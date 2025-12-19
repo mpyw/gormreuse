@@ -29,18 +29,14 @@ go install github.com/mpyw/gormreuse/cmd/gormreuse@latest
 ## Usage
 
 ```bash
-# Run directly
 gormreuse ./...
-
-# Or as a vet tool
-go vet -vettool=$(which gormreuse) ./...
 ```
 
 ## Flags
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `-test` | `true` | Analyze test files (`*_test.go`) |
+| `-test` | `true` | Analyze test files (`*_test.go`) — built-in driver flag |
 
 Generated files (containing `// Code generated ... DO NOT EDIT.`) are always excluded and cannot be opted in.
 
@@ -49,9 +45,6 @@ Generated files (containing `// Code generated ... DO NOT EDIT.`) are always exc
 ```bash
 # Exclude test files from analysis
 gormreuse -test=false ./...
-
-# With go vet
-go vet -vettool=$(which gormreuse) -gormreuse.test=false ./...
 ```
 
 ## Detection Model: Pollute Semantics
