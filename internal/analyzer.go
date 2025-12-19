@@ -21,6 +21,7 @@ func RunSSA(
 	ignoreMaps map[string]IgnoreMap,
 	funcIgnores map[string]map[token.Pos]struct{},
 	pureFuncs map[string]struct{},
+	skipFiles map[string]bool,
 ) {
 	for _, fn := range ssaInfo.SrcFuncs {
 		pos := fn.Pos()
@@ -29,6 +30,12 @@ func RunSSA(
 		}
 
 		filename := pass.Fset.Position(pos).Filename
+
+		// Skip functions in excluded files
+		if skipFiles[filename] {
+			continue
+		}
+
 		ignoreMap := ignoreMaps[filename]
 
 		// Check if entire function is ignored

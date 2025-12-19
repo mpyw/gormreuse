@@ -36,6 +36,24 @@ gormreuse ./...
 go vet -vettool=$(which gormreuse) ./...
 ```
 
+## Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-test` | `true` | Analyze test files (`*_test.go`) |
+
+Generated files (containing `// Code generated ... DO NOT EDIT.`) are always excluded and cannot be opted in.
+
+### Examples
+
+```bash
+# Exclude test files from analysis
+gormreuse -test=false ./...
+
+# With go vet
+go vet -vettool=$(which gormreuse) -gormreuse.test=false ./...
+```
+
 ## Detection Model: Pollute Semantics
 
 This linter uses a "pollute" model inspired by Rust's move semantics. The core concept:
