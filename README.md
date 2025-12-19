@@ -20,16 +20,23 @@ q.Find(&users)  // SELECT * FROM users WHERE active = true
 q.Find(&admins) // Bug: SELECT * FROM users WHERE active = ? AND active = ?
 ```
 
-## Installation
+## Installation & Usage
+
+### Using [`go install`](https://pkg.go.dev/cmd/go#hdr-Compile_and_install_packages_and_dependencies)
 
 ```bash
 go install github.com/mpyw/gormreuse/cmd/gormreuse@latest
+gormreuse ./...
 ```
 
-## Usage
+### Using [`go tool`](https://pkg.go.dev/cmd/go#hdr-Run_specified_go_tool) (Go 1.24+)
 
 ```bash
-gormreuse ./...
+# Add to go.mod as a tool dependency
+go get -tool github.com/mpyw/gormreuse/cmd/gormreuse@latest
+
+# Run via go tool
+go tool gormreuse ./...
 ```
 
 ## Flags
