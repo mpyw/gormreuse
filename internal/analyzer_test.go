@@ -328,3 +328,496 @@ func TestDetectReachabilityViolations_SinglePollution(t *testing.T) {
 		t.Errorf("Expected 0 violations with single pollution, got %d", len(state.violations))
 	}
 }
+
+// ============================================================================
+// Additional tests for better coverage
+// ============================================================================
+
+func TestCanReach_WithSuccessors(t *testing.T) {
+	analyzer := newUsageAnalyzer(nil, nil)
+
+	// Create a chain: block1 -> block2 -> block3
+	block1 := &ssa.BasicBlock{}
+	block2 := &ssa.BasicBlock{}
+	block3 := &ssa.BasicBlock{}
+
+	block1.Succs = []*ssa.BasicBlock{block2}
+	block2.Succs = []*ssa.BasicBlock{block3}
+
+	// block1 can reach block3 via block2
+	if !analyzer.canReach(block1, block3) {
+		t.Error("block1 should reach block3")
+	}
+
+	// block3 cannot reach block1 (no back edge)
+	if analyzer.canReach(block3, block1) {
+		t.Error("block3 should not reach block1")
+	}
+
+	// block1 can reach block2 directly
+	if !analyzer.canReach(block1, block2) {
+		t.Error("block1 should reach block2")
+	}
+}
+
+func TestCanReach_Unreachable(t *testing.T) {
+	analyzer := newUsageAnalyzer(nil, nil)
+
+	block1 := &ssa.BasicBlock{}
+	block2 := &ssa.BasicBlock{}
+
+	// No successors, so unreachable
+	if analyzer.canReach(block1, block2) {
+		t.Error("Disconnected blocks should not be reachable")
+	}
+}
+
+func TestDetectLoopBlocks_WithBlocks(t *testing.T) {
+	analyzer := newUsageAnalyzer(nil, nil)
+
+	// Create blocks for a simple loop: block0 -> block1 -> block0 (back edge)
+	block0 := &ssa.BasicBlock{Index: 0}
+	block1 := &ssa.BasicBlock{Index: 1}
+
+	block0.Succs = []*ssa.BasicBlock{block1}
+	block1.Succs = []*ssa.BasicBlock{block0} // back edge
+
+	fn := &ssa.Function{
+		Blocks: []*ssa.BasicBlock{block0, block1},
+	}
+
+	loopBlocks := analyzer.detectLoopBlocks(fn)
+
+	// Both blocks should be marked as in loop
+	if !loopBlocks[block0] {
+		t.Error("block0 should be in loop")
+	}
+	if !loopBlocks[block1] {
+		t.Error("block1 should be in loop")
+	}
+}
+
+func TestDetectLoopBlocks_NoLoop(t *testing.T) {
+	analyzer := newUsageAnalyzer(nil, nil)
+
+	// Linear blocks: block0 -> block1 -> block2 (no back edge)
+	block0 := &ssa.BasicBlock{Index: 0}
+	block1 := &ssa.BasicBlock{Index: 1}
+	block2 := &ssa.BasicBlock{Index: 2}
+
+	block0.Succs = []*ssa.BasicBlock{block1}
+	block1.Succs = []*ssa.BasicBlock{block2}
+
+	fn := &ssa.Function{
+		Blocks: []*ssa.BasicBlock{block0, block1, block2},
+	}
+
+	loopBlocks := analyzer.detectLoopBlocks(fn)
+
+	// No blocks should be in loop
+	if len(loopBlocks) != 0 {
+		t.Errorf("Expected no loop blocks, got %d", len(loopBlocks))
+	}
+}
+
+func TestIsPollutedAt_SameFunction(t *testing.T) {
+	fn := &ssa.Function{}
+	analyzer := newUsageAnalyzer(fn, nil)
+
+	block1 := &ssa.BasicBlock{Index: 0}
+	block2 := &ssa.BasicBlock{Index: 1}
+	block1.Succs = []*ssa.BasicBlock{block2}
+
+	// Set parent function for blocks
+	fn.Blocks = []*ssa.BasicBlock{block1, block2}
+
+	state := &valueState{
+		pollutedBlocks: map[*ssa.BasicBlock]token.Pos{
+			block1: token.Pos(1),
+		},
+	}
+
+	// block2 is reachable from polluted block1
+	if !analyzer.isPollutedAt(state, block2) {
+		t.Error("block2 should be polluted (reachable from block1)")
+	}
+}
+
+func TestIsPollutedAt_UnreachableBlocks(t *testing.T) {
+	fn := &ssa.Function{}
+	analyzer := newUsageAnalyzer(fn, nil)
+
+	block1 := &ssa.BasicBlock{Index: 0}
+	block2 := &ssa.BasicBlock{Index: 1}
+	// No successors set - blocks are disconnected
+	fn.Blocks = []*ssa.BasicBlock{block1, block2}
+
+	state := &valueState{
+		pollutedBlocks: map[*ssa.BasicBlock]token.Pos{
+			block1: token.Pos(1),
+		},
+	}
+
+	// block2 is NOT reachable from block1 (no path)
+	if analyzer.isPollutedAt(state, block2) {
+		t.Error("block2 should not be polluted (unreachable from block1)")
+	}
+}
+
+func TestIsPollutedAnywhere_WithBlock(t *testing.T) {
+	fn := &ssa.Function{}
+	analyzer := newUsageAnalyzer(fn, nil)
+
+	block := &ssa.BasicBlock{Index: 0}
+	fn.Blocks = []*ssa.BasicBlock{block}
+
+	state := &valueState{
+		pollutedBlocks: map[*ssa.BasicBlock]token.Pos{
+			block: token.Pos(1),
+		},
+	}
+
+	// Same function - should be polluted
+	if !analyzer.isPollutedAnywhere(state, fn) {
+		t.Error("Should be polluted anywhere in same function")
+	}
+}
+
+func TestIsPollutedAnywhere_DifferentFunction(t *testing.T) {
+	fn1 := &ssa.Function{}
+	fn2 := &ssa.Function{}
+	analyzer := newUsageAnalyzer(fn1, nil)
+
+	block := &ssa.BasicBlock{Index: 0}
+	fn1.Blocks = []*ssa.BasicBlock{block}
+
+	state := &valueState{
+		pollutedBlocks: map[*ssa.BasicBlock]token.Pos{
+			block: token.Pos(1),
+		},
+	}
+
+	// Different function - closure pollution affects parent
+	if !analyzer.isPollutedAnywhere(state, fn2) {
+		t.Error("Should be polluted (closure affects parent)")
+	}
+}
+
+func TestIsRootDefinedOutsideLoop_NilBlock(t *testing.T) {
+	analyzer := newUsageAnalyzer(nil, nil)
+
+	// Call is an instruction but Block() returns nil for uninitialized Call
+	call := &ssa.Call{}
+
+	loopBlocks := map[*ssa.BasicBlock]bool{}
+
+	// Instruction with nil block should be considered outside loop
+	result := analyzer.isRootDefinedOutsideLoop(call, loopBlocks)
+	if !result {
+		t.Error("Instruction with nil block should be outside loop")
+	}
+}
+
+func TestHandleNonCallForRoot_Phi(t *testing.T) {
+	analyzer := newUsageAnalyzer(nil, nil)
+	visited := make(map[ssa.Value]bool)
+
+	// Phi with nil edges returns nil
+	phi := &ssa.Phi{}
+	result := analyzer.handleNonCallForRoot(phi, visited)
+	if result != nil {
+		t.Error("Phi with no edges should return nil")
+	}
+}
+
+func TestHandleNonCallForRoot_ChangeType(t *testing.T) {
+	analyzer := newUsageAnalyzer(nil, nil)
+	visited := make(map[ssa.Value]bool)
+
+	// ChangeType traces through X
+	changeType := &ssa.ChangeType{X: nil}
+	result := analyzer.handleNonCallForRoot(changeType, visited)
+	if result != nil {
+		t.Error("ChangeType with nil X should return nil")
+	}
+}
+
+func TestHandleNonCallForRoot_Extract(t *testing.T) {
+	analyzer := newUsageAnalyzer(nil, nil)
+	visited := make(map[ssa.Value]bool)
+
+	// Extract traces through Tuple
+	extract := &ssa.Extract{Tuple: nil}
+	result := analyzer.handleNonCallForRoot(extract, visited)
+	if result != nil {
+		t.Error("Extract with nil Tuple should return nil")
+	}
+}
+
+func TestClosureCapturesGormDB_WithNonGormBinding(t *testing.T) {
+	analyzer := newUsageAnalyzer(nil, nil)
+
+	// MakeClosure with non-gorm.DB binding
+	param := &ssa.Parameter{} // not *gorm.DB type
+	mc := &ssa.MakeClosure{
+		Bindings: []ssa.Value{param},
+	}
+
+	if analyzer.closureCapturesGormDB(mc) {
+		t.Error("MakeClosure with non-gorm.DB binding should not capture GormDB")
+	}
+}
+
+func TestFindMutableRootImpl_Parameter(t *testing.T) {
+	analyzer := newUsageAnalyzer(nil, nil)
+	visited := make(map[ssa.Value]bool)
+
+	// Parameter is immutable source
+	param := &ssa.Parameter{}
+	result := analyzer.findMutableRootImpl(param, visited)
+	if result != nil {
+		t.Error("Parameter should return nil (immutable)")
+	}
+}
+
+func TestFindMutableRootImpl_Call_NilCallee(t *testing.T) {
+	analyzer := newUsageAnalyzer(nil, nil)
+	visited := make(map[ssa.Value]bool)
+
+	// Call with nil StaticCallee
+	call := &ssa.Call{}
+	result := analyzer.findMutableRootImpl(call, visited)
+	// StaticCallee is nil, returns nil
+	if result != nil {
+		t.Error("Call with nil callee should return nil")
+	}
+}
+
+func TestDetectReachabilityViolations_MultiplePollutions_SameBlock(t *testing.T) {
+	fn := &ssa.Function{}
+	analyzer := newUsageAnalyzer(fn, nil)
+
+	block1 := &ssa.BasicBlock{Index: 0}
+	block2 := &ssa.BasicBlock{Index: 1}
+	fn.Blocks = []*ssa.BasicBlock{block1, block2}
+
+	// Same block for both - should not create violation (same block case handled elsewhere)
+	var mockValue ssa.Value
+	state := analyzer.getOrCreateState(mockValue)
+	state.pollutedBlocks[block1] = token.Pos(1)
+	state.pollutedBlocks[block1] = token.Pos(2) // Same block, different pos (won't happen in practice)
+
+	analyzer.detectReachabilityViolations()
+	// No violations because there's only one unique block
+}
+
+func TestDetectReachabilityViolations_ReachableBlocks(t *testing.T) {
+	fn := &ssa.Function{}
+	analyzer := newUsageAnalyzer(fn, nil)
+
+	block1 := &ssa.BasicBlock{Index: 0}
+	block2 := &ssa.BasicBlock{Index: 1}
+	block1.Succs = []*ssa.BasicBlock{block2}
+	fn.Blocks = []*ssa.BasicBlock{block1, block2}
+
+	var mockValue ssa.Value
+	state := analyzer.getOrCreateState(mockValue)
+	state.pollutedBlocks[block1] = token.Pos(1)
+	state.pollutedBlocks[block2] = token.Pos(2)
+
+	analyzer.detectReachabilityViolations()
+
+	// block1 can reach block2, so block2 should be a violation
+	if len(state.violations) != 1 {
+		t.Errorf("Expected 1 violation, got %d", len(state.violations))
+	}
+}
+
+func TestMarkLoopBlocks(t *testing.T) {
+	analyzer := newUsageAnalyzer(nil, nil)
+
+	block0 := &ssa.BasicBlock{Index: 0}
+	block1 := &ssa.BasicBlock{Index: 1}
+	block2 := &ssa.BasicBlock{Index: 2}
+
+	fn := &ssa.Function{
+		Blocks: []*ssa.BasicBlock{block0, block1, block2},
+	}
+
+	blockIndex := map[*ssa.BasicBlock]int{
+		block0: 0,
+		block1: 1,
+		block2: 2,
+	}
+
+	loopBlocks := make(map[*ssa.BasicBlock]bool)
+
+	// Mark blocks from block0 to block2 as loop
+	analyzer.markLoopBlocks(fn, block0, block2, loopBlocks, blockIndex)
+
+	if !loopBlocks[block0] || !loopBlocks[block1] || !loopBlocks[block2] {
+		t.Error("All blocks should be marked as in loop")
+	}
+}
+
+func TestFindMutableRoot_NilInput(t *testing.T) {
+	analyzer := newUsageAnalyzer(nil, nil)
+
+	result := analyzer.findMutableRoot(nil)
+	if result != nil {
+		t.Error("findMutableRoot(nil) should return nil")
+	}
+}
+
+func TestHandleNonCallForRoot_UnOp_NonDeref(t *testing.T) {
+	analyzer := newUsageAnalyzer(nil, nil)
+	visited := make(map[ssa.Value]bool)
+
+	// UnOp that is not dereference (e.g., negation)
+	unop := &ssa.UnOp{
+		Op: token.SUB, // Not MUL (dereference)
+		X:  nil,
+	}
+	result := analyzer.handleNonCallForRoot(unop, visited)
+	if result != nil {
+		t.Error("UnOp with nil X should return nil")
+	}
+}
+
+func TestHandleNonCallForRoot_UnOp_Deref(t *testing.T) {
+	analyzer := newUsageAnalyzer(nil, nil)
+	visited := make(map[ssa.Value]bool)
+
+	// UnOp that is dereference
+	unop := &ssa.UnOp{
+		Op: token.MUL, // Dereference
+		X:  nil,
+	}
+	result := analyzer.handleNonCallForRoot(unop, visited)
+	// tracePointerLoad with nil returns nil
+	if result != nil {
+		t.Error("UnOp deref with nil X should return nil")
+	}
+}
+
+func TestHandleNonCallForRoot_FreeVar(t *testing.T) {
+	analyzer := newUsageAnalyzer(nil, nil)
+	visited := make(map[ssa.Value]bool)
+
+	fv := &ssa.FreeVar{}
+	result := analyzer.handleNonCallForRoot(fv, visited)
+	// traceFreeVar with nil parent returns nil
+	if result != nil {
+		t.Error("FreeVar with nil parent should return nil")
+	}
+}
+
+func TestTracePointerLoad_NilPointer(t *testing.T) {
+	analyzer := newUsageAnalyzer(nil, nil)
+	visited := make(map[ssa.Value]bool)
+
+	result := analyzer.tracePointerLoad(nil, visited)
+	if result != nil {
+		t.Error("tracePointerLoad(nil) should return nil")
+	}
+}
+
+func TestTracePointerLoad_FreeVar(t *testing.T) {
+	analyzer := newUsageAnalyzer(nil, nil)
+	visited := make(map[ssa.Value]bool)
+
+	fv := &ssa.FreeVar{}
+	result := analyzer.tracePointerLoad(fv, visited)
+	// traceFreeVar with nil parent returns nil
+	if result != nil {
+		t.Error("tracePointerLoad(FreeVar) with nil parent should return nil")
+	}
+}
+
+func TestTracePointerLoad_OtherValue(t *testing.T) {
+	analyzer := newUsageAnalyzer(nil, nil)
+	visited := make(map[ssa.Value]bool)
+
+	// Parameter falls through to findMutableRootImpl
+	param := &ssa.Parameter{}
+	result := analyzer.tracePointerLoad(param, visited)
+	// Parameter is immutable, returns nil
+	if result != nil {
+		t.Error("tracePointerLoad(Parameter) should return nil")
+	}
+}
+
+func TestTraceFreeVar_NotFound(t *testing.T) {
+	analyzer := newUsageAnalyzer(nil, nil)
+	visited := make(map[ssa.Value]bool)
+
+	// FreeVar with nil parent - traceFreeVar returns nil
+	fv := &ssa.FreeVar{}
+	result := analyzer.traceFreeVar(fv, visited)
+	if result != nil {
+		t.Error("FreeVar with nil parent should return nil")
+	}
+}
+
+func TestIsImmutableSource_Call_SafeMethod(t *testing.T) {
+	analyzer := newUsageAnalyzer(nil, nil)
+
+	// We cannot easily create a proper ssa.Call with StaticCallee
+	// But we can test the nil callee case
+	call := &ssa.Call{}
+	if analyzer.isImmutableSource(call) {
+		t.Error("Call with nil callee should not be immutable")
+	}
+}
+
+func TestDetectReachabilityViolations_CrossFunction(t *testing.T) {
+	fn := &ssa.Function{}
+	analyzer := newUsageAnalyzer(fn, nil)
+
+	// Create blocks in different "functions" (simulate closure)
+	block1 := &ssa.BasicBlock{Index: 0}
+	block2 := &ssa.BasicBlock{Index: 0}
+
+	fn.Blocks = []*ssa.BasicBlock{block1}
+	// block2 belongs to fn as well (same Parent)
+
+	var mockValue ssa.Value
+	state := analyzer.getOrCreateState(mockValue)
+	state.pollutedBlocks[block1] = token.Pos(1)
+	state.pollutedBlocks[block2] = token.Pos(2)
+
+	// Both blocks have same Parent() (nil), so they're in same function
+	analyzer.detectReachabilityViolations()
+}
+
+func TestClosureCapturesGormDB_PointerToPointer(t *testing.T) {
+	analyzer := newUsageAnalyzer(nil, nil)
+
+	// MakeClosure with a pointer type binding (not *gorm.DB)
+	param := &ssa.Parameter{}
+	mc := &ssa.MakeClosure{
+		Bindings: []ssa.Value{param},
+	}
+
+	// Parameter type is nil, so it won't match *gorm.DB
+	if analyzer.closureCapturesGormDB(mc) {
+		t.Error("MakeClosure with nil type binding should not capture GormDB")
+	}
+}
+
+func TestHandleNonCallForRoot_PhiWithEdges(t *testing.T) {
+	analyzer := newUsageAnalyzer(nil, nil)
+	visited := make(map[ssa.Value]bool)
+
+	// Phi with edges that are all nil
+	param := &ssa.Parameter{} // immutable, will return nil
+	phi := &ssa.Phi{
+		Edges: []ssa.Value{param},
+	}
+
+	result := analyzer.handleNonCallForRoot(phi, visited)
+	// Parameter is immutable, returns nil
+	if result != nil {
+		t.Error("Phi with only immutable edges should return nil")
+	}
+}
