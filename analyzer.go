@@ -67,7 +67,6 @@ func run(pass *analysis.Pass) (any, error) {
 	return nil, nil
 }
 
-
 // buildSkipFiles creates a set of filenames to skip based on flags.
 // Generated files are always skipped.
 // Test files are skipped when analyzeTests is false.
