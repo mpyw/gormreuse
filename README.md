@@ -61,9 +61,11 @@ The linter conservatively marks `*gorm.DB` as polluted in these scenarios:
 | Interface method call    | `repo.Query(db)` - Can't statically analyze              |
 | Channel send             | `ch <- db` - May be received and used elsewhere          |
 | Slice/Map storage        | `[]*gorm.DB{db}` - May be accessed elsewhere             |
-| Struct field storage     | `&S{db: db}` - May be accessed elsewhere                 |
 | Interface conversion     | `interface{}(db)` - May be extracted via type assertion  |
 | Non-pure function call   | `helper(db)` - Unless marked with `gormreuse:pure`       |
+| Struct field access      | `h.db.Find(nil)` - Traces back to the stored value       |
+
+Note: Simple struct literal storage (`_ = &S{db: q}`) without actual field usage does NOT pollute.
 
 ### Examples
 
@@ -122,7 +124,7 @@ func legacyCode(db *gorm.DB) {
 }
 ```
 
-### `gormreuse:pure` (Future)
+### `gormreuse:pure`
 
 Mark a function as not polluting its `*gorm.DB` argument:
 
@@ -134,8 +136,6 @@ func countOnly(db *gorm.DB) int64 {
     return count
 }
 ```
-
-Note: This directive is planned for future implementation.
 
 ## Development
 

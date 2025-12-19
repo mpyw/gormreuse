@@ -17,7 +17,7 @@ The linter uses a "pollute" model inspired by Rust's move semantics:
 ### Directives
 
 - `//gormreuse:ignore` - Suppress warnings for the next line or same line
-- `//gormreuse:pure` - (Future) Mark function as not polluting its argument
+- `//gormreuse:pure` - Mark function as not polluting its `*gorm.DB` argument
 
 ## Architecture
 
@@ -35,7 +35,7 @@ gormreuse/
 │       ├── gormreuse/          # Test fixtures
 │       │   ├── basic.go        # Basic patterns
 │       │   ├── advanced.go     # Complex patterns
-│       │   ├── limitation.go   # Known false positives/negatives
+│       │   ├── evil.go         # Edge cases, closures, defer, goroutines
 │       │   └── ignore.go       # Directive tests
 │       └── gorm.io/gorm/       # Library stub
 ├── e2e/
@@ -60,12 +60,14 @@ The linter marks `*gorm.DB` as polluted in these scenarios:
 
 - **Interface method calls**: Assumed to pollute (can't statically analyze)
 - **Channel send**: `ch <- db` marks db as polluted
-- **Slice/Array storage**: `[]* gorm.DB{db}` marks db as polluted
+- **Slice/Array storage**: `[]*gorm.DB{db}` marks db as polluted
 - **Map storage**: `map[string]*gorm.DB{"k": db}` marks db as polluted
-- **Struct field storage**: `&S{db: db}` marks db as polluted
 - **Interface conversion**: `interface{}(db)` marks db as polluted (type assertion may extract)
 - **Function arguments**: Non-pure functions receiving `*gorm.DB` assumed to pollute
-- **Phi nodes**: Any mutable root in branch edges is propagated
+- **Struct field access**: `h.field.Find(nil)` traces back to the original value stored in field
+
+Note: Simple struct literal storage (`_ = &S{db: q}`) without actual field usage does NOT pollute.
+The linter tracks actual usage through struct fields, not just storage.
 
 ### SSA Tracking Strategy
 
@@ -116,7 +118,7 @@ cd e2e/internal && go test -v ./...
 testdata/src/gormreuse/
 ├── basic.go         # Basic reuse patterns, Session at end/middle
 ├── advanced.go      # Derived variables, helper functions, conditional reuse
-├── evil.go          # Complex patterns, edge cases, known limitations
+├── evil.go          # Edge cases: closures, defer, goroutines, struct fields, loops
 └── ignore.go        # gormreuse:ignore directive tests
 ```
 
@@ -134,7 +136,7 @@ The `e2e/internal/` directory contains tests that verify actual GORM SQL behavio
 
 - **Method value tracking**: `find := q.Find; find(nil)` - bound method not tracked due to SSA representation
 - **Closure assignment**: `f := func() { q = db.Where(...) }; f()` - cross-closure assignment not tracked
-- **Defer inside goroutine**: `go func() { defer q.Find(nil) }()` - nested defer/goroutine chains not fully tracked
-- **Multi-field aliasing**: `h := multiHolder{q1: q, q2: q}; h.q1.Find(nil); h.q2.Count(nil)` - alias tracking not supported
+- **Defer inside for loop**: `for range items { defer func() { q.Find(nil) }() }` - closure deferred multiple times not fully tracked
+- **Nested defer/goroutine**: `go func() { defer q.Find(nil) }()` - deep nested defer/goroutine chains not fully tracked
 
 These are documented in `testdata/src/gormreuse/evil.go` with `[LIMITATION]` markers.
