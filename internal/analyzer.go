@@ -140,6 +140,29 @@ func newUsageAnalyzer(fn *ssa.Function, pureFuncs map[string]struct{}) *usageAna
 	}
 }
 
+// getOrCreateState returns the state for the given root, creating it if necessary.
+func (a *usageAnalyzer) getOrCreateState(root ssa.Value) *valueState {
+	state := a.states[root]
+	if state == nil {
+		state = &valueState{
+			pollutedBlocks: make(map[*ssa.BasicBlock]token.Pos),
+		}
+		a.states[root] = state
+	}
+	return state
+}
+
+// markPolluted marks the root as polluted at the given block and position.
+// Returns true if the block was newly polluted (not already polluted).
+func (a *usageAnalyzer) markPolluted(root ssa.Value, block *ssa.BasicBlock, pos token.Pos) bool {
+	state := a.getOrCreateState(root)
+	if _, exists := state.pollutedBlocks[block]; exists {
+		return false
+	}
+	state.pollutedBlocks[block] = pos
+	return true
+}
+
 func (a *usageAnalyzer) analyze() []violation {
 	// Process all *gorm.DB method calls and track pollution
 	// This includes method calls in closures that capture tracked values
@@ -308,15 +331,7 @@ func (a *usageAnalyzer) processCall(call *ssa.Call, isInLoop bool, loopBlocks ma
 	}
 
 	// Get or create state for this root
-	state := a.states[root]
-	if state == nil {
-		state = &valueState{
-			pollutedBlocks: make(map[*ssa.BasicBlock]token.Pos),
-		}
-		a.states[root] = state
-	}
-
-	// Get the current block
+	state := a.getOrCreateState(root)
 	currentBlock := call.Block()
 
 	// Check for same-block pollution (inline checking is correct for same block)
@@ -465,20 +480,8 @@ func (a *usageAnalyzer) checkFunctionCallPollution(call *ssa.Call) {
 			continue // Immutable
 		}
 
-		// Get or create state
-		state := a.states[root]
-		if state == nil {
-			state = &valueState{
-				pollutedBlocks: make(map[*ssa.BasicBlock]token.Pos),
-			}
-			a.states[root] = state
-		}
-
 		// Mark as polluted (function call assumed to pollute)
-		block := call.Block()
-		if _, exists := state.pollutedBlocks[block]; !exists {
-			state.pollutedBlocks[block] = call.Pos()
-		}
+		a.markPolluted(root, call.Block(), call.Pos())
 	}
 }
 
@@ -530,13 +533,7 @@ func (a *usageAnalyzer) processCallCommonForDefer(callCommon *ssa.CallCommon, po
 		}
 
 		// Get or create state for this root
-		state := a.states[root]
-		if state == nil {
-			state = &valueState{
-				pollutedBlocks: make(map[*ssa.BasicBlock]token.Pos),
-			}
-			a.states[root] = state
-		}
+		state := a.getOrCreateState(root)
 
 		// Check if root was polluted anywhere (defer executes at function exit)
 		if a.isPollutedAnywhere(state, fn) {
@@ -557,13 +554,7 @@ func (a *usageAnalyzer) processCallCommonForDefer(callCommon *ssa.CallCommon, po
 			continue
 		}
 
-		state := a.states[root]
-		if state == nil {
-			state = &valueState{
-				pollutedBlocks: make(map[*ssa.BasicBlock]token.Pos),
-			}
-			a.states[root] = state
-		}
+		state := a.getOrCreateState(root)
 
 		// For defer, check if polluted anywhere
 		if a.isPollutedAnywhere(state, fn) {
@@ -597,13 +588,7 @@ func (a *usageAnalyzer) processCallCommonForGo(callCommon *ssa.CallCommon, pos t
 		}
 
 		// Get or create state for this root
-		state := a.states[root]
-		if state == nil {
-			state = &valueState{
-				pollutedBlocks: make(map[*ssa.BasicBlock]token.Pos),
-			}
-			a.states[root] = state
-		}
+		state := a.getOrCreateState(root)
 
 		// Check if root was polluted (from a reachable block)
 		if a.isPollutedAt(state, block) {
@@ -624,13 +609,7 @@ func (a *usageAnalyzer) processCallCommonForGo(callCommon *ssa.CallCommon, pos t
 			continue
 		}
 
-		state := a.states[root]
-		if state == nil {
-			state = &valueState{
-				pollutedBlocks: make(map[*ssa.BasicBlock]token.Pos),
-			}
-			a.states[root] = state
-		}
+		state := a.getOrCreateState(root)
 
 		// For go, check if polluted from reachable block
 		if a.isPollutedAt(state, block) {
@@ -652,19 +631,8 @@ func (a *usageAnalyzer) processSend(send *ssa.Send) {
 		return
 	}
 
-	state := a.states[root]
-	if state == nil {
-		state = &valueState{
-			pollutedBlocks: make(map[*ssa.BasicBlock]token.Pos),
-		}
-		a.states[root] = state
-	}
-
 	// Mark as polluted (channel send assumed to pollute)
-	block := send.Block()
-	if _, exists := state.pollutedBlocks[block]; !exists {
-		state.pollutedBlocks[block] = send.Pos()
-	}
+	a.markPolluted(root, send.Block(), send.Pos())
 }
 
 // processStore handles store operations to slice elements.
@@ -691,19 +659,8 @@ func (a *usageAnalyzer) processStore(store *ssa.Store) {
 		return
 	}
 
-	state := a.states[root]
-	if state == nil {
-		state = &valueState{
-			pollutedBlocks: make(map[*ssa.BasicBlock]token.Pos),
-		}
-		a.states[root] = state
-	}
-
 	// Mark as polluted (slice element store assumed to pollute)
-	block := store.Block()
-	if _, exists := state.pollutedBlocks[block]; !exists {
-		state.pollutedBlocks[block] = store.Pos()
-	}
+	a.markPolluted(root, store.Block(), store.Pos())
 }
 
 // processMapUpdate handles map update operations.
@@ -718,19 +675,8 @@ func (a *usageAnalyzer) processMapUpdate(mapUpdate *ssa.MapUpdate) {
 		return
 	}
 
-	state := a.states[root]
-	if state == nil {
-		state = &valueState{
-			pollutedBlocks: make(map[*ssa.BasicBlock]token.Pos),
-		}
-		a.states[root] = state
-	}
-
 	// Mark as polluted (map update assumed to pollute)
-	block := mapUpdate.Block()
-	if _, exists := state.pollutedBlocks[block]; !exists {
-		state.pollutedBlocks[block] = mapUpdate.Pos()
-	}
+	a.markPolluted(root, mapUpdate.Block(), mapUpdate.Pos())
 }
 
 // processBoundMethod handles bound method (method value) creation.
@@ -759,19 +705,8 @@ func (a *usageAnalyzer) processBoundMethod(mc *ssa.MakeClosure, fn *ssa.Function
 		return
 	}
 
-	state := a.states[root]
-	if state == nil {
-		state = &valueState{
-			pollutedBlocks: make(map[*ssa.BasicBlock]token.Pos),
-		}
-		a.states[root] = state
-	}
-
 	// Mark as polluted (bound method may be called and pollute the receiver)
-	block := mc.Block()
-	if _, exists := state.pollutedBlocks[block]; !exists {
-		state.pollutedBlocks[block] = mc.Pos()
-	}
+	a.markPolluted(root, mc.Block(), mc.Pos())
 }
 
 // processMakeInterface handles conversion of *gorm.DB to interface{}.
@@ -786,19 +721,8 @@ func (a *usageAnalyzer) processMakeInterface(mi *ssa.MakeInterface) {
 		return
 	}
 
-	state := a.states[root]
-	if state == nil {
-		state = &valueState{
-			pollutedBlocks: make(map[*ssa.BasicBlock]token.Pos),
-		}
-		a.states[root] = state
-	}
-
 	// Mark as polluted (interface conversion assumed to pollute)
-	block := mi.Block()
-	if _, exists := state.pollutedBlocks[block]; !exists {
-		state.pollutedBlocks[block] = mi.Pos()
-	}
+	a.markPolluted(root, mi.Block(), mi.Pos())
 }
 
 // closureCapturesGormDB checks if a MakeClosure captures any *gorm.DB values.
