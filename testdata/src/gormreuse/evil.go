@@ -1249,8 +1249,7 @@ func ifElseInsideDefer(db *gorm.DB, flag bool) {
 		if flag {
 			q.Count(nil) // LIMITATION: Not detected (inside defer closure with condition)
 		} else {
-			//gormreuse:ignore - TEST FRAMEWORK ISSUE
-			q.First(nil)
+			q.First(nil) // LIMITATION: Not detected (inside defer closure with condition)
 		}
 	}()
 
@@ -1264,11 +1263,9 @@ func nestedIfInsideDefer(db *gorm.DB, a, b bool) {
 	defer func() {
 		if a {
 			if b {
-				//gormreuse:ignore - TEST FRAMEWORK ISSUE
-				q.Count(nil)
+				q.Count(nil) // LIMITATION: Not detected (nested if inside defer)
 			} else {
-				//gormreuse:ignore - TEST FRAMEWORK ISSUE
-				q.First(nil)
+				q.First(nil) // LIMITATION: Not detected (nested if inside defer)
 			}
 		}
 	}()
@@ -1718,8 +1715,7 @@ func typeSwitchWithDefer(db *gorm.DB, v interface{}) {
 
 	switch v.(type) {
 	case int:
-		//gormreuse:ignore - TEST FRAMEWORK ISSUE
-		q.Find(nil)
+		q.Find(nil) // First use in case (mutually exclusive with other cases)
 	case string:
 		q.First(nil) // First use in case (mutually exclusive)
 	default:

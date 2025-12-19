@@ -52,3 +52,20 @@ func ignoredFunction(db *gorm.DB) {
 	q.Count(nil) // Not reported - entire function ignored
 	q.First(nil) // Not reported - entire function ignored
 }
+
+// =============================================================================
+// SHOULD REPORT - Unused ignore directives
+// =============================================================================
+
+func unusedIgnoreOnSafeCode(db *gorm.DB) {
+	q := db.Where("x = ?", 1).Session(&gorm.Session{})
+	q.Find(nil)
+	//gormreuse:ignore // want `unused gormreuse:ignore directive`
+	q.Count(nil)
+}
+
+func unusedIgnoreNoViolation(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+	//gormreuse:ignore // want `unused gormreuse:ignore directive`
+	q.Find(nil)
+}

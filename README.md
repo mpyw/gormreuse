@@ -124,6 +124,8 @@ func legacyCode(db *gorm.DB) {
 }
 ```
 
+**Note:** Unused `gormreuse:ignore` directives are reported as warnings. This helps keep the codebase clean by identifying stale ignore comments.
+
 ### `gormreuse:pure`
 
 Mark a function as not polluting its `*gorm.DB` argument:

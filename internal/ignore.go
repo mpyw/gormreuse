@@ -6,8 +6,14 @@ import (
 	"strings"
 )
 
+// ignoreEntry tracks an ignore directive and whether it was used.
+type ignoreEntry struct {
+	pos  token.Pos // Position of the ignore comment
+	used bool      // Whether this ignore was actually used to suppress a warning
+}
+
 // IgnoreMap tracks line numbers that have ignore comments.
-type IgnoreMap map[int]struct{}
+type IgnoreMap map[int]*ignoreEntry
 
 // BuildIgnoreMap scans a file for ignore comments and returns a map.
 // It also handles file-level and function-level ignore directives.
@@ -21,7 +27,7 @@ func BuildIgnoreMap(fset *token.FileSet, file *ast.File) IgnoreMap {
 			// File-level ignore: before package or at the very start
 			if isIgnoreComment(c.Text) {
 				// Mark this line
-				m[pos.Line] = struct{}{}
+				m[pos.Line] = &ignoreEntry{pos: c.Pos(), used: false}
 			}
 		}
 	}
@@ -32,7 +38,8 @@ func BuildIgnoreMap(fset *token.FileSet, file *ast.File) IgnoreMap {
 			if isIgnoreComment(c.Text) {
 				// File-level ignore: mark all lines as ignored
 				// We use line -1 as a special marker
-				m[-1] = struct{}{}
+				// File-level ignores are always considered "used" (no warning for them)
+				m[-1] = &ignoreEntry{pos: c.Pos(), used: true}
 			}
 		}
 	}
@@ -62,14 +69,44 @@ func isPureComment(text string) bool {
 // - File-level ignore is active (marker at line -1)
 // - The same line has an ignore comment
 // - The previous line has an ignore comment
+// When an ignore is used, it marks the entry as used.
 func (m IgnoreMap) ShouldIgnore(line int) bool {
 	// File-level ignore
-	if _, fileIgnore := m[-1]; fileIgnore {
+	if entry, fileIgnore := m[-1]; fileIgnore {
+		entry.used = true
 		return true
 	}
-	_, onSameLine := m[line]
-	_, onPrevLine := m[line-1]
-	return onSameLine || onPrevLine
+	if entry, onSameLine := m[line]; onSameLine {
+		entry.used = true
+		return true
+	}
+	if entry, onPrevLine := m[line-1]; onPrevLine {
+		entry.used = true
+		return true
+	}
+	return false
+}
+
+// GetUnusedIgnores returns the positions of ignore directives that were not used.
+func (m IgnoreMap) GetUnusedIgnores() []token.Pos {
+	var unused []token.Pos
+	for line, entry := range m {
+		if line == -1 {
+			// Skip file-level ignores
+			continue
+		}
+		if !entry.used {
+			unused = append(unused, entry.pos)
+		}
+	}
+	return unused
+}
+
+// MarkUsed marks the ignore directive at the given line as used.
+func (m IgnoreMap) MarkUsed(line int) {
+	if entry, ok := m[line]; ok {
+		entry.used = true
+	}
 }
 
 // BuildFunctionIgnoreSet builds a set of functions that should be ignored.

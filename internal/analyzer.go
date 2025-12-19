@@ -34,12 +34,28 @@ func RunSSA(
 		// Check if entire function is ignored
 		if funcIgnoreSet, ok := funcIgnores[filename]; ok {
 			if _, ignored := funcIgnoreSet[fn.Pos()]; ignored {
+				// Mark the ignore directive as used
+				if ignoreMap != nil {
+					fnLine := pass.Fset.Position(fn.Pos()).Line
+					// The ignore comment is on the line before the function name
+					ignoreMap.MarkUsed(fnLine - 1)
+				}
 				continue
 			}
 		}
 
 		chk := newChecker(pass, ignoreMap, pureFuncs)
 		chk.checkFunction(fn)
+	}
+
+	// Report unused ignore directives
+	for _, ignoreMap := range ignoreMaps {
+		if ignoreMap == nil {
+			continue
+		}
+		for _, pos := range ignoreMap.GetUnusedIgnores() {
+			pass.Reportf(pos, "unused gormreuse:ignore directive")
+		}
 	}
 }
 
