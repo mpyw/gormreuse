@@ -140,7 +140,6 @@ func newUsageAnalyzer(fn *ssa.Function, pureFuncs map[string]struct{}) *usageAna
 	}
 }
 
-
 // getOrCreateState returns the state for the given root, creating it if necessary.
 func (a *usageAnalyzer) getOrCreateState(root ssa.Value) *valueState {
 	state := a.states[root]
