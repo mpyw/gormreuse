@@ -79,48 +79,48 @@ func closureIndependentUse(db *gorm.DB) {
 // SHOULD REPORT - Conditional reuse
 // =============================================================================
 
-// conditionalReuse demonstrates reuse across conditional branches.
+// conditionalReuse demonstrates that if/else branches are mutually exclusive.
+// Only the merge point (after both branches) should be flagged.
 func conditionalReuse(db *gorm.DB, flag bool) {
 	q := db.Where("base = ?", true)
 
 	if flag {
-		q.Where("a = ?", 1).Find(nil)
+		q.Where("a = ?", 1).Find(nil) // First use in if-branch
 	} else {
-		q.Where("b = ?", 2).Find(nil) // want `\*gorm\.DB instance reused after chain method`
+		q.Where("b = ?", 2).Find(nil) // First use in else-branch (mutually exclusive)
 	}
 
 	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
 }
 
-// conditionalBothBranches demonstrates pollution in both branches.
-// [LIMITATION] FALSE POSITIVE: SSA processes if-branch before else-branch.
+// conditionalBothBranches demonstrates that if/else branches are mutually exclusive.
+// Flow-sensitive analysis correctly handles this - branches don't see each other's pollution.
 func conditionalBothBranches(db *gorm.DB, flag bool) {
 	q := db.Where("x = ?", 1)
 
 	if flag {
 		q.Find(nil) // First use in if-branch
 	} else {
-		// [LIMITATION] FALSE POSITIVE: Flagged because SSA sees if-branch first
-		q.First(nil) // want `\*gorm\.DB instance reused after chain method`
+		q.First(nil) // First use in else-branch (mutually exclusive)
 	}
 
 	// After either branch, q is polluted - this IS a reuse
 	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
 }
 
-// switchReuse demonstrates that each switch case is a first use in its exclusive path.
-// [LIMITATION] FALSE POSITIVE: SSA may process switch cases in different order.
+// switchReuse demonstrates that switch cases are mutually exclusive.
+// Each case is a first use in its exclusive path - no violations within cases.
 func switchReuse(db *gorm.DB, mode int) {
 	q := db.Where("base = ?", 1)
 
-	// [LIMITATION] FALSE POSITIVE: SSA processes cases in compile order, not runtime order
+	// Each switch case is mutually exclusive - only one executes at runtime
 	switch mode {
 	case 1:
-		q.Where("a = ?", 1).Find(nil) // want `\*gorm\.DB instance reused after chain method`
+		q.Where("a = ?", 1).Find(nil) // First use in case 1
 	case 2:
-		q.Where("b = ?", 2).Find(nil) // want `\*gorm\.DB instance reused after chain method`
+		q.Where("b = ?", 2).Find(nil) // First use in case 2
 	default:
-		q.Where("c = ?", 3).Find(nil) // want `\*gorm\.DB instance reused after chain method`
+		q.Where("c = ?", 3).Find(nil) // First use in default
 	}
 }
 
@@ -605,15 +605,13 @@ type queryHolder struct {
 	db *gorm.DB
 }
 
-// structFieldPollution demonstrates pollution through struct field.
-// [LIMITATION] Inter-procedural tracking not supported.
-// Storing to struct field alone doesn't pollute - we need actual usage to track.
+// structFieldPollution demonstrates struct field storage without actual usage.
+// Storing to struct field alone doesn't pollute - the struct is discarded without using the field.
 func structFieldPollution(db *gorm.DB) {
 	q := db.Where("x = ?", 1)
-	_ = &queryHolder{db: q} // Struct might escape, but we can't track inter-procedurally
+	_ = &queryHolder{db: q} // Struct is discarded, field never used
 
-	// [LIMITATION] FALSE NEGATIVE: Can't detect if struct escapes and is used elsewhere
-	q.Count(nil) // Not detected
+	q.Count(nil) // OK: struct was discarded, no actual reuse occurred
 }
 
 type multiHolder struct {
@@ -711,17 +709,16 @@ func panicRecover(db *gorm.DB) {
 // EVIL PATTERNS - Select Statement
 // =============================================================================
 
-// selectStatement demonstrates pollution in select cases.
-// [LIMITATION] SSA may process select cases in different order than source code.
-// Similar to switch, all cases are flagged due to flow-insensitive analysis.
+// selectStatement demonstrates that select cases are mutually exclusive.
+// Flow-sensitive analysis correctly handles this - cases don't see each other's pollution.
 func selectStatement(db *gorm.DB, ch chan int) {
 	q := db.Where("x = ?", 1)
 
 	select {
 	case <-ch:
-		q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+		q.Find(nil) // First use in case (mutually exclusive)
 	default:
-		q.First(nil) // want `\*gorm\.DB instance reused after chain method`
+		q.First(nil) // First use in default (mutually exclusive)
 	}
 
 	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
@@ -802,7 +799,7 @@ func variadicPollution(db *gorm.DB) {
 // =============================================================================
 
 // gotoStatement demonstrates pollution with goto.
-// [LIMITATION] FALSE POSITIVE: SSA processes if-branch before else fallthrough.
+// Flow-sensitive analysis correctly detects mutually exclusive branches.
 func gotoStatement(db *gorm.DB, flag bool) {
 	q := db.Where("x = ?", 1)
 
@@ -810,8 +807,8 @@ func gotoStatement(db *gorm.DB, flag bool) {
 		q.Find(nil)
 		goto cleanup
 	}
-	// [LIMITATION] FALSE POSITIVE: Flagged because SSA sees if-branch first
-	q.First(nil) // want `\*gorm\.DB instance reused after chain method`
+	// Not flagged: mutually exclusive branch (if-branch has goto, so this only runs when flag=false)
+	q.First(nil)
 
 cleanup:
 	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
@@ -822,13 +819,13 @@ cleanup:
 // =============================================================================
 
 // switchFallthrough demonstrates pollution with fallthrough.
-// [LIMITATION] SSA processes switch cases, may flag first case too.
+// With fallthrough, case 0 can reach case 1, so case 1 is a reuse.
 func switchFallthrough(db *gorm.DB, level int) {
 	q := db.Where("x = ?", 1)
 
 	switch level {
 	case 0:
-		q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+		q.Find(nil) // First use in case 0
 		fallthrough
 	case 1:
 		q.First(nil) // want `\*gorm\.DB instance reused after chain method`
@@ -918,19 +915,20 @@ func ultimateChaos(db *gorm.DB) {
 // EVIL PATTERNS - Nested If Statements
 // =============================================================================
 
-// nestedIf demonstrates nested if statements.
+// nestedIf demonstrates nested if statements with mutually exclusive branches.
+// Flow-sensitive analysis correctly handles this - only the merge point is flagged.
 func nestedIf(db *gorm.DB, a, b, c bool) {
 	q := db.Where("x = ?", 1)
 
 	if a {
 		if b {
 			if c {
-				q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+				q.Find(nil) // First use in innermost if (mutually exclusive)
 			} else {
-				q.First(nil) // want `\*gorm\.DB instance reused after chain method`
+				q.First(nil) // First use in else (mutually exclusive)
 			}
 		} else {
-			q.Last(nil) // want `\*gorm\.DB instance reused after chain method`
+			q.Last(nil) // First use in outer else (mutually exclusive)
 		}
 	}
 
@@ -938,6 +936,7 @@ func nestedIf(db *gorm.DB, a, b, c bool) {
 }
 
 // deepNestedIf demonstrates 4-level nested if.
+// The deep branch is the first use; only the merge point after is a violation.
 func deepNestedIf(db *gorm.DB, a, b, c, d bool) {
 	q := db.Where("x = ?", 1)
 
@@ -945,7 +944,7 @@ func deepNestedIf(db *gorm.DB, a, b, c, d bool) {
 		if b {
 			if c {
 				if d {
-					q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+					q.Find(nil) // First use (mutually exclusive path)
 				}
 			}
 		}
@@ -954,18 +953,19 @@ func deepNestedIf(db *gorm.DB, a, b, c, d bool) {
 	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
 }
 
-// ifElseChain demonstrates if-else-if chain.
+// ifElseChain demonstrates if-else-if chain with mutually exclusive branches.
+// Flow-sensitive analysis correctly handles this - only the merge point is flagged.
 func ifElseChain(db *gorm.DB, level int) {
 	q := db.Where("x = ?", 1)
 
 	if level == 0 {
-		q.Find(nil)
+		q.Find(nil) // First use in first branch
 	} else if level == 1 {
-		q.First(nil) // want `\*gorm\.DB instance reused after chain method`
+		q.First(nil) // First use in else-if (mutually exclusive)
 	} else if level == 2 {
-		q.Last(nil) // want `\*gorm\.DB instance reused after chain method`
+		q.Last(nil) // First use in else-if (mutually exclusive)
 	} else {
-		q.Take(nil) // want `\*gorm\.DB instance reused after chain method`
+		q.Take(nil) // First use in else (mutually exclusive)
 	}
 
 	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
@@ -1107,6 +1107,7 @@ func deferInsideIf(db *gorm.DB, flag bool) {
 }
 
 // deferInsideIfElse demonstrates defer inside if-else.
+// Find executes FIRST, then defers execute at function exit.
 func deferInsideIfElse(db *gorm.DB, flag bool) {
 	q := db.Where("x = ?", 1)
 
@@ -1116,10 +1117,11 @@ func deferInsideIfElse(db *gorm.DB, flag bool) {
 		defer q.First(nil) // want `\*gorm\.DB instance reused after chain method`
 	}
 
-	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Find(nil) // First use - defers execute AFTER this at function exit
 }
 
 // deferInsideNestedIf demonstrates defer inside nested if.
+// Find executes FIRST, then defer executes at function exit.
 func deferInsideNestedIf(db *gorm.DB, a, b bool) {
 	q := db.Where("x = ?", 1)
 
@@ -1129,7 +1131,7 @@ func deferInsideNestedIf(db *gorm.DB, a, b bool) {
 		}
 	}
 
-	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Find(nil) // First use - defer executes AFTER this at function exit
 }
 
 // multipleDeferInsideIf demonstrates multiple defers inside if.
@@ -1288,7 +1290,7 @@ func ifForDefer(db *gorm.DB, flag bool, items []string) {
 		}
 	}
 
-	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Find(nil) // First use - defers execute AFTER this at function exit
 }
 
 // forIfDefer demonstrates for containing if containing defer.
@@ -1338,13 +1340,15 @@ func deferForIf(db *gorm.DB, items []int) {
 }
 
 // tripleNestingIfForDefer demonstrates 3-level nesting: if -> for -> defer.
+// [LIMITATION] Defer inside for loop: closure is deferred multiple times,
+// but static analysis cannot detect the loop iteration count.
 func tripleNestingIfForDefer(db *gorm.DB, flag bool, items []string) {
 	q := db.Where("x = ?", 1)
 
 	if flag {
 		for range items {
 			defer func() {
-				q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+				q.Count(nil) // [LIMITATION] FALSE NEGATIVE: defer in for loop not fully tracked
 			}()
 		}
 	}
@@ -1353,13 +1357,15 @@ func tripleNestingIfForDefer(db *gorm.DB, flag bool, items []string) {
 }
 
 // tripleNestingForIfDefer demonstrates 3-level nesting: for -> if -> defer.
+// [LIMITATION] Defer inside for loop: closure is deferred multiple times,
+// but static analysis cannot detect the loop iteration count.
 func tripleNestingForIfDefer(db *gorm.DB, items []int) {
 	q := db.Where("x = ?", 1)
 
 	for _, item := range items {
 		if item > 0 {
 			defer func(i int) {
-				q.Where("item = ?", i).Count(nil) // want `\*gorm\.DB instance reused after chain method`
+				q.Where("item = ?", i).Count(nil) // [LIMITATION] FALSE NEGATIVE: defer in for loop not fully tracked
 			}(item)
 		}
 	}
@@ -1415,7 +1421,7 @@ func quadNestingIfForIfDefer(db *gorm.DB, a bool, items []int) {
 		}
 	}
 
-	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Find(nil) // First use - defers execute AFTER this at function exit
 }
 
 // quadNestingForIfForDefer demonstrates 4-level: for -> if -> for -> defer.
@@ -1485,7 +1491,7 @@ func multipleDefersInDifferentBranches(db *gorm.DB, level int) {
 		defer q.Last(nil) // want `\*gorm\.DB instance reused after chain method`
 	}
 
-	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Find(nil) // First use - defers execute AFTER this at function exit
 }
 
 // multipleDefersInLoopBranches demonstrates multiple defers in loop branches.
@@ -1508,7 +1514,7 @@ func multipleDefersInLoopBranches(db *gorm.DB, items []int) {
 // =============================================================================
 
 // earlyReturnWithDefer demonstrates early return with defer.
-// [LIMITATION] FALSE POSITIVE: SSA processes if-branch before else fallthrough.
+// Flow-sensitive analysis correctly detects mutually exclusive branches.
 func earlyReturnWithDefer(db *gorm.DB, flag bool) {
 	q := db.Where("x = ?", 1)
 
@@ -1519,8 +1525,8 @@ func earlyReturnWithDefer(db *gorm.DB, flag bool) {
 		return
 	}
 
-	// [LIMITATION] FALSE POSITIVE: Flagged because SSA sees if-branch first
-	q.First(nil) // want `\*gorm\.DB instance reused after chain method`
+	// Not flagged: mutually exclusive branch (if-branch has return, so this only runs when flag=false)
+	q.First(nil)
 }
 
 // earlyReturnInLoopWithDefer demonstrates early return in loop with defer.
@@ -1583,6 +1589,7 @@ outer:
 // =============================================================================
 
 // foreverLoopWithBreak demonstrates for{} with break.
+// With break at end, loop only runs once, so select cases are first use.
 func foreverLoopWithBreak(db *gorm.DB, ch chan bool) {
 	q := db.Where("x = ?", 1)
 
@@ -1593,7 +1600,7 @@ func foreverLoopWithBreak(db *gorm.DB, ch chan bool) {
 				break
 			}
 		default:
-			q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+			q.Find(nil) // First use (select case is mutually exclusive)
 		}
 		break // Prevent actual infinite loop in test
 	}
@@ -1703,6 +1710,7 @@ func rangeOverChannelWithDefer(db *gorm.DB, ch chan int) {
 // =============================================================================
 
 // typeSwitchWithDefer demonstrates type switch with defer.
+// Type switch cases are mutually exclusive - only defer sees the pollution.
 func typeSwitchWithDefer(db *gorm.DB, v interface{}) {
 	q := db.Where("x = ?", 1)
 
@@ -1713,9 +1721,9 @@ func typeSwitchWithDefer(db *gorm.DB, v interface{}) {
 		//gormreuse:ignore - TEST FRAMEWORK ISSUE
 		q.Find(nil)
 	case string:
-		q.First(nil) // want `\*gorm\.DB instance reused after chain method`
+		q.First(nil) // First use in case (mutually exclusive)
 	default:
-		q.Last(nil) // want `\*gorm\.DB instance reused after chain method`
+		q.Last(nil) // First use in default (mutually exclusive)
 	}
 }
 

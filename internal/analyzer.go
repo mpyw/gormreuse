@@ -97,11 +97,10 @@ type violation struct {
 
 // valueState tracks the state of a *gorm.DB value.
 type valueState struct {
-	// isPolluted indicates this mutable value has been used with a Chain Method.
-	isPolluted bool
-
-	// pollutedAt is the position where this value was first polluted.
-	pollutedAt token.Pos
+	// pollutedBlocks maps blocks where this value was polluted to the position.
+	// This enables flow-sensitive analysis: pollution in block A only affects
+	// uses in block B if A can reach B in the CFG.
+	pollutedBlocks map[*ssa.BasicBlock]token.Pos
 
 	// violations tracks positions where polluted value was reused.
 	violations []token.Pos
@@ -129,6 +128,11 @@ func (a *usageAnalyzer) analyze() []violation {
 	// Process all *gorm.DB method calls and track pollution
 	// This includes method calls in closures that capture tracked values
 	a.processMethodCalls(a.fn, make(map[*ssa.Function]bool))
+
+	// Second pass: check for violations based on CFG reachability
+	// This is needed because SSA block ordering doesn't match execution order.
+	// A call is a violation if ANY OTHER polluted block can reach its block.
+	a.detectReachabilityViolations()
 
 	// Collect violations
 	return a.collectViolations()
@@ -214,13 +218,20 @@ func (a *usageAnalyzer) detectLoopBlocks(fn *ssa.Function) map[*ssa.BasicBlock]b
 		blockIndex[b] = i
 	}
 
-	// Detect back-edges: edge from block B to block A where A dominates B or A appears before B
-	// A simpler heuristic: if a block has a successor with a lower index, it's a back-edge
+	// Detect back-edges: a true back-edge creates a cycle in the CFG.
+	// For an edge block -> succ to be a back-edge:
+	// 1. succ must appear before block in block ordering (potential back-edge)
+	// 2. succ must be able to reach block (confirming there's a cycle)
+	// This distinguishes real loops from if/else merge edges where the merge
+	// block comes before else-branch in block ordering.
 	for _, block := range fn.Blocks {
 		for _, succ := range block.Succs {
 			if blockIndex[succ] <= blockIndex[block] {
-				// Back-edge detected: mark all blocks from succ to block as in-loop
-				a.markLoopBlocks(fn, succ, block, loopBlocks, blockIndex)
+				// Potential back-edge - verify it creates a cycle
+				if a.canReach(succ, block) {
+					// True back-edge detected: mark all blocks from succ to block as in-loop
+					a.markLoopBlocks(fn, succ, block, loopBlocks, blockIndex)
+				}
 			}
 		}
 	}
@@ -244,6 +255,7 @@ func (a *usageAnalyzer) markLoopBlocks(fn *ssa.Function, loopHead, loopTail *ssa
 
 // processCall handles a regular *ssa.Call instruction.
 func (a *usageAnalyzer) processCall(call *ssa.Call, isInLoop bool, loopBlocks map[*ssa.BasicBlock]bool) {
+
 	// Check if this is a function call that takes *gorm.DB as argument (pollutes it)
 	a.checkFunctionCallPollution(call)
 
@@ -282,18 +294,23 @@ func (a *usageAnalyzer) processCall(call *ssa.Call, isInLoop bool, loopBlocks ma
 	// Get or create state for this root
 	state := a.states[root]
 	if state == nil {
-		state = &valueState{}
+		state = &valueState{
+			pollutedBlocks: make(map[*ssa.BasicBlock]token.Pos),
+		}
 		a.states[root] = state
 	}
 
-	// Check if root was already polluted
-	if state.isPolluted {
-		// Using a polluted value - violation!
+	// Get the current block
+	currentBlock := call.Block()
+
+	// Check for same-block pollution (inline checking is correct for same block)
+	// This handles sequential calls like: q.Find(); q.Count()
+	if _, pollutedInSameBlock := state.pollutedBlocks[currentBlock]; pollutedInSameBlock {
+		// Already polluted in the same block - this is a violation
 		state.violations = append(state.violations, call.Pos())
 	} else if !isSafeMethod && isTerminal {
-		// Terminal Chain Method on unpolluted mutable - pollutes it
-		state.isPolluted = true
-		state.pollutedAt = call.Pos()
+		// Terminal Chain Method - mark as polluted
+		state.pollutedBlocks[currentBlock] = call.Pos()
 
 		// If in a loop AND the root is defined outside the loop, report as violation
 		// (second iteration will reuse the polluted root)
@@ -301,6 +318,84 @@ func (a *usageAnalyzer) processCall(call *ssa.Call, isInLoop bool, loopBlocks ma
 			state.violations = append(state.violations, call.Pos())
 		}
 	}
+}
+
+// isPollutedAt checks if the value is polluted at the given block.
+// A value is polluted at block B if there exists a polluted block A
+// such that A can reach B (there is a path from A to B in the CFG).
+func (a *usageAnalyzer) isPollutedAt(state *valueState, targetBlock *ssa.BasicBlock) bool {
+	if state == nil || len(state.pollutedBlocks) == 0 {
+		return false
+	}
+	if targetBlock == nil {
+		return false
+	}
+	for pollutedBlock := range state.pollutedBlocks {
+		if pollutedBlock == nil {
+			continue
+		}
+		// If pollution is from a different function (closure), conservatively consider it reachable
+		if pollutedBlock.Parent() != targetBlock.Parent() {
+			return true
+		}
+		// Same function: check if polluted block can reach target block
+		if a.canReach(pollutedBlock, targetBlock) {
+			return true
+		}
+	}
+	return false
+}
+
+// isPollutedAnywhere checks if the value is polluted anywhere in the given function.
+// Used for defer statements which execute at function exit.
+func (a *usageAnalyzer) isPollutedAnywhere(state *valueState, fn *ssa.Function) bool {
+	if state == nil || len(state.pollutedBlocks) == 0 {
+		return false
+	}
+	for pollutedBlock := range state.pollutedBlocks {
+		if pollutedBlock == nil {
+			continue
+		}
+		// Check if this pollution is from the same function or a closure of it
+		if pollutedBlock.Parent() == fn {
+			return true
+		}
+		// Also check closures (parent function captures the value)
+		// Closure pollution affects the parent function's defers
+		return true
+	}
+	return false
+}
+
+// canReach checks if srcBlock can reach dstBlock in the CFG using BFS.
+func (a *usageAnalyzer) canReach(srcBlock, dstBlock *ssa.BasicBlock) bool {
+	if srcBlock == nil || dstBlock == nil {
+		return false
+	}
+	// Same block means reachable (important for loops with back-edges)
+	if srcBlock == dstBlock {
+		return true
+	}
+
+	visited := make(map[*ssa.BasicBlock]bool)
+	queue := []*ssa.BasicBlock{srcBlock}
+	visited[srcBlock] = true
+
+	for len(queue) > 0 {
+		block := queue[0]
+		queue = queue[1:]
+
+		for _, succ := range block.Succs {
+			if succ == dstBlock {
+				return true
+			}
+			if !visited[succ] {
+				visited[succ] = true
+				queue = append(queue, succ)
+			}
+		}
+	}
+	return false
 }
 
 // isRootDefinedOutsideLoop checks if the mutable root is defined outside loop blocks.
@@ -357,14 +452,16 @@ func (a *usageAnalyzer) checkFunctionCallPollution(call *ssa.Call) {
 		// Get or create state
 		state := a.states[root]
 		if state == nil {
-			state = &valueState{}
+			state = &valueState{
+				pollutedBlocks: make(map[*ssa.BasicBlock]token.Pos),
+			}
 			a.states[root] = state
 		}
 
 		// Mark as polluted (function call assumed to pollute)
-		if !state.isPolluted {
-			state.isPolluted = true
-			state.pollutedAt = call.Pos()
+		block := call.Block()
+		if _, exists := state.pollutedBlocks[block]; !exists {
+			state.pollutedBlocks[block] = call.Pos()
 		}
 	}
 }
@@ -382,19 +479,19 @@ func (a *usageAnalyzer) isPureFunction(fn *ssa.Function) bool {
 }
 
 // processDeferStatement handles a defer statement (second pass).
+// Defers execute at function exit, so we check for any pollution in the function.
 func (a *usageAnalyzer) processDeferStatement(d *ssa.Defer) {
-	a.processCallCommon(&d.Call, d.Pos())
+	a.processCallCommonForDefer(&d.Call, d.Pos(), d.Parent())
 }
 
 // processGoStatement handles a go statement.
 func (a *usageAnalyzer) processGoStatement(g *ssa.Go) {
-	a.processCallCommon(&g.Call, g.Pos())
+	a.processCallCommonForGo(&g.Call, g.Pos(), g.Block())
 }
 
-// processCallCommon handles CallCommon from Defer and Go instructions.
-// For defer: executed after regular statements, so we check if receiver was polluted.
-// For go: executed concurrently, same check applies.
-func (a *usageAnalyzer) processCallCommon(callCommon *ssa.CallCommon, pos token.Pos) {
+// processCallCommonForDefer handles CallCommon from Defer instructions.
+// For defer: executed at function exit, so any pollution in the function affects it.
+func (a *usageAnalyzer) processCallCommonForDefer(callCommon *ssa.CallCommon, pos token.Pos, fn *ssa.Function) {
 	callee := callCommon.StaticCallee()
 	if callee == nil {
 		return
@@ -419,12 +516,14 @@ func (a *usageAnalyzer) processCallCommon(callCommon *ssa.CallCommon, pos token.
 		// Get or create state for this root
 		state := a.states[root]
 		if state == nil {
-			state = &valueState{}
+			state = &valueState{
+				pollutedBlocks: make(map[*ssa.BasicBlock]token.Pos),
+			}
 			a.states[root] = state
 		}
 
-		// Check if root was already polluted
-		if state.isPolluted {
+		// Check if root was polluted anywhere (defer executes at function exit)
+		if a.isPollutedAnywhere(state, fn) {
 			// Using a polluted value - violation!
 			state.violations = append(state.violations, pos)
 		}
@@ -444,12 +543,81 @@ func (a *usageAnalyzer) processCallCommon(callCommon *ssa.CallCommon, pos token.
 
 		state := a.states[root]
 		if state == nil {
-			state = &valueState{}
+			state = &valueState{
+				pollutedBlocks: make(map[*ssa.BasicBlock]token.Pos),
+			}
 			a.states[root] = state
 		}
 
-		// For defer/go, if passing *gorm.DB to a function, check if already polluted
-		if state.isPolluted {
+		// For defer, check if polluted anywhere
+		if a.isPollutedAnywhere(state, fn) {
+			state.violations = append(state.violations, pos)
+		}
+	}
+}
+
+// processCallCommonForGo handles CallCommon from Go instructions.
+// For go: executed concurrently, use block-aware pollution check.
+func (a *usageAnalyzer) processCallCommonForGo(callCommon *ssa.CallCommon, pos token.Pos, block *ssa.BasicBlock) {
+	callee := callCommon.StaticCallee()
+	if callee == nil {
+		return
+	}
+
+	sig := callee.Signature
+
+	// Check if this is a *gorm.DB method call
+	if sig != nil && sig.Recv() != nil && IsGormDB(sig.Recv().Type()) {
+		// Get the receiver
+		if len(callCommon.Args) == 0 {
+			return
+		}
+		recv := callCommon.Args[0]
+
+		// Find the mutable root being used
+		root := a.findMutableRoot(recv)
+		if root == nil {
+			return // Receiver is immutable
+		}
+
+		// Get or create state for this root
+		state := a.states[root]
+		if state == nil {
+			state = &valueState{
+				pollutedBlocks: make(map[*ssa.BasicBlock]token.Pos),
+			}
+			a.states[root] = state
+		}
+
+		// Check if root was polluted (from a reachable block)
+		if a.isPollutedAt(state, block) {
+			// Using a polluted value - violation!
+			state.violations = append(state.violations, pos)
+		}
+		return
+	}
+
+	// Check if this is a function call that takes *gorm.DB as argument
+	for _, arg := range callCommon.Args {
+		if !IsGormDB(arg.Type()) {
+			continue
+		}
+
+		root := a.findMutableRoot(arg)
+		if root == nil {
+			continue
+		}
+
+		state := a.states[root]
+		if state == nil {
+			state = &valueState{
+				pollutedBlocks: make(map[*ssa.BasicBlock]token.Pos),
+			}
+			a.states[root] = state
+		}
+
+		// For go, check if polluted from reachable block
+		if a.isPollutedAt(state, block) {
 			state.violations = append(state.violations, pos)
 		}
 	}
@@ -470,14 +638,16 @@ func (a *usageAnalyzer) processSend(send *ssa.Send) {
 
 	state := a.states[root]
 	if state == nil {
-		state = &valueState{}
+		state = &valueState{
+			pollutedBlocks: make(map[*ssa.BasicBlock]token.Pos),
+		}
 		a.states[root] = state
 	}
 
 	// Mark as polluted (channel send assumed to pollute)
-	if !state.isPolluted {
-		state.isPolluted = true
-		state.pollutedAt = send.Pos()
+	block := send.Block()
+	if _, exists := state.pollutedBlocks[block]; !exists {
+		state.pollutedBlocks[block] = send.Pos()
 	}
 }
 
@@ -507,14 +677,16 @@ func (a *usageAnalyzer) processStore(store *ssa.Store) {
 
 	state := a.states[root]
 	if state == nil {
-		state = &valueState{}
+		state = &valueState{
+			pollutedBlocks: make(map[*ssa.BasicBlock]token.Pos),
+		}
 		a.states[root] = state
 	}
 
-	// Mark as polluted (slice/struct field store assumed to pollute)
-	if !state.isPolluted {
-		state.isPolluted = true
-		state.pollutedAt = store.Pos()
+	// Mark as polluted (slice element store assumed to pollute)
+	block := store.Block()
+	if _, exists := state.pollutedBlocks[block]; !exists {
+		state.pollutedBlocks[block] = store.Pos()
 	}
 }
 
@@ -532,14 +704,16 @@ func (a *usageAnalyzer) processMapUpdate(mapUpdate *ssa.MapUpdate) {
 
 	state := a.states[root]
 	if state == nil {
-		state = &valueState{}
+		state = &valueState{
+			pollutedBlocks: make(map[*ssa.BasicBlock]token.Pos),
+		}
 		a.states[root] = state
 	}
 
 	// Mark as polluted (map update assumed to pollute)
-	if !state.isPolluted {
-		state.isPolluted = true
-		state.pollutedAt = mapUpdate.Pos()
+	block := mapUpdate.Block()
+	if _, exists := state.pollutedBlocks[block]; !exists {
+		state.pollutedBlocks[block] = mapUpdate.Pos()
 	}
 }
 
@@ -571,14 +745,16 @@ func (a *usageAnalyzer) processBoundMethod(mc *ssa.MakeClosure, fn *ssa.Function
 
 	state := a.states[root]
 	if state == nil {
-		state = &valueState{}
+		state = &valueState{
+			pollutedBlocks: make(map[*ssa.BasicBlock]token.Pos),
+		}
 		a.states[root] = state
 	}
 
 	// Mark as polluted (bound method may be called and pollute the receiver)
-	if !state.isPolluted {
-		state.isPolluted = true
-		state.pollutedAt = mc.Pos()
+	block := mc.Block()
+	if _, exists := state.pollutedBlocks[block]; !exists {
+		state.pollutedBlocks[block] = mc.Pos()
 	}
 }
 
@@ -596,14 +772,16 @@ func (a *usageAnalyzer) processMakeInterface(mi *ssa.MakeInterface) {
 
 	state := a.states[root]
 	if state == nil {
-		state = &valueState{}
+		state = &valueState{
+			pollutedBlocks: make(map[*ssa.BasicBlock]token.Pos),
+		}
 		a.states[root] = state
 	}
 
 	// Mark as polluted (interface conversion assumed to pollute)
-	if !state.isPolluted {
-		state.isPolluted = true
-		state.pollutedAt = mi.Pos()
+	block := mi.Block()
+	if _, exists := state.pollutedBlocks[block]; !exists {
+		state.pollutedBlocks[block] = mi.Pos()
 	}
 }
 
@@ -874,6 +1052,52 @@ func (a *usageAnalyzer) traceFreeVar(fv *ssa.FreeVar, visited map[ssa.Value]bool
 		}
 	}
 	return nil
+}
+
+// detectReachabilityViolations performs the second pass to detect violations.
+// For each polluted block, checks if ANY OTHER polluted block can reach it.
+// This handles SSA block ordering that doesn't match execution order.
+func (a *usageAnalyzer) detectReachabilityViolations() {
+	for _, state := range a.states {
+		if len(state.pollutedBlocks) <= 1 {
+			continue // Need at least 2 pollution sites for a violation
+		}
+
+		// For each polluted block, check if another polluted block can reach it
+		for targetBlock, targetPos := range state.pollutedBlocks {
+			for srcBlock := range state.pollutedBlocks {
+				if srcBlock == targetBlock {
+					continue // Same block
+				}
+				// Different functions (closure): check cross-function pollution.
+				if srcBlock.Parent() != targetBlock.Parent() {
+					// Case 1: pollution flows from closure to parent function
+					if targetBlock.Parent() == a.fn {
+						state.violations = append(state.violations, targetPos)
+						break
+					} else if srcBlock.Parent() != a.fn {
+						// Case 2: both are in different closures (neither is parent function)
+						// Report violation only if srcBlock's pollution comes before targetBlock's in code order.
+						// This treats the first closure (by code position) as the "first use".
+						srcPos := state.pollutedBlocks[srcBlock]
+						if srcPos < targetPos {
+							state.violations = append(state.violations, targetPos)
+							break
+						}
+					}
+					// Case 3: srcBlock in parent, targetBlock in closure - don't report
+					// (closure usage is first use from that closure's perspective)
+					// Don't break - continue checking other srcBlocks for potential violations
+					continue
+				}
+				// Same function: check CFG reachability
+				if a.canReach(srcBlock, targetBlock) {
+					state.violations = append(state.violations, targetPos)
+					break // Only need to find one reaching pollution site
+				}
+			}
+		}
+	}
 }
 
 // collectViolations collects all detected violations.
