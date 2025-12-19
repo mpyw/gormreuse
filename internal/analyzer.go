@@ -481,18 +481,21 @@ func (a *usageAnalyzer) processSend(send *ssa.Send) {
 	}
 }
 
-// processStore handles store operations to slice elements and struct fields.
-// If storing *gorm.DB to a slice element or struct field, we mark the value as polluted.
+// processStore handles store operations to slice elements.
+// If storing *gorm.DB to a slice element, we mark the value as polluted.
+// Note: FieldAddr (struct fields) are handled via traceFieldStore instead,
+// which allows proper tracking of field access patterns.
 func (a *usageAnalyzer) processStore(store *ssa.Store) {
 	if !IsGormDB(store.Val.Type()) {
 		return
 	}
 
-	// Only process stores to IndexAddr (slice element) or FieldAddr (struct field)
+	// Only process stores to IndexAddr (slice element)
 	// Skip stores to Alloc (local variable assignment, closure capture, etc.)
+	// Skip stores to FieldAddr (struct field) - handled via tracing
 	switch store.Addr.(type) {
-	case *ssa.IndexAddr, *ssa.FieldAddr:
-		// These are stores to slice elements or struct fields - mark as polluted
+	case *ssa.IndexAddr:
+		// Stores to slice elements - mark as polluted (can't track index access)
 	default:
 		return
 	}
@@ -766,6 +769,9 @@ func (a *usageAnalyzer) tracePointerLoad(ptr ssa.Value, visited map[ssa.Value]bo
 	case *ssa.Alloc:
 		// Local allocation - find the stored value
 		return a.traceAllocStore(p, visited)
+	case *ssa.FieldAddr:
+		// Struct field - find Store to this field and trace the stored value
+		return a.traceFieldStore(p, visited)
 	default:
 		// Try to trace through other pointer sources
 		return a.findMutableRootImpl(ptr, visited)
@@ -789,6 +795,34 @@ func (a *usageAnalyzer) traceAllocStore(alloc *ssa.Alloc, visited map[ssa.Value]
 			}
 			if store.Addr == alloc {
 				// Found a store to this alloc - trace the stored value
+				return a.findMutableRootImpl(store.Val, visited)
+			}
+		}
+	}
+	return nil
+}
+
+// traceFieldStore finds the value stored to a struct field.
+// When we have h.field, we find Store instructions that write to the same field.
+func (a *usageAnalyzer) traceFieldStore(fa *ssa.FieldAddr, visited map[ssa.Value]bool) ssa.Value {
+	fn := fa.Parent()
+	if fn == nil {
+		return nil
+	}
+
+	// Find Store instructions that write to a FieldAddr with same base and field
+	for _, block := range fn.Blocks {
+		for _, instr := range block.Instrs {
+			store, ok := instr.(*ssa.Store)
+			if !ok {
+				continue
+			}
+			storeFA, ok := store.Addr.(*ssa.FieldAddr)
+			if !ok {
+				continue
+			}
+			// Match by same base and same field index
+			if storeFA.X == fa.X && storeFA.Field == fa.Field {
 				return a.findMutableRootImpl(store.Val, visited)
 			}
 		}

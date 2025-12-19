@@ -93,28 +93,27 @@ func conditionalReuse(db *gorm.DB, flag bool) {
 }
 
 // conditionalBothBranches demonstrates pollution in both branches.
-// Note: SSA processes both branches, so else branch sees if-branch's pollution.
-// [LIMITATION] FALSE POSITIVE in else branch due to flow-insensitive analysis.
+// [LIMITATION] FALSE POSITIVE: SSA processes if-branch before else-branch.
 func conditionalBothBranches(db *gorm.DB, flag bool) {
 	q := db.Where("x = ?", 1)
 
 	if flag {
-		q.Find(nil)
+		q.Find(nil) // First use in if-branch
 	} else {
-		// [LIMITATION] FALSE POSITIVE: This is flagged because SSA sees if-branch first
+		// [LIMITATION] FALSE POSITIVE: Flagged because SSA sees if-branch first
 		q.First(nil) // want `\*gorm\.DB instance reused after chain method`
 	}
 
-	// After either branch, q is polluted
+	// After either branch, q is polluted - this IS a reuse
 	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
 }
 
-// switchReuse demonstrates reuse across switch cases.
-// [LIMITATION] SSA may process switch cases in different order than source code.
-// All cases are flagged because any execution path would reuse q.
+// switchReuse demonstrates that each switch case is a first use in its exclusive path.
+// [LIMITATION] FALSE POSITIVE: SSA may process switch cases in different order.
 func switchReuse(db *gorm.DB, mode int) {
 	q := db.Where("base = ?", 1)
 
+	// [LIMITATION] FALSE POSITIVE: SSA processes cases in compile order, not runtime order
 	switch mode {
 	case 1:
 		q.Where("a = ?", 1).Find(nil) // want `\*gorm\.DB instance reused after chain method`
@@ -607,12 +606,14 @@ type queryHolder struct {
 }
 
 // structFieldPollution demonstrates pollution through struct field.
-// Storing *gorm.DB in struct field is assumed to pollute it.
+// [LIMITATION] Inter-procedural tracking not supported.
+// Storing to struct field alone doesn't pollute - we need actual usage to track.
 func structFieldPollution(db *gorm.DB) {
 	q := db.Where("x = ?", 1)
-	_ = &queryHolder{db: q} // Storing in struct field marks q as polluted
+	_ = &queryHolder{db: q} // Struct might escape, but we can't track inter-procedurally
 
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	// [LIMITATION] FALSE NEGATIVE: Can't detect if struct escapes and is used elsewhere
+	q.Count(nil) // Not detected
 }
 
 type multiHolder struct {
@@ -620,15 +621,14 @@ type multiHolder struct {
 	q2 *gorm.DB
 }
 
-// multiStructField demonstrates multiple struct fields.
-// [LIMITATION] Struct field tracking not supported.
+// multiStructField demonstrates multiple struct fields pointing to same value.
+// Field access is traced back to the original value.
 func multiStructField(db *gorm.DB) {
 	q := db.Where("x = ?", 1)
 	h := multiHolder{q1: q, q2: q}
-	h.q1.Find(nil)
+	h.q1.Find(nil) // First use - pollutes underlying q
 
-	// [LIMITATION] FALSE NEGATIVE: Struct field tracking
-	h.q2.Count(nil) // Not detected
+	h.q2.Count(nil) // want `\*gorm\.DB instance reused after chain method`
 }
 
 // =============================================================================
@@ -802,6 +802,7 @@ func variadicPollution(db *gorm.DB) {
 // =============================================================================
 
 // gotoStatement demonstrates pollution with goto.
+// [LIMITATION] FALSE POSITIVE: SSA processes if-branch before else fallthrough.
 func gotoStatement(db *gorm.DB, flag bool) {
 	q := db.Where("x = ?", 1)
 
@@ -809,6 +810,7 @@ func gotoStatement(db *gorm.DB, flag bool) {
 		q.Find(nil)
 		goto cleanup
 	}
+	// [LIMITATION] FALSE POSITIVE: Flagged because SSA sees if-branch first
 	q.First(nil) // want `\*gorm\.DB instance reused after chain method`
 
 cleanup:
@@ -1506,6 +1508,7 @@ func multipleDefersInLoopBranches(db *gorm.DB, items []int) {
 // =============================================================================
 
 // earlyReturnWithDefer demonstrates early return with defer.
+// [LIMITATION] FALSE POSITIVE: SSA processes if-branch before else fallthrough.
 func earlyReturnWithDefer(db *gorm.DB, flag bool) {
 	q := db.Where("x = ?", 1)
 
@@ -1516,6 +1519,7 @@ func earlyReturnWithDefer(db *gorm.DB, flag bool) {
 		return
 	}
 
+	// [LIMITATION] FALSE POSITIVE: Flagged because SSA sees if-branch first
 	q.First(nil) // want `\*gorm\.DB instance reused after chain method`
 }
 
