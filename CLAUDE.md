@@ -119,7 +119,7 @@ testdata/src/gormreuse/
 ├── basic.go         # Basic reuse patterns, Session at end/middle
 ├── advanced.go      # Derived variables, helper functions, conditional reuse
 ├── evil.go          # Edge cases: closures, defer, goroutines, struct fields, loops
-└── ignore.go        # gormreuse:ignore directive tests
+└── ignore.go        # //gormreuse:ignore directive tests
 ```
 
 ### E2E Tests
