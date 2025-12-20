@@ -4,13 +4,13 @@ This file provides guidance to Claude Code when working with code in this reposi
 
 ## Project Overview
 
-**gormreuse** is a Go linter that detects unsafe `*gorm.DB` instance reuse after chain methods. It uses SSA (Static Single Assignment) form to track `*gorm.DB` values through variable assignments and method chains.
+**gormreuse** is a Go linter that detects unsafe [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) instance reuse after chain methods. It uses [SSA](https://pkg.go.dev/golang.org/x/tools/go/ssa) (Static Single Assignment) form to track `*gorm.DB` values through variable assignments and method chains.
 
 ### Detection Model: Pollute Semantics
 
 The linter uses a "pollute" model inspired by Rust's move semantics:
 
-1. **Safe Methods** (`Session`, `WithContext`) return an immutable copy
+1. **Safe Methods** ([`Session`](https://pkg.go.dev/gorm.io/gorm#DB.Session), [`WithContext`](https://pkg.go.dev/gorm.io/gorm#DB.WithContext)) return an immutable copy
 2. **Chain Methods** (all others including finishers) pollute the receiver if mutable
 3. Using a polluted mutable instance is a violation
 
@@ -140,3 +140,9 @@ The `e2e/internal/` directory contains tests that verify actual GORM SQL behavio
 - **Nested defer/goroutine**: `go func() { defer q.Find(nil) }()` - deep nested defer/goroutine chains not fully tracked
 
 These are documented in `testdata/src/gormreuse/evil.go` with `[LIMITATION]` markers.
+
+## Related Projects
+
+- [goroutinectx](https://github.com/mpyw/goroutinectx) - Goroutine context propagation linter
+- [zerologlintctx](https://github.com/mpyw/zerologlintctx) - Zerolog context propagation linter
+- [ctxweaver](https://github.com/mpyw/ctxweaver) - Code generator for context-aware instrumentation
