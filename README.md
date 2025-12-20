@@ -8,11 +8,11 @@
 > [!NOTE]
 > This project was written by AI (Claude Code).
 
-A Go linter that detects unsafe `*gorm.DB` instance reuse after chain methods.
+A Go linter that detects unsafe [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) instance reuse after chain methods.
 
 ## Background
 
-GORM's chain methods (`Where`, `Order`, etc.) modify internal state. Reusing the same `*gorm.DB` instance after chain methods can cause query conditions to accumulate unexpectedly.
+[GORM](https://pkg.go.dev/gorm.io/gorm)'s chain methods ([`Where`](https://pkg.go.dev/gorm.io/gorm#DB.Where), [`Order`](https://pkg.go.dev/gorm.io/gorm#DB.Order), etc.) modify internal state. Reusing the same [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) instance after chain methods can cause query conditions to accumulate unexpectedly.
 
 ```go
 q := db.Where("active = ?", true)
@@ -75,8 +75,8 @@ This linter uses a "pollute" model inspired by Rust's move semantics. The core c
 
 | Category        | Methods                  | Description                    |
 | --------------- | ------------------------ | ------------------------------ |
-| Safe Methods    | `Session`, `WithContext` | Return new immutable instance  |
-| DB Init Methods | `Begin`, `Transaction`   | Create new DB instance         |
+| Safe Methods    | [`Session`](https://pkg.go.dev/gorm.io/gorm#DB.Session), [`WithContext`](https://pkg.go.dev/gorm.io/gorm#DB.WithContext) | Return new immutable instance  |
+| DB Init Methods | [`Begin`](https://pkg.go.dev/gorm.io/gorm#DB.Begin), [`Transaction`](https://pkg.go.dev/gorm.io/gorm#DB.Transaction)   | Create new DB instance         |
 | Chain Methods   | All others               | Pollute mutable receiver       |
 
 ### Automatic Pollution Sources
@@ -166,6 +166,10 @@ func countOnly(db *gorm.DB) int64 {
 }
 ```
 
+## Documentation
+
+- [CLAUDE.md](./CLAUDE.md) - AI assistant guidance for development
+
 ## Development
 
 ```bash
@@ -178,6 +182,12 @@ go build -o bin/gormreuse ./cmd/gormreuse
 # Run linter on a project
 ./bin/gormreuse ./...
 ```
+
+## Related Tools
+
+- [goroutinectx](https://github.com/mpyw/goroutinectx) - Goroutine context propagation linter
+- [zerologlintctx](https://github.com/mpyw/zerologlintctx) - Zerolog context propagation linter
+- [ctxweaver](https://github.com/mpyw/ctxweaver) - Code generator for context-aware instrumentation
 
 ## License
 
