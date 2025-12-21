@@ -461,8 +461,11 @@ func (a *usageAnalyzer) traceMakeClosureImpl(v ssa.Value, visited map[ssa.Value]
 		}
 		return a.traceMakeClosureImpl(val.X, visited)
 	case *ssa.Phi:
-		// Phi node - check all edges
+		// Phi node - check all edges, skip nil constants
 		for _, edge := range val.Edges {
+			if isNilConst(edge) {
+				continue
+			}
 			if mc := a.traceMakeClosureImpl(edge, visited); mc != nil {
 				return mc
 			}
@@ -1012,7 +1015,11 @@ func (a *usageAnalyzer) handleNonCallForRoot(v ssa.Value, visited map[ssa.Value]
 	case *ssa.Phi:
 		// For Phi nodes, trace through all edges to find any mutable root.
 		// If any edge has a mutable root, return it (conservative for false-negative reduction).
+		// Skip nil constant edges - nil pointers can't have methods called on them.
 		for _, edge := range val.Edges {
+			if isNilConst(edge) {
+				continue
+			}
 			if root := a.findMutableRootImpl(edge, visited); root != nil {
 				return root
 			}
@@ -1226,27 +1233,41 @@ func (a *usageAnalyzer) detectReachabilityViolations() {
 				if srcBlock == targetBlock {
 					continue // Same block
 				}
+
+				srcPos := state.pollutedBlocks[srcBlock]
+
 				// Different functions (closure): check cross-function pollution.
+				// Use isDescendantOf for nested closure support.
 				if srcBlock.Parent() != targetBlock.Parent() {
-					// Case 1: pollution flows from closure to parent function
-					if targetBlock.Parent() == a.fn {
+					srcInParent := srcBlock.Parent() == a.fn
+					targetInParent := targetBlock.Parent() == a.fn
+					srcIsDescendant := isDescendantOf(srcBlock.Parent(), a.fn)
+					targetIsDescendant := isDescendantOf(targetBlock.Parent(), a.fn)
+
+					// Case 1: src in descendant closure, target in parent function
+					// Violation if src executes before target (by code position)
+					if srcIsDescendant && targetInParent && srcPos < targetPos {
 						state.violations = append(state.violations, targetPos)
 						break
-					} else if srcBlock.Parent() != a.fn {
-						// Case 2: both are in different closures (neither is parent function)
-						// Report violation only if srcBlock's pollution comes before targetBlock's in code order.
-						// This treats the first closure (by code position) as the "first use".
-						srcPos := state.pollutedBlocks[srcBlock]
-						if srcPos < targetPos {
-							state.violations = append(state.violations, targetPos)
-							break
-						}
 					}
-					// Case 3: srcBlock in parent, targetBlock in closure - don't report
-					// (closure usage is first use from that closure's perspective)
-					// Don't break - continue checking other srcBlocks for potential violations
+
+					// Case 2: src in parent function, target in descendant closure
+					// Violation if src executes before target (by code position)
+					if srcInParent && targetIsDescendant && srcPos < targetPos {
+						state.violations = append(state.violations, targetPos)
+						break
+					}
+
+					// Case 3: both in descendant closures (potentially different ones)
+					// Violation if src executes before target (by code position)
+					if srcIsDescendant && targetIsDescendant && srcPos < targetPos {
+						state.violations = append(state.violations, targetPos)
+						break
+					}
+
 					continue
 				}
+
 				// Same function: check CFG reachability
 				if a.canReach(srcBlock, targetBlock) {
 					state.violations = append(state.violations, targetPos)
@@ -1271,6 +1292,33 @@ func (a *usageAnalyzer) collectViolations() []violation {
 	}
 
 	return violations
+}
+
+// isDescendantOf checks if fn is a descendant of ancestor by traversing the Parent() chain.
+// This is used to detect nested closures - a closure inside another closure has the
+// inner closure as Parent, not the original function.
+func isDescendantOf(fn, ancestor *ssa.Function) bool {
+	if fn == nil || ancestor == nil {
+		return false
+	}
+	for current := fn; current != nil; current = current.Parent() {
+		if current == ancestor {
+			return true
+		}
+	}
+	return false
+}
+
+// isNilConst checks if a value is a nil constant.
+// Nil pointers cannot have methods called on them, so they are safe to skip
+// when tracing Phi nodes (the nil path would panic before reaching the call).
+func isNilConst(v ssa.Value) bool {
+	c, ok := v.(*ssa.Const)
+	if !ok {
+		return false
+	}
+	// For nil pointer constants, Value is nil
+	return c.Value == nil
 }
 
 // isImmutableSource checks if a value is an immutable source.

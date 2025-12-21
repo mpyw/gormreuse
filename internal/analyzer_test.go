@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"go/constant"
 	"go/token"
 	"testing"
 
@@ -1100,5 +1101,78 @@ func TestTraceMakeClosureImpl_NilValue(t *testing.T) {
 	result := analyzer.traceMakeClosureImpl(nil, visited)
 	if result != nil {
 		t.Error("nil value should return nil")
+	}
+}
+
+// =============================================================================
+// isDescendantOf Tests
+// =============================================================================
+
+func TestIsDescendantOf_NilFn(t *testing.T) {
+	if isDescendantOf(nil, &ssa.Function{}) {
+		t.Error("nil fn should not be descendant of anything")
+	}
+}
+
+func TestIsDescendantOf_NilAncestor(t *testing.T) {
+	if isDescendantOf(&ssa.Function{}, nil) {
+		t.Error("nothing should be descendant of nil")
+	}
+}
+
+func TestIsDescendantOf_BothNil(t *testing.T) {
+	if isDescendantOf(nil, nil) {
+		t.Error("nil should not be descendant of nil")
+	}
+}
+
+func TestIsDescendantOf_SameFunction(t *testing.T) {
+	fn := &ssa.Function{}
+	if !isDescendantOf(fn, fn) {
+		t.Error("function should be descendant of itself")
+	}
+}
+
+func TestIsDescendantOf_NoParent(t *testing.T) {
+	fn := &ssa.Function{}
+	ancestor := &ssa.Function{}
+	// fn has no Parent, so it's not a descendant of ancestor
+	if isDescendantOf(fn, ancestor) {
+		t.Error("function with no parent should not be descendant of unrelated function")
+	}
+}
+
+// =============================================================================
+// isNilConst Tests
+// =============================================================================
+
+func TestIsNilConst_NilConst(t *testing.T) {
+	// Const with nil Value is a nil constant
+	c := &ssa.Const{Value: nil}
+	if !isNilConst(c) {
+		t.Error("Const with nil Value should be nil constant")
+	}
+}
+
+func TestIsNilConst_NonNilConst(t *testing.T) {
+	// Const with non-nil Value is not a nil constant
+	c := &ssa.Const{Value: constant.MakeInt64(42)}
+	if isNilConst(c) {
+		t.Error("Const with non-nil Value should not be nil constant")
+	}
+}
+
+func TestIsNilConst_NonConst(t *testing.T) {
+	// Non-Const value is not a nil constant
+	p := &ssa.Parameter{}
+	if isNilConst(p) {
+		t.Error("Parameter should not be nil constant")
+	}
+}
+
+func TestIsNilConst_Nil(t *testing.T) {
+	// nil value is not a nil constant
+	if isNilConst(nil) {
+		t.Error("nil should not be nil constant")
 	}
 }

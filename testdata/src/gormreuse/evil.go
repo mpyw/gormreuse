@@ -380,6 +380,35 @@ func tripleNestedClosureSafe(db *gorm.DB) {
 	q.Count(nil) // OK: q has Session
 }
 
+// parentPollutesNestedClosureUses demonstrates pollution in parent, violation in nested closure.
+// This is the reverse of closurePollutesOutside - parent pollutes first, then nested closure reuses.
+func parentPollutesNestedClosureUses(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+
+	q.Find(nil) // Pollutes q in parent
+
+	func() {
+		func() {
+			q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+		}()
+	}()
+}
+
+// parentPollutesTripleNestedUses demonstrates pollution in parent, violation in triple-nested closure.
+func parentPollutesTripleNestedUses(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+
+	q.Find(nil) // Pollutes q in parent
+
+	func() {
+		func() {
+			func() {
+				q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+			}()
+		}()
+	}()
+}
+
 // =============================================================================
 // EVIL PATTERNS - Higher-Order Functions (go fn()())
 // =============================================================================
