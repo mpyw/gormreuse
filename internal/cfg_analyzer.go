@@ -6,17 +6,38 @@ import (
 )
 
 // =============================================================================
-// Control Flow Graph (CFG) Analysis
+// CFGAnalyzer
 //
-// This file contains methods for analyzing the control flow graph of SSA functions.
+// CFGAnalyzer provides control flow graph analysis for SSA functions.
 // This includes loop detection, reachability analysis, and block classification.
+//
+// This component is stateless and can be reused across multiple analyses.
 // =============================================================================
 
-// detectLoopBlocks returns a set of blocks that are inside loops.
-func (a *usageAnalyzer) detectLoopBlocks(fn *ssa.Function) map[*ssa.BasicBlock]bool {
+// CFGAnalyzer analyzes control flow graphs of SSA functions.
+type CFGAnalyzer struct{}
+
+// NewCFGAnalyzer creates a new CFGAnalyzer.
+func NewCFGAnalyzer() *CFGAnalyzer {
+	return &CFGAnalyzer{}
+}
+
+// LoopInfo contains information about loops in a function.
+type LoopInfo struct {
+	// LoopBlocks is a set of blocks that are inside loops.
+	LoopBlocks map[*ssa.BasicBlock]bool
+}
+
+// IsInLoop returns true if the given block is inside a loop.
+func (l *LoopInfo) IsInLoop(block *ssa.BasicBlock) bool {
+	return l.LoopBlocks[block]
+}
+
+// DetectLoops analyzes the function and returns loop information.
+func (c *CFGAnalyzer) DetectLoops(fn *ssa.Function) *LoopInfo {
 	loopBlocks := make(map[*ssa.BasicBlock]bool)
 	if fn.Blocks == nil {
-		return loopBlocks
+		return &LoopInfo{LoopBlocks: loopBlocks}
 	}
 
 	// Build block index map
@@ -35,33 +56,19 @@ func (a *usageAnalyzer) detectLoopBlocks(fn *ssa.Function) map[*ssa.BasicBlock]b
 		for _, succ := range block.Succs {
 			if blockIndex[succ] <= blockIndex[block] {
 				// Potential back-edge - verify it creates a cycle
-				if a.canReach(succ, block) {
+				if c.CanReach(succ, block) {
 					// True back-edge detected: mark all blocks from succ to block as in-loop
-					a.markLoopBlocks(fn, succ, block, loopBlocks, blockIndex)
+					c.markLoopBlocks(fn, succ, block, loopBlocks, blockIndex)
 				}
 			}
 		}
 	}
 
-	return loopBlocks
+	return &LoopInfo{LoopBlocks: loopBlocks}
 }
 
-// markLoopBlocks marks blocks that are part of a loop.
-func (a *usageAnalyzer) markLoopBlocks(fn *ssa.Function, loopHead, loopTail *ssa.BasicBlock, loopBlocks map[*ssa.BasicBlock]bool, blockIndex map[*ssa.BasicBlock]int) {
-	headIdx := blockIndex[loopHead]
-	tailIdx := blockIndex[loopTail]
-
-	// Mark all blocks between head and tail (inclusive) as in-loop
-	for _, block := range fn.Blocks {
-		idx := blockIndex[block]
-		if idx >= headIdx && idx <= tailIdx {
-			loopBlocks[block] = true
-		}
-	}
-}
-
-// canReach checks if srcBlock can reach dstBlock in the CFG using BFS.
-func (a *usageAnalyzer) canReach(srcBlock, dstBlock *ssa.BasicBlock) bool {
+// CanReach checks if srcBlock can reach dstBlock in the CFG using BFS.
+func (c *CFGAnalyzer) CanReach(srcBlock, dstBlock *ssa.BasicBlock) bool {
 	if srcBlock == nil || dstBlock == nil {
 		return false
 	}
@@ -91,10 +98,10 @@ func (a *usageAnalyzer) canReach(srcBlock, dstBlock *ssa.BasicBlock) bool {
 	return false
 }
 
-// isRootDefinedOutsideLoop checks if the mutable root is defined outside loop blocks.
-func (a *usageAnalyzer) isRootDefinedOutsideLoop(root ssa.Value, loopBlocks map[*ssa.BasicBlock]bool) bool {
+// IsDefinedOutsideLoop checks if a value is defined outside the given loop blocks.
+func (c *CFGAnalyzer) IsDefinedOutsideLoop(v ssa.Value, loopInfo *LoopInfo) bool {
 	// Get the instruction that defines this value
-	instr, ok := root.(ssa.Instruction)
+	instr, ok := v.(ssa.Instruction)
 	if !ok {
 		return true // Non-instruction values (parameters, etc.) are outside loops
 	}
@@ -105,5 +112,23 @@ func (a *usageAnalyzer) isRootDefinedOutsideLoop(root ssa.Value, loopBlocks map[
 		return true
 	}
 
-	return !loopBlocks[block]
+	return !loopInfo.IsInLoop(block)
+}
+
+// =============================================================================
+// Internal Implementation
+// =============================================================================
+
+// markLoopBlocks marks blocks that are part of a loop.
+func (c *CFGAnalyzer) markLoopBlocks(fn *ssa.Function, loopHead, loopTail *ssa.BasicBlock, loopBlocks map[*ssa.BasicBlock]bool, blockIndex map[*ssa.BasicBlock]int) {
+	headIdx := blockIndex[loopHead]
+	tailIdx := blockIndex[loopTail]
+
+	// Mark all blocks between head and tail (inclusive) as in-loop
+	for _, block := range fn.Blocks {
+		idx := blockIndex[block]
+		if idx >= headIdx && idx <= tailIdx {
+			loopBlocks[block] = true
+		}
+	}
 }

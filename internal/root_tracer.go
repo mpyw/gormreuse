@@ -8,34 +8,58 @@ import (
 )
 
 // =============================================================================
-// Root Tracing
+// RootTracer
 //
-// This file contains methods for tracing SSA values back to their mutable roots.
+// RootTracer traces SSA values back to their mutable roots.
 // A "mutable root" is the origin *gorm.DB value that can be polluted by chain methods.
+//
+// This component is stateless and can be reused across multiple analyses.
 // =============================================================================
 
-// findMutableRoot finds the mutable root for a receiver value.
-// Returns nil if the receiver is immutable (Session result, parameter, etc.)
-func (a *usageAnalyzer) findMutableRoot(recv ssa.Value) ssa.Value {
-	return a.findMutableRootImpl(recv, make(map[ssa.Value]bool))
+// RootTracer traces SSA values to find mutable *gorm.DB roots.
+type RootTracer struct {
+	// pureFuncs is a set of functions marked as pure (don't pollute *gorm.DB).
+	pureFuncs map[string]struct{}
 }
 
+// NewRootTracer creates a new RootTracer with the given pure functions.
+func NewRootTracer(pureFuncs map[string]struct{}) *RootTracer {
+	return &RootTracer{pureFuncs: pureFuncs}
+}
+
+// FindMutableRoot finds the mutable root for a receiver value.
+// Returns nil if the receiver is immutable (Session result, parameter, etc.)
+func (t *RootTracer) FindMutableRoot(recv ssa.Value) ssa.Value {
+	return t.findMutableRootImpl(recv, make(map[ssa.Value]bool))
+}
+
+// FindAllMutableRoots finds ALL possible mutable roots from a value.
+// For Phi nodes, this returns roots from ALL edges (not just the first).
+// This is used for pollution checking where ANY polluted path should be detected.
+func (t *RootTracer) FindAllMutableRoots(v ssa.Value) []ssa.Value {
+	return t.findAllMutableRootsImpl(v, make(map[ssa.Value]bool))
+}
+
+// =============================================================================
+// Internal Implementation
+// =============================================================================
+
 // findMutableRootImpl recursively finds the mutable root.
-func (a *usageAnalyzer) findMutableRootImpl(v ssa.Value, visited map[ssa.Value]bool) ssa.Value {
+func (t *RootTracer) findMutableRootImpl(v ssa.Value, visited map[ssa.Value]bool) ssa.Value {
 	if visited[v] {
 		return nil
 	}
 	visited[v] = true
 
 	// Check if this is an immutable source (Parameter, Safe Method result)
-	if a.isImmutableSource(v) {
+	if t.isImmutableSource(v) {
 		return nil
 	}
 
 	call, ok := v.(*ssa.Call)
 	if !ok {
 		// Non-call values - check for Phi, UnOp, etc.
-		return a.handleNonCallForRoot(v, visited)
+		return t.handleNonCallForRoot(v, visited)
 	}
 
 	callee := call.Call.StaticCallee()
@@ -44,7 +68,7 @@ func (a *usageAnalyzer) findMutableRootImpl(v ssa.Value, visited map[ssa.Value]b
 	// e.g., func() *gorm.DB { return q.Where(...) }().Find(nil)
 	if mc, ok := call.Call.Value.(*ssa.MakeClosure); ok {
 		if closureFn, ok := mc.Fn.(*ssa.Function); ok {
-			if root := a.traceIIFEReturns(closureFn, visited); root != nil {
+			if root := t.traceIIFEReturns(closureFn, visited); root != nil {
 				return root
 			}
 		}
@@ -71,22 +95,15 @@ func (a *usageAnalyzer) findMutableRootImpl(v ssa.Value, visited map[ssa.Value]b
 	recv := call.Call.Args[0]
 
 	// If receiver is immutable, this call is the mutable root
-	if a.isImmutableSource(recv) {
+	if t.isImmutableSource(recv) {
 		return call
 	}
 
 	// Receiver is mutable - trace back to find the root
-	return a.findMutableRootImpl(recv, visited)
+	return t.findMutableRootImpl(recv, visited)
 }
 
-// findAllMutableRoots finds ALL possible mutable roots from a value.
-// For Phi nodes, this returns roots from ALL edges (not just the first).
-// This is used for pollution checking where ANY polluted path should be detected.
-func (a *usageAnalyzer) findAllMutableRoots(v ssa.Value) []ssa.Value {
-	return a.findAllMutableRootsImpl(v, make(map[ssa.Value]bool))
-}
-
-func (a *usageAnalyzer) findAllMutableRootsImpl(v ssa.Value, visited map[ssa.Value]bool) []ssa.Value {
+func (t *RootTracer) findAllMutableRootsImpl(v ssa.Value, visited map[ssa.Value]bool) []ssa.Value {
 	if v == nil || visited[v] {
 		return nil
 	}
@@ -100,7 +117,7 @@ func (a *usageAnalyzer) findAllMutableRootsImpl(v ssa.Value, visited map[ssa.Val
 			if isNilConst(edge) {
 				continue
 			}
-			edgeRoots := a.findAllMutableRootsImpl(edge, visited)
+			edgeRoots := t.findAllMutableRootsImpl(edge, visited)
 			roots = append(roots, edgeRoots...)
 		}
 		return roots
@@ -108,13 +125,13 @@ func (a *usageAnalyzer) findAllMutableRootsImpl(v ssa.Value, visited map[ssa.Val
 	case *ssa.UnOp:
 		// Load operation - trace through to find stored values
 		if val.Op == token.MUL {
-			return a.traceAllPointerLoads(val.X, visited)
+			return t.traceAllPointerLoads(val.X, visited)
 		}
-		return a.findAllMutableRootsImpl(val.X, visited)
+		return t.findAllMutableRootsImpl(val.X, visited)
 
 	case *ssa.Alloc:
 		// Alloc - find ALL values stored to this alloc
-		return a.traceAllAllocStores(val, visited)
+		return t.traceAllAllocStores(val, visited)
 
 	default:
 		// For other values, use normal root finding.
@@ -124,7 +141,7 @@ func (a *usageAnalyzer) findAllMutableRootsImpl(v ssa.Value, visited map[ssa.Val
 			freshVisited[k] = true
 		}
 		delete(freshVisited, v) // Allow this value to be processed
-		root := a.findMutableRootImpl(v, freshVisited)
+		root := t.findMutableRootImpl(v, freshVisited)
 		if root != nil {
 			return []ssa.Value{root}
 		}
@@ -133,27 +150,27 @@ func (a *usageAnalyzer) findAllMutableRootsImpl(v ssa.Value, visited map[ssa.Val
 }
 
 // traceAllPointerLoads traces a pointer load to find ALL possible stored values.
-func (a *usageAnalyzer) traceAllPointerLoads(ptr ssa.Value, visited map[ssa.Value]bool) []ssa.Value {
+func (t *RootTracer) traceAllPointerLoads(ptr ssa.Value, visited map[ssa.Value]bool) []ssa.Value {
 	switch p := ptr.(type) {
 	case *ssa.Alloc:
-		return a.traceAllAllocStores(p, visited)
+		return t.traceAllAllocStores(p, visited)
 	case *ssa.Phi:
 		var roots []ssa.Value
 		for _, edge := range p.Edges {
 			if isNilConst(edge) {
 				continue
 			}
-			edgeRoots := a.traceAllPointerLoads(edge, visited)
+			edgeRoots := t.traceAllPointerLoads(edge, visited)
 			roots = append(roots, edgeRoots...)
 		}
 		return roots
 	default:
-		return a.findAllMutableRootsImpl(ptr, visited)
+		return t.findAllMutableRootsImpl(ptr, visited)
 	}
 }
 
 // traceAllAllocStores finds ALL values stored to an Alloc instruction.
-func (a *usageAnalyzer) traceAllAllocStores(alloc *ssa.Alloc, visited map[ssa.Value]bool) []ssa.Value {
+func (t *RootTracer) traceAllAllocStores(alloc *ssa.Alloc, visited map[ssa.Value]bool) []ssa.Value {
 	fn := alloc.Parent()
 	if fn == nil {
 		return nil
@@ -169,7 +186,7 @@ func (a *usageAnalyzer) traceAllAllocStores(alloc *ssa.Alloc, visited map[ssa.Va
 			}
 			if store.Addr == alloc {
 				// Found a store to this alloc - trace the stored value
-				storeRoots := a.findAllMutableRootsImpl(store.Val, visited)
+				storeRoots := t.findAllMutableRootsImpl(store.Val, visited)
 				roots = append(roots, storeRoots...)
 			}
 		}
@@ -178,7 +195,7 @@ func (a *usageAnalyzer) traceAllAllocStores(alloc *ssa.Alloc, visited map[ssa.Va
 }
 
 // handleNonCallForRoot handles non-call values when finding mutable root.
-func (a *usageAnalyzer) handleNonCallForRoot(v ssa.Value, visited map[ssa.Value]bool) ssa.Value {
+func (t *RootTracer) handleNonCallForRoot(v ssa.Value, visited map[ssa.Value]bool) ssa.Value {
 	switch val := v.(type) {
 	case *ssa.Phi:
 		// For Phi nodes, trace through all edges to find any mutable root.
@@ -188,7 +205,7 @@ func (a *usageAnalyzer) handleNonCallForRoot(v ssa.Value, visited map[ssa.Value]
 			if isNilConst(edge) {
 				continue
 			}
-			if root := a.findMutableRootImpl(edge, visited); root != nil {
+			if root := t.findMutableRootImpl(edge, visited); root != nil {
 				return root
 			}
 		}
@@ -196,19 +213,19 @@ func (a *usageAnalyzer) handleNonCallForRoot(v ssa.Value, visited map[ssa.Value]
 	case *ssa.UnOp:
 		// Dereference (*ptr) - trace through to find the stored value
 		if val.Op == token.MUL {
-			return a.tracePointerLoad(val.X, visited)
+			return t.tracePointerLoad(val.X, visited)
 		}
-		return a.findMutableRootImpl(val.X, visited)
+		return t.findMutableRootImpl(val.X, visited)
 	case *ssa.ChangeType:
-		return a.findMutableRootImpl(val.X, visited)
+		return t.findMutableRootImpl(val.X, visited)
 	case *ssa.Extract:
-		return a.findMutableRootImpl(val.Tuple, visited)
+		return t.findMutableRootImpl(val.Tuple, visited)
 	case *ssa.FreeVar:
 		// Trace FreeVar back through MakeClosure to find the bound value
-		return a.traceFreeVar(val, visited)
+		return t.traceFreeVar(val, visited)
 	case *ssa.Alloc:
 		// Alloc is a heap/stack allocation. Trace to find stored value.
-		return a.traceAllocStore(val, visited)
+		return t.traceAllocStore(val, visited)
 	default:
 		return nil
 	}
@@ -216,27 +233,27 @@ func (a *usageAnalyzer) handleNonCallForRoot(v ssa.Value, visited map[ssa.Value]
 
 // tracePointerLoad traces a pointer load (dereference) to find the mutable root.
 // When we have *ptr, we need to find what value was stored to ptr.
-func (a *usageAnalyzer) tracePointerLoad(ptr ssa.Value, visited map[ssa.Value]bool) ssa.Value {
+func (t *RootTracer) tracePointerLoad(ptr ssa.Value, visited map[ssa.Value]bool) ssa.Value {
 	// First, recursively resolve the pointer value (might be FreeVar, Alloc, etc.)
 	switch p := ptr.(type) {
 	case *ssa.FreeVar:
 		// FreeVar pointer - trace back through MakeClosure
-		return a.traceFreeVar(p, visited)
+		return t.traceFreeVar(p, visited)
 	case *ssa.Alloc:
 		// Local allocation - find the stored value
-		return a.traceAllocStore(p, visited)
+		return t.traceAllocStore(p, visited)
 	case *ssa.FieldAddr:
 		// Struct field - find Store to this field and trace the stored value
-		return a.traceFieldStore(p, visited)
+		return t.traceFieldStore(p, visited)
 	default:
 		// Try to trace through other pointer sources
-		return a.findMutableRootImpl(ptr, visited)
+		return t.findMutableRootImpl(ptr, visited)
 	}
 }
 
 // traceAllocStore finds the value stored to an Alloc instruction.
 // Variables captured by closures are allocated on heap and use Store instructions.
-func (a *usageAnalyzer) traceAllocStore(alloc *ssa.Alloc, visited map[ssa.Value]bool) ssa.Value {
+func (t *RootTracer) traceAllocStore(alloc *ssa.Alloc, visited map[ssa.Value]bool) ssa.Value {
 	fn := alloc.Parent()
 	if fn == nil {
 		return nil
@@ -251,7 +268,7 @@ func (a *usageAnalyzer) traceAllocStore(alloc *ssa.Alloc, visited map[ssa.Value]
 			}
 			if store.Addr == alloc {
 				// Found a store to this alloc - trace the stored value
-				return a.findMutableRootImpl(store.Val, visited)
+				return t.findMutableRootImpl(store.Val, visited)
 			}
 		}
 	}
@@ -260,7 +277,7 @@ func (a *usageAnalyzer) traceAllocStore(alloc *ssa.Alloc, visited map[ssa.Value]
 
 // traceFieldStore finds the value stored to a struct field.
 // When we have h.field, we find Store instructions that write to the same field.
-func (a *usageAnalyzer) traceFieldStore(fa *ssa.FieldAddr, visited map[ssa.Value]bool) ssa.Value {
+func (t *RootTracer) traceFieldStore(fa *ssa.FieldAddr, visited map[ssa.Value]bool) ssa.Value {
 	fn := fa.Parent()
 	if fn == nil {
 		return nil
@@ -279,7 +296,7 @@ func (a *usageAnalyzer) traceFieldStore(fa *ssa.FieldAddr, visited map[ssa.Value
 			}
 			// Match by same base and same field index
 			if storeFA.X == fa.X && storeFA.Field == fa.Field {
-				return a.findMutableRootImpl(store.Val, visited)
+				return t.findMutableRootImpl(store.Val, visited)
 			}
 		}
 	}
@@ -288,7 +305,7 @@ func (a *usageAnalyzer) traceFieldStore(fa *ssa.FieldAddr, visited map[ssa.Value
 
 // traceFreeVar traces a FreeVar back to the value bound in MakeClosure.
 // FreeVars are variables captured from an enclosing function scope.
-func (a *usageAnalyzer) traceFreeVar(fv *ssa.FreeVar, visited map[ssa.Value]bool) ssa.Value {
+func (t *RootTracer) traceFreeVar(fv *ssa.FreeVar, visited map[ssa.Value]bool) ssa.Value {
 	fn := fv.Parent()
 	if fn == nil {
 		return nil
@@ -325,7 +342,7 @@ func (a *usageAnalyzer) traceFreeVar(fv *ssa.FreeVar, visited map[ssa.Value]bool
 			}
 			// mc.Bindings[idx] is the value bound to this FreeVar
 			if idx < len(mc.Bindings) {
-				return a.findMutableRootImpl(mc.Bindings[idx], visited)
+				return t.findMutableRootImpl(mc.Bindings[idx], visited)
 			}
 		}
 	}
@@ -343,7 +360,7 @@ func (a *usageAnalyzer) traceFreeVar(fv *ssa.FreeVar, visited map[ssa.Value]bool
 //	}().Find(nil)
 //
 // The analyzer traces through the IIFE's return value to find q as the mutable root.
-func (a *usageAnalyzer) traceIIFEReturns(fn *ssa.Function, visited map[ssa.Value]bool) ssa.Value {
+func (t *RootTracer) traceIIFEReturns(fn *ssa.Function, visited map[ssa.Value]bool) ssa.Value {
 	// Check if the function returns *gorm.DB
 	if fn.Signature == nil {
 		return nil
@@ -377,7 +394,7 @@ func (a *usageAnalyzer) traceIIFEReturns(fn *ssa.Function, visited map[ssa.Value
 				retVisited[k] = v
 			}
 
-			if root := a.findMutableRootImpl(ret.Results[0], retVisited); root != nil {
+			if root := t.findMutableRootImpl(ret.Results[0], retVisited); root != nil {
 				return root
 			}
 		}
@@ -405,7 +422,7 @@ func isNilConst(v ssa.Value) bool {
 // isImmutableSource checks if a value is an immutable source.
 // This includes: Session/WithContext results, function parameters, and DB init methods.
 // Note: FreeVar is NOT immutable - it needs to be traced back through MakeClosure.
-func (a *usageAnalyzer) isImmutableSource(v ssa.Value) bool {
+func (t *RootTracer) isImmutableSource(v ssa.Value) bool {
 	switch val := v.(type) {
 	case *ssa.Parameter:
 		return true
@@ -428,4 +445,16 @@ func (a *usageAnalyzer) isImmutableSource(v ssa.Value) bool {
 	default:
 		return false
 	}
+}
+
+// IsPureFunction checks if a function is marked as pure.
+func (t *RootTracer) IsPureFunction(fn *ssa.Function) bool {
+	if t.pureFuncs == nil {
+		return false
+	}
+
+	// Build function name: pkgPath.FuncName or pkgPath.(ReceiverType).MethodName
+	fullName := fn.String()
+	_, exists := t.pureFuncs[fullName]
+	return exists
 }
