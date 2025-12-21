@@ -856,6 +856,25 @@ func methodValueConditional(db *gorm.DB, flag bool) {
 	q.Count(nil) // Not detected due to limitation above
 }
 
+// methodValuePhiWithNil demonstrates Phi node with nil edge.
+// Tests isNilConst returning true and traceMakeClosureImpl finding MakeClosure.
+// [LIMITATION] Phi node tracing for bound methods with nil edge not fully supported.
+func methodValuePhiWithNil(db *gorm.DB, flag bool) {
+	q := db.Where("x = ?", 1)
+	var find func(dest interface{}, conds ...interface{}) *gorm.DB
+	if flag {
+		find = q.Find // MakeClosure assigned
+	}
+	// find is Phi: [MakeClosure, nil]
+	// traceMakeClosureImpl should skip nil edge (isNilConst=true)
+	// and find MakeClosure through non-nil edge
+	if find != nil {
+		find(nil)
+		// [LIMITATION] FALSE NEGATIVE: Phi with nil edge not fully traced
+		find(nil) // Not detected - Phi with nil limitation
+	}
+}
+
 // =============================================================================
 // EVIL PATTERNS - Closure Modifying Captured Variable
 // =============================================================================

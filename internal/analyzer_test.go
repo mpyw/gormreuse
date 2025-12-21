@@ -1093,6 +1093,46 @@ func TestTraceMakeClosureImpl_Phi(t *testing.T) {
 	}
 }
 
+func TestTraceMakeClosureImpl_PhiWithNilConst(t *testing.T) {
+	analyzer := newUsageAnalyzer(nil, nil)
+	visited := make(map[ssa.Value]bool)
+
+	// Phi with nil const edge - should skip nil and return nil (no MakeClosure)
+	nilConst := &ssa.Const{Value: nil}
+	phi := &ssa.Phi{Edges: []ssa.Value{nilConst}}
+	result := analyzer.traceMakeClosureImpl(phi, visited)
+	if result != nil {
+		t.Error("Phi with only nil const edge should return nil")
+	}
+}
+
+func TestTraceMakeClosureImpl_PhiWithMakeClosure(t *testing.T) {
+	analyzer := newUsageAnalyzer(nil, nil)
+	visited := make(map[ssa.Value]bool)
+
+	// Phi with MakeClosure edge - should find and return MakeClosure
+	mc := &ssa.MakeClosure{}
+	phi := &ssa.Phi{Edges: []ssa.Value{mc}}
+	result := analyzer.traceMakeClosureImpl(phi, visited)
+	if result != mc {
+		t.Error("Phi with MakeClosure edge should return the MakeClosure")
+	}
+}
+
+func TestTraceMakeClosureImpl_PhiWithNilAndMakeClosure(t *testing.T) {
+	analyzer := newUsageAnalyzer(nil, nil)
+	visited := make(map[ssa.Value]bool)
+
+	// Phi with nil const and MakeClosure edges - should skip nil and find MakeClosure
+	nilConst := &ssa.Const{Value: nil}
+	mc := &ssa.MakeClosure{}
+	phi := &ssa.Phi{Edges: []ssa.Value{nilConst, mc}}
+	result := analyzer.traceMakeClosureImpl(phi, visited)
+	if result != mc {
+		t.Error("Phi with nil and MakeClosure should skip nil and return MakeClosure")
+	}
+}
+
 func TestTraceMakeClosureImpl_NilValue(t *testing.T) {
 	analyzer := newUsageAnalyzer(nil, nil)
 	visited := make(map[ssa.Value]bool)
