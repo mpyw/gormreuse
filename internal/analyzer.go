@@ -312,22 +312,8 @@ func (a *usageAnalyzer) processCall(call *ssa.Call, isInLoop bool, loopBlocks ma
 		return
 	}
 
-	// Check for $bound suffix in callee name (bound method pattern)
-	// This handles method values like: find := q.Find; find(nil)
-	// When method value is stored in a variable, call.Call.Value is not MakeClosure directly
-	callee := call.Call.StaticCallee()
-	if callee != nil {
-		name := callee.Name()
-		if len(name) > 6 && name[len(name)-6:] == "$bound" {
-			// This is a bound method call - find the MakeClosure
-			if mc := a.findMakeClosureForBoundMethod(call); mc != nil {
-				a.processBoundMethodCall(call, mc, isInLoop, loopBlocks)
-				return
-			}
-		}
-	}
-
 	// Check if this is a method call on *gorm.DB
+	callee := call.Call.StaticCallee()
 	if !a.isGormDBMethodCall(call) {
 		return
 	}
@@ -408,11 +394,8 @@ func (a *usageAnalyzer) processBoundMethodCall(call *ssa.Call, mc *ssa.MakeClosu
 		return
 	}
 
-	// Get method name from bound function (strip $bound suffix and package prefix)
+	// Get method name from bound function (strip $bound suffix)
 	methodName := strings.TrimSuffix(mc.Fn.Name(), "$bound")
-	if idx := strings.LastIndex(methodName, "."); idx >= 0 {
-		methodName = methodName[idx+1:]
-	}
 
 	isSafeMethod := IsSafeMethod(methodName)
 	isTerminal := a.isTerminalCall(call)
@@ -442,43 +425,6 @@ func (a *usageAnalyzer) processBoundMethodCall(call *ssa.Call, mc *ssa.MakeClosu
 		if isInLoop && a.isRootDefinedOutsideLoop(root, loopBlocks) {
 			state.violations = append(state.violations, call.Pos())
 		}
-	}
-}
-
-// findMakeClosureForBoundMethod finds the MakeClosure instruction for a bound method call.
-// When a method is extracted as a value (e.g., find := q.Find), the call.Call.Value
-// may be an UnOp (dereference) of an Alloc, not the MakeClosure directly.
-// We trace back to find the original MakeClosure.
-func (a *usageAnalyzer) findMakeClosureForBoundMethod(call *ssa.Call) *ssa.MakeClosure {
-	return a.traceMakeClosureImpl(call.Call.Value, make(map[ssa.Value]bool))
-}
-
-// traceMakeClosureImpl recursively traces to find a MakeClosure.
-func (a *usageAnalyzer) traceMakeClosureImpl(v ssa.Value, visited map[ssa.Value]bool) *ssa.MakeClosure {
-	if v == nil || visited[v] {
-		return nil
-	}
-	visited[v] = true
-
-	switch val := v.(type) {
-	case *ssa.MakeClosure:
-		return val
-	case *ssa.UnOp:
-		// Dereference or other unary op - trace through operand
-		return a.traceMakeClosureImpl(val.X, visited)
-	case *ssa.Phi:
-		// Phi node - check all edges, skip nil constants
-		for _, edge := range val.Edges {
-			if isNilConst(edge) {
-				continue
-			}
-			if mc := a.traceMakeClosureImpl(edge, visited); mc != nil {
-				return mc
-			}
-		}
-		return nil
-	default:
-		return nil
 	}
 }
 
