@@ -144,6 +144,19 @@ The `e2e/internal/` directory contains tests that verify actual GORM SQL behavio
 - Use `go/analysis` framework
 - Unexported types by default; only export what's needed
 
+## Refactoring Guidelines
+
+When refactoring code, follow these rules strictly:
+
+1. **Main code refactoring**: Tests must NEVER fail
+   - Run `go test ./...` after each change
+   - If tests fail, revert and try a different approach
+
+2. **Test code refactoring**: Coverage must NEVER drop
+   - Check coverage before: `go test -coverprofile=/tmp/before.out -coverpkg=./... .`
+   - Check coverage after: `go test -coverprofile=/tmp/after.out -coverpkg=./... .`
+   - Compare with `go tool cover -func=/tmp/before.out` vs `go tool cover -func=/tmp/after.out`
+
 ## Known Limitations
 
 - **Closure assignment**: `f := func() { q = db.Where(...) }; f()` - cross-closure assignment not tracked
