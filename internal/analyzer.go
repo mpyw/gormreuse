@@ -4,6 +4,7 @@ package internal
 import (
 	"go/token"
 	"go/types"
+	"strings"
 
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/analysis/passes/buildssa"
@@ -305,12 +306,34 @@ func (a *usageAnalyzer) processCall(call *ssa.Call, isInLoop bool, loopBlocks ma
 	// Check if this is a function call that takes *gorm.DB as argument (pollutes it)
 	a.checkFunctionCallPollution(call)
 
+	// Check if this is a bound method call (method value)
+	// e.g., find := q.Find; find(nil)
+	// In this case, the receiver is in MakeClosure.Bindings[0], not in Args[0]
+	if mc, ok := call.Call.Value.(*ssa.MakeClosure); ok {
+		a.processBoundMethodCall(call, mc, isInLoop, loopBlocks)
+		return
+	}
+
+	// Check for $bound suffix in callee name (bound method pattern)
+	// This handles method values like: find := q.Find; find(nil)
+	// When method value is stored in a variable, call.Call.Value is not MakeClosure directly
+	callee := call.Call.StaticCallee()
+	if callee != nil {
+		name := callee.Name()
+		if len(name) > 6 && name[len(name)-6:] == "$bound" {
+			// This is a bound method call - find the MakeClosure
+			if mc := a.findMakeClosureForBoundMethod(call); mc != nil {
+				a.processBoundMethodCall(call, mc, isInLoop, loopBlocks)
+				return
+			}
+		}
+	}
+
 	// Check if this is a method call on *gorm.DB
 	if !a.isGormDBMethodCall(call) {
 		return
 	}
 
-	callee := call.Call.StaticCallee()
 	if callee == nil {
 		return
 	}
@@ -356,6 +379,132 @@ func (a *usageAnalyzer) processCall(call *ssa.Call, isInLoop bool, loopBlocks ma
 			state.violations = append(state.violations, call.Pos())
 		}
 	}
+}
+
+// processBoundMethodCall handles a bound method call (method value).
+// When a method is extracted as a value (e.g., find := q.Find), calling it
+// (find(nil)) has the receiver in MakeClosure.Bindings[0], not in Args[0].
+func (a *usageAnalyzer) processBoundMethodCall(call *ssa.Call, mc *ssa.MakeClosure, isInLoop bool, loopBlocks map[*ssa.BasicBlock]bool) {
+	// For bound methods, the receiver is in Bindings[0], not in the signature
+	// Check if this is a *gorm.DB bound method by checking Bindings[0] type
+	if len(mc.Bindings) == 0 {
+		return
+	}
+
+	recv := mc.Bindings[0]
+	if !IsGormDB(recv.Type()) {
+		return
+	}
+
+	// Get method name from bound function (strip $bound suffix)
+	methodName := mc.Fn.Name()
+	if strings.HasSuffix(methodName, "$bound") {
+		methodName = methodName[:len(methodName)-6]
+	}
+	// Also strip package/type prefix like "(*gorm.io/gorm.DB)."
+	if idx := strings.LastIndex(methodName, "."); idx >= 0 {
+		methodName = methodName[idx+1:]
+	}
+
+	isSafeMethod := IsSafeMethod(methodName)
+	isTerminal := a.isTerminalCall(call)
+
+	// Skip non-terminal Chain Methods
+	if !isTerminal && !isSafeMethod {
+		return
+	}
+
+	// Find the mutable root being used
+	root := a.findMutableRoot(recv)
+	if root == nil {
+		return // Receiver is immutable
+	}
+
+	// Get or create state for this root
+	state := a.getOrCreateState(root)
+	currentBlock := call.Block()
+
+	// Check for same-block pollution
+	if _, pollutedInSameBlock := state.pollutedBlocks[currentBlock]; pollutedInSameBlock {
+		state.violations = append(state.violations, call.Pos())
+	} else if !isSafeMethod && isTerminal {
+		// Terminal Chain Method - mark as polluted
+		state.pollutedBlocks[currentBlock] = call.Pos()
+
+		if isInLoop && a.isRootDefinedOutsideLoop(root, loopBlocks) {
+			state.violations = append(state.violations, call.Pos())
+		}
+	}
+}
+
+// findMakeClosureForBoundMethod finds the MakeClosure instruction for a bound method call.
+// When a method is extracted as a value (e.g., find := q.Find), the call.Call.Value
+// may be an UnOp (dereference) of an Alloc, not the MakeClosure directly.
+// We trace back to find the original MakeClosure.
+func (a *usageAnalyzer) findMakeClosureForBoundMethod(call *ssa.Call) *ssa.MakeClosure {
+	return a.traceMakeClosureImpl(call.Call.Value, make(map[ssa.Value]bool))
+}
+
+// traceMakeClosureImpl recursively traces to find a MakeClosure.
+func (a *usageAnalyzer) traceMakeClosureImpl(v ssa.Value, visited map[ssa.Value]bool) *ssa.MakeClosure {
+	if visited[v] {
+		return nil
+	}
+	visited[v] = true
+
+	switch val := v.(type) {
+	case *ssa.MakeClosure:
+		return val
+	case *ssa.UnOp:
+		// Dereference - trace through
+		if val.Op == token.MUL {
+			// Find what was stored at this address
+			if stored := a.findStoredValueForMC(val.X); stored != nil {
+				return a.traceMakeClosureImpl(stored, visited)
+			}
+		}
+		return a.traceMakeClosureImpl(val.X, visited)
+	case *ssa.Phi:
+		// Phi node - check all edges
+		for _, edge := range val.Edges {
+			if mc := a.traceMakeClosureImpl(edge, visited); mc != nil {
+				return mc
+			}
+		}
+		return nil
+	case *ssa.Alloc:
+		// Find what was stored to this allocation
+		if stored := a.findStoredValueForMC(val); stored != nil {
+			return a.traceMakeClosureImpl(stored, visited)
+		}
+		return nil
+	default:
+		return nil
+	}
+}
+
+// findStoredValueForMC finds the value stored to an address for MakeClosure tracing.
+func (a *usageAnalyzer) findStoredValueForMC(addr ssa.Value) ssa.Value {
+	var fn *ssa.Function
+	if instr, ok := addr.(ssa.Instruction); ok {
+		fn = instr.Parent()
+	}
+	if fn == nil {
+		return nil
+	}
+
+	for _, block := range fn.Blocks {
+		for _, instr := range block.Instrs {
+			store, ok := instr.(*ssa.Store)
+			if !ok {
+				continue
+			}
+			if store.Addr == addr {
+				return store.Val
+			}
+		}
+	}
+	return nil
 }
 
 // isPollutedAt checks if the value is polluted at the given block.
@@ -821,6 +970,17 @@ func (a *usageAnalyzer) findMutableRootImpl(v ssa.Value, visited map[ssa.Value]b
 	}
 
 	callee := call.Call.StaticCallee()
+
+	// Check if this is an IIFE (Immediately Invoked Function Expression)
+	// e.g., func() *gorm.DB { return q.Where(...) }().Find(nil)
+	if mc, ok := call.Call.Value.(*ssa.MakeClosure); ok {
+		if closureFn, ok := mc.Fn.(*ssa.Function); ok {
+			if root := a.traceIIFEReturns(closureFn, visited); root != nil {
+				return root
+			}
+		}
+	}
+
 	if callee == nil {
 		return nil
 	}
@@ -998,6 +1158,57 @@ func (a *usageAnalyzer) traceFreeVar(fv *ssa.FreeVar, visited map[ssa.Value]bool
 			}
 		}
 	}
+	return nil
+}
+
+// traceIIFEReturns traces through an IIFE (Immediately Invoked Function Expression)
+// to find the mutable root. It finds all return statements in the function and
+// traces the returned values to find any mutable root.
+//
+// Example:
+//
+//	func() *gorm.DB {
+//	    return q.Where("x = ?", 1)
+//	}().Find(nil)
+//
+// The analyzer traces through the IIFE's return value to find q as the mutable root.
+func (a *usageAnalyzer) traceIIFEReturns(fn *ssa.Function, visited map[ssa.Value]bool) ssa.Value {
+	// Check if the function returns *gorm.DB
+	results := fn.Signature.Results()
+	if results == nil || results.Len() == 0 {
+		return nil
+	}
+
+	// Only trace if return type is *gorm.DB
+	retType := results.At(0).Type()
+	if !IsGormDB(retType) {
+		return nil
+	}
+
+	// Find all return statements and trace their values
+	// Return the first mutable root found (conservative approach)
+	for _, block := range fn.Blocks {
+		for _, instr := range block.Instrs {
+			ret, ok := instr.(*ssa.Return)
+			if !ok {
+				continue
+			}
+			if len(ret.Results) == 0 {
+				continue
+			}
+
+			// Clone visited to trace each return path independently
+			retVisited := make(map[ssa.Value]bool)
+			for k, v := range visited {
+				retVisited[k] = v
+			}
+
+			if root := a.findMutableRootImpl(ret.Results[0], retVisited); root != nil {
+				return root
+			}
+		}
+	}
+
 	return nil
 }
 

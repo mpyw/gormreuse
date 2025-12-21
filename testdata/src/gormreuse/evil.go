@@ -584,16 +584,16 @@ func iifeWithArgument(db *gorm.DB) {
 }
 
 // iifeReturnChain demonstrates IIFE returning chain result.
-// [LIMITATION] Cross-function tracking for return values not supported.
+// IIFE return tracing allows detection of pollution through IIFE return values.
 func iifeReturnChain(db *gorm.DB) {
 	q := db.Where("x = ?", 1)
 
-	// IIFE returns the result of Find, which pollutes q
+	// IIFE returns the result of Where, which is chained and pollutes q
 	_ = func() *gorm.DB {
 		return q.Where("y = ?", 2)
-	}().Find(nil) // Pollutes through chain
+	}().Find(nil) // want `\*gorm\.DB instance reused after chain method`
 
-	// [LIMITATION] This may or may not be detected depending on SSA structure
+	// Detected: q was polluted through the IIFE chain
 	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
 }
 
@@ -725,19 +725,18 @@ func selectStatement(db *gorm.DB, ch chan int) {
 }
 
 // =============================================================================
-// [LIMITATION] FALSE NEGATIVE - Method Value
-// SSA represents method values differently than expected.
+// Method Value - Now Detected
+// SSA bound methods ($bound suffix) are now tracked properly.
 // =============================================================================
 
 // methodValue demonstrates pollution through method value.
-// [LIMITATION] Method value tracking not supported due to SSA representation.
+// Method value tracking now works by detecting bound methods in SSA.
 func methodValue(db *gorm.DB) {
 	q := db.Where("x = ?", 1)
 	find := q.Find
 	find(nil) // Pollutes q through method value
 
-	// [LIMITATION] FALSE NEGATIVE: Method value breaks tracking
-	q.Count(nil) // Not detected - method value limitation
+	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
 }
 
 // =============================================================================
@@ -1762,4 +1761,148 @@ func ultimateIfForDeferChaos(db *gorm.DB, a, b bool, outer []int, inner []string
 	}()
 
 	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// =============================================================================
+// EVIL PATTERNS - Triple Nested IIFE
+// =============================================================================
+
+// tripleNestedIIFE demonstrates triple nested IIFE with pollution tracking.
+func tripleNestedIIFE(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+
+	_ = func() *gorm.DB {
+		return func() *gorm.DB {
+			return func() *gorm.DB {
+				return q.Where("nested", 1)
+			}()
+		}()
+	}().Find(nil) // want `\*gorm\.DB instance reused after chain method`
+
+	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// tripleNestedIIFEWithBranch demonstrates IIFE with conditional branches.
+func tripleNestedIIFEWithBranch(db *gorm.DB, cond bool) {
+	q := db.Where("x = ?", 1)
+
+	_ = func() *gorm.DB {
+		if cond {
+			return q.Where("branch1", 1)
+		}
+		return q.Where("branch2", 2)
+	}().Find(nil) // want `\*gorm\.DB instance reused after chain method`
+
+	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// =============================================================================
+// EVIL PATTERNS - IIFE with Multiple Return Paths
+// =============================================================================
+
+// iifeMultipleReturns demonstrates IIFE with multiple return statements.
+func iifeMultipleReturns(db *gorm.DB, flag int) {
+	q := db.Where("x = ?", 1)
+
+	_ = func() *gorm.DB {
+		switch flag {
+		case 0:
+			return q.Where("case0", 0)
+		case 1:
+			return q.Where("case1", 1)
+		default:
+			return q.Where("default", -1)
+		}
+	}().Find(nil) // want `\*gorm\.DB instance reused after chain method`
+
+	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// =============================================================================
+// EVIL PATTERNS - IIFE Returning Session (Safe)
+// =============================================================================
+
+// iifeReturnsSession demonstrates safe IIFE that returns Session result.
+// Direct Session call creates immutable clone.
+func iifeReturnsSession(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+
+	// Direct Session call - result is immutable
+	result := q.Session(&gorm.Session{})
+	result.Find(nil)
+	result.Count(nil) // Safe: Session creates immutable clone
+}
+
+// =============================================================================
+// EVIL PATTERNS - Struct Field with IIFE
+// =============================================================================
+
+type iifeHolder struct {
+	query *gorm.DB
+}
+
+// structFieldIIFE demonstrates struct field access with IIFE.
+func structFieldIIFE(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+
+	h := iifeHolder{
+		query: func() *gorm.DB {
+			return q.Where("from iife", 1)
+		}(),
+	}
+
+	h.query.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil)      // want `\*gorm\.DB instance reused after chain method`
+}
+
+// =============================================================================
+// EVIL PATTERNS - Chained IIFE
+// =============================================================================
+
+// chainedIIFE demonstrates chained IIFE calls.
+func chainedIIFE(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+
+	_ = func() *gorm.DB {
+		return q.Where("first", 1)
+	}().Where("second", 2).Find(nil) // want `\*gorm\.DB instance reused after chain method`
+
+	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// =============================================================================
+// EVIL PATTERNS - IIFE with Closure Capture
+// =============================================================================
+
+// iifeCaptureAndModify demonstrates IIFE that captures and uses a variable.
+func iifeCaptureAndModify(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+	var result *gorm.DB
+
+	func() {
+		result = q.Where("captured", 1)
+	}()
+
+	result.Find(nil)
+	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// =============================================================================
+// EVIL PATTERNS - IIFE with Phi Node
+// =============================================================================
+
+// iifeWithPhiNode demonstrates IIFE where the value comes from a Phi node.
+func iifeWithPhiNode(db *gorm.DB, cond bool) {
+	var q *gorm.DB
+	if cond {
+		q = db.Where("branch1", 1)
+	} else {
+		q = db.Where("branch2", 2)
+	}
+
+	_ = func() *gorm.DB {
+		return q.Where("from phi", 1)
+	}().Find(nil) // want `\*gorm\.DB instance reused after chain method`
+
+	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
 }
