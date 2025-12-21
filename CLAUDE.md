@@ -26,8 +26,13 @@ gormreuse/
 ├── cmd/
 │   └── gormreuse/              # CLI entry point (singlechecker)
 │       └── main.go
-├── internal/                   # SSA-based analysis
-│   ├── analyzer.go             # Entry point, pollute tracking, violation detection
+├── internal/                   # SSA-based analysis (modular design)
+│   ├── analyzer.go             # Analyzer orchestrator, entry point
+│   ├── tracing.go              # SSATracer - common SSA traversal patterns
+│   ├── root_tracer.go          # RootTracer - mutable root detection
+│   ├── pollution_tracker.go    # PollutionTracker - pollution state tracking
+│   ├── cfg_analyzer.go         # CFGAnalyzer - control flow graph analysis
+│   ├── instruction_handlers.go # InstructionHandler - Strategy pattern handlers
 │   ├── types.go                # Type utilities, method classification
 │   └── ignore.go               # Ignore directive handling
 ├── testdata/
@@ -45,6 +50,17 @@ gormreuse/
 ├── analyzer_test.go            # Integration tests
 └── README.md
 ```
+
+### Design Patterns
+
+The codebase uses several design patterns inspired by [zerologlintctx](https://github.com/mpyw/zerologlintctx):
+
+1. **Composition over Inheritance**: `Analyzer` composes `RootTracer`, `CFGAnalyzer`, `PollutionTracker`
+2. **Strategy Pattern**: `InstructionHandler` interface with `CallHandler`, `GoHandler`, `DeferHandler`, etc.
+3. **Validated State Pattern**: `traceResult` type with explicit states (`Immutable`, `MutableRoot`)
+4. **Mechanism vs Policy Separation**:
+   - `SSATracer`: HOW to traverse SSA values (mechanism)
+   - `RootTracer`: WHAT constitutes a mutable root (policy)
 
 ### Key Design Decisions
 
