@@ -299,6 +299,24 @@ func goroutineClosureReuse(db *gorm.DB) {
 	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
 }
 
+// goroutineDirectMethodCall demonstrates direct method call in goroutine.
+// This tests the processCallCommonForGo path for method calls.
+func goroutineDirectMethodCall(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+	q.Find(nil) // First use - pollutes q
+
+	go q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// goroutineFunctionCallWithDB demonstrates passing *gorm.DB to function in goroutine.
+// This tests the processCallCommonForGo path for function calls with *gorm.DB argument.
+func goroutineFunctionCallWithDB(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+	q.Find(nil) // First use - pollutes q
+
+	go helperPollute(q) // want `\*gorm\.DB instance reused after chain method`
+}
+
 // =============================================================================
 // SHOULD NOT REPORT - Goroutine safe patterns
 // =============================================================================

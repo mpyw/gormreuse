@@ -214,8 +214,6 @@ func (a *usageAnalyzer) processMethodCalls(fn *ssa.Function, visited map[*ssa.Fu
 					if a.closureCapturesGormDB(mc) {
 						a.processMethodCalls(closureFn, visited)
 					}
-					// Check for bound method (method value) - pollute the receiver
-					a.processBoundMethod(mc, closureFn)
 				}
 				continue
 			}
@@ -452,13 +450,7 @@ func (a *usageAnalyzer) traceMakeClosureImpl(v ssa.Value, visited map[ssa.Value]
 	case *ssa.MakeClosure:
 		return val
 	case *ssa.UnOp:
-		// Dereference - trace through
-		if val.Op == token.MUL {
-			// Find what was stored at this address
-			if stored := a.findStoredValueForMC(val.X); stored != nil {
-				return a.traceMakeClosureImpl(stored, visited)
-			}
-		}
+		// Dereference or other unary op - trace through operand
 		return a.traceMakeClosureImpl(val.X, visited)
 	case *ssa.Phi:
 		// Phi node - check all edges, skip nil constants
@@ -471,39 +463,9 @@ func (a *usageAnalyzer) traceMakeClosureImpl(v ssa.Value, visited map[ssa.Value]
 			}
 		}
 		return nil
-	case *ssa.Alloc:
-		// Find what was stored to this allocation
-		if stored := a.findStoredValueForMC(val); stored != nil {
-			return a.traceMakeClosureImpl(stored, visited)
-		}
-		return nil
 	default:
 		return nil
 	}
-}
-
-// findStoredValueForMC finds the value stored to an address for MakeClosure tracing.
-func (a *usageAnalyzer) findStoredValueForMC(addr ssa.Value) ssa.Value {
-	var fn *ssa.Function
-	if instr, ok := addr.(ssa.Instruction); ok {
-		fn = instr.Parent()
-	}
-	if fn == nil {
-		return nil
-	}
-
-	for _, block := range fn.Blocks {
-		for _, instr := range block.Instrs {
-			store, ok := instr.(*ssa.Store)
-			if !ok {
-				continue
-			}
-			if store.Addr == addr {
-				return store.Val
-			}
-		}
-	}
-	return nil
 }
 
 // isPollutedAt checks if the value is polluted at the given block.
@@ -832,36 +794,6 @@ func (a *usageAnalyzer) processMapUpdate(mapUpdate *ssa.MapUpdate) {
 
 	// Mark as polluted (map update assumed to pollute)
 	a.markPolluted(root, mapUpdate.Block(), mapUpdate.Pos())
-}
-
-// processBoundMethod handles bound method (method value) creation.
-// If the receiver is *gorm.DB, mark it as polluted since the method
-// may be called later and pollute the receiver.
-func (a *usageAnalyzer) processBoundMethod(mc *ssa.MakeClosure, fn *ssa.Function) {
-	// Check if this is a method (has a receiver)
-	sig := fn.Signature
-	if sig == nil || sig.Recv() == nil {
-		return
-	}
-
-	// Check if the receiver type is *gorm.DB
-	if !IsGormDB(sig.Recv().Type()) {
-		return
-	}
-
-	// The first binding is the receiver for bound methods
-	if len(mc.Bindings) == 0 {
-		return
-	}
-
-	recv := mc.Bindings[0]
-	root := a.findMutableRoot(recv)
-	if root == nil {
-		return
-	}
-
-	// Mark as polluted (bound method may be called and pollute the receiver)
-	a.markPolluted(root, mc.Block(), mc.Pos())
 }
 
 // processMakeInterface handles conversion of *gorm.DB to interface{}.
