@@ -4,6 +4,7 @@ package internal
 import (
 	"go/token"
 	"go/types"
+	"strings"
 
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/analysis/passes/buildssa"
@@ -213,8 +214,6 @@ func (a *usageAnalyzer) processMethodCalls(fn *ssa.Function, visited map[*ssa.Fu
 					if a.closureCapturesGormDB(mc) {
 						a.processMethodCalls(closureFn, visited)
 					}
-					// Check for bound method (method value) - pollute the receiver
-					a.processBoundMethod(mc, closureFn)
 				}
 				continue
 			}
@@ -305,12 +304,20 @@ func (a *usageAnalyzer) processCall(call *ssa.Call, isInLoop bool, loopBlocks ma
 	// Check if this is a function call that takes *gorm.DB as argument (pollutes it)
 	a.checkFunctionCallPollution(call)
 
+	// Check if this is a bound method call (method value)
+	// e.g., find := q.Find; find(nil)
+	// In this case, the receiver is in MakeClosure.Bindings[0], not in Args[0]
+	if mc, ok := call.Call.Value.(*ssa.MakeClosure); ok {
+		a.processBoundMethodCall(call, mc, isInLoop, loopBlocks)
+		return
+	}
+
 	// Check if this is a method call on *gorm.DB
+	callee := call.Call.StaticCallee()
 	if !a.isGormDBMethodCall(call) {
 		return
 	}
 
-	callee := call.Call.StaticCallee()
 	if callee == nil {
 		return
 	}
@@ -331,7 +338,7 @@ func (a *usageAnalyzer) processCall(call *ssa.Call, isInLoop bool, loopBlocks ma
 	}
 	recv := call.Call.Args[0]
 
-	// Find the mutable root being used
+	// Find the mutable root being used (for state tracking)
 	root := a.findMutableRoot(recv)
 	if root == nil {
 		return // Receiver is immutable (Session result, parameter, etc.)
@@ -352,6 +359,69 @@ func (a *usageAnalyzer) processCall(call *ssa.Call, isInLoop bool, loopBlocks ma
 
 		// If in a loop AND the root is defined outside the loop, report as violation
 		// (second iteration will reuse the polluted root)
+		if isInLoop && a.isRootDefinedOutsideLoop(root, loopBlocks) {
+			state.violations = append(state.violations, call.Pos())
+		}
+	}
+
+	// Check ALL possible roots for pollution (handles Phi nodes from switch/if).
+	// If ANY path leads to a polluted root, it's a violation.
+	// This handles cases like: switch { case 1: q = fresh; default: /* q still polluted */ }
+	allRoots := a.findAllMutableRoots(recv)
+	for _, r := range allRoots {
+		if r == root {
+			continue // Already checked above
+		}
+		otherState := a.states[r]
+		if otherState != nil && a.isPollutedAt(otherState, currentBlock) {
+			otherState.violations = append(otherState.violations, call.Pos())
+		}
+	}
+}
+
+// processBoundMethodCall handles a bound method call (method value).
+// When a method is extracted as a value (e.g., find := q.Find), calling it
+// (find(nil)) has the receiver in MakeClosure.Bindings[0], not in Args[0].
+func (a *usageAnalyzer) processBoundMethodCall(call *ssa.Call, mc *ssa.MakeClosure, isInLoop bool, loopBlocks map[*ssa.BasicBlock]bool) {
+	// For bound methods, the receiver is in Bindings[0], not in the signature
+	// Check if this is a *gorm.DB bound method by checking Bindings[0] type
+	if len(mc.Bindings) == 0 {
+		return
+	}
+
+	recv := mc.Bindings[0]
+	if !IsGormDB(recv.Type()) {
+		return
+	}
+
+	// Get method name from bound function (strip $bound suffix)
+	methodName := strings.TrimSuffix(mc.Fn.Name(), "$bound")
+
+	isSafeMethod := IsSafeMethod(methodName)
+	isTerminal := a.isTerminalCall(call)
+
+	// Skip non-terminal Chain Methods
+	if !isTerminal && !isSafeMethod {
+		return
+	}
+
+	// Find the mutable root being used
+	root := a.findMutableRoot(recv)
+	if root == nil {
+		return // Receiver is immutable
+	}
+
+	// Get or create state for this root
+	state := a.getOrCreateState(root)
+	currentBlock := call.Block()
+
+	// Check for same-block pollution
+	if _, pollutedInSameBlock := state.pollutedBlocks[currentBlock]; pollutedInSameBlock {
+		state.violations = append(state.violations, call.Pos())
+	} else if !isSafeMethod && isTerminal {
+		// Terminal Chain Method - mark as polluted
+		state.pollutedBlocks[currentBlock] = call.Pos()
+
 		if isInLoop && a.isRootDefinedOutsideLoop(root, loopBlocks) {
 			state.violations = append(state.violations, call.Pos())
 		}
@@ -686,36 +756,6 @@ func (a *usageAnalyzer) processMapUpdate(mapUpdate *ssa.MapUpdate) {
 	a.markPolluted(root, mapUpdate.Block(), mapUpdate.Pos())
 }
 
-// processBoundMethod handles bound method (method value) creation.
-// If the receiver is *gorm.DB, mark it as polluted since the method
-// may be called later and pollute the receiver.
-func (a *usageAnalyzer) processBoundMethod(mc *ssa.MakeClosure, fn *ssa.Function) {
-	// Check if this is a method (has a receiver)
-	sig := fn.Signature
-	if sig == nil || sig.Recv() == nil {
-		return
-	}
-
-	// Check if the receiver type is *gorm.DB
-	if !IsGormDB(sig.Recv().Type()) {
-		return
-	}
-
-	// The first binding is the receiver for bound methods
-	if len(mc.Bindings) == 0 {
-		return
-	}
-
-	recv := mc.Bindings[0]
-	root := a.findMutableRoot(recv)
-	if root == nil {
-		return
-	}
-
-	// Mark as polluted (bound method may be called and pollute the receiver)
-	a.markPolluted(root, mc.Block(), mc.Pos())
-}
-
 // processMakeInterface handles conversion of *gorm.DB to interface{}.
 // This is polluting because the value may be extracted via type assertion.
 func (a *usageAnalyzer) processMakeInterface(mi *ssa.MakeInterface) {
@@ -821,6 +861,17 @@ func (a *usageAnalyzer) findMutableRootImpl(v ssa.Value, visited map[ssa.Value]b
 	}
 
 	callee := call.Call.StaticCallee()
+
+	// Check if this is an IIFE (Immediately Invoked Function Expression)
+	// e.g., func() *gorm.DB { return q.Where(...) }().Find(nil)
+	if mc, ok := call.Call.Value.(*ssa.MakeClosure); ok {
+		if closureFn, ok := mc.Fn.(*ssa.Function); ok {
+			if root := a.traceIIFEReturns(closureFn, visited); root != nil {
+				return root
+			}
+		}
+	}
+
 	if callee == nil {
 		return nil
 	}
@@ -850,13 +901,115 @@ func (a *usageAnalyzer) findMutableRootImpl(v ssa.Value, visited map[ssa.Value]b
 	return a.findMutableRootImpl(recv, visited)
 }
 
+// findAllMutableRoots finds ALL possible mutable roots from a value.
+// For Phi nodes, this returns roots from ALL edges (not just the first).
+// This is used for pollution checking where ANY polluted path should be detected.
+func (a *usageAnalyzer) findAllMutableRoots(v ssa.Value) []ssa.Value {
+	return a.findAllMutableRootsImpl(v, make(map[ssa.Value]bool))
+}
+
+func (a *usageAnalyzer) findAllMutableRootsImpl(v ssa.Value, visited map[ssa.Value]bool) []ssa.Value {
+	if v == nil || visited[v] {
+		return nil
+	}
+	visited[v] = true
+
+	switch val := v.(type) {
+	case *ssa.Phi:
+		// Phi node - collect roots from ALL edges
+		var roots []ssa.Value
+		for _, edge := range val.Edges {
+			if isNilConst(edge) {
+				continue
+			}
+			edgeRoots := a.findAllMutableRootsImpl(edge, visited)
+			roots = append(roots, edgeRoots...)
+		}
+		return roots
+
+	case *ssa.UnOp:
+		// Load operation - trace through to find stored values
+		if val.Op == token.MUL {
+			return a.traceAllPointerLoads(val.X, visited)
+		}
+		return a.findAllMutableRootsImpl(val.X, visited)
+
+	case *ssa.Alloc:
+		// Alloc - find ALL values stored to this alloc
+		return a.traceAllAllocStores(val, visited)
+
+	default:
+		// For other values, use normal root finding.
+		// We need a fresh visited map because this value was already marked visited above.
+		freshVisited := make(map[ssa.Value]bool)
+		for k := range visited {
+			freshVisited[k] = true
+		}
+		delete(freshVisited, v) // Allow this value to be processed
+		root := a.findMutableRootImpl(v, freshVisited)
+		if root != nil {
+			return []ssa.Value{root}
+		}
+		return nil
+	}
+}
+
+// traceAllPointerLoads traces a pointer load to find ALL possible stored values.
+func (a *usageAnalyzer) traceAllPointerLoads(ptr ssa.Value, visited map[ssa.Value]bool) []ssa.Value {
+	switch p := ptr.(type) {
+	case *ssa.Alloc:
+		return a.traceAllAllocStores(p, visited)
+	case *ssa.Phi:
+		var roots []ssa.Value
+		for _, edge := range p.Edges {
+			if isNilConst(edge) {
+				continue
+			}
+			edgeRoots := a.traceAllPointerLoads(edge, visited)
+			roots = append(roots, edgeRoots...)
+		}
+		return roots
+	default:
+		return a.findAllMutableRootsImpl(ptr, visited)
+	}
+}
+
+// traceAllAllocStores finds ALL values stored to an Alloc instruction.
+func (a *usageAnalyzer) traceAllAllocStores(alloc *ssa.Alloc, visited map[ssa.Value]bool) []ssa.Value {
+	fn := alloc.Parent()
+	if fn == nil {
+		return nil
+	}
+
+	var roots []ssa.Value
+	// Find ALL Store instructions that write to this alloc
+	for _, block := range fn.Blocks {
+		for _, instr := range block.Instrs {
+			store, ok := instr.(*ssa.Store)
+			if !ok {
+				continue
+			}
+			if store.Addr == alloc {
+				// Found a store to this alloc - trace the stored value
+				storeRoots := a.findAllMutableRootsImpl(store.Val, visited)
+				roots = append(roots, storeRoots...)
+			}
+		}
+	}
+	return roots
+}
+
 // handleNonCallForRoot handles non-call values when finding mutable root.
 func (a *usageAnalyzer) handleNonCallForRoot(v ssa.Value, visited map[ssa.Value]bool) ssa.Value {
 	switch val := v.(type) {
 	case *ssa.Phi:
 		// For Phi nodes, trace through all edges to find any mutable root.
 		// If any edge has a mutable root, return it (conservative for false-negative reduction).
+		// Skip nil constant edges - nil pointers can't have methods called on them.
 		for _, edge := range val.Edges {
+			if isNilConst(edge) {
+				continue
+			}
 			if root := a.findMutableRootImpl(edge, visited); root != nil {
 				return root
 			}
@@ -1001,6 +1154,60 @@ func (a *usageAnalyzer) traceFreeVar(fv *ssa.FreeVar, visited map[ssa.Value]bool
 	return nil
 }
 
+// traceIIFEReturns traces through an IIFE (Immediately Invoked Function Expression)
+// to find the mutable root. It finds all return statements in the function and
+// traces the returned values to find any mutable root.
+//
+// Example:
+//
+//	func() *gorm.DB {
+//	    return q.Where("x = ?", 1)
+//	}().Find(nil)
+//
+// The analyzer traces through the IIFE's return value to find q as the mutable root.
+func (a *usageAnalyzer) traceIIFEReturns(fn *ssa.Function, visited map[ssa.Value]bool) ssa.Value {
+	// Check if the function returns *gorm.DB
+	if fn.Signature == nil {
+		return nil
+	}
+	results := fn.Signature.Results()
+	if results == nil || results.Len() == 0 {
+		return nil
+	}
+
+	// Only trace if return type is *gorm.DB
+	retType := results.At(0).Type()
+	if !IsGormDB(retType) {
+		return nil
+	}
+
+	// Find all return statements and trace their values
+	// Return the first mutable root found (conservative approach)
+	for _, block := range fn.Blocks {
+		for _, instr := range block.Instrs {
+			ret, ok := instr.(*ssa.Return)
+			if !ok {
+				continue
+			}
+			if len(ret.Results) == 0 {
+				continue
+			}
+
+			// Clone visited to trace each return path independently
+			retVisited := make(map[ssa.Value]bool)
+			for k, v := range visited {
+				retVisited[k] = v
+			}
+
+			if root := a.findMutableRootImpl(ret.Results[0], retVisited); root != nil {
+				return root
+			}
+		}
+	}
+
+	return nil
+}
+
 // detectReachabilityViolations performs the second pass to detect violations.
 // For each polluted block, checks if ANY OTHER polluted block can reach it.
 // This handles SSA block ordering that doesn't match execution order.
@@ -1016,27 +1223,41 @@ func (a *usageAnalyzer) detectReachabilityViolations() {
 				if srcBlock == targetBlock {
 					continue // Same block
 				}
+
+				srcPos := state.pollutedBlocks[srcBlock]
+
 				// Different functions (closure): check cross-function pollution.
+				// Use isDescendantOf for nested closure support.
 				if srcBlock.Parent() != targetBlock.Parent() {
-					// Case 1: pollution flows from closure to parent function
-					if targetBlock.Parent() == a.fn {
+					srcInParent := srcBlock.Parent() == a.fn
+					targetInParent := targetBlock.Parent() == a.fn
+					srcIsDescendant := isDescendantOf(srcBlock.Parent(), a.fn)
+					targetIsDescendant := isDescendantOf(targetBlock.Parent(), a.fn)
+
+					// Case 1: src in descendant closure, target in parent function
+					// Violation if src executes before target (by code position)
+					if srcIsDescendant && targetInParent && srcPos < targetPos {
 						state.violations = append(state.violations, targetPos)
 						break
-					} else if srcBlock.Parent() != a.fn {
-						// Case 2: both are in different closures (neither is parent function)
-						// Report violation only if srcBlock's pollution comes before targetBlock's in code order.
-						// This treats the first closure (by code position) as the "first use".
-						srcPos := state.pollutedBlocks[srcBlock]
-						if srcPos < targetPos {
-							state.violations = append(state.violations, targetPos)
-							break
-						}
 					}
-					// Case 3: srcBlock in parent, targetBlock in closure - don't report
-					// (closure usage is first use from that closure's perspective)
-					// Don't break - continue checking other srcBlocks for potential violations
+
+					// Case 2: src in parent function, target in descendant closure
+					// Violation if src executes before target (by code position)
+					if srcInParent && targetIsDescendant && srcPos < targetPos {
+						state.violations = append(state.violations, targetPos)
+						break
+					}
+
+					// Case 3: both in descendant closures (potentially different ones)
+					// Violation if src executes before target (by code position)
+					if srcIsDescendant && targetIsDescendant && srcPos < targetPos {
+						state.violations = append(state.violations, targetPos)
+						break
+					}
+
 					continue
 				}
+
 				// Same function: check CFG reachability
 				if a.canReach(srcBlock, targetBlock) {
 					state.violations = append(state.violations, targetPos)
@@ -1061,6 +1282,33 @@ func (a *usageAnalyzer) collectViolations() []violation {
 	}
 
 	return violations
+}
+
+// isDescendantOf checks if fn is a descendant of ancestor by traversing the Parent() chain.
+// This is used to detect nested closures - a closure inside another closure has the
+// inner closure as Parent, not the original function.
+func isDescendantOf(fn, ancestor *ssa.Function) bool {
+	if fn == nil || ancestor == nil {
+		return false
+	}
+	for current := fn; current != nil; current = current.Parent() {
+		if current == ancestor {
+			return true
+		}
+	}
+	return false
+}
+
+// isNilConst checks if a value is a nil constant.
+// Nil pointers cannot have methods called on them, so they are safe to skip
+// when tracing Phi nodes (the nil path would panic before reaching the call).
+func isNilConst(v ssa.Value) bool {
+	c, ok := v.(*ssa.Const)
+	if !ok {
+		return false
+	}
+	// For nil pointer constants, Value is nil
+	return c.Value == nil
 }
 
 // isImmutableSource checks if a value is an immutable source.

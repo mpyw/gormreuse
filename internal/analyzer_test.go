@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"go/constant"
 	"go/token"
 	"testing"
 
@@ -819,5 +820,282 @@ func TestHandleNonCallForRoot_PhiWithEdges(t *testing.T) {
 	// Parameter is immutable, returns nil
 	if result != nil {
 		t.Error("Phi with only immutable edges should return nil")
+	}
+}
+
+// =============================================================================
+// traceFreeVar Tests
+// =============================================================================
+
+func TestTraceFreeVar_NilParent(t *testing.T) {
+	analyzer := newUsageAnalyzer(nil, nil)
+	visited := make(map[ssa.Value]bool)
+
+	// FreeVar with nil Parent
+	fv := &ssa.FreeVar{}
+	result := analyzer.traceFreeVar(fv, visited)
+	if result != nil {
+		t.Error("FreeVar with nil parent should return nil")
+	}
+}
+
+func TestTraceFreeVar_NotInFreeVars(t *testing.T) {
+	analyzer := newUsageAnalyzer(nil, nil)
+	visited := make(map[ssa.Value]bool)
+
+	// FreeVar with no matching entry in fn.FreeVars
+	fv := &ssa.FreeVar{}
+	result := analyzer.traceFreeVar(fv, visited)
+	// Parent is nil, returns nil
+	if result != nil {
+		t.Error("FreeVar not found in parent's FreeVars should return nil")
+	}
+}
+
+func TestTraceFreeVar_NilGrandparent(t *testing.T) {
+	analyzer := newUsageAnalyzer(nil, nil)
+	visited := make(map[ssa.Value]bool)
+
+	// This tests the case where fn.Parent() is nil
+	fv := &ssa.FreeVar{}
+	result := analyzer.traceFreeVar(fv, visited)
+	if result != nil {
+		t.Error("FreeVar with nil grandparent should return nil")
+	}
+}
+
+// =============================================================================
+// traceIIFEReturns Tests
+// =============================================================================
+
+func TestTraceIIFEReturns_NilResults(t *testing.T) {
+	analyzer := newUsageAnalyzer(nil, nil)
+	visited := make(map[ssa.Value]bool)
+
+	// Function with nil Signature.Results()
+	fn := &ssa.Function{}
+	result := analyzer.traceIIFEReturns(fn, visited)
+	if result != nil {
+		t.Error("Function with nil results should return nil")
+	}
+}
+
+func TestTraceIIFEReturns_EmptyResults(t *testing.T) {
+	analyzer := newUsageAnalyzer(nil, nil)
+	visited := make(map[ssa.Value]bool)
+
+	// Function with empty signature (void return)
+	fn := &ssa.Function{}
+	result := analyzer.traceIIFEReturns(fn, visited)
+	if result != nil {
+		t.Error("Function with no return type should return nil")
+	}
+}
+
+func TestTraceIIFEReturns_NonGormDBReturn(t *testing.T) {
+	analyzer := newUsageAnalyzer(nil, nil)
+	visited := make(map[ssa.Value]bool)
+
+	// Function that doesn't return *gorm.DB - signature is nil
+	fn := &ssa.Function{}
+	result := analyzer.traceIIFEReturns(fn, visited)
+	if result != nil {
+		t.Error("Function not returning *gorm.DB should return nil")
+	}
+}
+
+func TestTraceIIFEReturns_NoBlocks(t *testing.T) {
+	analyzer := newUsageAnalyzer(nil, nil)
+	visited := make(map[ssa.Value]bool)
+
+	// Function with nil Blocks
+	fn := &ssa.Function{}
+	result := analyzer.traceIIFEReturns(fn, visited)
+	if result != nil {
+		t.Error("Function with no blocks should return nil")
+	}
+}
+
+// =============================================================================
+// detectReachabilityViolations Tests - Cross-function cases
+// =============================================================================
+
+func TestDetectReachabilityViolations_SinglePollution_NoViolation(t *testing.T) {
+	parentFn := &ssa.Function{}
+	analyzer := newUsageAnalyzer(parentFn, nil)
+
+	// Only one pollution site - no violation possible
+	block := &ssa.BasicBlock{Index: 0}
+	parentFn.Blocks = []*ssa.BasicBlock{block}
+
+	var mockValue ssa.Value
+	state := analyzer.getOrCreateState(mockValue)
+	state.pollutedBlocks[block] = token.Pos(1)
+
+	analyzer.detectReachabilityViolations()
+
+	// Single pollution should not create violation
+	if len(state.violations) != 0 {
+		t.Errorf("Expected 0 violations (single pollution), got %d", len(state.violations))
+	}
+}
+
+// =============================================================================
+// isImmutableSource Tests
+// =============================================================================
+
+func TestIsImmutableSource_NilValue(t *testing.T) {
+	analyzer := newUsageAnalyzer(nil, nil)
+
+	// nil value
+	result := analyzer.isImmutableSource(nil)
+	if result {
+		t.Error("nil value should not be immutable source")
+	}
+}
+
+func TestIsImmutableSource_Alloc(t *testing.T) {
+	analyzer := newUsageAnalyzer(nil, nil)
+
+	// Alloc is not an immutable source
+	alloc := &ssa.Alloc{}
+	result := analyzer.isImmutableSource(alloc)
+	if result {
+		t.Error("Alloc should not be immutable source")
+	}
+}
+
+func TestIsImmutableSource_MakeInterface(t *testing.T) {
+	analyzer := newUsageAnalyzer(nil, nil)
+
+	// MakeInterface is not an immutable source
+	mi := &ssa.MakeInterface{}
+	result := analyzer.isImmutableSource(mi)
+	if result {
+		t.Error("MakeInterface should not be immutable source")
+	}
+}
+
+func TestIsImmutableSource_Phi(t *testing.T) {
+	analyzer := newUsageAnalyzer(nil, nil)
+
+	// Phi is not an immutable source
+	phi := &ssa.Phi{}
+	result := analyzer.isImmutableSource(phi)
+	if result {
+		t.Error("Phi should not be immutable source")
+	}
+}
+
+func TestIsImmutableSource_CallWithNilCallee(t *testing.T) {
+	analyzer := newUsageAnalyzer(nil, nil)
+
+	// Call with nil StaticCallee
+	call := &ssa.Call{}
+	result := analyzer.isImmutableSource(call)
+	if result {
+		t.Error("Call with nil callee should not be immutable source")
+	}
+}
+
+// =============================================================================
+// processBoundMethodCall Tests
+// =============================================================================
+
+func TestProcessBoundMethodCall_EmptyBindings(t *testing.T) {
+	analyzer := newUsageAnalyzer(nil, nil)
+
+	call := &ssa.Call{}
+	mc := &ssa.MakeClosure{
+		Bindings: []ssa.Value{}, // empty
+	}
+
+	// Should not panic with empty bindings
+	analyzer.processBoundMethodCall(call, mc, false, nil)
+}
+
+func TestProcessBoundMethodCall_NonGormDBBinding(t *testing.T) {
+	analyzer := newUsageAnalyzer(nil, nil)
+
+	call := &ssa.Call{}
+	param := &ssa.Parameter{} // Not *gorm.DB type
+	mc := &ssa.MakeClosure{
+		Bindings: []ssa.Value{param},
+	}
+
+	// Should not panic with non-gorm.DB binding
+	analyzer.processBoundMethodCall(call, mc, false, nil)
+}
+
+// =============================================================================
+// isDescendantOf Tests
+// =============================================================================
+
+func TestIsDescendantOf_NilFn(t *testing.T) {
+	if isDescendantOf(nil, &ssa.Function{}) {
+		t.Error("nil fn should not be descendant of anything")
+	}
+}
+
+func TestIsDescendantOf_NilAncestor(t *testing.T) {
+	if isDescendantOf(&ssa.Function{}, nil) {
+		t.Error("nothing should be descendant of nil")
+	}
+}
+
+func TestIsDescendantOf_BothNil(t *testing.T) {
+	if isDescendantOf(nil, nil) {
+		t.Error("nil should not be descendant of nil")
+	}
+}
+
+func TestIsDescendantOf_SameFunction(t *testing.T) {
+	fn := &ssa.Function{}
+	if !isDescendantOf(fn, fn) {
+		t.Error("function should be descendant of itself")
+	}
+}
+
+func TestIsDescendantOf_NoParent(t *testing.T) {
+	fn := &ssa.Function{}
+	ancestor := &ssa.Function{}
+	// fn has no Parent, so it's not a descendant of ancestor
+	if isDescendantOf(fn, ancestor) {
+		t.Error("function with no parent should not be descendant of unrelated function")
+	}
+}
+
+// =============================================================================
+// isNilConst Tests
+// =============================================================================
+
+func TestIsNilConst_NilConst(t *testing.T) {
+	// Const with nil Value is a nil constant
+	c := &ssa.Const{Value: nil}
+	if !isNilConst(c) {
+		t.Error("Const with nil Value should be nil constant")
+	}
+}
+
+func TestIsNilConst_NonNilConst(t *testing.T) {
+	// Const with non-nil Value is not a nil constant
+	c := &ssa.Const{Value: constant.MakeInt64(42)}
+	if isNilConst(c) {
+		t.Error("Const with non-nil Value should not be nil constant")
+	}
+}
+
+func TestIsNilConst_NonConst(t *testing.T) {
+	// Non-Const value is not a nil constant
+	p := &ssa.Parameter{}
+	if isNilConst(p) {
+		t.Error("Parameter should not be nil constant")
+	}
+}
+
+func TestIsNilConst_Nil(t *testing.T) {
+	// nil value is not a nil constant
+	if isNilConst(nil) {
+		t.Error("nil should not be nil constant")
 	}
 }

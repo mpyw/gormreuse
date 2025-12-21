@@ -53,6 +53,8 @@ gormreuse/
 3. **Terminal call detection**: Only processes calls that consume the chain (not chain construction)
 4. **Mutable root finding**: Traces back to find the origin of each chain
 5. **Conservative approach**: Prefer false positives over false negatives (reduces false-negatives)
+6. **IIFE return tracing**: Traces through immediately invoked function expressions to find mutable roots
+7. **Method value tracking**: Detects bound methods (e.g., `find := q.Find; find(nil)`) via `$bound` suffix in SSA
 
 ### Pollution Sources (Safe Side)
 
@@ -83,6 +85,16 @@ Terminal Call Detection:
 Mutable Root Finding:
   q := db.Where("x").Session(...)  <- q is immutable (Session at end)
   q := db.Session(...).Where("x")  <- q is mutable (Chain after Session)
+
+IIFE Return Tracing:
+  _ = func() *gorm.DB {
+    return q.Where("x")
+  }().Find(nil)  <- Traces through IIFE return to find q as mutable root
+
+Bound Method Tracking:
+  find := q.Find    <- MakeClosure with receiver q in Bindings[0]
+  find(nil)         <- SSA: Call with Value=*ssa.MakeClosure, Fn.Name()="Find$bound"
+                   <- Receiver extracted from Bindings[0] for pollution tracking
 ```
 
 ## Development Commands
@@ -132,9 +144,21 @@ The `e2e/internal/` directory contains tests that verify actual GORM SQL behavio
 - Use `go/analysis` framework
 - Unexported types by default; only export what's needed
 
+## Refactoring Guidelines
+
+When refactoring code, follow these rules strictly:
+
+1. **Main code refactoring**: Tests must NEVER fail
+   - Run `go test ./...` after each change
+   - If tests fail, revert and try a different approach
+
+2. **Test code refactoring**: Coverage must NEVER drop
+   - Check coverage before: `go test -coverprofile=/tmp/before.out -coverpkg=./... .`
+   - Check coverage after: `go test -coverprofile=/tmp/after.out -coverpkg=./... .`
+   - Compare with `go tool cover -func=/tmp/before.out` vs `go tool cover -func=/tmp/after.out`
+
 ## Known Limitations
 
-- **Method value tracking**: `find := q.Find; find(nil)` - bound method not tracked due to SSA representation
 - **Closure assignment**: `f := func() { q = db.Where(...) }; f()` - cross-closure assignment not tracked
 - **Defer inside for loop**: `for range items { defer func() { q.Find(nil) }() }` - closure deferred multiple times not fully tracked
 - **Nested defer/goroutine**: `go func() { defer q.Find(nil) }()` - deep nested defer/goroutine chains not fully tracked
