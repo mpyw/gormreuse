@@ -2207,7 +2207,7 @@ func reassignMultipleTimes(db *gorm.DB) {
 }
 
 // reassignInSwitch demonstrates reassignment in switch statement.
-// [LIMITATION] Switch branch flow analysis not fully supported.
+// Only some branches reassign - default branch keeps polluted value.
 func reassignInSwitch(db *gorm.DB, mode int) {
 	q := db.Where("x = ?", 1)
 	q.Find(nil) // Pollutes q
@@ -2218,11 +2218,10 @@ func reassignInSwitch(db *gorm.DB, mode int) {
 	case 2:
 		q = db.Where("mode2", 2)
 	default:
-		// No reassignment in default
+		// No reassignment in default - q is still polluted
 	}
 
-	// [LIMITATION] FALSE NEGATIVE: Switch branch flow not tracked
-	q.Count(nil) // Not detected - switch flow limitation
+	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
 }
 
 // reassignInSwitchAll demonstrates reassignment in all switch branches.

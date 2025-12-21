@@ -352,7 +352,7 @@ func (a *usageAnalyzer) processCall(call *ssa.Call, isInLoop bool, loopBlocks ma
 	}
 	recv := call.Call.Args[0]
 
-	// Find the mutable root being used
+	// Find the mutable root being used (for state tracking)
 	root := a.findMutableRoot(recv)
 	if root == nil {
 		return // Receiver is immutable (Session result, parameter, etc.)
@@ -375,6 +375,20 @@ func (a *usageAnalyzer) processCall(call *ssa.Call, isInLoop bool, loopBlocks ma
 		// (second iteration will reuse the polluted root)
 		if isInLoop && a.isRootDefinedOutsideLoop(root, loopBlocks) {
 			state.violations = append(state.violations, call.Pos())
+		}
+	}
+
+	// Check ALL possible roots for pollution (handles Phi nodes from switch/if).
+	// If ANY path leads to a polluted root, it's a violation.
+	// This handles cases like: switch { case 1: q = fresh; default: /* q still polluted */ }
+	allRoots := a.findAllMutableRoots(recv)
+	for _, r := range allRoots {
+		if r == root {
+			continue // Already checked above
+		}
+		otherState := a.states[r]
+		if otherState != nil && a.isPollutedAt(otherState, currentBlock) {
+			otherState.violations = append(otherState.violations, call.Pos())
 		}
 	}
 }
@@ -939,6 +953,104 @@ func (a *usageAnalyzer) findMutableRootImpl(v ssa.Value, visited map[ssa.Value]b
 
 	// Receiver is mutable - trace back to find the root
 	return a.findMutableRootImpl(recv, visited)
+}
+
+// findAllMutableRoots finds ALL possible mutable roots from a value.
+// For Phi nodes, this returns roots from ALL edges (not just the first).
+// This is used for pollution checking where ANY polluted path should be detected.
+func (a *usageAnalyzer) findAllMutableRoots(v ssa.Value) []ssa.Value {
+	return a.findAllMutableRootsImpl(v, make(map[ssa.Value]bool))
+}
+
+func (a *usageAnalyzer) findAllMutableRootsImpl(v ssa.Value, visited map[ssa.Value]bool) []ssa.Value {
+	if v == nil || visited[v] {
+		return nil
+	}
+	visited[v] = true
+
+	switch val := v.(type) {
+	case *ssa.Phi:
+		// Phi node - collect roots from ALL edges
+		var roots []ssa.Value
+		for _, edge := range val.Edges {
+			if isNilConst(edge) {
+				continue
+			}
+			edgeRoots := a.findAllMutableRootsImpl(edge, visited)
+			roots = append(roots, edgeRoots...)
+		}
+		return roots
+
+	case *ssa.UnOp:
+		// Load operation - trace through to find stored values
+		if val.Op == token.MUL {
+			return a.traceAllPointerLoads(val.X, visited)
+		}
+		return a.findAllMutableRootsImpl(val.X, visited)
+
+	case *ssa.Alloc:
+		// Alloc - find ALL values stored to this alloc
+		return a.traceAllAllocStores(val, visited)
+
+	default:
+		// For other values, use normal root finding.
+		// We need a fresh visited map because this value was already marked visited above.
+		freshVisited := make(map[ssa.Value]bool)
+		for k := range visited {
+			freshVisited[k] = true
+		}
+		delete(freshVisited, v) // Allow this value to be processed
+		root := a.findMutableRootImpl(v, freshVisited)
+		if root != nil {
+			return []ssa.Value{root}
+		}
+		return nil
+	}
+}
+
+// traceAllPointerLoads traces a pointer load to find ALL possible stored values.
+func (a *usageAnalyzer) traceAllPointerLoads(ptr ssa.Value, visited map[ssa.Value]bool) []ssa.Value {
+	switch p := ptr.(type) {
+	case *ssa.Alloc:
+		return a.traceAllAllocStores(p, visited)
+	case *ssa.Phi:
+		var roots []ssa.Value
+		for _, edge := range p.Edges {
+			if isNilConst(edge) {
+				continue
+			}
+			edgeRoots := a.traceAllPointerLoads(edge, visited)
+			roots = append(roots, edgeRoots...)
+		}
+		return roots
+	default:
+		return a.findAllMutableRootsImpl(ptr, visited)
+	}
+}
+
+// traceAllAllocStores finds ALL values stored to an Alloc instruction.
+func (a *usageAnalyzer) traceAllAllocStores(alloc *ssa.Alloc, visited map[ssa.Value]bool) []ssa.Value {
+	fn := alloc.Parent()
+	if fn == nil {
+		return nil
+	}
+
+	var roots []ssa.Value
+	// Find ALL Store instructions that write to this alloc
+	for _, block := range fn.Blocks {
+		for _, instr := range block.Instrs {
+			store, ok := instr.(*ssa.Store)
+			if !ok {
+				continue
+			}
+			if store.Addr == alloc {
+				// Found a store to this alloc - trace the stored value
+				storeRoots := a.findAllMutableRootsImpl(store.Val, visited)
+				roots = append(roots, storeRoots...)
+			}
+		}
+	}
+	return roots
 }
 
 // handleNonCallForRoot handles non-call values when finding mutable root.
