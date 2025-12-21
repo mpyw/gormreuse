@@ -2042,3 +2042,221 @@ func beginChainedBecomesMutable(db *gorm.DB) {
 	tx.Find(nil)
 	tx.Count(nil) // want `\*gorm\.DB instance reused after chain method`
 }
+
+// =============================================================================
+// EVIL PATTERNS - Reassignment Edge Cases
+// =============================================================================
+
+// reassignInLoop demonstrates reassignment inside a loop.
+// Each iteration creates a new mutable instance.
+func reassignInLoop(db *gorm.DB, items []string) {
+	var q *gorm.DB
+	for _, item := range items {
+		q = db.Where("name = ?", item)
+		q.Find(nil)
+		q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	}
+}
+
+// reassignInLoopSafe demonstrates safe reassignment pattern in loop.
+// Reassignment before each use prevents pollution carry-over.
+func reassignInLoopSafe(db *gorm.DB, items []string) {
+	var q *gorm.DB
+	for _, item := range items {
+		q = db.Where("name = ?", item)
+		q.Find(nil)
+		// No second use of same q - reassigned in next iteration
+	}
+}
+
+// reassignConditionalPartial demonstrates partial reassignment in conditional.
+// Only one branch reassigns - other branch uses polluted value.
+func reassignConditionalPartial(db *gorm.DB, flag bool) {
+	q := db.Where("x = ?", 1)
+	q.Find(nil) // Pollutes q
+
+	if flag {
+		q = db.Where("y = ?", 2) // Reassigns q in this branch only
+	}
+
+	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// reassignConditionalBoth demonstrates reassignment in both branches.
+// Both branches reassign - should be safe.
+func reassignConditionalBoth(db *gorm.DB, flag bool) {
+	q := db.Where("x = ?", 1)
+	q.Find(nil) // Pollutes q
+
+	if flag {
+		q = db.Where("y = ?", 2)
+	} else {
+		q = db.Where("z = ?", 3)
+	}
+
+	q.Count(nil) // Safe - q reassigned in both branches
+}
+
+// reassignAfterPollutionSameValue demonstrates reassignment with same polluted source.
+// Reassigning from same polluted chain is still unsafe.
+func reassignAfterPollutionSameValue(db *gorm.DB) {
+	base := db.Where("x = ?", 1)
+	base.Find(nil) // Pollutes base
+
+	q := base.Where("y = ?", 2) // Derived from polluted base
+	q.Count(nil)                // want `\*gorm\.DB instance reused after chain method`
+}
+
+// reassignShadowing demonstrates variable shadowing vs reassignment.
+// Inner q shadows outer q - they are different variables.
+func reassignShadowing(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+	q.Find(nil) // Pollutes outer q
+
+	{
+		q := db.Where("y = ?", 2) // New variable (shadows)
+		q.Find(nil)               // Pollutes inner q
+		q.Count(nil)              // want `\*gorm\.DB instance reused after chain method`
+	}
+
+	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// reassignInClosure demonstrates reassignment inside closure.
+// [LIMITATION] Closure assignment not fully tracked.
+func reassignInClosure(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+	q.Find(nil) // Pollutes q
+
+	func() {
+		q = db.Where("y = ?", 2) // Reassign in closure
+	}()
+
+	// [LIMITATION] FALSE NEGATIVE: Closure reassignment not tracked
+	q.Count(nil) // Not detected - closure reassignment limitation
+}
+
+// reassignFromHelper demonstrates reassignment from helper function.
+func reassignFromHelper(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+	q.Find(nil) // Pollutes q
+
+	q = helperReturnsDB(db) // Reassign from helper
+	q.Find(nil)             // Pollutes new q
+	q.Count(nil)            // want `\*gorm\.DB instance reused after chain method`
+}
+
+func helperReturnsDB(db *gorm.DB) *gorm.DB {
+	return db.Where("from helper", 1)
+}
+
+// reassignNilThenUse demonstrates reassigning to nil then using.
+func reassignNilThenUse(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+	q.Find(nil) // Pollutes q
+
+	q = nil // Reassign to nil
+
+	q = db.Where("y = ?", 2)
+	q.Find(nil) // Safe - new instance
+}
+
+// reassignChainExtension demonstrates extending a chain after reassignment.
+func reassignChainExtension(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+	q.Find(nil) // Pollutes q
+
+	q = db.Where("y = ?", 2)
+	q = q.Where("z = ?", 3) // Extend the new chain
+	q.Find(nil)             // Pollutes new q
+	q.Count(nil)            // want `\*gorm\.DB instance reused after chain method`
+}
+
+// reassignMultipleTimes demonstrates multiple reassignments.
+func reassignMultipleTimes(db *gorm.DB) {
+	q := db.Where("a = ?", 1)
+	q.Find(nil) // Pollutes first q
+
+	q = db.Where("b = ?", 2)
+	q.Find(nil) // Pollutes second q
+
+	q = db.Where("c = ?", 3)
+	q.Find(nil) // Pollutes third q
+
+	q = db.Where("d = ?", 4) // Fresh assignment
+	q.Count(nil)             // Safe - new instance
+}
+
+// reassignInSwitch demonstrates reassignment in switch statement.
+// [LIMITATION] Switch branch flow analysis not fully supported.
+func reassignInSwitch(db *gorm.DB, mode int) {
+	q := db.Where("x = ?", 1)
+	q.Find(nil) // Pollutes q
+
+	switch mode {
+	case 1:
+		q = db.Where("mode1", 1)
+	case 2:
+		q = db.Where("mode2", 2)
+	default:
+		// No reassignment in default
+	}
+
+	// [LIMITATION] FALSE NEGATIVE: Switch branch flow not tracked
+	q.Count(nil) // Not detected - switch flow limitation
+}
+
+// reassignInSwitchAll demonstrates reassignment in all switch branches.
+func reassignInSwitchAll(db *gorm.DB, mode int) {
+	q := db.Where("x = ?", 1)
+	q.Find(nil) // Pollutes q
+
+	switch mode {
+	case 1:
+		q = db.Where("mode1", 1)
+	case 2:
+		q = db.Where("mode2", 2)
+	default:
+		q = db.Where("default", 0)
+	}
+
+	q.Count(nil) // Safe - q reassigned in all branches
+}
+
+// reassignFromMethodValue demonstrates reassignment via method value result.
+func reassignFromMethodValue(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+	q.Find(nil) // Pollutes q
+
+	where := db.Where
+	q = where("y = ?", 2) // Reassign from method value
+	q.Find(nil)           // Pollutes new q
+	q.Count(nil)          // want `\*gorm\.DB instance reused after chain method`
+}
+
+// reassignDeferredUse demonstrates reassignment with deferred use.
+// The defer evaluates q immediately - Count pollutes, then defer uses polluted q.
+func reassignDeferredUse(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+
+	defer q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+
+	q.Count(nil) // Pollutes q, defer will use this polluted q
+
+	q = db.Where("y = ?", 2) // Reassignment doesn't affect deferred call (already captured)
+}
+
+// reassignPointerDeref demonstrates reassignment through pointer.
+// [LIMITATION] Pointer dereference reassignment tracking not fully supported.
+func reassignPointerDeref(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+	p := &q
+
+	(*p).Find(nil) // Pollutes through pointer
+
+	*p = db.Where("y = ?", 2) // Reassign through pointer
+
+	// [LIMITATION] FALSE POSITIVE: Pointer reassignment creates new root tracking
+	q.Find(nil)  // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}
