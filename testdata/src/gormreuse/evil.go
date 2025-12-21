@@ -2278,3 +2278,33 @@ func reassignPointerDeref(db *gorm.DB) {
 	q.Find(nil)  // want `\*gorm\.DB instance reused after chain method`
 	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
 }
+
+// =============================================================================
+// EDGE CASES - Pointer Phi for traceAllPointerLoads coverage
+// =============================================================================
+
+// pointerPhiCase demonstrates pointer tracking through conditionally assigned pointer-to-pointer.
+// Due to SSA's Alloc/Store/Load pattern for local variables, this doesn't create a Phi
+// for the pointer itself, but exercises the traceAllAllocStores path.
+func pointerPhiCase(db *gorm.DB, flag bool) {
+	// Create two separate allocations
+	var q1, q2 *gorm.DB
+	q1 = db.Where("a", 1)
+	q2 = db.Where("b", 2)
+
+	// pp is a pointer-to-pointer
+	var pp **gorm.DB
+	if flag {
+		pp = &q1 // Points to q1's storage
+	} else {
+		pp = &q2 // Points to q2's storage
+	}
+
+	// Dereference through conditionally assigned pointer
+	(*pp).Find(nil) // Pollutes through pointer
+
+	// q1 is detected because traceAllAllocStores finds the store
+	q1.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	// q2 detection depends on SSA structure - may or may not be detected
+	q2.Count(nil)
+}
