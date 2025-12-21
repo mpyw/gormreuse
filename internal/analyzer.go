@@ -396,12 +396,8 @@ func (a *usageAnalyzer) processBoundMethodCall(call *ssa.Call, mc *ssa.MakeClosu
 		return
 	}
 
-	// Get method name from bound function (strip $bound suffix)
-	methodName := mc.Fn.Name()
-	if strings.HasSuffix(methodName, "$bound") {
-		methodName = methodName[:len(methodName)-6]
-	}
-	// Also strip package/type prefix like "(*gorm.io/gorm.DB)."
+	// Get method name from bound function (strip $bound suffix and package prefix)
+	methodName := strings.TrimSuffix(mc.Fn.Name(), "$bound")
 	if idx := strings.LastIndex(methodName, "."); idx >= 0 {
 		methodName = methodName[idx+1:]
 	}
@@ -447,7 +443,7 @@ func (a *usageAnalyzer) findMakeClosureForBoundMethod(call *ssa.Call) *ssa.MakeC
 
 // traceMakeClosureImpl recursively traces to find a MakeClosure.
 func (a *usageAnalyzer) traceMakeClosureImpl(v ssa.Value, visited map[ssa.Value]bool) *ssa.MakeClosure {
-	if visited[v] {
+	if v == nil || visited[v] {
 		return nil
 	}
 	visited[v] = true
@@ -1174,6 +1170,9 @@ func (a *usageAnalyzer) traceFreeVar(fv *ssa.FreeVar, visited map[ssa.Value]bool
 // The analyzer traces through the IIFE's return value to find q as the mutable root.
 func (a *usageAnalyzer) traceIIFEReturns(fn *ssa.Function, visited map[ssa.Value]bool) ssa.Value {
 	// Check if the function returns *gorm.DB
+	if fn.Signature == nil {
+		return nil
+	}
 	results := fn.Signature.Results()
 	if results == nil || results.Len() == 0 {
 		return nil

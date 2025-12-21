@@ -821,3 +821,284 @@ func TestHandleNonCallForRoot_PhiWithEdges(t *testing.T) {
 		t.Error("Phi with only immutable edges should return nil")
 	}
 }
+
+// =============================================================================
+// traceFreeVar Tests
+// =============================================================================
+
+func TestTraceFreeVar_NilParent(t *testing.T) {
+	analyzer := newUsageAnalyzer(nil, nil)
+	visited := make(map[ssa.Value]bool)
+
+	// FreeVar with nil Parent
+	fv := &ssa.FreeVar{}
+	result := analyzer.traceFreeVar(fv, visited)
+	if result != nil {
+		t.Error("FreeVar with nil parent should return nil")
+	}
+}
+
+func TestTraceFreeVar_NotInFreeVars(t *testing.T) {
+	analyzer := newUsageAnalyzer(nil, nil)
+	visited := make(map[ssa.Value]bool)
+
+	// FreeVar with no matching entry in fn.FreeVars
+	fv := &ssa.FreeVar{}
+	result := analyzer.traceFreeVar(fv, visited)
+	// Parent is nil, returns nil
+	if result != nil {
+		t.Error("FreeVar not found in parent's FreeVars should return nil")
+	}
+}
+
+func TestTraceFreeVar_NilGrandparent(t *testing.T) {
+	analyzer := newUsageAnalyzer(nil, nil)
+	visited := make(map[ssa.Value]bool)
+
+	// This tests the case where fn.Parent() is nil
+	fv := &ssa.FreeVar{}
+	result := analyzer.traceFreeVar(fv, visited)
+	if result != nil {
+		t.Error("FreeVar with nil grandparent should return nil")
+	}
+}
+
+// =============================================================================
+// traceIIFEReturns Tests
+// =============================================================================
+
+func TestTraceIIFEReturns_NilResults(t *testing.T) {
+	analyzer := newUsageAnalyzer(nil, nil)
+	visited := make(map[ssa.Value]bool)
+
+	// Function with nil Signature.Results()
+	fn := &ssa.Function{}
+	result := analyzer.traceIIFEReturns(fn, visited)
+	if result != nil {
+		t.Error("Function with nil results should return nil")
+	}
+}
+
+func TestTraceIIFEReturns_EmptyResults(t *testing.T) {
+	analyzer := newUsageAnalyzer(nil, nil)
+	visited := make(map[ssa.Value]bool)
+
+	// Function with empty signature (void return)
+	fn := &ssa.Function{}
+	result := analyzer.traceIIFEReturns(fn, visited)
+	if result != nil {
+		t.Error("Function with no return type should return nil")
+	}
+}
+
+func TestTraceIIFEReturns_NonGormDBReturn(t *testing.T) {
+	analyzer := newUsageAnalyzer(nil, nil)
+	visited := make(map[ssa.Value]bool)
+
+	// Function that doesn't return *gorm.DB - signature is nil
+	fn := &ssa.Function{}
+	result := analyzer.traceIIFEReturns(fn, visited)
+	if result != nil {
+		t.Error("Function not returning *gorm.DB should return nil")
+	}
+}
+
+func TestTraceIIFEReturns_NoBlocks(t *testing.T) {
+	analyzer := newUsageAnalyzer(nil, nil)
+	visited := make(map[ssa.Value]bool)
+
+	// Function with nil Blocks
+	fn := &ssa.Function{}
+	result := analyzer.traceIIFEReturns(fn, visited)
+	if result != nil {
+		t.Error("Function with no blocks should return nil")
+	}
+}
+
+// =============================================================================
+// detectReachabilityViolations Tests - Cross-function cases
+// =============================================================================
+
+func TestDetectReachabilityViolations_SinglePollution_NoViolation(t *testing.T) {
+	parentFn := &ssa.Function{}
+	analyzer := newUsageAnalyzer(parentFn, nil)
+
+	// Only one pollution site - no violation possible
+	block := &ssa.BasicBlock{Index: 0}
+	parentFn.Blocks = []*ssa.BasicBlock{block}
+
+	var mockValue ssa.Value
+	state := analyzer.getOrCreateState(mockValue)
+	state.pollutedBlocks[block] = token.Pos(1)
+
+	analyzer.detectReachabilityViolations()
+
+	// Single pollution should not create violation
+	if len(state.violations) != 0 {
+		t.Errorf("Expected 0 violations (single pollution), got %d", len(state.violations))
+	}
+}
+
+// =============================================================================
+// isImmutableSource Tests
+// =============================================================================
+
+func TestIsImmutableSource_NilValue(t *testing.T) {
+	analyzer := newUsageAnalyzer(nil, nil)
+
+	// nil value
+	result := analyzer.isImmutableSource(nil)
+	if result {
+		t.Error("nil value should not be immutable source")
+	}
+}
+
+func TestIsImmutableSource_Alloc(t *testing.T) {
+	analyzer := newUsageAnalyzer(nil, nil)
+
+	// Alloc is not an immutable source
+	alloc := &ssa.Alloc{}
+	result := analyzer.isImmutableSource(alloc)
+	if result {
+		t.Error("Alloc should not be immutable source")
+	}
+}
+
+func TestIsImmutableSource_MakeInterface(t *testing.T) {
+	analyzer := newUsageAnalyzer(nil, nil)
+
+	// MakeInterface is not an immutable source
+	mi := &ssa.MakeInterface{}
+	result := analyzer.isImmutableSource(mi)
+	if result {
+		t.Error("MakeInterface should not be immutable source")
+	}
+}
+
+func TestIsImmutableSource_Phi(t *testing.T) {
+	analyzer := newUsageAnalyzer(nil, nil)
+
+	// Phi is not an immutable source
+	phi := &ssa.Phi{}
+	result := analyzer.isImmutableSource(phi)
+	if result {
+		t.Error("Phi should not be immutable source")
+	}
+}
+
+func TestIsImmutableSource_CallWithNilCallee(t *testing.T) {
+	analyzer := newUsageAnalyzer(nil, nil)
+
+	// Call with nil StaticCallee
+	call := &ssa.Call{}
+	result := analyzer.isImmutableSource(call)
+	if result {
+		t.Error("Call with nil callee should not be immutable source")
+	}
+}
+
+// =============================================================================
+// processBoundMethodCall Tests
+// =============================================================================
+
+func TestProcessBoundMethodCall_EmptyBindings(t *testing.T) {
+	analyzer := newUsageAnalyzer(nil, nil)
+
+	call := &ssa.Call{}
+	mc := &ssa.MakeClosure{
+		Bindings: []ssa.Value{}, // empty
+	}
+
+	// Should not panic with empty bindings
+	analyzer.processBoundMethodCall(call, mc, false, nil)
+}
+
+func TestProcessBoundMethodCall_NonGormDBBinding(t *testing.T) {
+	analyzer := newUsageAnalyzer(nil, nil)
+
+	call := &ssa.Call{}
+	param := &ssa.Parameter{} // Not *gorm.DB type
+	mc := &ssa.MakeClosure{
+		Bindings: []ssa.Value{param},
+	}
+
+	// Should not panic with non-gorm.DB binding
+	analyzer.processBoundMethodCall(call, mc, false, nil)
+}
+
+// =============================================================================
+// findMakeClosureForBoundMethod Tests
+// =============================================================================
+
+func TestFindMakeClosureForBoundMethod_NilValue(t *testing.T) {
+	analyzer := newUsageAnalyzer(nil, nil)
+
+	call := &ssa.Call{}
+	result := analyzer.findMakeClosureForBoundMethod(call)
+	if result != nil {
+		t.Error("Call with nil Value should return nil MakeClosure")
+	}
+}
+
+// =============================================================================
+// traceMakeClosureImpl Tests
+// =============================================================================
+
+func TestTraceMakeClosureImpl_MakeClosure(t *testing.T) {
+	analyzer := newUsageAnalyzer(nil, nil)
+	visited := make(map[ssa.Value]bool)
+
+	mc := &ssa.MakeClosure{}
+	result := analyzer.traceMakeClosureImpl(mc, visited)
+	if result != mc {
+		t.Error("MakeClosure should return itself")
+	}
+}
+
+func TestTraceMakeClosureImpl_Visited(t *testing.T) {
+	analyzer := newUsageAnalyzer(nil, nil)
+	visited := make(map[ssa.Value]bool)
+
+	param := &ssa.Parameter{}
+	visited[param] = true
+
+	result := analyzer.traceMakeClosureImpl(param, visited)
+	if result != nil {
+		t.Error("Already visited value should return nil")
+	}
+}
+
+func TestTraceMakeClosureImpl_UnOp(t *testing.T) {
+	analyzer := newUsageAnalyzer(nil, nil)
+	visited := make(map[ssa.Value]bool)
+
+	// UnOp with nil X
+	unop := &ssa.UnOp{X: nil}
+	result := analyzer.traceMakeClosureImpl(unop, visited)
+	if result != nil {
+		t.Error("UnOp with nil X should return nil")
+	}
+}
+
+func TestTraceMakeClosureImpl_Phi(t *testing.T) {
+	analyzer := newUsageAnalyzer(nil, nil)
+	visited := make(map[ssa.Value]bool)
+
+	// Phi with no edges
+	phi := &ssa.Phi{Edges: []ssa.Value{}}
+	result := analyzer.traceMakeClosureImpl(phi, visited)
+	if result != nil {
+		t.Error("Phi with no edges should return nil")
+	}
+}
+
+func TestTraceMakeClosureImpl_NilValue(t *testing.T) {
+	analyzer := newUsageAnalyzer(nil, nil)
+	visited := make(map[ssa.Value]bool)
+
+	// nil value should return nil
+	result := analyzer.traceMakeClosureImpl(nil, visited)
+	if result != nil {
+		t.Error("nil value should return nil")
+	}
+}
