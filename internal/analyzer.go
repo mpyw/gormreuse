@@ -117,14 +117,38 @@ type violation struct {
 	message string
 }
 
-// valueState tracks the state of a *gorm.DB value.
+// =============================================================================
+// valueState - State Machine for *gorm.DB Value Tracking
+//
+// Lifecycle:
+//   1. TRACKING PHASE (processMethodCalls):
+//      - pollutedBlocks: WRITE (via markPolluted)
+//      - violations: WRITE (same-block violations detected inline)
+//
+//   2. DETECTION PHASE (detectReachabilityViolations):
+//      - pollutedBlocks: READ-ONLY (tracking complete)
+//      - violations: WRITE (cross-block violations detected)
+//
+//   3. COLLECTION PHASE (collectViolations):
+//      - pollutedBlocks: READ-ONLY
+//      - violations: READ-ONLY
+//
+// Note: Same-block violations are detected inline during tracking for efficiency.
+// This prevents a strict separation between tracking and detection phases,
+// but avoids redundant iteration over instructions.
+// =============================================================================
+
+// valueState tracks the pollution state and violations for a *gorm.DB value.
+// See the lifecycle documentation above for state transition rules.
 type valueState struct {
 	// pollutedBlocks maps blocks where this value was polluted to the position.
 	// This enables flow-sensitive analysis: pollution in block A only affects
 	// uses in block B if A can reach B in the CFG.
+	// INVARIANT: Only modified during TRACKING PHASE.
 	pollutedBlocks map[*ssa.BasicBlock]token.Pos
 
 	// violations tracks positions where polluted value was reused.
+	// INVARIANT: Appended during TRACKING and DETECTION phases, read during COLLECTION.
 	violations []token.Pos
 }
 
@@ -169,17 +193,23 @@ func (a *usageAnalyzer) markPolluted(root ssa.Value, block *ssa.BasicBlock, pos 
 	return true
 }
 
+// analyze performs the complete analysis pipeline.
+// See valueState documentation for the phase lifecycle.
 func (a *usageAnalyzer) analyze() []violation {
-	// Process all *gorm.DB method calls and track pollution
-	// This includes method calls in closures that capture tracked values
+	// PHASE 1: TRACKING
+	// - Tracks pollution by marking pollutedBlocks
+	// - Detects same-block violations inline (optimization)
+	// - Also processes closures that capture *gorm.DB values
 	a.processMethodCalls(a.fn, make(map[*ssa.Function]bool))
 
-	// Second pass: check for violations based on CFG reachability
-	// This is needed because SSA block ordering doesn't match execution order.
-	// A call is a violation if ANY OTHER polluted block can reach its block.
+	// PHASE 2: DETECTION
+	// - pollutedBlocks are now frozen (read-only)
+	// - Detects cross-block violations using CFG reachability
 	a.detectReachabilityViolations()
 
-	// Collect violations
+	// PHASE 3: COLLECTION
+	// - All violations have been recorded
+	// - Collect and return final results
 	return a.collectViolations()
 }
 
