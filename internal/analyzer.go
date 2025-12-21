@@ -125,10 +125,10 @@ func (c *checker) report(pos token.Pos, message string) {
 
 // Analyzer orchestrates the SSA-based analysis for *gorm.DB reuse detection.
 type Analyzer struct {
-	fn          *ssa.Function
-	rootTracer  *RootTracer
-	cfgAnalyzer *CFGAnalyzer
-	handlers    []InstructionHandler
+	fn           *ssa.Function
+	rootTracer   *RootTracer
+	cfgAnalyzer  *CFGAnalyzer
+	handlers     []InstructionHandler
 	deferHandler *DeferHandler
 }
 
