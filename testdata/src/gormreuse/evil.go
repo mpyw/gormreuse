@@ -185,6 +185,15 @@ func deferReuse(db *gorm.DB) {
 	q.Find(nil) // LIMITATION: Not detected (defer executes after, but q.Find is first in code order)
 }
 
+// deferFunctionCallWithDB demonstrates defer with function call passing *gorm.DB.
+// Tests lines 669-678: defer with *gorm.DB argument to function.
+func deferFunctionCallWithDB(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+	q.Find(nil) // First use - pollutes q
+
+	defer helperPollute(q) // want `\*gorm\.DB instance reused after chain method`
+}
+
 // =============================================================================
 // SHOULD NOT REPORT - Defer safe patterns
 // =============================================================================
@@ -315,6 +324,22 @@ func goroutineFunctionCallWithDB(db *gorm.DB) {
 	q.Find(nil) // First use - pollutes q
 
 	go helperPollute(q) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// goroutineCrossFunctionPollution demonstrates cross-function pollution with goroutine.
+// Tests line 487: isPollutedAt cross-function pollution check.
+// Pollution happens in closure, then goroutine checks isPollutedAt.
+func goroutineCrossFunctionPollution(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+
+	// Pollute q inside a closure (IIFE)
+	func() {
+		q.Find(nil)
+	}()
+
+	// Start goroutine that uses the already-polluted q
+	// isPollutedAt should detect pollution from different function (closure)
+	go q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
 }
 
 // =============================================================================
@@ -784,6 +809,51 @@ func methodValue(db *gorm.DB) {
 	find(nil) // Pollutes q through method value
 
 	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// methodValueSameBlock demonstrates same-block pollution with method value.
+// Tests line 423: same-block pollution detection for bound methods.
+func methodValueSameBlock(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+	find := q.Find
+	find(nil)  // First use - pollutes q
+	find(nil)  // want `\*gorm\.DB instance reused after chain method`
+}
+
+// methodValueInLoop demonstrates method value in loop.
+// Tests line 429: loop violation detection for bound methods.
+func methodValueInLoop(db *gorm.DB, items []string) {
+	q := db.Where("x = ?", 1)
+	find := q.Find
+
+	for range items {
+		find(nil) // want `\*gorm\.DB instance reused after chain method`
+	}
+}
+
+// methodValueNonTerminal demonstrates non-terminal bound method call.
+// Tests line 408: non-terminal bound method early return.
+func methodValueNonTerminal(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+	where := q.Where
+	// The bound method call where("y = ?", 2) is non-terminal (chained to Find)
+	// This should NOT report a violation since Where is a chain method
+	where("y = ?", 2).Find(nil)
+}
+
+// methodValueConditional demonstrates method value with conditional.
+// [LIMITATION] Phi node tracing for bound methods not fully supported.
+func methodValueConditional(db *gorm.DB, flag bool) {
+	q := db.Where("x = ?", 1)
+	var find func(dest interface{}, conds ...interface{}) *gorm.DB
+	if flag {
+		find = q.Find
+	} else {
+		find = q.Find
+	}
+	find(nil) // [LIMITATION] Not detected - Phi node tracing for method values
+
+	q.Count(nil) // Not detected due to limitation above
 }
 
 // =============================================================================
@@ -1952,4 +2022,23 @@ func iifeWithPhiNode(db *gorm.DB, cond bool) {
 	}().Find(nil) // want `\*gorm\.DB instance reused after chain method`
 
 	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// =============================================================================
+// DB INIT METHODS - Begin/Transaction (Immutable Source)
+// =============================================================================
+
+// beginReturnsImmutable demonstrates that Begin() returns an immutable source.
+// Using tx (from Begin()) multiple times is safe - Begin() creates a new transaction.
+func beginReturnsImmutable(db *gorm.DB) {
+	tx := db.Begin()
+	tx.Find(nil)
+	tx.Count(nil) // Safe - tx is from Begin(), treated as immutable source
+}
+
+// beginChainedBecomesMutable demonstrates chaining after Begin() creates mutable.
+func beginChainedBecomesMutable(db *gorm.DB) {
+	tx := db.Begin().Where("x = ?", 1)
+	tx.Find(nil)
+	tx.Count(nil) // want `\*gorm\.DB instance reused after chain method`
 }
