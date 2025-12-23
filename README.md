@@ -166,6 +166,9 @@ func countOnly(db *gorm.DB) int64 {
 }
 ```
 
+> [!TIP]
+> All user-defined functions/methods that accept or return `*gorm.DB` are treated as polluting by default. You must add `//gormreuse:pure` to any helper function that safely wraps `*gorm.DB` without polluting it.
+
 ## Documentation
 
 - [CLAUDE.md](./CLAUDE.md) - AI assistant guidance for development
