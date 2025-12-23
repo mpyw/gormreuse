@@ -49,25 +49,26 @@ func purePollutesViaNonPureFunc(db *gorm.DB) {
 	nonPureHelper(db) // want `pure function passes \*gorm\.DB argument to non-pure function nonPureHelper`
 }
 
-// PV005: Pure function returns argument directly (mutable)
+// PV005: Pure function returns argument directly - NOW VALID with 3-state model!
+// The return state is Depends(db), which is valid for pure functions.
 //
 //gormreuse:pure
 func pureReturnsArgDirectly(db *gorm.DB) *gorm.DB {
-	return db // want `pure function returns mutable \*gorm\.DB`
+	return db // OK: returns Depends(db), purity depends on caller's argument
 }
 
 // PV006: Pure function returns non-pure method result on argument
 //
 //gormreuse:pure
 func pureReturnsWhereResult(db *gorm.DB) *gorm.DB {
-	return db.Where("x") // want `pure function pollutes \*gorm\.DB argument by calling Where` `pure function returns mutable \*gorm\.DB`
+	return db.Where("x") // want `pure function pollutes \*gorm\.DB argument by calling Where` `pure function returns Polluted \*gorm\.DB`
 }
 
 // PV007: Pure function returns non-pure function result
 //
 //gormreuse:pure
 func pureReturnsNonPureFuncResult(db *gorm.DB) *gorm.DB {
-	return nonPureHelperReturns(db) // want `pure function passes \*gorm\.DB argument to non-pure function nonPureHelperReturns` `pure function returns mutable \*gorm\.DB`
+	return nonPureHelperReturns(db) // want `pure function passes \*gorm\.DB argument to non-pure function nonPureHelperReturns` `pure function returns Polluted \*gorm\.DB`
 }
 
 // PV008: Pure function with multiple DB args, pollutes one
@@ -241,14 +242,18 @@ func purePollutesConditionally(db *gorm.DB, cond bool) {
 	}
 }
 
-// PV206: Pure function with mixed return paths
+// PV206: Pure function with mixed return paths - NOW VALID with 3-state model!
+// Both branches return valid states:
+//   - if cond: Session() returns Clean
+//   - else: return db returns Depends(db)
+// Merged state: Depends(db) - valid for pure function
 //
 //gormreuse:pure
 func pureMixedReturnPaths(db *gorm.DB, cond bool) *gorm.DB {
 	if cond {
-		return db.Session(&gorm.Session{}) // OK branch
+		return db.Session(&gorm.Session{}) // Clean
 	}
-	return db // want `pure function returns mutable \*gorm\.DB`
+	return db // Depends(db) - valid!
 }
 
 // =============================================================================

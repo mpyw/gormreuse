@@ -4,6 +4,7 @@ package internal
 import (
 	"go/token"
 
+	"github.com/mpyw/gormreuse/internal/purity"
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/analysis/passes/buildssa"
 	"golang.org/x/tools/go/ssa"
@@ -50,9 +51,10 @@ func RunSSA(
 			}
 		}
 
-		// Validate pure function contracts
+		// Validate pure function contracts using 3-state purity model
 		if IsPureFunctionDecl(fn, pureFuncs) {
-			for _, v := range ValidatePureFunction(fn, pureFuncs) {
+			checker := newPurityChecker(pureFuncs)
+			for _, v := range purity.ValidateFunction(fn, checker) {
 				pass.Reportf(v.Pos, "%s", v.Message)
 			}
 		}
