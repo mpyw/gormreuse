@@ -24,11 +24,11 @@ import (
 // RootTracer traces SSA values to find mutable *gorm.DB roots.
 type RootTracer struct {
 	ssaTracer *SSATracer
-	pureFuncs map[string]struct{}
+	pureFuncs PureFuncSet
 }
 
 // NewRootTracer creates a new RootTracer with the given pure functions.
-func NewRootTracer(pureFuncs map[string]struct{}) *RootTracer {
+func NewRootTracer(pureFuncs PureFuncSet) *RootTracer {
 	return &RootTracer{
 		ssaTracer: NewSSATracer(),
 		pureFuncs: pureFuncs,
@@ -54,12 +54,7 @@ func (t *RootTracer) FindAllMutableRoots(v ssa.Value) []ssa.Value {
 
 // IsPureFunction checks if a function is marked as pure.
 func (t *RootTracer) IsPureFunction(fn *ssa.Function) bool {
-	if t.pureFuncs == nil {
-		return false
-	}
-	fullName := fn.String()
-	_, exists := t.pureFuncs[fullName]
-	return exists
+	return t.pureFuncs.Contains(fn)
 }
 
 // =============================================================================

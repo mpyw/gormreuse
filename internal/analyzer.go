@@ -19,7 +19,7 @@ func RunSSA(
 	ssaInfo *buildssa.SSA,
 	ignoreMaps map[string]IgnoreMap,
 	funcIgnores map[string]map[token.Pos]struct{},
-	pureFuncs map[string]struct{},
+	pureFuncs PureFuncSet,
 	skipFiles map[string]bool,
 ) {
 	for _, fn := range ssaInfo.SrcFuncs {
@@ -72,11 +72,11 @@ func RunSSA(
 type checker struct {
 	pass      *analysis.Pass
 	ignoreMap IgnoreMap
-	pureFuncs map[string]struct{}
+	pureFuncs PureFuncSet
 	reported  map[token.Pos]bool
 }
 
-func newChecker(pass *analysis.Pass, ignoreMap IgnoreMap, pureFuncs map[string]struct{}) *checker {
+func newChecker(pass *analysis.Pass, ignoreMap IgnoreMap, pureFuncs PureFuncSet) *checker {
 	return &checker{
 		pass:      pass,
 		ignoreMap: ignoreMap,
@@ -133,7 +133,7 @@ type Analyzer struct {
 }
 
 // NewAnalyzer creates a new Analyzer for the given function.
-func NewAnalyzer(fn *ssa.Function, pureFuncs map[string]struct{}) *Analyzer {
+func NewAnalyzer(fn *ssa.Function, pureFuncs PureFuncSet) *Analyzer {
 	return &Analyzer{
 		fn:           fn,
 		rootTracer:   NewRootTracer(pureFuncs),

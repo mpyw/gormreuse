@@ -191,11 +191,32 @@ func notIgnored() {}
 func TestBuildPureFunctionSet(t *testing.T) {
 	src := `package test
 
+type Receiver struct{}
+type GenericReceiver[T any] struct{}
+
+// 1. Regular function
 // gormreuse:pure
 func pureFunc() {}
 
+// 2. Value receiver method
 // gormreuse:pure
-func (r *Receiver) pureMethod() {}
+func (r Receiver) pureValueMethod() {}
+
+// 3. Pointer receiver method
+// gormreuse:pure
+func (r *Receiver) purePointerMethod() {}
+
+// 4. Generic function
+// gormreuse:pure
+func pureGenericFunc[T any]() {}
+
+// 5. Generic value receiver method
+// gormreuse:pure
+func (r GenericReceiver[T]) pureGenericValueMethod() {}
+
+// 6. Generic pointer receiver method
+// gormreuse:pure
+func (r *GenericReceiver[T]) pureGenericPointerMethod() {}
 
 func notPure() {}
 `
@@ -206,15 +227,28 @@ func notPure() {}
 	}
 
 	set := BuildPureFunctionSet(fset, file, "test/pkg")
-	if len(set) != 2 {
-		t.Errorf("Expected 2 pure functions, got %d", len(set))
+	if len(set) != 6 {
+		t.Errorf("Expected 6 pure functions, got %d", len(set))
 	}
 
-	if _, ok := set["test/pkg.pureFunc"]; !ok {
-		t.Error("Expected test/pkg.pureFunc in set")
+	tests := []struct {
+		name string
+		key  PureFuncKey
+	}{
+		{"regular function", PureFuncKey{PkgPath: "test/pkg", FuncName: "pureFunc"}},
+		{"value receiver method", PureFuncKey{PkgPath: "test/pkg", ReceiverType: "Receiver", FuncName: "pureValueMethod"}},
+		{"pointer receiver method", PureFuncKey{PkgPath: "test/pkg", ReceiverType: "Receiver", FuncName: "purePointerMethod"}},
+		{"generic function", PureFuncKey{PkgPath: "test/pkg", FuncName: "pureGenericFunc"}},
+		{"generic value receiver method", PureFuncKey{PkgPath: "test/pkg", ReceiverType: "GenericReceiver", FuncName: "pureGenericValueMethod"}},
+		{"generic pointer receiver method", PureFuncKey{PkgPath: "test/pkg", ReceiverType: "GenericReceiver", FuncName: "pureGenericPointerMethod"}},
 	}
-	if _, ok := set["test/pkg.(*Receiver).pureMethod"]; !ok {
-		t.Error("Expected test/pkg.(*Receiver).pureMethod in set")
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, ok := set[tt.key]; !ok {
+				t.Errorf("Expected %s in set (key: %+v)", tt.name, tt.key)
+			}
+		})
 	}
 }
 

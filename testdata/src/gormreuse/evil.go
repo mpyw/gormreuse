@@ -2327,3 +2327,25 @@ func pointerPhiCase(db *gorm.DB, flag bool) {
 	// q2 detection depends on SSA structure - may or may not be detected
 	q2.Count(nil)
 }
+
+// =============================================================================
+// SHOULD NOT REPORT - Pure method (gormreuse:pure directive on method)
+// =============================================================================
+
+// OrmWrapper is a wrapper type for testing pure methods.
+type OrmWrapper struct{}
+
+// GetDB is a pure method that returns a new *gorm.DB.
+//
+//gormreuse:pure
+func (o *OrmWrapper) GetDB() *gorm.DB {
+	return DB.WithContext(nil)
+}
+
+// pureMethodUsage demonstrates that pure method return values are immutable.
+func pureMethodUsage() {
+	wrapper := &OrmWrapper{}
+	db := wrapper.GetDB()
+	db.Find(nil)
+	db.Find(nil) // OK: pure method returns immutable, can be reused
+}

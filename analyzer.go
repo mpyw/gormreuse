@@ -36,7 +36,7 @@ func run(pass *analysis.Pass) (any, error) {
 	// Build ignore maps for each file (excluding skipped files)
 	ignoreMaps := make(map[string]internal.IgnoreMap)
 	funcIgnores := make(map[string]map[token.Pos]struct{})
-	pureFuncs := make(map[string]struct{})
+	pureFuncs := make(internal.PureFuncSet)
 
 	pkgPath := pass.Pkg.Path()
 	for _, file := range pass.Files {
@@ -48,8 +48,8 @@ func run(pass *analysis.Pass) (any, error) {
 		funcIgnores[filename] = internal.BuildFunctionIgnoreSet(pass.Fset, file)
 
 		// Build pure function set for this file
-		for name := range internal.BuildPureFunctionSet(pass.Fset, file, pkgPath) {
-			pureFuncs[name] = struct{}{}
+		for key := range internal.BuildPureFunctionSet(pass.Fset, file, pkgPath) {
+			pureFuncs[key] = struct{}{}
 		}
 	}
 

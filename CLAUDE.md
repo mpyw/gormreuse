@@ -10,14 +10,16 @@ This file provides guidance to Claude Code when working with code in this reposi
 
 The linter uses a "pollute" model inspired by Rust's move semantics:
 
-1. **Safe Methods** ([`Session`](https://pkg.go.dev/gorm.io/gorm#DB.Session), [`WithContext`](https://pkg.go.dev/gorm.io/gorm#DB.WithContext)) return an immutable copy
-2. **Chain Methods** (all others including finishers) pollute the receiver if mutable
+1. **Immutable-returning methods** ([`Session`](https://pkg.go.dev/gorm.io/gorm#DB.Session), [`WithContext`](https://pkg.go.dev/gorm.io/gorm#DB.WithContext), [`Debug`](https://pkg.go.dev/gorm.io/gorm#DB.Debug), [`Open`](https://pkg.go.dev/gorm.io/gorm#Open), [`Begin`](https://pkg.go.dev/gorm.io/gorm#DB.Begin), [`Transaction`](https://pkg.go.dev/gorm.io/gorm#DB.Transaction)) return a new immutable instance
+2. **Chain Methods** (all others including finishers) pollute the receiver if it's mutable-derived
 3. Using a polluted mutable instance is a violation
 
 ### Directives
 
 - `//gormreuse:ignore` - Suppress warnings for the next line or same line
-- `//gormreuse:pure` - Mark function as not polluting its `*gorm.DB` argument
+- `//gormreuse:pure` - Mark function/method as not polluting its `*gorm.DB` argument
+
+> **Important**: All user-defined functions/methods that accept or return `*gorm.DB` are treated as polluting by default. You must add `//gormreuse:pure` to any helper function that safely wraps `*gorm.DB` without polluting it.
 
 ## Architecture
 
@@ -91,7 +93,7 @@ The linter tracks actual usage through struct fields, not just storage.
 
 ```
 Pollute Model:
-  Immutable: Created by Safe Methods - can be reused freely
+  Immutable: Created by Immutable-returning Methods - can be reused freely
   Mutable:   Created by Chain Methods - gets polluted on first terminal use
 
 Terminal Call Detection:
