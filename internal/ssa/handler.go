@@ -1,11 +1,12 @@
-// Package internal provides SSA-based analysis for GORM *gorm.DB reuse detection.
-package internal
+// Package ssa provides SSA-based analysis for GORM *gorm.DB reuse detection.
+package ssa
 
 import (
 	"go/token"
 	"go/types"
 	"strings"
 
+	"github.com/mpyw/gormreuse/internal/typeutil"
 	"golang.org/x/tools/go/ssa"
 )
 
@@ -44,6 +45,7 @@ type InstructionHandler interface {
 // It processes method calls on *gorm.DB and function calls that accept *gorm.DB.
 type CallHandler struct{}
 
+// CanHandle returns true for Call instructions.
 func (h *CallHandler) CanHandle(instr ssa.Instruction) bool {
 	_, ok := instr.(*ssa.Call)
 	return ok
@@ -96,7 +98,7 @@ func (h *CallHandler) Handle(instr ssa.Instruction, ctx *HandlerContext) {
 	}
 
 	methodName := callee.Name()
-	isPureBuiltin := IsPureFunctionBuiltin(methodName)
+	isPureBuiltin := typeutil.IsPureFunctionBuiltin(methodName)
 	isTerminal := h.isTerminalCall(call)
 
 	// Skip non-terminal Chain Methods (part of chain construction)
@@ -166,12 +168,12 @@ func (h *CallHandler) processBoundMethodCall(call *ssa.Call, mc *ssa.MakeClosure
 	}
 
 	recv := mc.Bindings[0]
-	if !IsGormDB(recv.Type()) {
+	if !typeutil.IsGormDB(recv.Type()) {
 		return
 	}
 
 	methodName := strings.TrimSuffix(mc.Fn.Name(), "$bound")
-	isPureBuiltin := IsPureFunctionBuiltin(methodName)
+	isPureBuiltin := typeutil.IsPureFunctionBuiltin(methodName)
 	isTerminal := h.isTerminalCall(call)
 
 	if !isTerminal && !isPureBuiltin {
@@ -201,7 +203,7 @@ func (h *CallHandler) checkFunctionCallPollution(call *ssa.Call, ctx *HandlerCon
 
 	if callee != nil {
 		sig := callee.Signature
-		if sig != nil && sig.Recv() != nil && IsGormDB(sig.Recv().Type()) {
+		if sig != nil && sig.Recv() != nil && typeutil.IsGormDB(sig.Recv().Type()) {
 			return
 		}
 
@@ -211,7 +213,7 @@ func (h *CallHandler) checkFunctionCallPollution(call *ssa.Call, ctx *HandlerCon
 	}
 
 	for _, arg := range call.Call.Args {
-		if !IsGormDB(arg.Type()) {
+		if !typeutil.IsGormDB(arg.Type()) {
 			continue
 		}
 
@@ -242,7 +244,7 @@ func (h *CallHandler) checkFunctionCallPollution(call *ssa.Call, ctx *HandlerCon
 //	  2. If no referrers → terminal
 //	  3. If any referrer uses this as receiver for *gorm.DB method → non-terminal
 func (h *CallHandler) isTerminalCall(call *ssa.Call) bool {
-	if !IsGormDB(call.Type()) {
+	if !typeutil.IsGormDB(call.Type()) {
 		return true
 	}
 
@@ -275,20 +277,23 @@ func (h *CallHandler) isGormDBMethodCall(call *ssa.Call) bool {
 		return false
 	}
 
-	return IsGormDB(sig.Recv().Type())
+	return typeutil.IsGormDB(sig.Recv().Type())
 }
 
 // =============================================================================
 // GoHandler handles *ssa.Go instructions.
 // =============================================================================
 
+// GoHandler handles goroutine spawning instructions.
 type GoHandler struct{}
 
+// CanHandle returns true for Go instructions.
 func (h *GoHandler) CanHandle(instr ssa.Instruction) bool {
 	_, ok := instr.(*ssa.Go)
 	return ok
 }
 
+// Handle processes a Go instruction for pollution detection.
 func (h *GoHandler) Handle(instr ssa.Instruction, ctx *HandlerContext) {
 	g := instr.(*ssa.Go)
 	h.processCallCommon(&g.Call, g.Pos(), g.Block(), ctx)
@@ -302,7 +307,7 @@ func (h *GoHandler) processCallCommon(callCommon *ssa.CallCommon, pos token.Pos,
 
 	sig := callee.Signature
 
-	if sig != nil && sig.Recv() != nil && IsGormDB(sig.Recv().Type()) {
+	if sig != nil && sig.Recv() != nil && typeutil.IsGormDB(sig.Recv().Type()) {
 		if len(callCommon.Args) == 0 {
 			return
 		}
@@ -320,7 +325,7 @@ func (h *GoHandler) processCallCommon(callCommon *ssa.CallCommon, pos token.Pos,
 	}
 
 	for _, arg := range callCommon.Args {
-		if !IsGormDB(arg.Type()) {
+		if !typeutil.IsGormDB(arg.Type()) {
 			continue
 		}
 
@@ -350,12 +355,15 @@ func (h *GoHandler) processCallCommon(callCommon *ssa.CallCommon, pos token.Pos,
 //	}                           // defer executes here → violation!
 //
 // Detection:
-//   Unlike regular calls, defer checks IsPollutedAnywhere (not IsPollutedAt)
-//   because the deferred call executes after all other code in the function.
+//
+//	Unlike regular calls, defer checks IsPollutedAnywhere (not IsPollutedAt)
+//	because the deferred call executes after all other code in the function.
 // =============================================================================
 
+// DeferHandler handles deferred call instructions.
 type DeferHandler struct{}
 
+// CanHandle returns true for Defer instructions.
 func (h *DeferHandler) CanHandle(instr ssa.Instruction) bool {
 	_, ok := instr.(*ssa.Defer)
 	return ok
@@ -375,7 +383,7 @@ func (h *DeferHandler) processCallCommon(callCommon *ssa.CallCommon, pos token.P
 
 	sig := callee.Signature
 
-	if sig != nil && sig.Recv() != nil && IsGormDB(sig.Recv().Type()) {
+	if sig != nil && sig.Recv() != nil && typeutil.IsGormDB(sig.Recv().Type()) {
 		if len(callCommon.Args) == 0 {
 			return
 		}
@@ -393,7 +401,7 @@ func (h *DeferHandler) processCallCommon(callCommon *ssa.CallCommon, pos token.P
 	}
 
 	for _, arg := range callCommon.Args {
-		if !IsGormDB(arg.Type()) {
+		if !typeutil.IsGormDB(arg.Type()) {
 			continue
 		}
 
@@ -422,8 +430,10 @@ func (h *DeferHandler) processCallCommon(callCommon *ssa.CallCommon, pos token.P
 //	q.Find(nil)             // Violation! q was sent to channel
 // =============================================================================
 
+// SendHandler handles channel send instructions.
 type SendHandler struct{}
 
+// CanHandle returns true for Send instructions.
 func (h *SendHandler) CanHandle(instr ssa.Instruction) bool {
 	_, ok := instr.(*ssa.Send)
 	return ok
@@ -433,7 +443,7 @@ func (h *SendHandler) CanHandle(instr ssa.Instruction) bool {
 func (h *SendHandler) Handle(instr ssa.Instruction, ctx *HandlerContext) {
 	send := instr.(*ssa.Send)
 
-	if !IsGormDB(send.X.Type()) {
+	if !typeutil.IsGormDB(send.X.Type()) {
 		return
 	}
 
@@ -460,11 +470,14 @@ func (h *SendHandler) Handle(instr ssa.Instruction, ctx *HandlerContext) {
 //	q.Find(nil)             // Violation! q was stored in slice
 //
 // Note: Simple stores to local variables (Alloc) are NOT pollution.
-//       They're handled by SSATracer for value tracking.
+//
+//	They're handled by SSATracer for value tracking.
 // =============================================================================
 
+// StoreHandler handles store instructions.
 type StoreHandler struct{}
 
+// CanHandle returns true for Store instructions.
 func (h *StoreHandler) CanHandle(instr ssa.Instruction) bool {
 	_, ok := instr.(*ssa.Store)
 	return ok
@@ -474,7 +487,7 @@ func (h *StoreHandler) CanHandle(instr ssa.Instruction) bool {
 func (h *StoreHandler) Handle(instr ssa.Instruction, ctx *HandlerContext) {
 	store := instr.(*ssa.Store)
 
-	if !IsGormDB(store.Val.Type()) {
+	if !typeutil.IsGormDB(store.Val.Type()) {
 		return
 	}
 
@@ -509,8 +522,10 @@ func (h *StoreHandler) Handle(instr ssa.Instruction, ctx *HandlerContext) {
 //	q.Find(nil)             // Violation! q was stored in map
 // =============================================================================
 
+// MapUpdateHandler handles map update instructions.
 type MapUpdateHandler struct{}
 
+// CanHandle returns true for MapUpdate instructions.
 func (h *MapUpdateHandler) CanHandle(instr ssa.Instruction) bool {
 	_, ok := instr.(*ssa.MapUpdate)
 	return ok
@@ -520,7 +535,7 @@ func (h *MapUpdateHandler) CanHandle(instr ssa.Instruction) bool {
 func (h *MapUpdateHandler) Handle(instr ssa.Instruction, ctx *HandlerContext) {
 	mapUpdate := instr.(*ssa.MapUpdate)
 
-	if !IsGormDB(mapUpdate.Value.Type()) {
+	if !typeutil.IsGormDB(mapUpdate.Value.Type()) {
 		return
 	}
 
@@ -546,8 +561,10 @@ func (h *MapUpdateHandler) Handle(instr ssa.Instruction, ctx *HandlerContext) {
 //	q.Find(nil)             // Violation! q was wrapped in interface
 // =============================================================================
 
+// MakeInterfaceHandler handles interface conversion instructions.
 type MakeInterfaceHandler struct{}
 
+// CanHandle returns true for MakeInterface instructions.
 func (h *MakeInterfaceHandler) CanHandle(instr ssa.Instruction) bool {
 	_, ok := instr.(*ssa.MakeInterface)
 	return ok
@@ -557,7 +574,7 @@ func (h *MakeInterfaceHandler) CanHandle(instr ssa.Instruction) bool {
 func (h *MakeInterfaceHandler) Handle(instr ssa.Instruction, ctx *HandlerContext) {
 	mi := instr.(*ssa.MakeInterface)
 
-	if !IsGormDB(mi.X.Type()) {
+	if !typeutil.IsGormDB(mi.X.Type()) {
 		return
 	}
 
@@ -577,11 +594,11 @@ func (h *MakeInterfaceHandler) Handle(instr ssa.Instruction, ctx *HandlerContext
 func ClosureCapturesGormDB(mc *ssa.MakeClosure) bool {
 	for _, binding := range mc.Bindings {
 		t := binding.Type()
-		if IsGormDB(t) {
+		if typeutil.IsGormDB(t) {
 			return true
 		}
 		if ptr, ok := t.(*types.Pointer); ok {
-			if IsGormDB(ptr.Elem()) {
+			if typeutil.IsGormDB(ptr.Elem()) {
 				return true
 			}
 		}

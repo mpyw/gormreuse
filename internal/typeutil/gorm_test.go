@@ -1,4 +1,4 @@
-package internal
+package typeutil
 
 import (
 	"go/types"

@@ -34,70 +34,70 @@ func (m *mockChecker) IsPureUserFunc(fn *ssa.Function) bool {
 	return m.pureUserFuncs[fn]
 }
 
-func TestNewAnalyzer(t *testing.T) {
+func TestNewInferencer(t *testing.T) {
 	checker := newMockChecker()
-	a := NewAnalyzer(nil, checker)
+	inf := NewInferencer(nil, checker)
 
-	if a == nil {
-		t.Fatal("NewAnalyzer returned nil")
+	if inf == nil {
+		t.Fatal("NewInferencer returned nil")
 	}
-	if a.checker != checker {
-		t.Error("Analyzer checker not set correctly")
+	if inf.checker != checker {
+		t.Error("Inferencer checker not set correctly")
 	}
-	if a.cache == nil {
-		t.Error("Analyzer cache not initialized")
+	if inf.cache == nil {
+		t.Error("Inferencer cache not initialized")
 	}
-	if a.visiting == nil {
-		t.Error("Analyzer visiting not initialized")
+	if inf.visiting == nil {
+		t.Error("Inferencer visiting not initialized")
 	}
 }
 
-func TestAnalyzer_AnalyzeValue_Nil(t *testing.T) {
+func TestInferencer_InferValue_Nil(t *testing.T) {
 	checker := newMockChecker()
-	a := NewAnalyzer(nil, checker)
+	inf := NewInferencer(nil, checker)
 
-	state := a.AnalyzeValue(nil)
+	state := inf.InferValue(nil)
 	if !state.IsClean() {
-		t.Errorf("AnalyzeValue(nil) = %v, want Clean", state)
+		t.Errorf("InferValue(nil) = %v, want Clean", state)
 	}
 }
 
-func TestAnalyzer_AnalyzeValue_Const(t *testing.T) {
+func TestInferencer_InferValue_Const(t *testing.T) {
 	checker := newMockChecker()
-	a := NewAnalyzer(nil, checker)
+	inf := NewInferencer(nil, checker)
 
 	// Create a nil constant
 	nilConst := &ssa.Const{}
-	state := a.AnalyzeValue(nilConst)
+	state := inf.InferValue(nilConst)
 	if !state.IsClean() {
-		t.Errorf("AnalyzeValue(Const) = %v, want Clean", state)
+		t.Errorf("InferValue(Const) = %v, want Clean", state)
 	}
 }
 
-func TestAnalyzer_AnalyzeValue_Caching(t *testing.T) {
+func TestInferencer_InferValue_Caching(t *testing.T) {
 	checker := newMockChecker()
-	a := NewAnalyzer(nil, checker)
+	inf := NewInferencer(nil, checker)
 
 	nilConst := &ssa.Const{}
 
 	// First call
-	state1 := a.AnalyzeValue(nilConst)
+	state1 := inf.InferValue(nilConst)
 
 	// Second call should return cached value
-	state2 := a.AnalyzeValue(nilConst)
+	state2 := inf.InferValue(nilConst)
 
 	if !state1.Equal(state2) {
 		t.Errorf("Cached value mismatch: %v != %v", state1, state2)
 	}
 
 	// Verify it was cached
-	if _, ok := a.cache[nilConst]; !ok {
+	if _, ok := inf.cache[nilConst]; !ok {
 		t.Error("Value was not cached")
 	}
 }
 
 // Note: More comprehensive tests would require building actual SSA programs.
-// The analyzer is primarily tested through integration tests with the validator.
+// The inferencer is primarily tested through integration tests with the validator.
 
 func TestValidateFunction_Nil(t *testing.T) {
 	checker := newMockChecker()

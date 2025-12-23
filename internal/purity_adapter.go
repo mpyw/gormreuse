@@ -5,7 +5,9 @@ import (
 
 	"golang.org/x/tools/go/ssa"
 
-	"github.com/mpyw/gormreuse/internal/purity"
+	"github.com/mpyw/gormreuse/internal/directive"
+	"github.com/mpyw/gormreuse/internal/ssa/purity"
+	"github.com/mpyw/gormreuse/internal/typeutil"
 )
 
 // =============================================================================
@@ -14,19 +16,19 @@ import (
 
 // purityChecker implements purity.PurityChecker using internal package functions.
 type purityChecker struct {
-	pureFuncs *PureFuncSet
+	pureFuncs *directive.PureFuncSet
 }
 
-func newPurityChecker(pureFuncs *PureFuncSet) purity.PurityChecker {
+func newPurityChecker(pureFuncs *directive.PureFuncSet) purity.PurityChecker {
 	return &purityChecker{pureFuncs: pureFuncs}
 }
 
 func (c *purityChecker) IsGormDB(t types.Type) bool {
-	return IsGormDB(t)
+	return typeutil.IsGormDB(t)
 }
 
 func (c *purityChecker) IsPureBuiltinMethod(methodName string) bool {
-	return IsPureFunctionBuiltin(methodName)
+	return typeutil.IsPureFunctionBuiltin(methodName)
 }
 
 func (c *purityChecker) IsPureUserFunc(fn *ssa.Function) bool {
@@ -41,7 +43,7 @@ func (c *purityChecker) IsPureUserFunc(fn *ssa.Function) bool {
 // =============================================================================
 
 // IsPureFunctionDecl checks if a function declaration has a pure directive.
-func IsPureFunctionDecl(fn *ssa.Function, pureFuncs *PureFuncSet) bool {
+func IsPureFunctionDecl(fn *ssa.Function, pureFuncs *directive.PureFuncSet) bool {
 	if pureFuncs == nil {
 		return false
 	}

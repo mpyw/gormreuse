@@ -8,7 +8,9 @@ import (
 	"golang.org/x/tools/go/analysis/passes/buildssa"
 	"golang.org/x/tools/go/ssa"
 
-	"github.com/mpyw/gormreuse/internal/purity"
+	"github.com/mpyw/gormreuse/internal/directive"
+	ssapkg "github.com/mpyw/gormreuse/internal/ssa"
+	"github.com/mpyw/gormreuse/internal/ssa/purity"
 )
 
 // =============================================================================
@@ -19,9 +21,9 @@ import (
 func RunSSA(
 	pass *analysis.Pass,
 	ssaInfo *buildssa.SSA,
-	ignoreMaps map[string]IgnoreMap,
+	ignoreMaps map[string]directive.IgnoreMap,
 	funcIgnores map[string]map[token.Pos]struct{},
-	pureFuncs *PureFuncSet,
+	pureFuncs *directive.PureFuncSet,
 	skipFiles map[string]bool,
 ) {
 	for _, fn := range ssaInfo.SrcFuncs {
@@ -81,12 +83,12 @@ func RunSSA(
 
 type checker struct {
 	pass      *analysis.Pass
-	ignoreMap IgnoreMap
-	pureFuncs *PureFuncSet
+	ignoreMap directive.IgnoreMap
+	pureFuncs *directive.PureFuncSet
 	reported  map[token.Pos]bool
 }
 
-func newChecker(pass *analysis.Pass, ignoreMap IgnoreMap, pureFuncs *PureFuncSet) *checker {
+func newChecker(pass *analysis.Pass, ignoreMap directive.IgnoreMap, pureFuncs *directive.PureFuncSet) *checker {
 	return &checker{
 		pass:      pass,
 		ignoreMap: ignoreMap,
@@ -96,7 +98,7 @@ func newChecker(pass *analysis.Pass, ignoreMap IgnoreMap, pureFuncs *PureFuncSet
 }
 
 func (c *checker) checkFunction(fn *ssa.Function) {
-	analyzer := NewAnalyzer(fn, c.pureFuncs)
+	analyzer := newSSAAnalyzer(fn, c.pureFuncs)
 	violations := analyzer.Analyze()
 
 	for _, v := range violations {
@@ -119,9 +121,9 @@ func (c *checker) report(pos token.Pos, message string) {
 }
 
 // =============================================================================
-// Analyzer - Orchestrates the Analysis Pipeline
+// SSA Analyzer - Orchestrates the Analysis Pipeline
 //
-// The Analyzer composes:
+// The analyzer composes:
 //   - RootTracer: Traces SSA values to mutable roots
 //   - CFGAnalyzer: Analyzes control flow (loops, reachability)
 //   - PollutionTracker: Tracks pollution state and violations
@@ -133,29 +135,29 @@ func (c *checker) report(pos token.Pos, message string) {
 //   3. COLLECTION PHASE: Collect and return all violations
 // =============================================================================
 
-// Analyzer orchestrates the SSA-based analysis for *gorm.DB reuse detection.
-type Analyzer struct {
+// ssaAnalyzer orchestrates the SSA-based analysis for *gorm.DB reuse detection.
+type ssaAnalyzer struct {
 	fn           *ssa.Function
-	rootTracer   *RootTracer
-	cfgAnalyzer  *CFGAnalyzer
-	handlers     []InstructionHandler
-	deferHandler *DeferHandler
+	rootTracer   *ssapkg.RootTracer
+	cfgAnalyzer  *ssapkg.CFGAnalyzer
+	handlers     []ssapkg.InstructionHandler
+	deferHandler *ssapkg.DeferHandler
 }
 
-// NewAnalyzer creates a new Analyzer for the given function.
-func NewAnalyzer(fn *ssa.Function, pureFuncs *PureFuncSet) *Analyzer {
-	return &Analyzer{
+// newSSAAnalyzer creates a new ssaAnalyzer for the given function.
+func newSSAAnalyzer(fn *ssa.Function, pureFuncs *directive.PureFuncSet) *ssaAnalyzer {
+	return &ssaAnalyzer{
 		fn:           fn,
-		rootTracer:   NewRootTracer(pureFuncs),
-		cfgAnalyzer:  NewCFGAnalyzer(),
-		handlers:     DefaultHandlers(),
-		deferHandler: &DeferHandler{},
+		rootTracer:   ssapkg.NewRootTracer(pureFuncs),
+		cfgAnalyzer:  ssapkg.NewCFGAnalyzer(),
+		handlers:     ssapkg.DefaultHandlers(),
+		deferHandler: &ssapkg.DeferHandler{},
 	}
 }
 
 // Analyze performs the complete analysis and returns detected violations.
-func (a *Analyzer) Analyze() []Violation {
-	tracker := NewPollutionTracker(a.cfgAnalyzer, a.fn)
+func (a *ssaAnalyzer) Analyze() []ssapkg.Violation {
+	tracker := ssapkg.NewPollutionTracker(a.cfgAnalyzer, a.fn)
 
 	// PHASE 1: TRACKING
 	// Process all instructions and track pollution
@@ -203,7 +205,7 @@ func (a *Analyzer) Analyze() []Violation {
 //	When a MakeClosure captures *gorm.DB (detected by ClosureCapturesGormDB),
 //	we recursively process the closure function. This ensures pollution
 //	inside closures is tracked in the parent's PollutionTracker.
-func (a *Analyzer) processFunction(fn *ssa.Function, tracker *PollutionTracker, visited map[*ssa.Function]bool) {
+func (a *ssaAnalyzer) processFunction(fn *ssa.Function, tracker *ssapkg.PollutionTracker, visited map[*ssa.Function]bool) {
 	if fn == nil || fn.Blocks == nil {
 		return
 	}
@@ -216,7 +218,7 @@ func (a *Analyzer) processFunction(fn *ssa.Function, tracker *PollutionTracker, 
 	loopInfo := a.cfgAnalyzer.DetectLoops(fn)
 
 	// Create handler context
-	ctx := &HandlerContext{
+	ctx := &ssapkg.HandlerContext{
 		Tracker:     tracker,
 		RootTracer:  a.rootTracer,
 		CFGAnalyzer: a.cfgAnalyzer,
@@ -233,7 +235,7 @@ func (a *Analyzer) processFunction(fn *ssa.Function, tracker *PollutionTracker, 
 			// Check for MakeClosure to process closures recursively
 			if mc, ok := instr.(*ssa.MakeClosure); ok {
 				if closureFn, ok := mc.Fn.(*ssa.Function); ok {
-					if ClosureCapturesGormDB(mc) {
+					if ssapkg.ClosureCapturesGormDB(mc) {
 						a.processFunction(closureFn, tracker, visited)
 					}
 				}

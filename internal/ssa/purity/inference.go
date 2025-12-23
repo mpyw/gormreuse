@@ -18,20 +18,20 @@ type PurityChecker interface {
 }
 
 // =============================================================================
-// Analyzer
+// Inferencer
 // =============================================================================
 
-// Analyzer analyzes purity states of SSA values within a function.
-type Analyzer struct {
+// Inferencer infers purity states of SSA values within a function.
+type Inferencer struct {
 	fn       *ssa.Function
 	checker  PurityChecker
 	cache    map[ssa.Value]State
 	visiting map[ssa.Value]bool
 }
 
-// NewAnalyzer creates a new purity analyzer for the given function.
-func NewAnalyzer(fn *ssa.Function, checker PurityChecker) *Analyzer {
-	return &Analyzer{
+// NewInferencer creates a new purity inferencer for the given function.
+func NewInferencer(fn *ssa.Function, checker PurityChecker) *Inferencer {
+	return &Inferencer{
 		fn:       fn,
 		checker:  checker,
 		cache:    make(map[ssa.Value]State),
@@ -43,7 +43,7 @@ func NewAnalyzer(fn *ssa.Function, checker PurityChecker) *Analyzer {
 // Value Analysis
 // =============================================================================
 
-// AnalyzeValue returns the purity state of the given SSA value.
+// InferValue returns the purity state of the given SSA value.
 //
 // This function recursively traverses the SSA value graph to determine purity.
 // Each SSA value may reference other values (e.g., Phi edges, Call arguments,
@@ -76,43 +76,43 @@ func NewAnalyzer(fn *ssa.Function, checker PurityChecker) *Analyzer {
 //
 // Recursive traversal for t1 (Phi):
 //
-//	AnalyzeValue(t1)                    // Start: Phi node
-//	  → AnalyzeValue(t0)                // Edge 1: Call node
-//	      → analyzeCall(t0)             // Session() → Clean
-//	  → AnalyzeValue(db)                // Edge 2: Parameter
+//	InferValue(t1)                    // Start: Phi node
+//	  → InferValue(t0)                // Edge 1: Call node
+//	      → inferCall(t0)             // Session() → Clean
+//	  → InferValue(db)                // Edge 2: Parameter
 //	      → Depends(db)                 // Parameter → Depends
 //	  → Merge: Clean ⊔ Depends(db)      // Result: Depends(db)
 //
 // Optimizations:
 //   - cache: Memoizes results to avoid redundant traversal
 //   - visiting: Detects cycles (returns Polluted for safety)
-func (a *Analyzer) AnalyzeValue(v ssa.Value) State {
+func (inf *Inferencer) InferValue(v ssa.Value) State {
 	if v == nil {
 		return Clean()
 	}
 
-	if state, ok := a.cache[v]; ok {
+	if state, ok := inf.cache[v]; ok {
 		return state
 	}
 
-	if a.visiting[v] {
+	if inf.visiting[v] {
 		return Polluted() // Cycle detection
 	}
-	a.visiting[v] = true
-	defer delete(a.visiting, v)
+	inf.visiting[v] = true
+	defer delete(inf.visiting, v)
 
-	state := a.analyzeValueImpl(v)
-	a.cache[v] = state
+	state := inf.inferValueImpl(v)
+	inf.cache[v] = state
 	return state
 }
 
-func (a *Analyzer) analyzeValueImpl(v ssa.Value) State {
+func (inf *Inferencer) inferValueImpl(v ssa.Value) State {
 	switch val := v.(type) {
 	case *ssa.Parameter:
 		// func foo(db *gorm.DB) { ... }
 		//          ^^
 		// Parameter's purity depends on what the caller passes.
-		if a.checker.IsGormDB(val.Type()) {
+		if inf.checker.IsGormDB(val.Type()) {
 			return Depends(val)
 		}
 		return Clean()
@@ -127,7 +127,7 @@ func (a *Analyzer) analyzeValueImpl(v ssa.Value) State {
 		// db.Where("x")           // method call
 		// pureHelper(db)          // function call
 		// db.Session(&Session{})  // pure method call
-		return a.analyzeCall(val)
+		return inf.inferCall(val)
 
 	case *ssa.Phi:
 		// if cond {
@@ -136,18 +136,18 @@ func (a *Analyzer) analyzeValueImpl(v ssa.Value) State {
 		//     x = db               // Depends(db)
 		// }
 		// return x  // Phi node merges both branches → Depends(db)
-		return a.analyzePhi(val)
+		return inf.inferPhi(val)
 
 	case *ssa.Extract:
 		// tx, err := db.Begin()
 		// ^^
 		// Extract gets a value from a tuple (multiple return values).
-		return a.AnalyzeValue(val.Tuple)
+		return inf.InferValue(val.Tuple)
 
 	case *ssa.UnOp:
 		// *ptr  // dereference
 		// Trace through to the underlying value.
-		return a.AnalyzeValue(val.X)
+		return inf.InferValue(val.X)
 
 	case *ssa.MakeClosure:
 		// f := func() { db.Find(nil) }
@@ -155,7 +155,7 @@ func (a *Analyzer) analyzeValueImpl(v ssa.Value) State {
 		// Closure capturing *gorm.DB is treated as Polluted
 		// because we can't track what happens inside.
 		for _, binding := range val.Bindings {
-			if a.checker.IsGormDB(binding.Type()) {
+			if inf.checker.IsGormDB(binding.Type()) {
 				return Polluted()
 			}
 		}
@@ -183,30 +183,30 @@ func (a *Analyzer) analyzeValueImpl(v ssa.Value) State {
 		// MyDB(db)  // type alias conversion
 		// ^^^^^^^^
 		// Trace through - same underlying value.
-		return a.AnalyzeValue(val.X)
+		return inf.InferValue(val.X)
 
 	case *ssa.Convert:
 		// (*gorm.DB)(ptr)  // type conversion
 		// Trace through - same underlying value.
-		return a.AnalyzeValue(val.X)
+		return inf.InferValue(val.X)
 
 	case *ssa.TypeAssert:
 		// v.(*gorm.DB)  // type assertion
 		// ^^^^^^^^^^^^
 		// Trace through - extracts the underlying value.
-		return a.AnalyzeValue(val.X)
+		return inf.InferValue(val.X)
 
 	case *ssa.MakeInterface:
 		// var i interface{} = db
 		//                     ^^
 		// Wrapping in interface - trace through.
-		return a.AnalyzeValue(val.X)
+		return inf.InferValue(val.X)
 
 	case *ssa.Slice:
 		// dbs[1:3]  // slice operation
 		// ^^^^^^^^
 		// Trace through to the underlying slice.
-		return a.AnalyzeValue(val.X)
+		return inf.InferValue(val.X)
 
 	default:
 		// Unknown SSA value type - conservative: assume Polluted.
@@ -218,7 +218,7 @@ func (a *Analyzer) analyzeValueImpl(v ssa.Value) State {
 // Call Analysis
 // =============================================================================
 
-// analyzeCall analyzes a function/method call and returns its purity state.
+// inferCall analyzes a function/method call and returns its purity state.
 //
 // Examples:
 //
@@ -227,10 +227,10 @@ func (a *Analyzer) analyzeValueImpl(v ssa.Value) State {
 //	pureHelper(db)          → Depends  (user-defined pure function)
 //	nonPureHelper(db)       → Polluted (non-pure function with *gorm.DB arg)
 //	fmt.Println("hello")    → Clean    (no *gorm.DB involved)
-func (a *Analyzer) analyzeCall(call *ssa.Call) State {
+func (inf *Inferencer) inferCall(call *ssa.Call) State {
 	// Interface method call: var db gorm.DB; db.Where(...)
 	if call.Call.Method != nil {
-		return a.analyzeInterfaceMethodCall(call)
+		return inf.inferInterfaceMethodCall(call)
 	}
 
 	// Static call (concrete type or function)
@@ -242,21 +242,21 @@ func (a *Analyzer) analyzeCall(call *ssa.Call) State {
 
 	// Method call on *gorm.DB (concrete type)
 	// e.g., (*gorm.DB).Where(db, "x")
-	if sig := callee.Signature; sig != nil && sig.Recv() != nil && a.checker.IsGormDB(sig.Recv().Type()) {
-		if a.checker.IsPureBuiltinMethod(callee.Name()) {
+	if sig := callee.Signature; sig != nil && sig.Recv() != nil && inf.checker.IsGormDB(sig.Recv().Type()) {
+		if inf.checker.IsPureBuiltinMethod(callee.Name()) {
 			return Clean()
 		}
 		return Polluted()
 	}
 
 	// User-defined pure function: //gormreuse:pure func helper(db *gorm.DB) *gorm.DB
-	if a.checker.IsPureUserFunc(callee) {
-		return a.analyzePureUserFuncCall(call)
+	if inf.checker.IsPureUserFunc(callee) {
+		return inf.inferPureUserFuncCall(call)
 	}
 
 	// Non-pure function receiving *gorm.DB - assume it pollutes
 	for _, arg := range call.Call.Args {
-		if a.checker.IsGormDB(arg.Type()) {
+		if inf.checker.IsGormDB(arg.Type()) {
 			return Polluted()
 		}
 	}
@@ -264,7 +264,7 @@ func (a *Analyzer) analyzeCall(call *ssa.Call) State {
 	return Clean()
 }
 
-// analyzeInterfaceMethodCall analyzes a method call through an interface.
+// inferInterfaceMethodCall analyzes a method call through an interface.
 //
 // Examples:
 //
@@ -272,19 +272,19 @@ func (a *Analyzer) analyzeCall(call *ssa.Call) State {
 //	db.Session(&Session{})  → Clean    (pure builtin)
 //	db.Where("x")           → Polluted (non-pure method)
 //	db.Find(&users)         → Polluted (non-pure method)
-func (a *Analyzer) analyzeInterfaceMethodCall(call *ssa.Call) State {
+func (inf *Inferencer) inferInterfaceMethodCall(call *ssa.Call) State {
 	recv := call.Call.Value
-	if !a.checker.IsGormDB(recv.Type()) {
+	if !inf.checker.IsGormDB(recv.Type()) {
 		return Clean()
 	}
 
-	if a.checker.IsPureBuiltinMethod(call.Call.Method.Name()) {
+	if inf.checker.IsPureBuiltinMethod(call.Call.Method.Name()) {
 		return Clean()
 	}
 	return Polluted()
 }
 
-// analyzePureUserFuncCall analyzes a call to a user-defined pure function.
+// inferPureUserFuncCall analyzes a call to a user-defined pure function.
 //
 // The result depends on what *gorm.DB arguments are passed:
 //
@@ -294,17 +294,17 @@ func (a *Analyzer) analyzeInterfaceMethodCall(call *ssa.Call) State {
 //	identity(param)           → Depends(param)  (traces to parameter)
 //	identity(db.Session(...)) → Clean           (arg is Clean)
 //	identity(pollutedDB)      → Polluted        (arg is Polluted)
-func (a *Analyzer) analyzePureUserFuncCall(call *ssa.Call) State {
+func (inf *Inferencer) inferPureUserFuncCall(call *ssa.Call) State {
 	var deps []*ssa.Parameter
 	for _, arg := range call.Call.Args {
-		if !a.checker.IsGormDB(arg.Type()) {
+		if !inf.checker.IsGormDB(arg.Type()) {
 			continue
 		}
 
-		if param, ok := a.traceToParameter(arg); ok {
+		if param, ok := inf.traceToParameter(arg); ok {
 			deps = append(deps, param)
 		} else {
-			argState := a.AnalyzeValue(arg)
+			argState := inf.InferValue(arg)
 			if argState.IsPolluted() {
 				return Polluted()
 			}
@@ -324,7 +324,7 @@ func (a *Analyzer) analyzePureUserFuncCall(call *ssa.Call) State {
 // Phi Analysis
 // =============================================================================
 
-// analyzePhi analyzes a Phi node, which merges values from different control flow paths.
+// inferPhi analyzes a Phi node, which merges values from different control flow paths.
 //
 // SSA uses Phi nodes at join points where multiple branches converge:
 //
@@ -350,14 +350,14 @@ func (a *Analyzer) analyzePureUserFuncCall(call *ssa.Call) State {
 //   - Clean ⊔ Clean = Clean
 //   - Clean ⊔ Depends(p) = Depends(p)
 //   - * ⊔ Polluted = Polluted (short-circuits)
-func (a *Analyzer) analyzePhi(phi *ssa.Phi) State {
+func (inf *Inferencer) inferPhi(phi *ssa.Phi) State {
 	if len(phi.Edges) == 0 {
 		return Clean()
 	}
 
-	result := a.AnalyzeValue(phi.Edges[0])
+	result := inf.InferValue(phi.Edges[0])
 	for _, edge := range phi.Edges[1:] {
-		result = result.Merge(a.AnalyzeValue(edge))
+		result = result.Merge(inf.InferValue(edge))
 		if result.IsPolluted() {
 			return result
 		}
@@ -401,11 +401,11 @@ func (a *Analyzer) analyzePhi(phi *ssa.Phi) State {
 //	    if cond { x = db1 } else { x = db2 }  // FAIL: different params
 //	    // x does NOT trace
 //	}
-func (a *Analyzer) traceToParameter(v ssa.Value) (*ssa.Parameter, bool) {
-	return a.traceToParameterImpl(v, make(map[ssa.Value]bool))
+func (inf *Inferencer) traceToParameter(v ssa.Value) (*ssa.Parameter, bool) {
+	return inf.traceToParameterImpl(v, make(map[ssa.Value]bool))
 }
 
-func (a *Analyzer) traceToParameterImpl(v ssa.Value, visited map[ssa.Value]bool) (*ssa.Parameter, bool) {
+func (inf *Inferencer) traceToParameterImpl(v ssa.Value, visited map[ssa.Value]bool) (*ssa.Parameter, bool) {
 	if visited[v] {
 		return nil, false
 	}
@@ -425,7 +425,7 @@ func (a *Analyzer) traceToParameterImpl(v ssa.Value, visited map[ssa.Value]bool)
 		// If edges trace to different parameters, trace fails.
 		var param *ssa.Parameter
 		for _, edge := range val.Edges {
-			p, ok := a.traceToParameterImpl(edge, visited)
+			p, ok := inf.traceToParameterImpl(edge, visited)
 			if !ok {
 				return nil, false
 			}
@@ -440,22 +440,22 @@ func (a *Analyzer) traceToParameterImpl(v ssa.Value, visited map[ssa.Value]bool)
 	case *ssa.UnOp:
 		// *ptr  // dereference
 		// Trace through to the underlying value.
-		return a.traceToParameterImpl(val.X, visited)
+		return inf.traceToParameterImpl(val.X, visited)
 
 	case *ssa.ChangeType:
 		// MyDB(db)  // type alias conversion
 		// Same underlying value, trace through.
-		return a.traceToParameterImpl(val.X, visited)
+		return inf.traceToParameterImpl(val.X, visited)
 
 	case *ssa.Convert:
 		// (*gorm.DB)(ptr)  // type conversion
 		// Same underlying value, trace through.
-		return a.traceToParameterImpl(val.X, visited)
+		return inf.traceToParameterImpl(val.X, visited)
 
 	case *ssa.MakeInterface:
 		// var i interface{} = db
 		// Wrapping in interface, trace through.
-		return a.traceToParameterImpl(val.X, visited)
+		return inf.traceToParameterImpl(val.X, visited)
 
 	default:
 		// db.Where("x")  // Call - can't trace through
@@ -469,7 +469,7 @@ func (a *Analyzer) traceToParameterImpl(v ssa.Value, visited map[ssa.Value]bool)
 // Return Analysis
 // =============================================================================
 
-// AnalyzeReturn returns the merged purity state of all *gorm.DB return values.
+// InferReturn returns the merged purity state of all *gorm.DB return values.
 //
 // This function traverses all basic blocks to find return statements and analyzes
 // each *gorm.DB return value. Multiple return values are merged using lattice rules.
@@ -497,10 +497,10 @@ func (a *Analyzer) traceToParameterImpl(v ssa.Value, visited map[ssa.Value]bool)
 //	// Result: Clean ⊔ Polluted = Polluted ← INVALID for pure function
 //
 // Short-circuit: Returns immediately when Polluted state is encountered.
-func (a *Analyzer) AnalyzeReturn() State {
+func (inf *Inferencer) InferReturn() State {
 	result := Clean()
 
-	for _, block := range a.fn.Blocks {
+	for _, block := range inf.fn.Blocks {
 		for _, instr := range block.Instrs {
 			ret, ok := instr.(*ssa.Return)
 			if !ok {
@@ -508,11 +508,11 @@ func (a *Analyzer) AnalyzeReturn() State {
 			}
 
 			for _, res := range ret.Results {
-				if res == nil || !a.checker.IsGormDB(res.Type()) {
+				if res == nil || !inf.checker.IsGormDB(res.Type()) {
 					continue
 				}
 
-				result = result.Merge(a.AnalyzeValue(res))
+				result = result.Merge(inf.InferValue(res))
 				if result.IsPolluted() {
 					return result
 				}

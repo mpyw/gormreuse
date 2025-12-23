@@ -1,4 +1,4 @@
-package internal
+package directive
 
 import (
 	"go/ast"
@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func TestIsIgnoreComment(t *testing.T) {
+func TestIsIgnoreDirective(t *testing.T) {
 	tests := []struct {
 		name     string
 		text     string
@@ -24,14 +24,14 @@ func TestIsIgnoreComment(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := isIgnoreComment(tt.text); got != tt.expected {
-				t.Errorf("isIgnoreComment(%q) = %v, want %v", tt.text, got, tt.expected)
+			if got := IsIgnoreDirective(tt.text); got != tt.expected {
+				t.Errorf("IsIgnoreDirective(%q) = %v, want %v", tt.text, got, tt.expected)
 			}
 		})
 	}
 }
 
-func TestIsPureComment(t *testing.T) {
+func TestIsPureDirective(t *testing.T) {
 	tests := []struct {
 		name     string
 		text     string
@@ -46,8 +46,8 @@ func TestIsPureComment(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := isPureComment(tt.text); got != tt.expected {
-				t.Errorf("isPureComment(%q) = %v, want %v", tt.text, got, tt.expected)
+			if got := IsPureDirective(tt.text); got != tt.expected {
+				t.Errorf("IsPureDirective(%q) = %v, want %v", tt.text, got, tt.expected)
 			}
 		})
 	}
@@ -158,7 +158,7 @@ func foo() {}
 	// Check that file has doc and it contains ignore
 	if file.Doc != nil {
 		for _, c := range file.Doc.List {
-			if isIgnoreComment(c.Text) {
+			if IsIgnoreDirective(c.Text) {
 				// File-level ignore should be present
 				if _, ok := m[-1]; !ok {
 					t.Error("Expected file-level ignore (-1) in map")

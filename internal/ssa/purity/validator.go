@@ -17,8 +17,15 @@ type Violation struct {
 }
 
 // =============================================================================
-// Validation Entry Point
+// Validator
 // =============================================================================
+
+// Validator validates pure function contracts.
+type Validator struct {
+	fn           *ssa.Function
+	checker      PurityChecker
+	paramDerived map[ssa.Value]bool
+}
 
 // ValidateFunction validates that a function marked as pure satisfies the pure contract:
 // 1. Does not pollute *gorm.DB arguments (no non-pure method calls on them)
@@ -28,24 +35,31 @@ func ValidateFunction(fn *ssa.Function, checker PurityChecker) []Violation {
 		return nil
 	}
 
-	var violations []Violation
-
-	gormParams := findGormParams(fn, checker)
-	paramDerived := make(map[ssa.Value]bool)
-	for _, p := range gormParams {
-		paramDerived[p] = true
+	v := &Validator{
+		fn:           fn,
+		checker:      checker,
+		paramDerived: make(map[ssa.Value]bool),
 	}
+
+	// Initialize with *gorm.DB parameters
+	for _, p := range fn.Params {
+		if checker.IsGormDB(p.Type()) {
+			v.paramDerived[p] = true
+		}
+	}
+
+	var violations []Violation
 
 	for _, block := range fn.Blocks {
 		for _, instr := range block.Instrs {
-			trackDerivation(instr, paramDerived, checker)
+			v.trackDerivation(instr)
 
 			if call, ok := instr.(*ssa.Call); ok {
-				violations = append(violations, checkCallPollution(call, paramDerived, checker)...)
+				violations = append(violations, v.checkCallPollution(call)...)
 			}
 
 			if ret, ok := instr.(*ssa.Return); ok {
-				violations = append(violations, checkReturnPurity(ret, fn, checker)...)
+				violations = append(violations, v.checkReturnPurity(ret)...)
 			}
 		}
 	}
@@ -54,51 +68,37 @@ func ValidateFunction(fn *ssa.Function, checker PurityChecker) []Violation {
 }
 
 // =============================================================================
-// Parameter Detection
-// =============================================================================
-
-func findGormParams(fn *ssa.Function, checker PurityChecker) []*ssa.Parameter {
-	var params []*ssa.Parameter
-	for _, p := range fn.Params {
-		if checker.IsGormDB(p.Type()) {
-			params = append(params, p)
-		}
-	}
-	return params
-}
-
-// =============================================================================
 // Derivation Tracking
 // =============================================================================
 
-func trackDerivation(instr ssa.Instruction, paramDerived map[ssa.Value]bool, checker PurityChecker) {
+func (v *Validator) trackDerivation(instr ssa.Instruction) {
 	switch i := instr.(type) {
 	case *ssa.Phi:
 		for _, edge := range i.Edges {
-			if paramDerived[edge] {
-				paramDerived[i] = true
+			if v.paramDerived[edge] {
+				v.paramDerived[i] = true
 				break
 			}
 		}
 
 	case *ssa.Call:
-		trackCallDerivation(i, paramDerived, checker)
+		v.trackCallDerivation(i)
 
 	case *ssa.Extract:
-		if paramDerived[i.Tuple] {
-			paramDerived[i] = true
+		if v.paramDerived[i.Tuple] {
+			v.paramDerived[i] = true
 		}
 	}
 }
 
-func trackCallDerivation(call *ssa.Call, paramDerived map[ssa.Value]bool, checker PurityChecker) {
+func (v *Validator) trackCallDerivation(call *ssa.Call) {
 	// Interface method call
 	if call.Call.Method != nil {
 		recv := call.Call.Value
-		if checker.IsGormDB(recv.Type()) && paramDerived[recv] {
-			if !checker.IsPureBuiltinMethod(call.Call.Method.Name()) {
+		if v.checker.IsGormDB(recv.Type()) && v.paramDerived[recv] {
+			if !v.checker.IsPureBuiltinMethod(call.Call.Method.Name()) {
 				if result := call.Value(); result != nil {
-					paramDerived[result] = true
+					v.paramDerived[result] = true
 				}
 			}
 		}
@@ -112,12 +112,12 @@ func trackCallDerivation(call *ssa.Call, paramDerived map[ssa.Value]bool, checke
 	}
 
 	sig := callee.Signature
-	if sig != nil && sig.Recv() != nil && checker.IsGormDB(sig.Recv().Type()) {
+	if sig != nil && sig.Recv() != nil && v.checker.IsGormDB(sig.Recv().Type()) {
 		if len(call.Call.Args) > 0 {
 			recv := call.Call.Args[0]
-			if paramDerived[recv] && !checker.IsPureBuiltinMethod(callee.Name()) {
+			if v.paramDerived[recv] && !v.checker.IsPureBuiltinMethod(callee.Name()) {
 				if result := call.Value(); result != nil {
-					paramDerived[result] = true
+					v.paramDerived[result] = true
 				}
 			}
 		}
@@ -126,10 +126,10 @@ func trackCallDerivation(call *ssa.Call, paramDerived map[ssa.Value]bool, checke
 
 	// Regular function call
 	for _, arg := range call.Call.Args {
-		if checker.IsGormDB(arg.Type()) && paramDerived[arg] {
-			if result := call.Value(); result != nil && checker.IsGormDB(result.Type()) {
-				if !checker.IsPureUserFunc(callee) {
-					paramDerived[result] = true
+		if v.checker.IsGormDB(arg.Type()) && v.paramDerived[arg] {
+			if result := call.Value(); result != nil && v.checker.IsGormDB(result.Type()) {
+				if !v.checker.IsPureUserFunc(callee) {
+					v.paramDerived[result] = true
 				}
 			}
 			break
@@ -141,10 +141,10 @@ func trackCallDerivation(call *ssa.Call, paramDerived map[ssa.Value]bool, checke
 // Pollution Checking
 // =============================================================================
 
-func checkCallPollution(call *ssa.Call, paramDerived map[ssa.Value]bool, checker PurityChecker) []Violation {
+func (v *Validator) checkCallPollution(call *ssa.Call) []Violation {
 	// Interface method call
 	if call.Call.Method != nil {
-		return checkInterfaceMethodPollution(call, paramDerived, checker)
+		return v.checkInterfaceMethodPollution(call)
 	}
 
 	// Static call
@@ -154,21 +154,21 @@ func checkCallPollution(call *ssa.Call, paramDerived map[ssa.Value]bool, checker
 	}
 
 	sig := callee.Signature
-	if sig != nil && sig.Recv() != nil && checker.IsGormDB(sig.Recv().Type()) {
-		return checkStaticMethodPollution(call, callee, paramDerived, checker)
+	if sig != nil && sig.Recv() != nil && v.checker.IsGormDB(sig.Recv().Type()) {
+		return v.checkStaticMethodPollution(call, callee)
 	}
 
-	return checkFunctionCallPollution(call, callee, paramDerived, checker)
+	return v.checkFunctionCallPollution(call, callee)
 }
 
-func checkInterfaceMethodPollution(call *ssa.Call, paramDerived map[ssa.Value]bool, checker PurityChecker) []Violation {
+func (v *Validator) checkInterfaceMethodPollution(call *ssa.Call) []Violation {
 	recv := call.Call.Value
-	if !checker.IsGormDB(recv.Type()) {
+	if !v.checker.IsGormDB(recv.Type()) {
 		return nil
 	}
 
 	methodName := call.Call.Method.Name()
-	if paramDerived[recv] && !checker.IsPureBuiltinMethod(methodName) {
+	if v.paramDerived[recv] && !v.checker.IsPureBuiltinMethod(methodName) {
 		return []Violation{{
 			Pos:     call.Pos(),
 			Message: "pure function pollutes *gorm.DB argument by calling " + methodName,
@@ -177,14 +177,14 @@ func checkInterfaceMethodPollution(call *ssa.Call, paramDerived map[ssa.Value]bo
 	return nil
 }
 
-func checkStaticMethodPollution(call *ssa.Call, callee *ssa.Function, paramDerived map[ssa.Value]bool, checker PurityChecker) []Violation {
+func (v *Validator) checkStaticMethodPollution(call *ssa.Call, callee *ssa.Function) []Violation {
 	if len(call.Call.Args) == 0 {
 		return nil
 	}
 
 	recv := call.Call.Args[0]
 	methodName := callee.Name()
-	if paramDerived[recv] && !checker.IsPureBuiltinMethod(methodName) {
+	if v.paramDerived[recv] && !v.checker.IsPureBuiltinMethod(methodName) {
 		return []Violation{{
 			Pos:     call.Pos(),
 			Message: "pure function pollutes *gorm.DB argument by calling " + methodName,
@@ -193,10 +193,10 @@ func checkStaticMethodPollution(call *ssa.Call, callee *ssa.Function, paramDeriv
 	return nil
 }
 
-func checkFunctionCallPollution(call *ssa.Call, callee *ssa.Function, paramDerived map[ssa.Value]bool, checker PurityChecker) []Violation {
+func (v *Validator) checkFunctionCallPollution(call *ssa.Call, callee *ssa.Function) []Violation {
 	var violations []Violation
 	for _, arg := range call.Call.Args {
-		if checker.IsGormDB(arg.Type()) && paramDerived[arg] && !checker.IsPureUserFunc(callee) {
+		if v.checker.IsGormDB(arg.Type()) && v.paramDerived[arg] && !v.checker.IsPureUserFunc(callee) {
 			violations = append(violations, Violation{
 				Pos:     call.Pos(),
 				Message: "pure function passes *gorm.DB argument to non-pure function " + callee.Name(),
@@ -210,16 +210,16 @@ func checkFunctionCallPollution(call *ssa.Call, callee *ssa.Function, paramDeriv
 // Return Purity Checking
 // =============================================================================
 
-func checkReturnPurity(ret *ssa.Return, fn *ssa.Function, checker PurityChecker) []Violation {
+func (v *Validator) checkReturnPurity(ret *ssa.Return) []Violation {
 	var violations []Violation
-	analyzer := NewAnalyzer(fn, checker)
+	inferencer := NewInferencer(v.fn, v.checker)
 
 	for _, result := range ret.Results {
-		if result == nil || !checker.IsGormDB(result.Type()) {
+		if result == nil || !v.checker.IsGormDB(result.Type()) {
 			continue
 		}
 
-		if analyzer.AnalyzeValue(result).IsPolluted() {
+		if inferencer.InferValue(result).IsPolluted() {
 			violations = append(violations, Violation{
 				Pos:     ret.Pos(),
 				Message: "pure function returns Polluted *gorm.DB (should return result of Session/WithContext/etc., another pure function, or the parameter unchanged)",
