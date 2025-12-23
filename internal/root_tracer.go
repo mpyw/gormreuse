@@ -24,11 +24,11 @@ import (
 // RootTracer traces SSA values to find mutable *gorm.DB roots.
 type RootTracer struct {
 	ssaTracer *SSATracer
-	pureFuncs PureFuncSet
+	pureFuncs *PureFuncSet
 }
 
 // NewRootTracer creates a new RootTracer with the given pure functions.
-func NewRootTracer(pureFuncs PureFuncSet) *RootTracer {
+func NewRootTracer(pureFuncs *PureFuncSet) *RootTracer {
 	return &RootTracer{
 		ssaTracer: NewSSATracer(),
 		pureFuncs: pureFuncs,

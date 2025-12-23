@@ -2,6 +2,7 @@ package internal
 
 import (
 	"go/ast"
+	"go/parser"
 	"go/token"
 	"go/types"
 	"strings"
@@ -18,32 +19,168 @@ type PureFuncKey struct {
 	FuncName     string // Function or method name
 }
 
-// PureFuncSet is a set of pure functions.
-type PureFuncSet map[PureFuncKey]struct{}
+// PureFuncSet is a set of pure functions with caching for external packages.
+type PureFuncSet struct {
+	known map[PureFuncKey]struct{}
+	fset  *token.FileSet
+	cache map[string]*ast.File // cached parsed files
+}
 
-// Contains checks if the given SSA function is in the set.
-func (s PureFuncSet) Contains(fn *ssa.Function) bool {
-	if s == nil || fn == nil {
+// NewPureFuncSet creates a new PureFuncSet.
+func NewPureFuncSet(fset *token.FileSet) *PureFuncSet {
+	return &PureFuncSet{
+		known: make(map[PureFuncKey]struct{}),
+		fset:  fset,
+		cache: make(map[string]*ast.File),
+	}
+}
+
+// Add adds a pure function key to the set.
+func (s *PureFuncSet) Add(key PureFuncKey) {
+	if s != nil && s.known != nil {
+		s.known[key] = struct{}{}
+	}
+}
+
+// Contains checks if the given SSA function is in the set or has a pure directive.
+func (s *PureFuncSet) Contains(fn *ssa.Function) bool {
+	if fn == nil {
 		return false
 	}
 
-	key := PureFuncKey{
-		FuncName: fn.Name(),
+	// First, check the pre-built set (for current package)
+	if s != nil && s.known != nil {
+		key := PureFuncKey{
+			FuncName: fn.Name(),
+		}
+
+		// Get package path
+		if fn.Pkg != nil && fn.Pkg.Pkg != nil {
+			key.PkgPath = fn.Pkg.Pkg.Path()
+		}
+
+		// Get receiver type for methods
+		sig := fn.Signature
+		if sig != nil && sig.Recv() != nil {
+			key.ReceiverType = formatReceiverType(sig.Recv().Type())
+		}
+
+		if _, exists := s.known[key]; exists {
+			return true
+		}
 	}
 
-	// Get package path
-	if fn.Pkg != nil && fn.Pkg.Pkg != nil {
-		key.PkgPath = fn.Pkg.Pkg.Path()
+	// Second, check the SSA function's syntax for pure directive (for external packages)
+	return s.hasPureDirective(fn)
+}
+
+// hasPureDirective checks if an SSA function has a //gormreuse:pure directive.
+// This allows detecting pure functions in external packages.
+func (s *PureFuncSet) hasPureDirective(fn *ssa.Function) bool {
+	if fn == nil {
+		return false
 	}
 
-	// Get receiver type for methods
-	sig := fn.Signature
-	if sig != nil && sig.Recv() != nil {
-		key.ReceiverType = formatReceiverType(sig.Recv().Type())
+	// Try getting syntax from the SSA function (works for current package)
+	syntax := fn.Syntax()
+	if syntax != nil {
+		if funcDecl, ok := syntax.(*ast.FuncDecl); ok && funcDecl.Doc != nil {
+			for _, c := range funcDecl.Doc.List {
+				if isPureComment(c.Text) {
+					return true
+				}
+			}
+		}
 	}
 
-	_, exists := s[key]
-	return exists
+	// Fallback: parse the source file for external packages
+	if s == nil || s.fset == nil {
+		return false
+	}
+
+	obj := fn.Object()
+	if obj == nil {
+		return false
+	}
+
+	pos := obj.Pos()
+	if !pos.IsValid() {
+		return false
+	}
+
+	// Get the filename from the position
+	position := s.fset.Position(pos)
+	filename := position.Filename
+	if filename == "" {
+		return false
+	}
+
+	// Parse the file (with caching)
+	file := s.parseFile(filename)
+	if file == nil {
+		return false
+	}
+
+	// Find the function declaration at this position
+	funcName := fn.Name()
+	var receiverType string
+	if sig := fn.Signature; sig != nil && sig.Recv() != nil {
+		receiverType = formatReceiverType(sig.Recv().Type())
+	}
+
+	return s.hasPureDirectiveInFile(file, funcName, receiverType)
+}
+
+// parseFile parses a Go source file with caching.
+func (s *PureFuncSet) parseFile(filename string) *ast.File {
+	if file, ok := s.cache[filename]; ok {
+		return file
+	}
+
+	// Parse the file
+	file, err := parser.ParseFile(s.fset, filename, nil, parser.ParseComments)
+	if err != nil {
+		s.cache[filename] = nil
+		return nil
+	}
+
+	s.cache[filename] = file
+	return file
+}
+
+// hasPureDirectiveInFile checks if a function in a file has a pure directive.
+func (s *PureFuncSet) hasPureDirectiveInFile(file *ast.File, funcName, receiverType string) bool {
+	for _, decl := range file.Decls {
+		funcDecl, ok := decl.(*ast.FuncDecl)
+		if !ok {
+			continue
+		}
+
+		// Check if this is the function we're looking for
+		if funcDecl.Name.Name != funcName {
+			continue
+		}
+
+		// Check receiver type
+		declReceiverType := ""
+		if funcDecl.Recv != nil && len(funcDecl.Recv.List) > 0 {
+			declReceiverType = stripPointer(exprToString(funcDecl.Recv.List[0].Type))
+		}
+
+		if declReceiverType != receiverType {
+			continue
+		}
+
+		// Found the function, check for pure directive
+		if funcDecl.Doc != nil {
+			for _, c := range funcDecl.Doc.List {
+				if isPureComment(c.Text) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // formatReceiverType extracts the base type name from a receiver type.
@@ -193,10 +330,10 @@ func BuildFunctionIgnoreSet(fset *token.FileSet, file *ast.File) map[token.Pos]s
 }
 
 // BuildPureFunctionSet builds a set of functions marked as pure.
-// Returns a PureFuncSet that can match SSA functions without string comparison.
+// Returns a map of PureFuncKey that can be added to a PureFuncSet.
 // Functions marked pure are assumed NOT to pollute *gorm.DB arguments.
-func BuildPureFunctionSet(fset *token.FileSet, file *ast.File, pkgPath string) PureFuncSet {
-	result := make(PureFuncSet)
+func BuildPureFunctionSet(fset *token.FileSet, file *ast.File, pkgPath string) map[PureFuncKey]struct{} {
+	result := make(map[PureFuncKey]struct{})
 
 	ast.Inspect(file, func(n ast.Node) bool {
 		switch node := n.(type) {
