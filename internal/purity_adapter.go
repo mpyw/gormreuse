@@ -34,3 +34,12 @@ func (c *purityChecker) IsPureUserFunc(fn *ssa.Function) bool {
 	}
 	return c.pureFuncs.Contains(fn)
 }
+
+// IsPureFunctionDecl checks if a function declaration has a pure directive.
+// This is used to determine which functions should be validated.
+func IsPureFunctionDecl(fn *ssa.Function, pureFuncs *PureFuncSet) bool {
+	if pureFuncs == nil {
+		return false
+	}
+	return pureFuncs.Contains(fn)
+}
