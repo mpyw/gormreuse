@@ -3,8 +3,63 @@ package internal
 import (
 	"go/ast"
 	"go/token"
+	"go/types"
 	"strings"
+
+	"golang.org/x/tools/go/ssa"
 )
+
+// PureFuncKey identifies a function marked as pure.
+// This provides a structured way to match AST declarations with SSA functions,
+// avoiding fragile string comparison with fn.String().
+type PureFuncKey struct {
+	PkgPath      string // Package path (e.g., "github.com/example/pkg")
+	ReceiverType string // Receiver type name without pointer/package (e.g., "Orm"), empty for functions
+	FuncName     string // Function or method name
+}
+
+// PureFuncSet is a set of pure functions.
+type PureFuncSet map[PureFuncKey]struct{}
+
+// Contains checks if the given SSA function is in the set.
+func (s PureFuncSet) Contains(fn *ssa.Function) bool {
+	if s == nil || fn == nil {
+		return false
+	}
+
+	key := PureFuncKey{
+		FuncName: fn.Name(),
+	}
+
+	// Get package path
+	if fn.Pkg != nil && fn.Pkg.Pkg != nil {
+		key.PkgPath = fn.Pkg.Pkg.Path()
+	}
+
+	// Get receiver type for methods
+	sig := fn.Signature
+	if sig != nil && sig.Recv() != nil {
+		key.ReceiverType = formatReceiverType(sig.Recv().Type())
+	}
+
+	_, exists := s[key]
+	return exists
+}
+
+// formatReceiverType extracts the base type name from a receiver type.
+// Returns just the type name without pointer (e.g., "Orm" for both *Orm and Orm).
+// Go doesn't allow both pointer and value receivers with the same method name,
+// so the pointer is irrelevant for matching.
+func formatReceiverType(t types.Type) string {
+	// Unwrap pointer if present
+	if ptr, ok := t.(*types.Pointer); ok {
+		t = ptr.Elem()
+	}
+	if named, ok := t.(*types.Named); ok {
+		return named.Obj().Name()
+	}
+	return ""
+}
 
 // ignoreEntry tracks an ignore directive and whether it was used.
 type ignoreEntry struct {
@@ -138,10 +193,10 @@ func BuildFunctionIgnoreSet(fset *token.FileSet, file *ast.File) map[token.Pos]s
 }
 
 // BuildPureFunctionSet builds a set of functions marked as pure.
-// Returns a map of function name (package path + function name) to struct{}.
+// Returns a PureFuncSet that can match SSA functions without string comparison.
 // Functions marked pure are assumed NOT to pollute *gorm.DB arguments.
-func BuildPureFunctionSet(fset *token.FileSet, file *ast.File, pkgPath string) map[string]struct{} {
-	result := make(map[string]struct{})
+func BuildPureFunctionSet(fset *token.FileSet, file *ast.File, pkgPath string) PureFuncSet {
+	result := make(PureFuncSet)
 
 	ast.Inspect(file, func(n ast.Node) bool {
 		switch node := n.(type) {
@@ -149,16 +204,15 @@ func BuildPureFunctionSet(fset *token.FileSet, file *ast.File, pkgPath string) m
 			if node.Doc != nil {
 				for _, c := range node.Doc.List {
 					if isPureComment(c.Text) {
-						// Build full function name: pkgPath.FuncName
-						// For methods: pkgPath.(ReceiverType).MethodName
-						funcName := node.Name.Name
-						if node.Recv != nil && len(node.Recv.List) > 0 {
-							// Method - include receiver type
-							recvType := exprToString(node.Recv.List[0].Type)
-							funcName = "(" + recvType + ")." + funcName
+						key := PureFuncKey{
+							PkgPath:  pkgPath,
+							FuncName: node.Name.Name,
 						}
-						fullName := pkgPath + "." + funcName
-						result[fullName] = struct{}{}
+						if node.Recv != nil && len(node.Recv.List) > 0 {
+							// Method - extract receiver type (without pointer)
+							key.ReceiverType = stripPointer(exprToString(node.Recv.List[0].Type))
+						}
+						result[key] = struct{}{}
 						break
 					}
 				}
@@ -170,7 +224,13 @@ func BuildPureFunctionSet(fset *token.FileSet, file *ast.File, pkgPath string) m
 	return result
 }
 
+// stripPointer removes leading "*" from a type string.
+func stripPointer(s string) string {
+	return strings.TrimPrefix(s, "*")
+}
+
 // exprToString converts an ast.Expr to a string representation.
+// For generic types like GenericReceiver[T], returns just the base type name.
 func exprToString(expr ast.Expr) string {
 	switch e := expr.(type) {
 	case *ast.Ident:
@@ -179,6 +239,12 @@ func exprToString(expr ast.Expr) string {
 		return "*" + exprToString(e.X)
 	case *ast.SelectorExpr:
 		return exprToString(e.X) + "." + e.Sel.Name
+	case *ast.IndexExpr:
+		// Generic type with single type parameter: Type[T] -> Type
+		return exprToString(e.X)
+	case *ast.IndexListExpr:
+		// Generic type with multiple type parameters: Type[T, U] -> Type
+		return exprToString(e.X)
 	default:
 		return ""
 	}

@@ -9,8 +9,8 @@ import (
 )
 
 func TestNewAnalyzer(t *testing.T) {
-	pureFuncs := map[string]struct{}{
-		"test.Pure": {},
+	pureFuncs := PureFuncSet{
+		{PkgPath: "test", FuncName: "Pure"}: {},
 	}
 	analyzer := NewAnalyzer(nil, pureFuncs)
 
@@ -144,7 +144,7 @@ func TestRootTracer_IsPureFunction_NilPureFuncs(t *testing.T) {
 
 func TestNewChecker(t *testing.T) {
 	ignoreMap := make(IgnoreMap)
-	pureFuncs := map[string]struct{}{}
+	pureFuncs := make(PureFuncSet)
 
 	chk := newChecker(nil, ignoreMap, pureFuncs)
 
