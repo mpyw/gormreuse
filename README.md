@@ -67,17 +67,16 @@ gormreuse -test=false ./...
 
 This linter uses a "pollute" model inspired by Rust's move semantics. The core concept:
 
-1. **Safe Methods** (`Session`, `WithContext`) return an **immutable** copy
-2. **Chain Methods** (all others including finishers) **pollute** the receiver if it's mutable-derived
+1. **Immutable-returning methods** (`Session`, `WithContext`, `Begin`, etc.) return an **immutable** instance
+2. **Chain methods** (all others including finishers) **pollute** the receiver if it's mutable-derived
 3. Using a **polluted** mutable instance is a **violation**
 
 ### Method Classification
 
-| Category        | Methods                  | Description                    |
-| --------------- | ------------------------ | ------------------------------ |
-| Safe Methods    | [`Session`](https://pkg.go.dev/gorm.io/gorm#DB.Session), [`WithContext`](https://pkg.go.dev/gorm.io/gorm#DB.WithContext) | Return new immutable instance  |
-| DB Init Methods | [`Begin`](https://pkg.go.dev/gorm.io/gorm#DB.Begin), [`Transaction`](https://pkg.go.dev/gorm.io/gorm#DB.Transaction)   | Create new DB instance         |
-| Chain Methods   | All others               | Pollute mutable receiver       |
+| Category                    | Methods                  | Description                    |
+| --------------------------- | ------------------------ | ------------------------------ |
+| Immutable-Returning Methods | [`Session`](https://pkg.go.dev/gorm.io/gorm#DB.Session), [`WithContext`](https://pkg.go.dev/gorm.io/gorm#DB.WithContext), [`Debug`](https://pkg.go.dev/gorm.io/gorm#DB.Debug), [`Open`](https://pkg.go.dev/gorm.io/gorm#Open), [`Begin`](https://pkg.go.dev/gorm.io/gorm#DB.Begin), [`Transaction`](https://pkg.go.dev/gorm.io/gorm#DB.Transaction) | Return new immutable instance |
+| Chain Methods               | All others               | Pollute mutable receiver       |
 
 ### Automatic Pollution Sources
 
