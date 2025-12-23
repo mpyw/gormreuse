@@ -32,18 +32,23 @@ gormreuse/
 │   └── PURE_VALIDATION_DESIGN.md  # Design doc for 3-state purity model
 ├── internal/                   # SSA-based analysis (modular design)
 │   ├── analyzer.go             # Analyzer orchestrator, entry point
-│   ├── tracing.go              # SSATracer - common SSA traversal patterns
-│   ├── root_tracer.go          # RootTracer - mutable root detection
-│   ├── pollution_tracker.go    # PollutionTracker - pollution state tracking
-│   ├── cfg_analyzer.go         # CFGAnalyzer - control flow graph analysis
-│   ├── instruction_handlers.go # InstructionHandler - Strategy pattern handlers
-│   ├── types.go                # Type utilities, method classification
-│   ├── ignore.go               # Ignore directive handling
-│   ├── pure_validator.go       # Pure function validation (current, to be replaced)
-│   └── purity/                 # [WIP] New purity analysis package
-│       ├── state.go            # PurityState type (Clean/Polluted/Depends)
-│       ├── analyzer.go         # SSA-based state analyzer
-│       └── validator.go        # Pure function contract validator
+│   ├── exports.go              # Re-exports for backward compatibility
+│   ├── purity_adapter.go       # Adapter for purity validation
+│   ├── typeutil/               # Type utilities
+│   │   └── gorm.go             # GORM type checks, immutable method list
+│   ├── directive/              # Comment directive handling
+│   │   ├── common.go           # Shared directive utilities
+│   │   ├── ignore.go           # //gormreuse:ignore handling
+│   │   └── pure.go             # //gormreuse:pure handling
+│   └── ssa/                    # SSA analysis package
+│       ├── doc.go              # Package documentation
+│       ├── tracer.go           # SSATracer, RootTracer
+│       ├── pollution.go        # CFGAnalyzer, PollutionTracker
+│       ├── handler.go          # InstructionHandler implementations
+│       └── purity/             # [WIP] 3-state purity analysis
+│           ├── state.go        # PurityState type (Clean/Polluted/Depends)
+│           ├── inference.go    # Purity state inference (Inferencer)
+│           └── validator.go    # Pure function contract validator
 ├── testdata/
 │   └── src/
 │       ├── gormreuse/          # Test fixtures
