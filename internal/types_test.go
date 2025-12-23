@@ -5,68 +5,30 @@ import (
 	"testing"
 )
 
-func TestIsSafeMethod(t *testing.T) {
+func TestReturnsImmutable(t *testing.T) {
 	tests := []struct {
 		name     string
 		method   string
 		expected bool
 	}{
-		{"Session is safe", "Session", true},
-		{"WithContext is safe", "WithContext", true},
-		{"Find is not safe", "Find", false},
-		{"Where is not safe", "Where", false},
-		{"Create is not safe", "Create", false},
+		// Safe methods
+		{"Session returns immutable", "Session", true},
+		{"WithContext returns immutable", "WithContext", true},
+		{"Debug returns immutable", "Debug", true},
+		// Init methods
+		{"Open returns immutable", "Open", true},
+		{"Begin returns immutable", "Begin", true},
+		{"Transaction returns immutable", "Transaction", true},
+		// Chain methods
+		{"Find does not return immutable", "Find", false},
+		{"Where does not return immutable", "Where", false},
+		{"Create does not return immutable", "Create", false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := IsSafeMethod(tt.method); got != tt.expected {
-				t.Errorf("IsSafeMethod(%q) = %v, want %v", tt.method, got, tt.expected)
-			}
-		})
-	}
-}
-
-func TestIsDBInitMethod(t *testing.T) {
-	tests := []struct {
-		name     string
-		method   string
-		expected bool
-	}{
-		{"Begin is init", "Begin", true},
-		{"Transaction is init", "Transaction", true},
-		{"Find is not init", "Find", false},
-		{"Session is not init", "Session", false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := IsDBInitMethod(tt.method); got != tt.expected {
-				t.Errorf("IsDBInitMethod(%q) = %v, want %v", tt.method, got, tt.expected)
-			}
-		})
-	}
-}
-
-func TestIsChainMethod(t *testing.T) {
-	tests := []struct {
-		name     string
-		method   string
-		expected bool
-	}{
-		{"Find is chain", "Find", true},
-		{"Where is chain", "Where", true},
-		{"Create is chain", "Create", true},
-		{"Session is not chain", "Session", false},
-		{"WithContext is not chain", "WithContext", false},
-		{"Begin is not chain", "Begin", false},
-		{"Transaction is not chain", "Transaction", false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := IsChainMethod(tt.method); got != tt.expected {
-				t.Errorf("IsChainMethod(%q) = %v, want %v", tt.method, got, tt.expected)
+			if got := ReturnsImmutable(tt.method); got != tt.expected {
+				t.Errorf("ReturnsImmutable(%q) = %v, want %v", tt.method, got, tt.expected)
 			}
 		})
 	}

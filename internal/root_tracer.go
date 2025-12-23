@@ -239,12 +239,8 @@ func (t *RootTracer) isImmutableSource(v ssa.Value) bool {
 		if callee == nil {
 			return false
 		}
-		// Safe Methods (Session, WithContext) return immutable
-		if IsSafeMethod(callee.Name()) {
-			return true
-		}
-		// DB Init Methods (Open, etc.) return immutable
-		if IsDBInitMethod(callee.Name()) {
+		// Immutable-returning methods (Session, WithContext, Open, Begin, etc.)
+		if ReturnsImmutable(callee.Name()) {
 			return true
 		}
 		return false

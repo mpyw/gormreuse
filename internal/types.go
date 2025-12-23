@@ -40,37 +40,23 @@ func isGormDBNamed(t types.Type) bool {
 // Method Classification
 // =============================================================================
 
-// SafeMethods are methods that return a new immutable instance.
-// After calling these at the end of a chain, the returned *gorm.DB can be reused.
-var SafeMethods = map[string]struct{}{
+// ImmutableReturningMethods are methods/functions that return a new immutable
+// *gorm.DB instance (clone: 1). These include:
+//   - Safe methods: Session, WithContext, Debug (can be used mid-chain)
+//   - Init methods: Open, Begin, Transaction (start new chains)
+var ImmutableReturningMethods = map[string]struct{}{
+	// Safe methods - return immutable copy
 	"Session":     {},
 	"WithContext": {},
 	"Debug":       {},
-}
-
-// DBInitMethods are methods that create a new DB instance.
-// These are starting points for chains.
-var DBInitMethods = map[string]struct{}{
+	// Init methods - create new instance
 	"Open":        {},
 	"Begin":       {},
 	"Transaction": {},
 }
 
-// IsSafeMethod returns true if the method name is a safe method.
-func IsSafeMethod(name string) bool {
-	_, ok := SafeMethods[name]
+// ReturnsImmutable returns true if the method/function returns an immutable *gorm.DB.
+func ReturnsImmutable(name string) bool {
+	_, ok := ImmutableReturningMethods[name]
 	return ok
-}
-
-// IsDBInitMethod returns true if the method name is a DB init method.
-func IsDBInitMethod(name string) bool {
-	_, ok := DBInitMethods[name]
-	return ok
-}
-
-// IsChainMethod returns true if the method is a chain method
-// (modifies internal state). This is the default - anything that's
-// not a safe method or DB init method is a chain method.
-func IsChainMethod(name string) bool {
-	return !IsSafeMethod(name) && !IsDBInitMethod(name)
 }
