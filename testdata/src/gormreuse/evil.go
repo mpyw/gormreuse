@@ -250,10 +250,11 @@ func pureFunction(db *gorm.DB) {
 }
 
 // helperPureWithQuery is a pure helper that creates a new chain.
+// It must use Session() to ensure it returns an immutable *gorm.DB.
 //
 //gormreuse:pure
 func helperPureWithQuery(db *gorm.DB) *gorm.DB {
-	return db.Where("extra = ?", 1) // Returns new chain, doesn't pollute original
+	return db.Session(&gorm.Session{}).Where("extra = ?", 1).Session(&gorm.Session{}) // Creates immutable copy
 }
 
 // pureFunctionWithReturn demonstrates pure function returning new chain.

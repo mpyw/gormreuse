@@ -28,6 +28,8 @@ gormreuse/
 ├── cmd/
 │   └── gormreuse/              # CLI entry point (singlechecker)
 │       └── main.go
+├── docs/
+│   └── PURE_VALIDATION_DESIGN.md  # Design doc for 3-state purity model
 ├── internal/                   # SSA-based analysis (modular design)
 │   ├── analyzer.go             # Analyzer orchestrator, entry point
 │   ├── tracing.go              # SSATracer - common SSA traversal patterns
@@ -36,14 +38,20 @@ gormreuse/
 │   ├── cfg_analyzer.go         # CFGAnalyzer - control flow graph analysis
 │   ├── instruction_handlers.go # InstructionHandler - Strategy pattern handlers
 │   ├── types.go                # Type utilities, method classification
-│   └── ignore.go               # Ignore directive handling
+│   ├── ignore.go               # Ignore directive handling
+│   ├── pure_validator.go       # Pure function validation (current, to be replaced)
+│   └── purity/                 # [WIP] New purity analysis package
+│       ├── state.go            # PurityState type (Clean/Polluted/Depends)
+│       ├── analyzer.go         # SSA-based state analyzer
+│       └── validator.go        # Pure function contract validator
 ├── testdata/
 │   └── src/
 │       ├── gormreuse/          # Test fixtures
 │       │   ├── basic.go        # Basic patterns
 │       │   ├── advanced.go     # Complex patterns
 │       │   ├── evil.go         # Edge cases, closures, defer, goroutines
-│       │   └── ignore.go       # Directive tests
+│       │   ├── ignore.go       # Directive tests
+│       │   └── pure_validation.go  # Pure function validation tests
 │       └── gorm.io/gorm/       # Library stub
 ├── e2e/
 │   └── internal/               # SQL behavior verification tests (separate module)
@@ -182,6 +190,31 @@ When refactoring code, follow these rules strictly:
 - **Nested defer/goroutine**: `go func() { defer q.Find(nil) }()` - deep nested defer/goroutine chains not fully tracked
 
 These are documented in `testdata/src/gormreuse/evil.go` with `[LIMITATION]` markers.
+
+## Work in Progress
+
+### Pure Function Validation (3-State Model)
+
+**Design Document**: [`docs/PURE_VALIDATION_DESIGN.md`](docs/PURE_VALIDATION_DESIGN.md)
+
+The `//gormreuse:pure` directive validation is being enhanced with a 3-state purity model:
+
+| State | Meaning | Example |
+|-------|---------|---------|
+| `Clean` | Always immutable | `db.Session(&gorm.Session{})` |
+| `Polluted` | Tainted, unsafe | `db.Where("x")` after terminal use |
+| `Depends(param)` | Depends on argument | `return db` (identity function) |
+
+This enables accurate validation of pure functions that return their arguments unchanged:
+
+```go
+//gormreuse:pure
+func identity(db *gorm.DB) *gorm.DB {
+    return db  // OK: Depends(db) - doesn't pollute, state depends on caller
+}
+```
+
+**Implementation Status**: See `docs/PURE_VALIDATION_DESIGN.md` for detailed design and progress.
 
 ## Related Projects
 

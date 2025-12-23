@@ -52,9 +52,19 @@ func (t *RootTracer) FindAllMutableRoots(v ssa.Value) []ssa.Value {
 	return t.traceAll(v, make(map[ssa.Value]bool))
 }
 
-// IsPureFunction checks if a function is marked as pure.
-func (t *RootTracer) IsPureFunction(fn *ssa.Function) bool {
+// IsPureFunctionUserDefined checks if a user-defined function is marked as pure (//gormreuse:pure).
+func (t *RootTracer) IsPureFunctionUserDefined(fn *ssa.Function) bool {
 	return t.pureFuncs.Contains(fn)
+}
+
+// IsPureFunction checks if a function is pure.
+// Pure functions don't pollute *gorm.DB arguments and return immutable *gorm.DB (if any).
+// This covers both builtin methods (Session, WithContext, etc.) and user-defined pure functions.
+func (t *RootTracer) IsPureFunction(fn *ssa.Function) bool {
+	if fn == nil {
+		return false
+	}
+	return IsPureFunctionBuiltin(fn.Name()) || t.IsPureFunctionUserDefined(fn)
 }
 
 // =============================================================================
@@ -231,14 +241,8 @@ func (t *RootTracer) isImmutableSource(v ssa.Value) bool {
 		return true
 	case *ssa.Call:
 		callee := val.Call.StaticCallee()
-		if callee == nil {
-			return false
-		}
-		// Immutable-returning methods (Session, WithContext, Open, Begin, etc.)
-		if ReturnsImmutable(callee.Name()) {
-			return true
-		}
-		return false
+		// Pure functions return immutable *gorm.DB
+		return t.IsPureFunction(callee)
 	default:
 		return false
 	}

@@ -55,8 +55,10 @@ var ImmutableReturningMethods = map[string]struct{}{
 	"Transaction": {},
 }
 
-// ReturnsImmutable returns true if the method/function returns an immutable *gorm.DB.
-func ReturnsImmutable(name string) bool {
+// IsPureFunctionBuiltin returns true if the builtin method/function is pure.
+// Pure functions don't pollute arguments and return immutable *gorm.DB.
+// This includes Session, WithContext, Debug, Open, Begin, Transaction.
+func IsPureFunctionBuiltin(name string) bool {
 	_, ok := ImmutableReturningMethods[name]
 	return ok
 }

@@ -50,6 +50,13 @@ func RunSSA(
 			}
 		}
 
+		// Validate pure function contracts
+		if IsPureFunctionDecl(fn, pureFuncs) {
+			for _, v := range ValidatePureFunction(fn, pureFuncs) {
+				pass.Reportf(v.Pos, "%s", v.Message)
+			}
+		}
+
 		chk := newChecker(pass, ignoreMap, pureFuncs)
 		chk.checkFunction(fn)
 	}

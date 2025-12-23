@@ -5,30 +5,29 @@ import (
 	"testing"
 )
 
-func TestReturnsImmutable(t *testing.T) {
+func TestIsPureFunctionBuiltin(t *testing.T) {
 	tests := []struct {
 		name     string
 		method   string
 		expected bool
 	}{
-		// Safe methods
-		{"Session returns immutable", "Session", true},
-		{"WithContext returns immutable", "WithContext", true},
-		{"Debug returns immutable", "Debug", true},
-		// Init methods
-		{"Open returns immutable", "Open", true},
-		{"Begin returns immutable", "Begin", true},
-		{"Transaction returns immutable", "Transaction", true},
-		// Chain methods
-		{"Find does not return immutable", "Find", false},
-		{"Where does not return immutable", "Where", false},
-		{"Create does not return immutable", "Create", false},
+		// Pure builtin methods
+		{"Session is pure", "Session", true},
+		{"WithContext is pure", "WithContext", true},
+		{"Debug is pure", "Debug", true},
+		{"Open is pure", "Open", true},
+		{"Begin is pure", "Begin", true},
+		{"Transaction is pure", "Transaction", true},
+		// Non-pure methods (chain methods)
+		{"Find is not pure", "Find", false},
+		{"Where is not pure", "Where", false},
+		{"Create is not pure", "Create", false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := ReturnsImmutable(tt.method); got != tt.expected {
-				t.Errorf("ReturnsImmutable(%q) = %v, want %v", tt.method, got, tt.expected)
+			if got := IsPureFunctionBuiltin(tt.method); got != tt.expected {
+				t.Errorf("IsPureFunctionBuiltin(%q) = %v, want %v", tt.method, got, tt.expected)
 			}
 		})
 	}
