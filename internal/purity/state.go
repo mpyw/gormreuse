@@ -192,16 +192,36 @@ func (s State) String() string {
 }
 
 // Equal returns true if two states are equal.
+//
+// For Depends states, compares parameter sets (order-independent):
+//
+//	Depends(db1, db2).Equal(Depends(db2, db1))  // true  - same set
+//	Depends(db1, db2).Equal(Depends(db1))       // false - different size
+//	Depends(db1).Equal(Depends(db2))            // false - different params
 func (s State) Equal(other State) bool {
 	if s.kind != other.kind {
 		return false
 	}
 	if s.kind != KindDepends {
+		// Clean == Clean, Polluted == Polluted
 		return true
 	}
+
+	// Depends state: compare parameter sets
+	// Order doesn't matter, so we use set comparison.
+	//
+	// Algorithm:
+	//   1. Early exit if sizes differ
+	//   2. Build set from s.deps
+	//   3. Check all other.deps exist in set
+	//
+	// Since sizes are equal and deps are deduplicated (see Depends constructor),
+	// if all of other.deps are in set, the sets are identical.
+
 	if len(s.deps) != len(other.deps) {
 		return false
 	}
+
 	set := make(map[*ssa.Parameter]bool, len(s.deps))
 	for _, p := range s.deps {
 		set[p] = true
