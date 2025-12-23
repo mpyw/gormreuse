@@ -9,6 +9,7 @@ require (
 	golang.org/x/sync v0.19.0 // indirect
 )
 
-// Retract all previous versions due to -test flag not working
-// (conflicted with singlechecker's built-in flag)
-retract [v0.1.0, v0.2.0]
+// Retract all previous versions due to critical bugs:
+// - v0.1.0-v0.2.0: -test flag conflicted with singlechecker's built-in flag
+// - v0.3.0-v0.4.1: pure directive did not make return values immutable
+retract [v0.1.0, v0.4.1]
