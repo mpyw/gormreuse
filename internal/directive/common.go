@@ -1,3 +1,8 @@
+// Package directive handles gormreuse comment directives.
+//
+// Supported directives:
+//   - //gormreuse:ignore - Suppress warnings for the next line or same line
+//   - //gormreuse:pure - Mark function/method as not polluting its *gorm.DB argument
 package directive
 
 import (

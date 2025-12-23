@@ -88,31 +88,6 @@ func NewPollutionTracker(cfgAnalyzer *CFGAnalyzer, fn *ssa.Function) *PollutionT
 	return ssapkg.NewPollutionTracker(cfgAnalyzer, fn)
 }
 
-// NewRootTracer creates a new RootTracer.
-func NewRootTracer(pureFuncs *PureFuncSet) *RootTracer {
-	return ssapkg.NewRootTracer(pureFuncs)
-}
-
-// NewSSATracer creates a new SSATracer.
-func NewSSATracer() *SSATracer {
-	return ssapkg.NewSSATracer()
-}
-
-// DefaultHandlers returns the default set of instruction handlers.
-func DefaultHandlers() []InstructionHandler {
-	return ssapkg.DefaultHandlers()
-}
-
-// ClosureCapturesGormDB checks if a MakeClosure captures any *gorm.DB values.
-func ClosureCapturesGormDB(mc *ssa.MakeClosure) bool {
-	return ssapkg.ClosureCapturesGormDB(mc)
-}
-
-// IsNilConst checks if a value is a nil constant.
-func IsNilConst(v ssa.Value) bool {
-	return ssapkg.IsNilConst(v)
-}
-
 // NewAnalyzer creates a new SSA Analyzer (for test compatibility).
 func NewAnalyzer(fn *ssa.Function, pureFuncs *PureFuncSet) *ssaAnalyzer {
 	return newSSAAnalyzer(fn, pureFuncs)

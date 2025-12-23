@@ -1,4 +1,3 @@
-// Package ssa provides SSA-based analysis for GORM *gorm.DB reuse detection.
 package ssa
 
 import (

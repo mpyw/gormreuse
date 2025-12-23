@@ -1,12 +1,12 @@
-// Package ssa provides SSA-based analysis for GORM *gorm.DB reuse detection.
 package ssa
 
 import (
 	"go/token"
 
+	"golang.org/x/tools/go/ssa"
+
 	"github.com/mpyw/gormreuse/internal/directive"
 	"github.com/mpyw/gormreuse/internal/typeutil"
-	"golang.org/x/tools/go/ssa"
 )
 
 // =============================================================================

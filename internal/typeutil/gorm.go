@@ -1,3 +1,7 @@
+// Package typeutil provides type-related utilities for GORM analysis.
+//
+// It includes functions to check if a type is *gorm.DB and to identify
+// immutable-returning GORM methods (Session, WithContext, Debug, etc.).
 package typeutil
 
 import (
