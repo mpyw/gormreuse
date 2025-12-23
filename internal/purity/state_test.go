@@ -6,23 +6,11 @@ import (
 	"golang.org/x/tools/go/ssa"
 )
 
-// mockParam creates a mock parameter for testing.
-// The name field is set directly for String() tests.
-type mockParamWrapper struct {
-	*ssa.Parameter
-	name string
-}
-
-func (m *mockParamWrapper) Name() string {
-	return m.name
-}
-
 // createMockParams creates mock parameters for testing.
 // We use actual ssa.Parameter pointers for identity comparison.
 var (
 	mockP1 = &ssa.Parameter{}
 	mockP2 = &ssa.Parameter{}
-	mockP3 = &ssa.Parameter{}
 )
 
 func TestKind_String(t *testing.T) {

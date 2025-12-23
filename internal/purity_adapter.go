@@ -3,8 +3,9 @@ package internal
 import (
 	"go/types"
 
-	"github.com/mpyw/gormreuse/internal/purity"
 	"golang.org/x/tools/go/ssa"
+
+	"github.com/mpyw/gormreuse/internal/purity"
 )
 
 // =============================================================================

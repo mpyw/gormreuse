@@ -4,10 +4,11 @@ package internal
 import (
 	"go/token"
 
-	"github.com/mpyw/gormreuse/internal/purity"
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/analysis/passes/buildssa"
 	"golang.org/x/tools/go/ssa"
+
+	"github.com/mpyw/gormreuse/internal/purity"
 )
 
 // =============================================================================
