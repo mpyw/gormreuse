@@ -13,4 +13,5 @@ require (
 // - v0.1.0-v0.2.0: -test flag conflicted with singlechecker's built-in flag
 // - v0.3.0-v0.4.1: pure directive did not make return values immutable
 // - v0.5.0: pure directive on methods failed due to fn.String() format mismatch
-retract [v0.1.0, v0.5.0]
+// - v0.6.0: pure directive in external packages was not detected
+retract [v0.1.0, v0.6.0]
