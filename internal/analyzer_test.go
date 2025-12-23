@@ -9,9 +9,8 @@ import (
 )
 
 func TestNewAnalyzer(t *testing.T) {
-	pureFuncs := PureFuncSet{
-		{PkgPath: "test", FuncName: "Pure"}: {},
-	}
+	pureFuncs := NewPureFuncSet(nil)
+	pureFuncs.Add(PureFuncKey{PkgPath: "test", FuncName: "Pure"})
 	analyzer := NewAnalyzer(nil, pureFuncs)
 
 	if analyzer.fn != nil {
@@ -144,7 +143,7 @@ func TestRootTracer_IsPureFunction_NilPureFuncs(t *testing.T) {
 
 func TestNewChecker(t *testing.T) {
 	ignoreMap := make(IgnoreMap)
-	pureFuncs := make(PureFuncSet)
+	pureFuncs := NewPureFuncSet(nil)
 
 	chk := newChecker(nil, ignoreMap, pureFuncs)
 
