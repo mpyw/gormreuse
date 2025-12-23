@@ -72,6 +72,37 @@ func (t *RootTracer) IsPureFunction(fn *ssa.Function) bool {
 // =============================================================================
 
 // trace traces a value to find its mutable root using traceResult pattern.
+//
+// This is the core recursive function that traverses SSA values backwards
+// to find the origin of a *gorm.DB chain.
+//
+// Example scenarios:
+//
+//	Scenario 1: Simple chain
+//	  db.Session(&Session{}).Where("x").Find(nil)
+//	  └─ Find receives Where result
+//	     └─ trace(Where result)
+//	        └─ Session result is immutable → Where call is mutable root
+//
+//	Scenario 2: IIFE (Immediately Invoked Function Expression)
+//	  q := db.Where("x")
+//	  _ = func() *gorm.DB {
+//	      return q.Where("y")
+//	  }().Find(nil)
+//	  └─ trace(IIFE call)
+//	     └─ TraceIIFEReturns → finds q.Where("y")
+//	        └─ trace(Where result) → q is mutable root
+//
+//	Scenario 3: Helper function
+//	  //gormreuse:pure
+//	  func safeQuery(db *gorm.DB) *gorm.DB { return db.Session(&Session{}) }
+//	  safeQuery(db).Find(nil)
+//	  └─ trace(safeQuery result)
+//	     └─ IsPureFunction(safeQuery) → immutable (no mutable root)
+//
+// Returns:
+//   - immutableResult(): value is safe to reuse (Session result, parameter, etc.)
+//   - mutableRootResult(root): found the pollutable origin value
 func (t *RootTracer) trace(v ssa.Value, visited map[ssa.Value]bool) traceResult {
 	if visited[v] {
 		return immutableResult() // Cycle detected - treat as immutable
@@ -141,7 +172,36 @@ func (t *RootTracer) traceWithVisited(v ssa.Value, visited map[ssa.Value]bool) s
 	return nil
 }
 
-// traceNonCall handles non-call SSA values.
+// traceNonCall handles non-call SSA values (Phi, UnOp, FreeVar, Alloc, etc.).
+//
+// This function delegates to SSATracer for mechanism and applies policy decisions.
+//
+// Example scenarios:
+//
+//	Phi (control flow merge):
+//	  if cond {
+//	      x = db.Where("a")  // edge 1
+//	  } else {
+//	      x = db.Where("b")  // edge 2
+//	  }
+//	  x.Find(nil)  // x is Phi node
+//	  └─ TracePhiEdges → first mutable root from edges
+//
+//	UnOp (pointer dereference):
+//	  var ptr **gorm.DB = &q
+//	  (*ptr).Find(nil)
+//	  └─ TraceUnOp → trace through *ptr to q
+//
+//	FreeVar (closure capture):
+//	  q := db.Where("x")
+//	  f := func() { q.Find(nil) }  // q is FreeVar inside closure
+//	  └─ TraceFreeVar → finds binding q from parent function
+//
+//	Alloc (local variable via pointer):
+//	  var q *gorm.DB
+//	  q = db.Where("x")  // Store to Alloc
+//	  q.Find(nil)        // Load from Alloc via UnOp
+//	  └─ TraceAllocStore → finds stored value
 func (t *RootTracer) traceNonCall(v ssa.Value, visited map[ssa.Value]bool) traceResult {
 	// Create trace callback for SSATracer
 	traceCallback := func(val ssa.Value) ssa.Value {
@@ -193,6 +253,27 @@ func (t *RootTracer) traceNonCall(v ssa.Value, visited map[ssa.Value]bool) trace
 // =============================================================================
 
 // traceAll collects ALL possible mutable roots (for pollution checking).
+//
+// Unlike trace() which returns the first found root, this collects ALL roots.
+// This is critical for pollution detection: if ANY path leads to a polluted value,
+// we should detect it.
+//
+// Example scenario:
+//
+//	q1 := db.Where("a")
+//	q2 := db.Where("b")
+//	if cond {
+//	    x = q1
+//	} else {
+//	    x = q2
+//	}
+//	x.Find(nil)  // Pollutes BOTH q1 and q2!
+//	x.Find(nil)  // Violation for BOTH roots
+//
+//	SSA representation:
+//	  x = Phi(q1, q2)
+//	  └─ traceAll returns [q1.Where("a"), q2.Where("b")]
+//	  Both are marked polluted, so second Find detects violation
 func (t *RootTracer) traceAll(v ssa.Value, visited map[ssa.Value]bool) []ssa.Value {
 	if v == nil || visited[v] {
 		return nil

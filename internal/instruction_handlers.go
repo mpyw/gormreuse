@@ -39,6 +39,9 @@ type InstructionHandler interface {
 // =============================================================================
 
 // CallHandler handles *ssa.Call instructions.
+//
+// This is the primary handler for detecting *gorm.DB reuse violations.
+// It processes method calls on *gorm.DB and function calls that accept *gorm.DB.
 type CallHandler struct{}
 
 func (h *CallHandler) CanHandle(instr ssa.Instruction) bool {
@@ -46,6 +49,29 @@ func (h *CallHandler) CanHandle(instr ssa.Instruction) bool {
 	return ok
 }
 
+// Handle processes a Call instruction for pollution detection.
+//
+// Example scenarios:
+//
+//	Scenario 1: Terminal chain method (pollutes the root)
+//	  q := db.Where("x")     // q is mutable root
+//	  q.Find(nil)            // Terminal call → marks q as polluted
+//	  q.Find(nil)            // Violation! q is already polluted
+//
+//	Scenario 2: Bound method (method value)
+//	  q := db.Where("x")
+//	  find := q.Find         // MakeClosure with receiver bound
+//	  find(nil)              // Call through bound method → pollutes q
+//
+//	Scenario 3: Helper function pollutes argument
+//	  q := db.Where("x")
+//	  doSomething(q)         // Non-pure function → marks q as polluted
+//
+//	Scenario 4: Loop with external root
+//	  q := db.Where("x")
+//	  for i := range items {
+//	      q.Find(nil)        // In loop + root outside → immediate violation
+//	  }
 func (h *CallHandler) Handle(instr ssa.Instruction, ctx *HandlerContext) {
 	call := instr.(*ssa.Call)
 	isInLoop := ctx.LoopInfo.IsInLoop(call.Block())
@@ -117,6 +143,23 @@ func (h *CallHandler) Handle(instr ssa.Instruction, ctx *HandlerContext) {
 	}
 }
 
+// processBoundMethodCall handles calls through method values (bound methods).
+//
+// Example:
+//
+//	q := db.Where("x")
+//	find := q.Find          // MakeClosure: Fn=(*gorm.DB).Find$bound, Bindings=[q]
+//	find(&users)            // Call: Value=MakeClosure
+//
+//	SSA representation:
+//	  t0 = db.Where("x")              // q
+//	  t1 = make closure (*gorm.DB).Find$bound [t0]  // find
+//	  t2 = t1(&users)                 // call through bound method
+//
+//	Detection:
+//	  1. mc.Bindings[0] is the receiver (q)
+//	  2. Method name has "$bound" suffix
+//	  3. Apply same terminal/pollution logic as direct calls
 func (h *CallHandler) processBoundMethodCall(call *ssa.Call, mc *ssa.MakeClosure, isInLoop bool, ctx *HandlerContext) {
 	if len(mc.Bindings) == 0 {
 		return
@@ -181,6 +224,23 @@ func (h *CallHandler) checkFunctionCallPollution(call *ssa.Call, ctx *HandlerCon
 	}
 }
 
+// isTerminalCall determines if a call consumes the chain (vs continues building it).
+//
+// Example:
+//
+//	Terminal calls (result not used as receiver):
+//	  q.Find(&users)                  // Returns *gorm.DB but not used for chaining
+//	  q.Where("x")                    // Result is not used at all
+//	  q.Where("x").Find(&users)       // Find is terminal, Where is not
+//
+//	Non-terminal calls (result used as receiver):
+//	  q.Where("x").Where("y")         // First Where's result is receiver of second
+//	  q.Joins("...").Preload("...")   // Joins result is receiver of Preload
+//
+//	Detection logic:
+//	  1. If return type is not *gorm.DB → terminal
+//	  2. If no referrers → terminal
+//	  3. If any referrer uses this as receiver for *gorm.DB method → non-terminal
 func (h *CallHandler) isTerminalCall(call *ssa.Call) bool {
 	if !IsGormDB(call.Type()) {
 		return true
@@ -277,6 +337,21 @@ func (h *GoHandler) processCallCommon(callCommon *ssa.CallCommon, pos token.Pos,
 
 // =============================================================================
 // DeferHandler handles *ssa.Defer instructions.
+//
+// Deferred calls execute at function exit, so they see pollution from ANY block.
+// This is different from regular calls which only see pollution from reachable blocks.
+//
+// Example:
+//
+//	func example(db *gorm.DB) {
+//	    q := db.Where("x")
+//	    defer q.Find(nil)       // Deferred: will execute at function exit
+//	    q.Find(nil)             // Pollutes q
+//	}                           // defer executes here → violation!
+//
+// Detection:
+//   Unlike regular calls, defer checks IsPollutedAnywhere (not IsPollutedAt)
+//   because the deferred call executes after all other code in the function.
 // =============================================================================
 
 type DeferHandler struct{}
@@ -286,6 +361,7 @@ func (h *DeferHandler) CanHandle(instr ssa.Instruction) bool {
 	return ok
 }
 
+// Handle processes a Defer instruction for pollution detection.
 func (h *DeferHandler) Handle(instr ssa.Instruction, ctx *HandlerContext) {
 	d := instr.(*ssa.Defer)
 	h.processCallCommon(&d.Call, d.Pos(), d.Parent(), ctx)
@@ -334,6 +410,16 @@ func (h *DeferHandler) processCallCommon(callCommon *ssa.CallCommon, pos token.P
 
 // =============================================================================
 // SendHandler handles *ssa.Send instructions (channel send).
+//
+// Sending *gorm.DB through a channel is treated as pollution because:
+//   - The receiver goroutine might use it concurrently
+//   - We can't track usage across goroutines statically
+//
+// Example:
+//
+//	q := db.Where("x")
+//	ch <- q                 // Send pollutes q
+//	q.Find(nil)             // Violation! q was sent to channel
 // =============================================================================
 
 type SendHandler struct{}
@@ -343,6 +429,7 @@ func (h *SendHandler) CanHandle(instr ssa.Instruction) bool {
 	return ok
 }
 
+// Handle marks *gorm.DB values sent to channels as polluted.
 func (h *SendHandler) Handle(instr ssa.Instruction, ctx *HandlerContext) {
 	send := instr.(*ssa.Send)
 
@@ -360,6 +447,20 @@ func (h *SendHandler) Handle(instr ssa.Instruction, ctx *HandlerContext) {
 
 // =============================================================================
 // StoreHandler handles *ssa.Store instructions.
+//
+// Stores to slice/array elements are treated as pollution because:
+//   - The slice might be shared with other code
+//   - We can't track which element is accessed
+//
+// Example:
+//
+//	q := db.Where("x")
+//	dbs := make([]*gorm.DB, 1)
+//	dbs[0] = q              // Store to IndexAddr → pollutes q
+//	q.Find(nil)             // Violation! q was stored in slice
+//
+// Note: Simple stores to local variables (Alloc) are NOT pollution.
+//       They're handled by SSATracer for value tracking.
 // =============================================================================
 
 type StoreHandler struct{}
@@ -369,6 +470,7 @@ func (h *StoreHandler) CanHandle(instr ssa.Instruction) bool {
 	return ok
 }
 
+// Handle marks *gorm.DB values stored to slice elements as polluted.
 func (h *StoreHandler) Handle(instr ssa.Instruction, ctx *HandlerContext) {
 	store := instr.(*ssa.Store)
 
@@ -394,6 +496,17 @@ func (h *StoreHandler) Handle(instr ssa.Instruction, ctx *HandlerContext) {
 
 // =============================================================================
 // MapUpdateHandler handles *ssa.MapUpdate instructions.
+//
+// Storing *gorm.DB in a map is treated as pollution because:
+//   - The map might be shared with other code
+//   - We can't track which key is accessed or when
+//
+// Example:
+//
+//	q := db.Where("x")
+//	m := make(map[string]*gorm.DB)
+//	m["key"] = q            // MapUpdate → pollutes q
+//	q.Find(nil)             // Violation! q was stored in map
 // =============================================================================
 
 type MapUpdateHandler struct{}
@@ -403,6 +516,7 @@ func (h *MapUpdateHandler) CanHandle(instr ssa.Instruction) bool {
 	return ok
 }
 
+// Handle marks *gorm.DB values stored in maps as polluted.
 func (h *MapUpdateHandler) Handle(instr ssa.Instruction, ctx *HandlerContext) {
 	mapUpdate := instr.(*ssa.MapUpdate)
 
@@ -420,6 +534,16 @@ func (h *MapUpdateHandler) Handle(instr ssa.Instruction, ctx *HandlerContext) {
 
 // =============================================================================
 // MakeInterfaceHandler handles *ssa.MakeInterface instructions.
+//
+// Converting *gorm.DB to interface{} is treated as pollution because:
+//   - Type assertion might extract it later
+//   - We can't track usage through interface types
+//
+// Example:
+//
+//	q := db.Where("x")
+//	var i interface{} = q   // MakeInterface → pollutes q
+//	q.Find(nil)             // Violation! q was wrapped in interface
 // =============================================================================
 
 type MakeInterfaceHandler struct{}
@@ -429,6 +553,7 @@ func (h *MakeInterfaceHandler) CanHandle(instr ssa.Instruction) bool {
 	return ok
 }
 
+// Handle marks *gorm.DB values converted to interfaces as polluted.
 func (h *MakeInterfaceHandler) Handle(instr ssa.Instruction, ctx *HandlerContext) {
 	mi := instr.(*ssa.MakeInterface)
 

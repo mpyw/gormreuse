@@ -79,6 +79,35 @@ func (p *PollutionTracker) IsPollutedInBlock(root ssa.Value, block *ssa.BasicBlo
 // IsPollutedAt checks if the value is polluted at the given block.
 // A value is polluted at block B if there exists a polluted block A
 // such that A can reach B (there is a path from A to B in the CFG).
+//
+// Example:
+//
+//	q := db.Where("x")      // Block 0
+//	if cond {
+//	    q.Find(nil)         // Block 1: pollutes q
+//	}
+//	q.Find(nil)             // Block 2: IsPollutedAt(q, Block2)?
+//
+//	CFG:
+//	  Block0 → Block1 (if true)
+//	        ↘ Block2 (if false, or after Block1)
+//	  Block1 → Block2
+//
+//	Analysis:
+//	  - q is polluted in Block1
+//	  - CanReach(Block1, Block2) = true
+//	  - IsPollutedAt(q, Block2) returns true → violation detected
+//
+// Cross-function case:
+//
+//	func outer() {
+//	    q := db.Where("x")
+//	    f := func() { q.Find(nil) }  // Closure pollutes q
+//	    q.Find(nil)                  // Parent function uses polluted q
+//	}
+//
+//	If polluted block is in a different function (closure), we
+//	conservatively consider it reachable (returns true).
 func (p *PollutionTracker) IsPollutedAt(root ssa.Value, targetBlock *ssa.BasicBlock) bool {
 	state := p.states[root]
 	if state == nil || len(state.pollutedBlocks) == 0 {
@@ -125,11 +154,6 @@ func (p *PollutionTracker) IsPollutedAnywhere(root ssa.Value, fn *ssa.Function) 
 	return false
 }
 
-// GetState returns the state for a root, or nil if not tracked.
-func (p *PollutionTracker) GetState(root ssa.Value) *valueState {
-	return p.states[root]
-}
-
 // CollectViolations returns all detected violations.
 func (p *PollutionTracker) CollectViolations() []Violation {
 	var violations []Violation
@@ -149,6 +173,35 @@ func (p *PollutionTracker) CollectViolations() []Violation {
 // DetectReachabilityViolations performs cross-block violation detection.
 // For each polluted block, checks if ANY OTHER polluted block can reach it.
 // This handles SSA block ordering that doesn't match execution order.
+//
+// This method is called AFTER all instructions have been processed.
+// It detects violations where multiple uses of the same root exist
+// and one can reach another through CFG paths.
+//
+// Example:
+//
+//	q := db.Where("x")
+//	q.Find(nil)              // Block 1: pollutes q at pos=10
+//	q.Find(nil)              // Block 2: pollutes q at pos=20
+//
+//	SSA blocks may be in arbitrary order. DetectReachabilityViolations:
+//	  1. Finds all polluted blocks for q: {Block1:pos10, Block2:pos20}
+//	  2. For Block2, checks if Block1 can reach it
+//	  3. If yes, adds violation at pos=20
+//
+// Cross-function detection (closures):
+//
+//	func outer() {
+//	    q := db.Where("x")
+//	    f := func() { q.Find(nil) }  // pos=10, closure
+//	    f()
+//	    q.Find(nil)                  // pos=20, parent
+//	}
+//
+//	Cases handled:
+//	  - Case 1: src in closure, target in parent (pos order check)
+//	  - Case 2: src in parent, target in closure (pos order check)
+//	  - Case 3: both in closures (pos order check)
 func (p *PollutionTracker) DetectReachabilityViolations() {
 	for _, state := range p.states {
 		if len(state.pollutedBlocks) <= 1 {
