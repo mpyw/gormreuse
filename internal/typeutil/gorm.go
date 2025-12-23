@@ -44,11 +44,13 @@ func isGormDBNamed(t types.Type) bool {
 // Method Classification
 // =============================================================================
 
-// ImmutableReturningMethods are methods/functions that return a new immutable
+// immutableReturningMethods are methods/functions that return a new immutable
 // *gorm.DB instance (clone: 1). These include:
 //   - Safe methods: Session, WithContext, Debug (can be used mid-chain)
 //   - Init methods: Open, Begin, Transaction (start new chains)
-var ImmutableReturningMethods = map[string]struct{}{
+//
+// This map is unexported to prevent external modification.
+var immutableReturningMethods = map[string]struct{}{
 	// Safe methods - return immutable copy
 	"Session":     {},
 	"WithContext": {},
@@ -63,6 +65,6 @@ var ImmutableReturningMethods = map[string]struct{}{
 // Pure functions don't pollute arguments and return immutable *gorm.DB.
 // This includes Session, WithContext, Debug, Open, Begin, Transaction.
 func IsPureFunctionBuiltin(name string) bool {
-	_, ok := ImmutableReturningMethods[name]
+	_, ok := immutableReturningMethods[name]
 	return ok
 }

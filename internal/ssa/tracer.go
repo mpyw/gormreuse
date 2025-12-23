@@ -2,6 +2,7 @@ package ssa
 
 import (
 	"go/token"
+	"go/types"
 
 	"golang.org/x/tools/go/ssa"
 
@@ -50,7 +51,7 @@ func NewSSATracer() *SSATracer {
 // TracePhiEdges traces all edges of a Phi node, skipping nil constants and cycles.
 func (t *SSATracer) TracePhiEdges(phi *ssa.Phi, visited map[ssa.Value]bool, trace func(ssa.Value) ssa.Value) ssa.Value {
 	for _, edge := range phi.Edges {
-		if IsNilConst(edge) {
+		if isNilConst(edge) {
 			continue
 		}
 		if visited[edge] {
@@ -67,7 +68,7 @@ func (t *SSATracer) TracePhiEdges(phi *ssa.Phi, visited map[ssa.Value]bool, trac
 func (t *SSATracer) TraceAllPhiEdges(phi *ssa.Phi, visited map[ssa.Value]bool, trace func(ssa.Value) []ssa.Value) []ssa.Value {
 	var roots []ssa.Value
 	for _, edge := range phi.Edges {
-		if IsNilConst(edge) {
+		if isNilConst(edge) {
 			continue
 		}
 		if visited[edge] {
@@ -264,11 +265,6 @@ type RootTracer struct {
 	pureFuncs *directive.PureFuncSet
 }
 
-// PureFuncs returns the pure functions set (for testing).
-func (t *RootTracer) PureFuncs() *directive.PureFuncSet {
-	return t.pureFuncs
-}
-
 // NewRootTracer creates a new RootTracer with the given pure functions.
 func NewRootTracer(pureFuncs *directive.PureFuncSet) *RootTracer {
 	return &RootTracer{
@@ -432,6 +428,9 @@ func (t *RootTracer) traceAll(v ssa.Value, visited map[ssa.Value]bool) []ssa.Val
 		return t.ssaTracer.TraceAllAllocStores(val, traceAllCallback)
 
 	default:
+		// Clone visited and remove current value to allow trace() to re-process it.
+		// This is needed because traceAll already marked v as visited (line 415),
+		// but we want trace() to find a mutable root through v, not skip it.
 		freshVisited := cloneVisited(visited)
 		delete(freshVisited, v)
 		result := t.trace(v, freshVisited)
@@ -443,9 +442,13 @@ func (t *RootTracer) traceAll(v ssa.Value, visited map[ssa.Value]bool) []ssa.Val
 }
 
 // IsImmutableSource checks if a value is an immutable source.
+// Immutable sources don't need to be traced further and don't get polluted.
 func (t *RootTracer) IsImmutableSource(v ssa.Value) bool {
 	switch val := v.(type) {
 	case *ssa.Parameter:
+		return true
+	case *ssa.Const:
+		// Constants (including nil) are immutable
 		return true
 	case *ssa.Call:
 		callee := val.Call.StaticCallee()
@@ -459,8 +462,25 @@ func (t *RootTracer) IsImmutableSource(v ssa.Value) bool {
 // Helper Functions
 // =============================================================================
 
-// IsNilConst checks if a value is a nil constant.
-func IsNilConst(v ssa.Value) bool {
+// ClosureCapturesGormDB checks if a MakeClosure captures any *gorm.DB values.
+// This is used to determine if a closure needs pollution tracking.
+func ClosureCapturesGormDB(mc *ssa.MakeClosure) bool {
+	for _, binding := range mc.Bindings {
+		t := binding.Type()
+		if typeutil.IsGormDB(t) {
+			return true
+		}
+		if ptr, ok := t.(*types.Pointer); ok {
+			if typeutil.IsGormDB(ptr.Elem()) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// isNilConst checks if a value is a nil constant.
+func isNilConst(v ssa.Value) bool {
 	c, ok := v.(*ssa.Const)
 	if !ok {
 		return false

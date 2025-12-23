@@ -22,7 +22,7 @@ func RunSSA(
 	pass *analysis.Pass,
 	ssaInfo *buildssa.SSA,
 	ignoreMaps map[string]directive.IgnoreMap,
-	funcIgnores map[string]map[token.Pos]struct{},
+	funcIgnores map[string]map[token.Pos]directive.FunctionIgnoreEntry,
 	pureFuncs *directive.PureFuncSet,
 	skipFiles map[string]bool,
 ) {
@@ -43,21 +43,18 @@ func RunSSA(
 
 		// Check if entire function is ignored
 		if funcIgnoreSet, ok := funcIgnores[filename]; ok {
-			if _, ignored := funcIgnoreSet[fn.Pos()]; ignored {
-				// Mark the ignore directive as used
+			if entry, ignored := funcIgnoreSet[fn.Pos()]; ignored {
+				// Mark the ignore directive as used (use the stored line number)
 				if ignoreMap != nil {
-					fnLine := pass.Fset.Position(fn.Pos()).Line
-					// The ignore comment is on the line before the function name
-					ignoreMap.MarkUsed(fnLine - 1)
+					ignoreMap.MarkUsed(entry.DirectiveLine)
 				}
 				continue
 			}
 		}
 
 		// Validate pure function contracts using 3-state purity model
-		if IsPureFunctionDecl(fn, pureFuncs) {
-			checker := newPurityChecker(pureFuncs)
-			for _, v := range purity.ValidateFunction(fn, checker) {
+		if pureFuncs != nil && pureFuncs.Contains(fn) {
+			for _, v := range purity.ValidateFunction(fn, pureFuncs) {
 				pass.Reportf(v.Pos, "%s", v.Message)
 			}
 		}

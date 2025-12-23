@@ -6,12 +6,7 @@
 //   - Depends: Purity depends on referenced parameters
 package purity
 
-import (
-	"fmt"
-	"strings"
-
-	"golang.org/x/tools/go/ssa"
-)
+import "golang.org/x/tools/go/ssa"
 
 // =============================================================================
 // State Kind
@@ -28,20 +23,6 @@ const (
 	// KindDepends represents a value whose purity depends on parameters.
 	KindDepends
 )
-
-// String returns a string representation of the Kind.
-func (k Kind) String() string {
-	switch k {
-	case KindClean:
-		return "Clean"
-	case KindPolluted:
-		return "Polluted"
-	case KindDepends:
-		return "Depends"
-	default:
-		return fmt.Sprintf("Kind(%d)", k)
-	}
-}
 
 // =============================================================================
 // Purity State
@@ -94,19 +75,9 @@ func Depends(params ...*ssa.Parameter) State {
 // State Accessors
 // =============================================================================
 
-// Kind returns the kind of this state.
-func (s State) Kind() Kind {
-	return s.kind
-}
-
 // Deps returns the parameter dependencies for Depends states.
 func (s State) Deps() []*ssa.Parameter {
 	return s.deps
-}
-
-// IsClean returns true if the state is Clean.
-func (s State) IsClean() bool {
-	return s.kind == KindClean
 }
 
 // IsPolluted returns true if the state is Polluted.
@@ -117,24 +88,6 @@ func (s State) IsPolluted() bool {
 // IsDepends returns true if the state is Depends.
 func (s State) IsDepends() bool {
 	return s.kind == KindDepends
-}
-
-// IsValid returns true if the state is valid for a pure function return.
-func (s State) IsValid() bool {
-	return s.kind != KindPolluted
-}
-
-// DependsOn returns true if this state depends on the given parameter.
-func (s State) DependsOn(param *ssa.Parameter) bool {
-	if s.kind != KindDepends {
-		return false
-	}
-	for _, p := range s.deps {
-		if p == param {
-			return true
-		}
-	}
-	return false
 }
 
 // =============================================================================
@@ -168,68 +121,4 @@ func (s State) Merge(other State) State {
 	}
 
 	return Depends(allDeps...)
-}
-
-// String returns a string representation of the state.
-func (s State) String() string {
-	switch s.kind {
-	case KindClean:
-		return "Clean"
-	case KindPolluted:
-		return "Polluted"
-	case KindDepends:
-		if len(s.deps) == 0 {
-			return "Depends()"
-		}
-		names := make([]string, len(s.deps))
-		for i, p := range s.deps {
-			names[i] = p.Name()
-		}
-		return fmt.Sprintf("Depends(%s)", strings.Join(names, ", "))
-	default:
-		return fmt.Sprintf("State(%d)", s.kind)
-	}
-}
-
-// Equal returns true if two states are equal.
-//
-// For Depends states, compares parameter sets (order-independent):
-//
-//	Depends(db1, db2).Equal(Depends(db2, db1))  // true  - same set
-//	Depends(db1, db2).Equal(Depends(db1))       // false - different size
-//	Depends(db1).Equal(Depends(db2))            // false - different params
-func (s State) Equal(other State) bool {
-	if s.kind != other.kind {
-		return false
-	}
-	if s.kind != KindDepends {
-		// Clean == Clean, Polluted == Polluted
-		return true
-	}
-
-	// Depends state: compare parameter sets
-	// Order doesn't matter, so we use set comparison.
-	//
-	// Algorithm:
-	//   1. Early exit if sizes differ
-	//   2. Build set from s.deps
-	//   3. Check all other.deps exist in set
-	//
-	// Since sizes are equal and deps are deduplicated (see Depends constructor),
-	// if all of other.deps are in set, the sets are identical.
-
-	if len(s.deps) != len(other.deps) {
-		return false
-	}
-
-	set := make(map[*ssa.Parameter]bool, len(s.deps))
-	for _, p := range s.deps {
-		set[p] = true
-	}
-	for _, p := range other.deps {
-		if !set[p] {
-			return false
-		}
-	}
-	return true
 }

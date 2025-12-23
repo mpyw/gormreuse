@@ -1,48 +1,19 @@
 package purity
 
 import (
-	"go/types"
 	"testing"
 
 	"golang.org/x/tools/go/ssa"
 )
 
-// mockChecker implements PurityChecker for testing.
-type mockChecker struct {
-	gormTypes     map[types.Type]bool
-	pureMethods   map[string]bool
-	pureUserFuncs map[*ssa.Function]bool
-}
-
-func newMockChecker() *mockChecker {
-	return &mockChecker{
-		gormTypes:     make(map[types.Type]bool),
-		pureMethods:   make(map[string]bool),
-		pureUserFuncs: make(map[*ssa.Function]bool),
-	}
-}
-
-func (m *mockChecker) IsGormDB(t types.Type) bool {
-	return m.gormTypes[t]
-}
-
-func (m *mockChecker) IsPureBuiltinMethod(methodName string) bool {
-	return m.pureMethods[methodName]
-}
-
-func (m *mockChecker) IsPureUserFunc(fn *ssa.Function) bool {
-	return m.pureUserFuncs[fn]
-}
-
 func TestNewInferencer(t *testing.T) {
-	checker := newMockChecker()
-	inf := NewInferencer(nil, checker)
+	inf := NewInferencer(nil, nil)
 
 	if inf == nil {
 		t.Fatal("NewInferencer returned nil")
 	}
-	if inf.checker != checker {
-		t.Error("Inferencer checker not set correctly")
+	if inf.pureFuncs != nil {
+		t.Error("Inferencer pureFuncs should be nil")
 	}
 	if inf.cache == nil {
 		t.Error("Inferencer cache not initialized")
@@ -53,30 +24,27 @@ func TestNewInferencer(t *testing.T) {
 }
 
 func TestInferencer_InferValue_Nil(t *testing.T) {
-	checker := newMockChecker()
-	inf := NewInferencer(nil, checker)
+	inf := NewInferencer(nil, nil)
 
 	state := inf.InferValue(nil)
-	if !state.IsClean() {
-		t.Errorf("InferValue(nil) = %v, want Clean", state)
+	if state.IsPolluted() || state.IsDepends() {
+		t.Error("InferValue(nil) should be Clean")
 	}
 }
 
 func TestInferencer_InferValue_Const(t *testing.T) {
-	checker := newMockChecker()
-	inf := NewInferencer(nil, checker)
+	inf := NewInferencer(nil, nil)
 
 	// Create a nil constant
 	nilConst := &ssa.Const{}
 	state := inf.InferValue(nilConst)
-	if !state.IsClean() {
-		t.Errorf("InferValue(Const) = %v, want Clean", state)
+	if state.IsPolluted() || state.IsDepends() {
+		t.Error("InferValue(Const) should be Clean")
 	}
 }
 
 func TestInferencer_InferValue_Caching(t *testing.T) {
-	checker := newMockChecker()
-	inf := NewInferencer(nil, checker)
+	inf := NewInferencer(nil, nil)
 
 	nilConst := &ssa.Const{}
 
@@ -86,8 +54,9 @@ func TestInferencer_InferValue_Caching(t *testing.T) {
 	// Second call should return cached value
 	state2 := inf.InferValue(nilConst)
 
-	if !state1.Equal(state2) {
-		t.Errorf("Cached value mismatch: %v != %v", state1, state2)
+	// Both should be Clean (constants are immutable)
+	if state1.IsPolluted() || state1.IsDepends() || state2.IsPolluted() || state2.IsDepends() {
+		t.Error("Cached value mismatch: both should be Clean")
 	}
 
 	// Verify it was cached
@@ -97,13 +66,4 @@ func TestInferencer_InferValue_Caching(t *testing.T) {
 }
 
 // Note: More comprehensive tests would require building actual SSA programs.
-// The inferencer is primarily tested through integration tests with the validator.
-
-func TestValidateFunction_Nil(t *testing.T) {
-	checker := newMockChecker()
-
-	violations := ValidateFunction(nil, checker)
-	if len(violations) != 0 {
-		t.Errorf("ValidateFunction(nil) returned %d violations, want 0", len(violations))
-	}
-}
+// The integration tests in analyzer_test.go cover real-world scenarios.

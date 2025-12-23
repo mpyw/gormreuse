@@ -458,30 +458,30 @@ func TestCFGAnalyzer_MarkLoopBlocks(t *testing.T) {
 }
 
 // =============================================================================
-// IsFunctionDescendantOf Tests
+// isFunctionDescendantOf Tests
 // =============================================================================
 
 func TestIsFunctionDescendantOf_NilFn(t *testing.T) {
-	if IsFunctionDescendantOf(nil, &ssa.Function{}) {
+	if isFunctionDescendantOf(nil, &ssa.Function{}) {
 		t.Error("nil fn should not be descendant of anything")
 	}
 }
 
 func TestIsFunctionDescendantOf_NilAncestor(t *testing.T) {
-	if IsFunctionDescendantOf(&ssa.Function{}, nil) {
+	if isFunctionDescendantOf(&ssa.Function{}, nil) {
 		t.Error("nothing should be descendant of nil")
 	}
 }
 
 func TestIsFunctionDescendantOf_BothNil(t *testing.T) {
-	if IsFunctionDescendantOf(nil, nil) {
+	if isFunctionDescendantOf(nil, nil) {
 		t.Error("nil should not be descendant of nil")
 	}
 }
 
 func TestIsFunctionDescendantOf_SameFunction(t *testing.T) {
 	fn := &ssa.Function{}
-	if !IsFunctionDescendantOf(fn, fn) {
+	if !isFunctionDescendantOf(fn, fn) {
 		t.Error("function should be descendant of itself")
 	}
 }
@@ -490,7 +490,7 @@ func TestIsFunctionDescendantOf_NoParent(t *testing.T) {
 	fn := &ssa.Function{}
 	ancestor := &ssa.Function{}
 	// fn has no Parent, so it's not a descendant of ancestor
-	if IsFunctionDescendantOf(fn, ancestor) {
+	if isFunctionDescendantOf(fn, ancestor) {
 		t.Error("function with no parent should not be descendant of unrelated function")
 	}
 }

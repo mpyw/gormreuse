@@ -1,21 +1,11 @@
 package purity
 
 import (
-	"go/types"
-
 	"golang.org/x/tools/go/ssa"
+
+	"github.com/mpyw/gormreuse/internal/directive"
+	"github.com/mpyw/gormreuse/internal/typeutil"
 )
-
-// =============================================================================
-// Purity Checker Interface
-// =============================================================================
-
-// PurityChecker provides methods to check purity of functions and types.
-type PurityChecker interface {
-	IsGormDB(t types.Type) bool
-	IsPureBuiltinMethod(methodName string) bool
-	IsPureUserFunc(fn *ssa.Function) bool
-}
 
 // =============================================================================
 // Inferencer
@@ -23,19 +13,19 @@ type PurityChecker interface {
 
 // Inferencer infers purity states of SSA values within a function.
 type Inferencer struct {
-	fn       *ssa.Function
-	checker  PurityChecker
-	cache    map[ssa.Value]State
-	visiting map[ssa.Value]bool
+	fn        *ssa.Function
+	pureFuncs *directive.PureFuncSet
+	cache     map[ssa.Value]State
+	visiting  map[ssa.Value]bool
 }
 
 // NewInferencer creates a new purity inferencer for the given function.
-func NewInferencer(fn *ssa.Function, checker PurityChecker) *Inferencer {
+func NewInferencer(fn *ssa.Function, pureFuncs *directive.PureFuncSet) *Inferencer {
 	return &Inferencer{
-		fn:       fn,
-		checker:  checker,
-		cache:    make(map[ssa.Value]State),
-		visiting: make(map[ssa.Value]bool),
+		fn:        fn,
+		pureFuncs: pureFuncs,
+		cache:     make(map[ssa.Value]State),
+		visiting:  make(map[ssa.Value]bool),
 	}
 }
 
@@ -112,7 +102,7 @@ func (inf *Inferencer) inferValueImpl(v ssa.Value) State {
 		// func foo(db *gorm.DB) { ... }
 		//          ^^
 		// Parameter's purity depends on what the caller passes.
-		if inf.checker.IsGormDB(val.Type()) {
+		if typeutil.IsGormDB(val.Type()) {
 			return Depends(val)
 		}
 		return Clean()
@@ -155,7 +145,7 @@ func (inf *Inferencer) inferValueImpl(v ssa.Value) State {
 		// Closure capturing *gorm.DB is treated as Polluted
 		// because we can't track what happens inside.
 		for _, binding := range val.Bindings {
-			if inf.checker.IsGormDB(binding.Type()) {
+			if typeutil.IsGormDB(binding.Type()) {
 				return Polluted()
 			}
 		}
@@ -242,21 +232,21 @@ func (inf *Inferencer) inferCall(call *ssa.Call) State {
 
 	// Method call on *gorm.DB (concrete type)
 	// e.g., (*gorm.DB).Where(db, "x")
-	if sig := callee.Signature; sig != nil && sig.Recv() != nil && inf.checker.IsGormDB(sig.Recv().Type()) {
-		if inf.checker.IsPureBuiltinMethod(callee.Name()) {
+	if sig := callee.Signature; sig != nil && sig.Recv() != nil && typeutil.IsGormDB(sig.Recv().Type()) {
+		if typeutil.IsPureFunctionBuiltin(callee.Name()) {
 			return Clean()
 		}
 		return Polluted()
 	}
 
 	// User-defined pure function: //gormreuse:pure func helper(db *gorm.DB) *gorm.DB
-	if inf.checker.IsPureUserFunc(callee) {
+	if inf.isPureUserFunc(callee) {
 		return inf.inferPureUserFuncCall(call)
 	}
 
 	// Non-pure function receiving *gorm.DB - assume it pollutes
 	for _, arg := range call.Call.Args {
-		if inf.checker.IsGormDB(arg.Type()) {
+		if typeutil.IsGormDB(arg.Type()) {
 			return Polluted()
 		}
 	}
@@ -274,11 +264,11 @@ func (inf *Inferencer) inferCall(call *ssa.Call) State {
 //	db.Find(&users)         → Polluted (non-pure method)
 func (inf *Inferencer) inferInterfaceMethodCall(call *ssa.Call) State {
 	recv := call.Call.Value
-	if !inf.checker.IsGormDB(recv.Type()) {
+	if !typeutil.IsGormDB(recv.Type()) {
 		return Clean()
 	}
 
-	if inf.checker.IsPureBuiltinMethod(call.Call.Method.Name()) {
+	if typeutil.IsPureFunctionBuiltin(call.Call.Method.Name()) {
 		return Clean()
 	}
 	return Polluted()
@@ -297,7 +287,7 @@ func (inf *Inferencer) inferInterfaceMethodCall(call *ssa.Call) State {
 func (inf *Inferencer) inferPureUserFuncCall(call *ssa.Call) State {
 	var deps []*ssa.Parameter
 	for _, arg := range call.Call.Args {
-		if !inf.checker.IsGormDB(arg.Type()) {
+		if !typeutil.IsGormDB(arg.Type()) {
 			continue
 		}
 
@@ -318,6 +308,14 @@ func (inf *Inferencer) inferPureUserFuncCall(call *ssa.Call) State {
 		return Depends(deps...)
 	}
 	return Clean()
+}
+
+// isPureUserFunc checks if a function is marked as pure by the user.
+func (inf *Inferencer) isPureUserFunc(fn *ssa.Function) bool {
+	if inf.pureFuncs == nil {
+		return false
+	}
+	return inf.pureFuncs.Contains(fn)
 }
 
 // =============================================================================
@@ -463,62 +461,4 @@ func (inf *Inferencer) traceToParameterImpl(v ssa.Value, visited map[ssa.Value]b
 		// Anything that transforms the value breaks the trace.
 		return nil, false
 	}
-}
-
-// =============================================================================
-// Return Analysis
-// =============================================================================
-
-// InferReturn returns the merged purity state of all *gorm.DB return values.
-//
-// This function traverses all basic blocks to find return statements and analyzes
-// each *gorm.DB return value. Multiple return values are merged using lattice rules.
-//
-// Examples:
-//
-//	func f(db *gorm.DB) *gorm.DB {
-//	    return db.Session(&Session{})  // Single return → Clean
-//	}
-//
-//	func f(db *gorm.DB, cond bool) *gorm.DB {
-//	    if cond {
-//	        return db.Session(&Session{})  // Return 1: Clean
-//	    }
-//	    return db                           // Return 2: Depends(db)
-//	}
-//	// Result: Clean ⊔ Depends(db) = Depends(db) ← valid for pure function
-//
-//	func f(db *gorm.DB, cond bool) *gorm.DB {
-//	    if cond {
-//	        return db.Session(&Session{})  // Return 1: Clean
-//	    }
-//	    return db.Where("x")                // Return 2: Polluted
-//	}
-//	// Result: Clean ⊔ Polluted = Polluted ← INVALID for pure function
-//
-// Short-circuit: Returns immediately when Polluted state is encountered.
-func (inf *Inferencer) InferReturn() State {
-	result := Clean()
-
-	for _, block := range inf.fn.Blocks {
-		for _, instr := range block.Instrs {
-			ret, ok := instr.(*ssa.Return)
-			if !ok {
-				continue
-			}
-
-			for _, res := range ret.Results {
-				if res == nil || !inf.checker.IsGormDB(res.Type()) {
-					continue
-				}
-
-				result = result.Merge(inf.InferValue(res))
-				if result.IsPolluted() {
-					return result
-				}
-			}
-		}
-	}
-
-	return result
 }

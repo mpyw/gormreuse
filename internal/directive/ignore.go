@@ -104,27 +104,31 @@ func (m IgnoreMap) MarkUsed(line int) {
 	}
 }
 
+// FunctionIgnoreEntry represents a function-level ignore directive.
+type FunctionIgnoreEntry struct {
+	DirectiveLine int // Line number of the ignore directive (for marking as used)
+}
+
 // BuildFunctionIgnoreSet builds a set of functions that should be ignored.
-// Returns a map of function name positions to ignore.
+// Returns a map of function name positions to ignore entry.
 // We use Name.Pos() because SSA's Function.Pos() returns the name position.
-func BuildFunctionIgnoreSet(fset *token.FileSet, file *ast.File) map[token.Pos]struct{} {
-	result := make(map[token.Pos]struct{})
+func BuildFunctionIgnoreSet(fset *token.FileSet, file *ast.File) map[token.Pos]FunctionIgnoreEntry {
+	result := make(map[token.Pos]FunctionIgnoreEntry)
 
 	ast.Inspect(file, func(n ast.Node) bool {
-		switch node := n.(type) {
-		case *ast.FuncDecl:
-			if node.Doc != nil {
-				for _, c := range node.Doc.List {
-					if IsIgnoreDirective(c.Text) {
-						// Use Name.Pos() to match SSA's fn.Pos()
-						result[node.Name.Pos()] = struct{}{}
-						break
-					}
+		// Only handle FuncDecl - FuncLit (function literals) don't have doc comments in Go
+		fd, ok := n.(*ast.FuncDecl)
+		if !ok || fd.Doc == nil {
+			return true
+		}
+		for _, c := range fd.Doc.List {
+			if IsIgnoreDirective(c.Text) {
+				// Use Name.Pos() to match SSA's fn.Pos()
+				result[fd.Name.Pos()] = FunctionIgnoreEntry{
+					DirectiveLine: fset.Position(c.Pos()).Line,
 				}
+				break
 			}
-		case *ast.FuncLit:
-			// Function literals don't have doc comments in Go
-			// But we can check for inline comments
 		}
 		return true
 	})

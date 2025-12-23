@@ -4,6 +4,9 @@ import (
 	"go/token"
 
 	"golang.org/x/tools/go/ssa"
+
+	"github.com/mpyw/gormreuse/internal/directive"
+	"github.com/mpyw/gormreuse/internal/typeutil"
 )
 
 // =============================================================================
@@ -23,27 +26,27 @@ type Violation struct {
 // Validator validates pure function contracts.
 type Validator struct {
 	fn           *ssa.Function
-	checker      PurityChecker
+	pureFuncs    *directive.PureFuncSet
 	paramDerived map[ssa.Value]bool
 }
 
 // ValidateFunction validates that a function marked as pure satisfies the pure contract:
 // 1. Does not pollute *gorm.DB arguments (no non-pure method calls on them)
 // 2. If returning *gorm.DB, the return value must be Clean or Depends (not Polluted)
-func ValidateFunction(fn *ssa.Function, checker PurityChecker) []Violation {
+func ValidateFunction(fn *ssa.Function, pureFuncs *directive.PureFuncSet) []Violation {
 	if fn == nil || fn.Blocks == nil {
 		return nil
 	}
 
 	v := &Validator{
 		fn:           fn,
-		checker:      checker,
+		pureFuncs:    pureFuncs,
 		paramDerived: make(map[ssa.Value]bool),
 	}
 
 	// Initialize with *gorm.DB parameters
 	for _, p := range fn.Params {
-		if checker.IsGormDB(p.Type()) {
+		if typeutil.IsGormDB(p.Type()) {
 			v.paramDerived[p] = true
 		}
 	}
@@ -95,8 +98,8 @@ func (v *Validator) trackCallDerivation(call *ssa.Call) {
 	// Interface method call
 	if call.Call.Method != nil {
 		recv := call.Call.Value
-		if v.checker.IsGormDB(recv.Type()) && v.paramDerived[recv] {
-			if !v.checker.IsPureBuiltinMethod(call.Call.Method.Name()) {
+		if typeutil.IsGormDB(recv.Type()) && v.paramDerived[recv] {
+			if !typeutil.IsPureFunctionBuiltin(call.Call.Method.Name()) {
 				if result := call.Value(); result != nil {
 					v.paramDerived[result] = true
 				}
@@ -112,10 +115,10 @@ func (v *Validator) trackCallDerivation(call *ssa.Call) {
 	}
 
 	sig := callee.Signature
-	if sig != nil && sig.Recv() != nil && v.checker.IsGormDB(sig.Recv().Type()) {
+	if sig != nil && sig.Recv() != nil && typeutil.IsGormDB(sig.Recv().Type()) {
 		if len(call.Call.Args) > 0 {
 			recv := call.Call.Args[0]
-			if v.paramDerived[recv] && !v.checker.IsPureBuiltinMethod(callee.Name()) {
+			if v.paramDerived[recv] && !typeutil.IsPureFunctionBuiltin(callee.Name()) {
 				if result := call.Value(); result != nil {
 					v.paramDerived[result] = true
 				}
@@ -126,15 +129,23 @@ func (v *Validator) trackCallDerivation(call *ssa.Call) {
 
 	// Regular function call
 	for _, arg := range call.Call.Args {
-		if v.checker.IsGormDB(arg.Type()) && v.paramDerived[arg] {
-			if result := call.Value(); result != nil && v.checker.IsGormDB(result.Type()) {
-				if !v.checker.IsPureUserFunc(callee) {
+		if typeutil.IsGormDB(arg.Type()) && v.paramDerived[arg] {
+			if result := call.Value(); result != nil && typeutil.IsGormDB(result.Type()) {
+				if !v.isPureUserFunc(callee) {
 					v.paramDerived[result] = true
 				}
 			}
 			break
 		}
 	}
+}
+
+// isPureUserFunc checks if a function is marked as pure by the user.
+func (v *Validator) isPureUserFunc(fn *ssa.Function) bool {
+	if v.pureFuncs == nil {
+		return false
+	}
+	return v.pureFuncs.Contains(fn)
 }
 
 // =============================================================================
@@ -154,7 +165,7 @@ func (v *Validator) checkCallPollution(call *ssa.Call) []Violation {
 	}
 
 	sig := callee.Signature
-	if sig != nil && sig.Recv() != nil && v.checker.IsGormDB(sig.Recv().Type()) {
+	if sig != nil && sig.Recv() != nil && typeutil.IsGormDB(sig.Recv().Type()) {
 		return v.checkStaticMethodPollution(call, callee)
 	}
 
@@ -163,12 +174,12 @@ func (v *Validator) checkCallPollution(call *ssa.Call) []Violation {
 
 func (v *Validator) checkInterfaceMethodPollution(call *ssa.Call) []Violation {
 	recv := call.Call.Value
-	if !v.checker.IsGormDB(recv.Type()) {
+	if !typeutil.IsGormDB(recv.Type()) {
 		return nil
 	}
 
 	methodName := call.Call.Method.Name()
-	if v.paramDerived[recv] && !v.checker.IsPureBuiltinMethod(methodName) {
+	if v.paramDerived[recv] && !typeutil.IsPureFunctionBuiltin(methodName) {
 		return []Violation{{
 			Pos:     call.Pos(),
 			Message: "pure function pollutes *gorm.DB argument by calling " + methodName,
@@ -184,7 +195,7 @@ func (v *Validator) checkStaticMethodPollution(call *ssa.Call, callee *ssa.Funct
 
 	recv := call.Call.Args[0]
 	methodName := callee.Name()
-	if v.paramDerived[recv] && !v.checker.IsPureBuiltinMethod(methodName) {
+	if v.paramDerived[recv] && !typeutil.IsPureFunctionBuiltin(methodName) {
 		return []Violation{{
 			Pos:     call.Pos(),
 			Message: "pure function pollutes *gorm.DB argument by calling " + methodName,
@@ -196,7 +207,7 @@ func (v *Validator) checkStaticMethodPollution(call *ssa.Call, callee *ssa.Funct
 func (v *Validator) checkFunctionCallPollution(call *ssa.Call, callee *ssa.Function) []Violation {
 	var violations []Violation
 	for _, arg := range call.Call.Args {
-		if v.checker.IsGormDB(arg.Type()) && v.paramDerived[arg] && !v.checker.IsPureUserFunc(callee) {
+		if typeutil.IsGormDB(arg.Type()) && v.paramDerived[arg] && !v.isPureUserFunc(callee) {
 			violations = append(violations, Violation{
 				Pos:     call.Pos(),
 				Message: "pure function passes *gorm.DB argument to non-pure function " + callee.Name(),
@@ -212,10 +223,10 @@ func (v *Validator) checkFunctionCallPollution(call *ssa.Call, callee *ssa.Funct
 
 func (v *Validator) checkReturnPurity(ret *ssa.Return) []Violation {
 	var violations []Violation
-	inferencer := NewInferencer(v.fn, v.checker)
+	inferencer := NewInferencer(v.fn, v.pureFuncs)
 
 	for _, result := range ret.Results {
-		if result == nil || !v.checker.IsGormDB(result.Type()) {
+		if result == nil || !typeutil.IsGormDB(result.Type()) {
 			continue
 		}
 

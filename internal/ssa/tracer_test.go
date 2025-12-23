@@ -12,15 +12,6 @@ import (
 // RootTracer Tests
 // =============================================================================
 
-func TestRootTracer_IsPureFunction_NilPureFuncs(t *testing.T) {
-	// nil pureFuncs should return false
-	tracer := NewRootTracer(nil)
-
-	if tracer.PureFuncs() != nil {
-		t.Error("Expected pureFuncs to be nil")
-	}
-}
-
 func TestRootTracer_FindMutableRoot_NilValue(t *testing.T) {
 	tracer := NewRootTracer(nil)
 
@@ -376,36 +367,73 @@ func TestSSATracer_TraceIIFEReturns_NoBlocks(t *testing.T) {
 }
 
 // =============================================================================
-// IsNilConst Tests
+// isNilConst Tests
 // =============================================================================
 
-func TestIsNilConst_NilConst(t *testing.T) {
+func Test_isNilConst_NilConst(t *testing.T) {
 	// Const with nil Value is a nil constant
 	c := &ssa.Const{Value: nil}
-	if !IsNilConst(c) {
+	if !isNilConst(c) {
 		t.Error("Const with nil Value should be nil constant")
 	}
 }
 
-func TestIsNilConst_NonNilConst(t *testing.T) {
+func Test_isNilConst_NonNilConst(t *testing.T) {
 	// Const with non-nil Value is not a nil constant
 	c := &ssa.Const{Value: constant.MakeInt64(42)}
-	if IsNilConst(c) {
+	if isNilConst(c) {
 		t.Error("Const with non-nil Value should not be nil constant")
 	}
 }
 
-func TestIsNilConst_NonConst(t *testing.T) {
+func Test_isNilConst_NonConst(t *testing.T) {
 	// Non-Const value is not a nil constant
 	p := &ssa.Parameter{}
-	if IsNilConst(p) {
+	if isNilConst(p) {
 		t.Error("Parameter should not be nil constant")
 	}
 }
 
-func TestIsNilConst_Nil(t *testing.T) {
+func Test_isNilConst_Nil(t *testing.T) {
 	// nil value is not a nil constant
-	if IsNilConst(nil) {
+	if isNilConst(nil) {
 		t.Error("nil should not be nil constant")
+	}
+}
+
+// =============================================================================
+// ClosureCapturesGormDB Tests
+// =============================================================================
+
+func TestClosureCapturesGormDB_Empty(t *testing.T) {
+	// MakeClosure with no bindings
+	mc := &ssa.MakeClosure{}
+	if ClosureCapturesGormDB(mc) {
+		t.Error("Empty MakeClosure should not capture GormDB")
+	}
+}
+
+func TestClosureCapturesGormDB_WithNonGormBinding(t *testing.T) {
+	// MakeClosure with non-gorm.DB binding
+	param := &ssa.Parameter{} // not *gorm.DB type
+	mc := &ssa.MakeClosure{
+		Bindings: []ssa.Value{param},
+	}
+
+	if ClosureCapturesGormDB(mc) {
+		t.Error("MakeClosure with non-gorm.DB binding should not capture GormDB")
+	}
+}
+
+func TestClosureCapturesGormDB_PointerToPointer(t *testing.T) {
+	// MakeClosure with a pointer type binding (not *gorm.DB)
+	param := &ssa.Parameter{}
+	mc := &ssa.MakeClosure{
+		Bindings: []ssa.Value{param},
+	}
+
+	// Parameter type is nil, so it won't match *gorm.DB
+	if ClosureCapturesGormDB(mc) {
+		t.Error("MakeClosure with nil type binding should not capture GormDB")
 	}
 }

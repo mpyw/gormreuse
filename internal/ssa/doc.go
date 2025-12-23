@@ -5,7 +5,7 @@
 //   - RootTracer: Traces SSA values to find mutable *gorm.DB roots
 //   - CFGAnalyzer: Control flow graph analysis (loop detection, reachability)
 //   - PollutionTracker: Tracks pollution state of *gorm.DB values
-//   - InstructionHandler: Strategy pattern handlers for SSA instructions
+//   - Handlers: Type-specific handlers dispatched via DispatchInstruction
 //
 // Architecture follows mechanism vs policy separation:
 //   - SSATracer: HOW to traverse SSA values (mechanism)

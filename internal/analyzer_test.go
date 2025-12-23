@@ -5,6 +5,7 @@ import (
 
 	"golang.org/x/tools/go/ssa"
 
+	"github.com/mpyw/gormreuse/internal/directive"
 	ssapkg "github.com/mpyw/gormreuse/internal/ssa"
 )
 
@@ -13,8 +14,8 @@ import (
 // =============================================================================
 
 func TestNewAnalyzer(t *testing.T) {
-	pureFuncs := NewPureFuncSet(nil)
-	pureFuncs.Add(PureFuncKey{PkgPath: "test", FuncName: "Pure"})
+	pureFuncs := directive.NewPureFuncSet(nil)
+	pureFuncs.Add(directive.PureFuncKey{PkgPath: "test", FuncName: "Pure"})
 	analyzer := newSSAAnalyzer(nil, pureFuncs)
 
 	if analyzer.fn != nil {
@@ -29,8 +30,8 @@ func TestNewAnalyzer(t *testing.T) {
 }
 
 func TestNewChecker(t *testing.T) {
-	ignoreMap := make(IgnoreMap)
-	pureFuncs := NewPureFuncSet(nil)
+	ignoreMap := make(directive.IgnoreMap)
+	pureFuncs := directive.NewPureFuncSet(nil)
 
 	chk := newChecker(nil, ignoreMap, pureFuncs)
 

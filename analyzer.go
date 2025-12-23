@@ -17,6 +17,7 @@ import (
 	"golang.org/x/tools/go/analysis/passes/buildssa"
 
 	"github.com/mpyw/gormreuse/internal"
+	"github.com/mpyw/gormreuse/internal/directive"
 )
 
 // Analyzer is the main analyzer for gormreuse.
@@ -34,9 +35,9 @@ func run(pass *analysis.Pass) (any, error) {
 	skipFiles := buildSkipFiles(pass)
 
 	// Build ignore maps for each file (excluding skipped files)
-	ignoreMaps := make(map[string]internal.IgnoreMap)
-	funcIgnores := make(map[string]map[token.Pos]struct{})
-	pureFuncs := internal.NewPureFuncSet(pass.Fset)
+	ignoreMaps := make(map[string]directive.IgnoreMap)
+	funcIgnores := make(map[string]map[token.Pos]directive.FunctionIgnoreEntry)
+	pureFuncs := directive.NewPureFuncSet(pass.Fset)
 
 	pkgPath := pass.Pkg.Path()
 	for _, file := range pass.Files {
@@ -44,11 +45,11 @@ func run(pass *analysis.Pass) (any, error) {
 		if skipFiles[filename] {
 			continue
 		}
-		ignoreMaps[filename] = internal.BuildIgnoreMap(pass.Fset, file)
-		funcIgnores[filename] = internal.BuildFunctionIgnoreSet(pass.Fset, file)
+		ignoreMaps[filename] = directive.BuildIgnoreMap(pass.Fset, file)
+		funcIgnores[filename] = directive.BuildFunctionIgnoreSet(pass.Fset, file)
 
 		// Build pure function set for this file
-		for key := range internal.BuildPureFunctionSet(pass.Fset, file, pkgPath) {
+		for key := range directive.BuildPureFunctionSet(pass.Fset, file, pkgPath) {
 			pureFuncs.Add(key)
 		}
 	}

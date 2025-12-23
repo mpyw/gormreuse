@@ -7,43 +7,6 @@ import (
 )
 
 // =============================================================================
-// ClosureCapturesGormDB Tests
-// =============================================================================
-
-func TestClosureCapturesGormDB_Empty(t *testing.T) {
-	// MakeClosure with no bindings
-	mc := &ssa.MakeClosure{}
-	if ClosureCapturesGormDB(mc) {
-		t.Error("Empty MakeClosure should not capture GormDB")
-	}
-}
-
-func TestClosureCapturesGormDB_WithNonGormBinding(t *testing.T) {
-	// MakeClosure with non-gorm.DB binding
-	param := &ssa.Parameter{} // not *gorm.DB type
-	mc := &ssa.MakeClosure{
-		Bindings: []ssa.Value{param},
-	}
-
-	if ClosureCapturesGormDB(mc) {
-		t.Error("MakeClosure with non-gorm.DB binding should not capture GormDB")
-	}
-}
-
-func TestClosureCapturesGormDB_PointerToPointer(t *testing.T) {
-	// MakeClosure with a pointer type binding (not *gorm.DB)
-	param := &ssa.Parameter{}
-	mc := &ssa.MakeClosure{
-		Bindings: []ssa.Value{param},
-	}
-
-	// Parameter type is nil, so it won't match *gorm.DB
-	if ClosureCapturesGormDB(mc) {
-		t.Error("MakeClosure with nil type binding should not capture GormDB")
-	}
-}
-
-// =============================================================================
 // CallHandler ProcessBoundMethodCall Tests
 // =============================================================================
 

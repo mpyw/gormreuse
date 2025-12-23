@@ -407,8 +407,8 @@ func (p *PollutionTracker) DetectReachabilityViolations() {
 				if srcBlock.Parent() != targetBlock.Parent() {
 					srcInParent := srcBlock.Parent() == p.analyzedFn
 					targetInParent := targetBlock.Parent() == p.analyzedFn
-					srcIsDescendant := IsFunctionDescendantOf(srcBlock.Parent(), p.analyzedFn)
-					targetIsDescendant := IsFunctionDescendantOf(targetBlock.Parent(), p.analyzedFn)
+					srcIsDescendant := isFunctionDescendantOf(srcBlock.Parent(), p.analyzedFn)
+					targetIsDescendant := isFunctionDescendantOf(targetBlock.Parent(), p.analyzedFn)
 
 					// Case 1: src in descendant closure, target in parent function
 					if srcIsDescendant && targetInParent && srcPos < targetPos {
@@ -457,8 +457,8 @@ func (p *PollutionTracker) getOrCreateState(root ssa.Value) *valueState {
 // Helper Functions
 // =============================================================================
 
-// IsFunctionDescendantOf checks if fn is a descendant of ancestor by traversing the Parent() chain.
-func IsFunctionDescendantOf(fn, ancestor *ssa.Function) bool {
+// isFunctionDescendantOf checks if fn is a descendant of ancestor by traversing the Parent() chain.
+func isFunctionDescendantOf(fn, ancestor *ssa.Function) bool {
 	if fn == nil || ancestor == nil {
 		return false
 	}

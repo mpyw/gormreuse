@@ -44,7 +44,7 @@ gormreuse/
 │       ├── doc.go              # Package documentation
 │       ├── tracer.go           # SSATracer, RootTracer
 │       ├── pollution.go        # CFGAnalyzer, PollutionTracker
-│       ├── handler.go          # InstructionHandler implementations
+│       ├── handler.go          # Instruction handlers (type switch dispatch)
 │       └── purity/             # [WIP] 3-state purity analysis
 │           ├── state.go        # PurityState type (Clean/Polluted/Depends)
 │           ├── inference.go    # Purity state inference (Inferencer)
@@ -71,7 +71,7 @@ gormreuse/
 The codebase uses several design patterns inspired by [zerologlintctx](https://github.com/mpyw/zerologlintctx):
 
 1. **Composition over Inheritance**: `Analyzer` composes `RootTracer`, `CFGAnalyzer`, `PollutionTracker`
-2. **Strategy Pattern**: `InstructionHandler` interface with `CallHandler`, `GoHandler`, `DeferHandler`, etc.
+2. **Type Switch Dispatch**: `DispatchInstruction` routes SSA instructions to handlers via type switch (O(1) dispatch)
 3. **Validated State Pattern**: `traceResult` type with explicit states (`Immutable`, `MutableRoot`)
 4. **Mechanism vs Policy Separation**:
    - `SSATracer`: HOW to traverse SSA values (mechanism)

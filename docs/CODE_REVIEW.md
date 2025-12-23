@@ -1,18 +1,18 @@
 # Code Review - Tech Lead Review
 
-Date: 2025-12-23
+Date: 2025-12-23 (Updated: 2025-12-24)
 Reviewer: Claude (Tech Lead perspective)
-Status: **34 issues identified**
+Status: **34 issues identified, 15 fixed**
 
 ---
 
 ## Summary
 
-| Severity | Count |
-|----------|-------|
-| Critical (Design Issues) | 5 |
-| Major (Code Quality) | 15 |
-| Minor (Style/Cleanup) | 14 |
+| Severity | Count | Fixed |
+|----------|-------|-------|
+| Critical (Design Issues) | 5 | 1 |
+| Major (Code Quality) | 15 | 10 |
+| Minor (Style/Cleanup) | 14 | 4 |
 
 ---
 
@@ -35,30 +35,12 @@ type GoHandler struct{}
 
 ---
 
-### C2. Strategy Pattern Overhead Without Benefit
+### C2. ~~Strategy Pattern Overhead Without Benefit~~ (FIXED)
 **File**: `handler.go`, `analyzer.go`
 
-```go
-for _, handler := range a.handlers {
-    if handler.CanHandle(instr) {
-        handler.Handle(instr, ctx)
-        break
-    }
-}
-```
+~~O(n) dispatch for every instruction. With 6 handlers, this means 6 type checks per instruction.~~
 
-**Problem**: O(n) dispatch for every instruction. With 6 handlers, this means 6 type checks per instruction.
-
-**Recommendation**: Use type switch directly:
-```go
-switch instr := instr.(type) {
-case *ssa.Call:
-    handleCall(instr, ctx)
-case *ssa.Go:
-    handleGo(instr, ctx)
-// ...
-}
-```
+**Fixed**: Replaced with type switch in `DispatchInstruction`. Removed `InstructionHandler` interface and `CanHandle()` methods.
 
 ---
 
@@ -115,25 +97,21 @@ func (c *purityChecker) IsGormDB(t types.Type) bool {
 
 ## Major Issues (Code Quality)
 
-### M1. Massive Code Duplication in Handlers
+### M1. ~~Massive Code Duplication in Handlers~~ (FIXED)
 **File**: `handler.go`
 
-`CallHandler.Handle` and `processBoundMethodCall` have identical pollution-checking logic (15+ lines duplicated).
+~~`GoHandler.processCallCommon` and `DeferHandler.processCallCommon` are nearly identical.~~
 
-`GoHandler.processCallCommon` and `DeferHandler.processCallCommon` are nearly identical (40 lines each).
-
-**Fix**: Extract common logic to shared helper functions.
+**Fixed**: Common logic extracted to `processGormDBCallCommon`. `CallHandler` pollution logic extracted to `checkAndMarkPollution` method on `HandlerContext`.
 
 ---
 
-### M2. IsPureFunctionDecl Duplicates IsPureUserFunc
+### M2. ~~IsPureFunctionDecl Duplicates IsPureUserFunc~~ (FIXED)
 **File**: `purity_adapter.go`
 
-```go
-// These two do exactly the same thing:
-func (c *purityChecker) IsPureUserFunc(fn *ssa.Function) bool { ... }
-func IsPureFunctionDecl(fn *ssa.Function, pureFuncs *directive.PureFuncSet) bool { ... }
-```
+~~These two do exactly the same thing.~~
+
+**Fixed**: Removed `IsPureFunctionDecl`. Inlined `pureFuncs != nil && pureFuncs.Contains(fn)` in analyzer.go.
 
 ---
 
@@ -171,19 +149,12 @@ Too many responsibilities in one method. Should be split.
 
 ---
 
-### M6. Suspicious Logic in IsPollutedAnywhere
+### M6. ~~Suspicious Logic in IsPollutedAnywhere~~ (FIXED)
 **File**: `pollution.go:330`
 
-```go
-for pollutedBlock := range state.pollutedBlocks {
-    if pollutedBlock.Parent() == fn {
-        return true
-    }
-    return true  // ← Always returns true on first iteration
-}
-```
+~~The loop always returns on first iteration. Bug or intentional?~~
 
-The loop always returns on first iteration. Bug or intentional?
+**Fixed**: Simplified to `return state != nil && len(state.pollutedBlocks) > 0`. Conservative approach documented.
 
 ---
 
@@ -208,14 +179,12 @@ A `Contains()` method shouldn't trigger file parsing. Violates principle of leas
 
 ---
 
-### M9. Magic Number in Ignore Logic
+### M9. ~~Magic Number in Ignore Logic~~ (FIXED)
 **File**: `analyzer.go:51`
 
-```go
-ignoreMap.MarkUsed(fnLine - 1)
-```
+~~`fnLine - 1` assumes ignore comment is always on previous line.~~
 
-`fnLine - 1` assumes ignore comment is always on previous line. Should be a named constant or helper function.
+**Fixed**: `BuildFunctionIgnoreSet` now returns `FunctionIgnoreEntry` with the actual directive line number. No more magic number assumptions.
 
 ---
 
@@ -230,93 +199,99 @@ for _, block := range parent.Blocks {  // Loop 2
 
 ---
 
-### M11. Global Mutable Map
+### M11. ~~Global Mutable Map~~ (FIXED)
 **File**: `typeutil/gorm.go:51`
 
-```go
-var ImmutableReturningMethods = map[string]struct{}{
-```
+~~Exported mutable map. Could be modified by external code.~~
 
-Exported mutable map. Could be modified by external code.
+**Fixed**: Renamed to `immutableReturningMethods` (unexported). External code now uses `IsPureFunctionBuiltin()` function.
 
 ---
 
-### M12. HasSuffix for Package Path
+### M12. ~~HasSuffix for Package Path~~ (FIXED)
 **File**: `typeutil/gorm.go:40`
 
-```go
-strings.HasSuffix(obj.Pkg().Path(), gormPkgPath)
-```
+~~Could match `evil.com/fake-gorm.io/gorm`. Use exact match.~~
 
-Could match `evil.com/fake-gorm.io/gorm`. Use exact match.
+**Fixed**: Changed to exact match: `obj.Pkg().Path() == gormPkgPath`.
 
 ---
 
-### M13. IsImmutableSource Incomplete
+### M13. ~~IsImmutableSource Incomplete~~ (PARTIALLY FIXED)
 **File**: `tracer.go:446`
 
-Only handles `*ssa.Parameter` and `*ssa.Call`. Missing:
-- `*ssa.Const`
-- `*ssa.Global`
+~~Only handles `*ssa.Parameter` and `*ssa.Call`.~~
+
+**Fixed**: Added `*ssa.Const` case (constants including nil are immutable). `*ssa.Global` not added as globals can be mutable.
 
 ---
 
-### M14. Unexplained delete() in traceAll
+### M14. ~~Unexplained delete() in traceAll~~ (FIXED)
 **File**: `tracer.go:436`
 
-```go
-freshVisited := cloneVisited(visited)
-delete(freshVisited, v)  // Why?
-```
+~~No comment explaining why self-deletion is needed.~~
 
-No comment explaining why self-deletion is needed.
+**Fixed**: Added explanatory comment: "Clone visited and remove current value to allow trace() to re-process it."
 
 ---
 
-### M15. Empty Case in AST Inspection
+### M15. ~~Empty Case in AST Inspection~~ (FIXED)
 **File**: `directive/ignore.go:125`
 
-```go
-case *ast.FuncLit:
-    // Function literals don't have doc comments in Go
-    // But we can check for inline comments
-```
+~~Empty case with misleading comment.~~
 
-Empty case. Either implement or remove.
+**Fixed**: Removed empty switch case. Simplified to type assertion with early return.
 
 ---
 
 ## Minor Issues (Style/Cleanup)
 
-### m1. Single-case switch statements
+### m1. ~~Single-case switch statements~~ (FIXED)
 **File**: `handler.go:495`
 
-```go
-switch store.Addr.(type) {
-case *ssa.IndexAddr:
-    // ...
-default:
-    return
-}
-```
+~~Should be `if _, ok := store.Addr.(*ssa.IndexAddr); !ok { return }`.~~
 
-Should be `if _, ok := store.Addr.(*ssa.IndexAddr); !ok { return }`.
+**Fixed**: Converted to if statement.
 
 ---
 
-### m2. Comment explaining code that should be self-documenting
+### m2. ~~Comment explaining code that should be self-documenting~~ (FIXED)
 **File**: `analyzer.go:50`
 
-```go
-// The ignore comment is on the line before the function name
-ignoreMap.MarkUsed(fnLine - 1)
-```
+~~The code needs a comment to explain itself = bad code.~~
 
-The code needs a comment to explain itself = bad code.
+**Fixed**: Refactored to use `FunctionIgnoreEntry.DirectiveLine` which is self-explanatory.
 
 ---
 
-### m3-m14. Various minor style issues
+### m3. ~~Generic Helper Name `IsNilConst`~~ (FIXED)
+**File**: `tracer.go`
+
+~~Exported helper function with generic name that could collide with other packages.~~
+
+**Fixed**: Renamed to `isNilConst` (unexported). Internal implementation detail, not needed by external callers.
+
+---
+
+### m4. ~~`IsFunctionDescendantOf` exported but only used internally~~ (FIXED)
+**File**: `pollution.go`
+
+~~Exported function with generic name, only used within the same package.~~
+
+**Fixed**: Renamed to `isFunctionDescendantOf` (unexported). Only used by `DetectReachabilityViolations` in the same file.
+
+---
+
+### m5. ~~`ClosureCapturesGormDB` misplaced in handler.go~~ (FIXED)
+**File**: `handler.go` → `tracer.go`
+
+~~Type-checking utility function placed in instruction handler file. Violates single responsibility.~~
+
+**Fixed**: Moved to `tracer.go` under Helper Functions section. SSA value analysis is closer to RootTracer's responsibility.
+
+---
+
+### m6-m14. Various minor style issues
 - Inconsistent error handling patterns
 - Long parameter lists that could use structs
 - Missing godoc on some exported functions

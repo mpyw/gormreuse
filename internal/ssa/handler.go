@@ -2,7 +2,6 @@ package ssa
 
 import (
 	"go/token"
-	"go/types"
 	"strings"
 
 	"golang.org/x/tools/go/ssa"
@@ -11,10 +10,10 @@ import (
 )
 
 // =============================================================================
-// InstructionHandler Interface (Strategy Pattern)
+// Instruction Handlers
 //
-// Each handler is responsible for processing a specific type of SSA instruction.
-// The analyzer iterates through instructions and delegates to appropriate handlers.
+// Each handler processes a specific type of SSA instruction.
+// DispatchInstruction routes instructions to the appropriate handler using type switch.
 // =============================================================================
 
 // HandlerContext provides shared context for instruction handlers.
@@ -101,15 +100,6 @@ func processGormDBCallCommon(
 	}
 }
 
-// InstructionHandler handles a specific type of SSA instruction.
-type InstructionHandler interface {
-	// CanHandle returns true if this handler can process the given instruction.
-	CanHandle(instr ssa.Instruction) bool
-
-	// Handle processes the instruction and updates the analysis context.
-	Handle(instr ssa.Instruction, ctx *HandlerContext)
-}
-
 // =============================================================================
 // Handler Implementations
 // =============================================================================
@@ -119,12 +109,6 @@ type InstructionHandler interface {
 // This is the primary handler for detecting *gorm.DB reuse violations.
 // It processes method calls on *gorm.DB and function calls that accept *gorm.DB.
 type CallHandler struct{}
-
-// CanHandle returns true for Call instructions.
-func (h *CallHandler) CanHandle(instr ssa.Instruction) bool {
-	_, ok := instr.(*ssa.Call)
-	return ok
-}
 
 // Handle processes a Call instruction for pollution detection.
 //
@@ -342,12 +326,6 @@ func (h *CallHandler) isGormDBMethodCall(call *ssa.Call) bool {
 // GoHandler handles goroutine spawning instructions.
 type GoHandler struct{}
 
-// CanHandle returns true for Go instructions.
-func (h *GoHandler) CanHandle(instr ssa.Instruction) bool {
-	_, ok := instr.(*ssa.Go)
-	return ok
-}
-
 // Handle processes a Go instruction for pollution detection.
 func (h *GoHandler) Handle(instr ssa.Instruction, ctx *HandlerContext) {
 	g := instr.(*ssa.Go)
@@ -383,12 +361,6 @@ func (h *GoHandler) processCallCommon(callCommon *ssa.CallCommon, pos token.Pos,
 // DeferHandler handles deferred call instructions.
 type DeferHandler struct{}
 
-// CanHandle returns true for Defer instructions.
-func (h *DeferHandler) CanHandle(instr ssa.Instruction) bool {
-	_, ok := instr.(*ssa.Defer)
-	return ok
-}
-
 // Handle processes a Defer instruction for pollution detection.
 func (h *DeferHandler) Handle(instr ssa.Instruction, ctx *HandlerContext) {
 	d := instr.(*ssa.Defer)
@@ -417,12 +389,6 @@ func (h *DeferHandler) processCallCommon(callCommon *ssa.CallCommon, pos token.P
 
 // SendHandler handles channel send instructions.
 type SendHandler struct{}
-
-// CanHandle returns true for Send instructions.
-func (h *SendHandler) CanHandle(instr ssa.Instruction) bool {
-	_, ok := instr.(*ssa.Send)
-	return ok
-}
 
 // Handle marks *gorm.DB values sent to channels as polluted.
 func (h *SendHandler) Handle(instr ssa.Instruction, ctx *HandlerContext) {
@@ -462,12 +428,6 @@ func (h *SendHandler) Handle(instr ssa.Instruction, ctx *HandlerContext) {
 // StoreHandler handles store instructions.
 type StoreHandler struct{}
 
-// CanHandle returns true for Store instructions.
-func (h *StoreHandler) CanHandle(instr ssa.Instruction) bool {
-	_, ok := instr.(*ssa.Store)
-	return ok
-}
-
 // Handle marks *gorm.DB values stored to slice elements as polluted.
 func (h *StoreHandler) Handle(instr ssa.Instruction, ctx *HandlerContext) {
 	store := instr.(*ssa.Store)
@@ -477,10 +437,7 @@ func (h *StoreHandler) Handle(instr ssa.Instruction, ctx *HandlerContext) {
 	}
 
 	// Only process stores to IndexAddr (slice element)
-	switch store.Addr.(type) {
-	case *ssa.IndexAddr:
-		// Stores to slice elements - mark as polluted
-	default:
+	if _, ok := store.Addr.(*ssa.IndexAddr); !ok {
 		return
 	}
 
@@ -509,12 +466,6 @@ func (h *StoreHandler) Handle(instr ssa.Instruction, ctx *HandlerContext) {
 
 // MapUpdateHandler handles map update instructions.
 type MapUpdateHandler struct{}
-
-// CanHandle returns true for MapUpdate instructions.
-func (h *MapUpdateHandler) CanHandle(instr ssa.Instruction) bool {
-	_, ok := instr.(*ssa.MapUpdate)
-	return ok
-}
 
 // Handle marks *gorm.DB values stored in maps as polluted.
 func (h *MapUpdateHandler) Handle(instr ssa.Instruction, ctx *HandlerContext) {
@@ -549,12 +500,6 @@ func (h *MapUpdateHandler) Handle(instr ssa.Instruction, ctx *HandlerContext) {
 // MakeInterfaceHandler handles interface conversion instructions.
 type MakeInterfaceHandler struct{}
 
-// CanHandle returns true for MakeInterface instructions.
-func (h *MakeInterfaceHandler) CanHandle(instr ssa.Instruction) bool {
-	_, ok := instr.(*ssa.MakeInterface)
-	return ok
-}
-
 // Handle marks *gorm.DB values converted to interfaces as polluted.
 func (h *MakeInterfaceHandler) Handle(instr ssa.Instruction, ctx *HandlerContext) {
 	mi := instr.(*ssa.MakeInterface)
@@ -569,41 +514,6 @@ func (h *MakeInterfaceHandler) Handle(instr ssa.Instruction, ctx *HandlerContext
 	}
 
 	ctx.Tracker.MarkPolluted(root, mi.Block(), mi.Pos())
-}
-
-// =============================================================================
-// Helper Functions
-// =============================================================================
-
-// ClosureCapturesGormDB checks if a MakeClosure captures any *gorm.DB values.
-func ClosureCapturesGormDB(mc *ssa.MakeClosure) bool {
-	for _, binding := range mc.Bindings {
-		t := binding.Type()
-		if typeutil.IsGormDB(t) {
-			return true
-		}
-		if ptr, ok := t.(*types.Pointer); ok {
-			if typeutil.IsGormDB(ptr.Elem()) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// DefaultHandlers returns the default set of instruction handlers.
-// Deprecated: Use DispatchInstruction instead for better performance.
-func DefaultHandlers() []InstructionHandler {
-	return []InstructionHandler{
-		&CallHandler{},
-		&GoHandler{},
-		&SendHandler{},
-		&StoreHandler{},
-		&MapUpdateHandler{},
-		&MakeInterfaceHandler{},
-		// Note: DeferHandler is not included here because defers are processed
-		// in a second pass after all regular instructions.
-	}
 }
 
 // singleton handlers for dispatch (avoid allocation per call)
