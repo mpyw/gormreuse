@@ -13,20 +13,19 @@ import (
 	"golang.org/x/tools/go/ssa"
 )
 
+// =============================================================================
+// State Kind
+// =============================================================================
+
 // Kind represents the kind of purity state.
 type Kind int
 
 const (
 	// KindClean represents a value that is always immutable.
-	// Created by Session(), WithContext(), Begin(), etc.
 	KindClean Kind = iota
-
 	// KindPolluted represents a value that is tainted and unsafe to reuse.
-	// Created by non-pure method calls like Where(), Find(), etc.
 	KindPolluted
-
 	// KindDepends represents a value whose purity depends on parameters.
-	// Occurs when a pure function returns its argument unchanged.
 	KindDepends
 )
 
@@ -44,11 +43,19 @@ func (k Kind) String() string {
 	}
 }
 
+// =============================================================================
+// Purity State
+// =============================================================================
+
 // State represents the purity state of a *gorm.DB value.
 type State struct {
 	kind Kind
 	deps []*ssa.Parameter // Non-nil only for KindDepends
 }
+
+// =============================================================================
+// State Constructors
+// =============================================================================
 
 // Clean returns a new Clean state.
 func Clean() State {
@@ -64,11 +71,9 @@ func Polluted() State {
 // Parameters are deduplicated. Order is not guaranteed.
 func Depends(params ...*ssa.Parameter) State {
 	if len(params) == 0 {
-		// No dependencies means effectively Clean
 		return Clean()
 	}
 
-	// Deduplicate parameters
 	seen := make(map[*ssa.Parameter]bool)
 	unique := make([]*ssa.Parameter, 0, len(params))
 	for _, p := range params {
@@ -85,13 +90,16 @@ func Depends(params ...*ssa.Parameter) State {
 	return State{kind: KindDepends, deps: unique}
 }
 
+// =============================================================================
+// State Accessors
+// =============================================================================
+
 // Kind returns the kind of this state.
 func (s State) Kind() Kind {
 	return s.kind
 }
 
 // Deps returns the parameter dependencies for Depends states.
-// Returns nil for Clean and Polluted states.
 func (s State) Deps() []*ssa.Parameter {
 	return s.deps
 }
@@ -112,7 +120,6 @@ func (s State) IsDepends() bool {
 }
 
 // IsValid returns true if the state is valid for a pure function return.
-// A pure function must return Clean or Depends, not Polluted.
 func (s State) IsValid() bool {
 	return s.kind != KindPolluted
 }
@@ -130,11 +137,13 @@ func (s State) DependsOn(param *ssa.Parameter) bool {
 	return false
 }
 
+// =============================================================================
+// State Operations
+// =============================================================================
+
 // Merge merges two states using lattice rules.
 //
-// Lattice order (from most pure to least pure):
-//
-//	Clean < Depends < Polluted
+// Lattice order: Clean < Depends < Polluted
 //
 // Merge rules:
 //   - Clean ⊔ Clean = Clean
@@ -142,17 +151,14 @@ func (s State) DependsOn(param *ssa.Parameter) bool {
 //   - Depends(p) ⊔ Depends(q) = Depends(p, q)
 //   - * ⊔ Polluted = Polluted
 func (s State) Merge(other State) State {
-	// Polluted dominates everything
 	if s.kind == KindPolluted || other.kind == KindPolluted {
 		return Polluted()
 	}
 
-	// Both Clean
 	if s.kind == KindClean && other.kind == KindClean {
 		return Clean()
 	}
 
-	// At least one is Depends
 	var allDeps []*ssa.Parameter
 	if s.kind == KindDepends {
 		allDeps = append(allDeps, s.deps...)
@@ -186,7 +192,6 @@ func (s State) String() string {
 }
 
 // Equal returns true if two states are equal.
-// For Depends states, compares deps as sets (order-independent).
 func (s State) Equal(other State) bool {
 	if s.kind != other.kind {
 		return false
@@ -197,7 +202,6 @@ func (s State) Equal(other State) bool {
 	if len(s.deps) != len(other.deps) {
 		return false
 	}
-	// Set-based comparison
 	set := make(map[*ssa.Parameter]bool, len(s.deps))
 	for _, p := range s.deps {
 		set[p] = true
