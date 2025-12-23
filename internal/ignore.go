@@ -209,6 +209,19 @@ type IgnoreMap map[int]*ignoreEntry
 
 // BuildIgnoreMap scans a file for ignore comments and returns a map.
 // It also handles file-level and function-level ignore directives.
+//
+// Example:
+//
+//	//gormreuse:ignore         // Line 5 → map[5] (line-level)
+//	q.Find(nil)                // Line 6 → ignored (line 5 covers line 6)
+//
+//	// File-level ignore (in package doc):
+//	// gormreuse:ignore        // → map[-1] (special marker)
+//	package main               // All lines ignored
+//
+// The returned map uses line numbers as keys:
+//   - Positive line: ignore directive for next line
+//   - Line -1: file-level ignore (all lines)
 func BuildIgnoreMap(fset *token.FileSet, file *ast.File) IgnoreMap {
 	m := make(IgnoreMap)
 
@@ -332,6 +345,25 @@ func BuildFunctionIgnoreSet(fset *token.FileSet, file *ast.File) map[token.Pos]s
 // BuildPureFunctionSet builds a set of functions marked as pure.
 // Returns a map of PureFuncKey that can be added to a PureFuncSet.
 // Functions marked pure are assumed NOT to pollute *gorm.DB arguments.
+//
+// Example:
+//
+//	//gormreuse:pure
+//	func safeQuery(db *gorm.DB) *gorm.DB {
+//	    return db.Session(&gorm.Session{})
+//	}
+//	→ PureFuncKey{PkgPath: "...", FuncName: "safeQuery"}
+//
+//	//gormreuse:pure
+//	func (h *Handler) GetDB() *gorm.DB {
+//	    return h.db.Session(&gorm.Session{})
+//	}
+//	→ PureFuncKey{PkgPath: "...", ReceiverType: "Handler", FuncName: "GetDB"}
+//
+// Key generation:
+//   - PkgPath: full import path (e.g., "github.com/user/pkg")
+//   - ReceiverType: type name without pointer (e.g., "Handler" not "*Handler")
+//   - FuncName: function or method name
 func BuildPureFunctionSet(fset *token.FileSet, file *ast.File, pkgPath string) map[PureFuncKey]struct{} {
 	result := make(map[PureFuncKey]struct{})
 
