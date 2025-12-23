@@ -325,26 +325,19 @@ func (p *PollutionTracker) IsPollutedAt(root ssa.Value, targetBlock *ssa.BasicBl
 	return false
 }
 
-// IsPollutedAnywhere checks if the value is polluted anywhere in the given function.
+// IsPollutedAnywhere checks if the value is polluted anywhere.
 // Used for defer statements which execute at function exit.
+//
+// Uses conservative approach: if polluted in ANY block (including nested closures),
+// considers it polluted since defers execute after all other code and
+// closures may have already modified the value.
+//
+// The fn parameter is kept for API compatibility and potential future use
+// for more precise analysis.
 func (p *PollutionTracker) IsPollutedAnywhere(root ssa.Value, fn *ssa.Function) bool {
 	state := p.states[root]
-	if state == nil || len(state.pollutedBlocks) == 0 {
-		return false
-	}
-	for pollutedBlock := range state.pollutedBlocks {
-		if pollutedBlock == nil {
-			continue
-		}
-		// Check if this pollution is from the same function or a closure of it
-		if pollutedBlock.Parent() == fn {
-			return true
-		}
-		// Also check closures (parent function captures the value)
-		// Closure pollution affects the parent function's defers
-		return true
-	}
-	return false
+	// Conservative: polluted in any block = polluted for defer purposes
+	return state != nil && len(state.pollutedBlocks) > 0
 }
 
 // CollectViolations returns all detected violations.

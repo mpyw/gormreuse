@@ -137,21 +137,17 @@ func (c *checker) report(pos token.Pos, message string) {
 
 // ssaAnalyzer orchestrates the SSA-based analysis for *gorm.DB reuse detection.
 type ssaAnalyzer struct {
-	fn           *ssa.Function
-	rootTracer   *ssapkg.RootTracer
-	cfgAnalyzer  *ssapkg.CFGAnalyzer
-	handlers     []ssapkg.InstructionHandler
-	deferHandler *ssapkg.DeferHandler
+	fn          *ssa.Function
+	rootTracer  *ssapkg.RootTracer
+	cfgAnalyzer *ssapkg.CFGAnalyzer
 }
 
 // newSSAAnalyzer creates a new ssaAnalyzer for the given function.
 func newSSAAnalyzer(fn *ssa.Function, pureFuncs *directive.PureFuncSet) *ssaAnalyzer {
 	return &ssaAnalyzer{
-		fn:           fn,
-		rootTracer:   ssapkg.NewRootTracer(pureFuncs),
-		cfgAnalyzer:  ssapkg.NewCFGAnalyzer(),
-		handlers:     ssapkg.DefaultHandlers(),
-		deferHandler: &ssapkg.DeferHandler{},
+		fn:          fn,
+		rootTracer:  ssapkg.NewRootTracer(pureFuncs),
+		cfgAnalyzer: ssapkg.NewCFGAnalyzer(),
 	}
 }
 
@@ -248,18 +244,14 @@ func (a *ssaAnalyzer) processFunction(fn *ssa.Function, tracker *ssapkg.Pollutio
 				continue
 			}
 
-			// Dispatch to appropriate handler
-			for _, handler := range a.handlers {
-				if handler.CanHandle(instr) {
-					handler.Handle(instr, ctx)
-					break
-				}
-			}
+			// Dispatch to appropriate handler (O(1) type switch)
+			ssapkg.DispatchInstruction(instr, ctx)
 		}
 	}
 
 	// Second pass: process defer statements
+	deferHandler := &ssapkg.DeferHandler{}
 	for _, d := range defers {
-		a.deferHandler.Handle(d, ctx)
+		deferHandler.Handle(d, ctx)
 	}
 }

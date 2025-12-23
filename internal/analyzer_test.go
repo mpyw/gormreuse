@@ -26,9 +26,6 @@ func TestNewAnalyzer(t *testing.T) {
 	if analyzer.cfgAnalyzer == nil {
 		t.Error("Expected cfgAnalyzer to be initialized")
 	}
-	if analyzer.handlers == nil {
-		t.Error("Expected handlers to be initialized")
-	}
 }
 
 func TestNewChecker(t *testing.T) {

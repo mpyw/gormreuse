@@ -6,7 +6,6 @@ import (
 	"go/token"
 
 	"github.com/mpyw/gormreuse/internal/directive"
-	ssapkg "github.com/mpyw/gormreuse/internal/ssa"
 )
 
 // =============================================================================
@@ -41,37 +40,3 @@ func BuildFunctionIgnoreSet(fset *token.FileSet, file *ast.File) map[token.Pos]s
 func BuildPureFunctionSet(fset *token.FileSet, file *ast.File, pkgPath string) map[PureFuncKey]struct{} {
 	return directive.BuildPureFunctionSet(fset, file, pkgPath)
 }
-
-// =============================================================================
-// Re-exports from ssa package (for tests and backward compatibility)
-// =============================================================================
-
-// Violation is an alias for ssapkg.Violation.
-type Violation = ssapkg.Violation
-
-// CFGAnalyzer is an alias for ssapkg.CFGAnalyzer.
-type CFGAnalyzer = ssapkg.CFGAnalyzer
-
-// LoopInfo is an alias for ssapkg.LoopInfo.
-type LoopInfo = ssapkg.LoopInfo
-
-// PollutionTracker is an alias for ssapkg.PollutionTracker.
-type PollutionTracker = ssapkg.PollutionTracker
-
-// RootTracer is an alias for ssapkg.RootTracer.
-type RootTracer = ssapkg.RootTracer
-
-// SSATracer is an alias for ssapkg.SSATracer.
-type SSATracer = ssapkg.SSATracer
-
-// HandlerContext is an alias for ssapkg.HandlerContext.
-type HandlerContext = ssapkg.HandlerContext
-
-// InstructionHandler is an alias for ssapkg.InstructionHandler.
-type InstructionHandler = ssapkg.InstructionHandler
-
-// CallHandler is an alias for ssapkg.CallHandler.
-type CallHandler = ssapkg.CallHandler
-
-// DeferHandler is an alias for ssapkg.DeferHandler.
-type DeferHandler = ssapkg.DeferHandler

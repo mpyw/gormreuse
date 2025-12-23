@@ -26,6 +26,81 @@ type HandlerContext struct {
 	CurrentFn   *ssa.Function
 }
 
+// checkAndMarkPollution checks for pollution and marks terminal calls as polluting.
+// Used by CallHandler for direct and bound method calls.
+func (ctx *HandlerContext) checkAndMarkPollution(
+	root ssa.Value,
+	currentBlock *ssa.BasicBlock,
+	pos token.Pos,
+	isPureBuiltin bool,
+	isTerminal bool,
+	isInLoop bool,
+) {
+	if ctx.Tracker.IsPollutedInBlock(root, currentBlock) {
+		ctx.Tracker.AddViolation(root, pos)
+		return
+	}
+	if !isPureBuiltin && isTerminal {
+		ctx.Tracker.MarkPolluted(root, currentBlock, pos)
+		if isInLoop && ctx.CFGAnalyzer.IsDefinedOutsideLoop(root, ctx.LoopInfo) {
+			ctx.Tracker.AddViolation(root, pos)
+		}
+	}
+}
+
+// pollutionChecker is a function that checks if a value is polluted.
+type pollutionChecker func(root ssa.Value) bool
+
+// processGormDBCallCommon processes a call with *gorm.DB arguments.
+// Used by GoHandler and DeferHandler to share common pollution-check logic.
+func processGormDBCallCommon(
+	callCommon *ssa.CallCommon,
+	pos token.Pos,
+	ctx *HandlerContext,
+	isPolluted pollutionChecker,
+) {
+	callee := callCommon.StaticCallee()
+	if callee == nil {
+		return
+	}
+
+	sig := callee.Signature
+
+	// Check if it's a method call on *gorm.DB
+	if sig != nil && sig.Recv() != nil && typeutil.IsGormDB(sig.Recv().Type()) {
+		if len(callCommon.Args) == 0 {
+			return
+		}
+		recv := callCommon.Args[0]
+
+		root := ctx.RootTracer.FindMutableRoot(recv)
+		if root == nil {
+			return
+		}
+
+		if isPolluted(root) {
+			ctx.Tracker.AddViolation(root, pos)
+		}
+		return
+	}
+
+	// Check each argument for *gorm.DB pollution
+	for _, arg := range callCommon.Args {
+		if !typeutil.IsGormDB(arg.Type()) {
+			continue
+		}
+
+		root := ctx.RootTracer.FindMutableRoot(arg)
+		if root == nil {
+			continue
+		}
+
+		if isPolluted(root) {
+			ctx.Tracker.AddViolation(root, pos)
+		}
+	}
+}
+
 // InstructionHandler handles a specific type of SSA instruction.
 type InstructionHandler interface {
 	// CanHandle returns true if this handler can process the given instruction.
@@ -120,18 +195,8 @@ func (h *CallHandler) Handle(instr ssa.Instruction, ctx *HandlerContext) {
 
 	currentBlock := call.Block()
 
-	// Check for same-block pollution
-	if ctx.Tracker.IsPollutedInBlock(root, currentBlock) {
-		ctx.Tracker.AddViolation(root, call.Pos())
-	} else if !isPureBuiltin && isTerminal {
-		// Terminal Chain Method - mark as polluted
-		ctx.Tracker.MarkPolluted(root, currentBlock, call.Pos())
-
-		// If in a loop AND the root is defined outside the loop, report as violation
-		if isInLoop && ctx.CFGAnalyzer.IsDefinedOutsideLoop(root, ctx.LoopInfo) {
-			ctx.Tracker.AddViolation(root, call.Pos())
-		}
-	}
+	// Check for same-block pollution and mark terminal calls
+	ctx.checkAndMarkPollution(root, currentBlock, call.Pos(), isPureBuiltin, isTerminal, isInLoop)
 
 	// Check ALL possible roots for pollution (handles Phi nodes from switch/if)
 	allRoots := ctx.RootTracer.FindAllMutableRoots(recv)
@@ -185,17 +250,7 @@ func (h *CallHandler) processBoundMethodCall(call *ssa.Call, mc *ssa.MakeClosure
 		return
 	}
 
-	currentBlock := call.Block()
-
-	if ctx.Tracker.IsPollutedInBlock(root, currentBlock) {
-		ctx.Tracker.AddViolation(root, call.Pos())
-	} else if !isPureBuiltin && isTerminal {
-		ctx.Tracker.MarkPolluted(root, currentBlock, call.Pos())
-
-		if isInLoop && ctx.CFGAnalyzer.IsDefinedOutsideLoop(root, ctx.LoopInfo) {
-			ctx.Tracker.AddViolation(root, call.Pos())
-		}
-	}
+	ctx.checkAndMarkPollution(root, call.Block(), call.Pos(), isPureBuiltin, isTerminal, isInLoop)
 }
 
 func (h *CallHandler) checkFunctionCallPollution(call *ssa.Call, ctx *HandlerContext) {
@@ -300,44 +355,9 @@ func (h *GoHandler) Handle(instr ssa.Instruction, ctx *HandlerContext) {
 }
 
 func (h *GoHandler) processCallCommon(callCommon *ssa.CallCommon, pos token.Pos, block *ssa.BasicBlock, ctx *HandlerContext) {
-	callee := callCommon.StaticCallee()
-	if callee == nil {
-		return
-	}
-
-	sig := callee.Signature
-
-	if sig != nil && sig.Recv() != nil && typeutil.IsGormDB(sig.Recv().Type()) {
-		if len(callCommon.Args) == 0 {
-			return
-		}
-		recv := callCommon.Args[0]
-
-		root := ctx.RootTracer.FindMutableRoot(recv)
-		if root == nil {
-			return
-		}
-
-		if ctx.Tracker.IsPollutedAt(root, block) {
-			ctx.Tracker.AddViolation(root, pos)
-		}
-		return
-	}
-
-	for _, arg := range callCommon.Args {
-		if !typeutil.IsGormDB(arg.Type()) {
-			continue
-		}
-
-		root := ctx.RootTracer.FindMutableRoot(arg)
-		if root == nil {
-			continue
-		}
-
-		if ctx.Tracker.IsPollutedAt(root, block) {
-			ctx.Tracker.AddViolation(root, pos)
-		}
-	}
+	processGormDBCallCommon(callCommon, pos, ctx, func(root ssa.Value) bool {
+		return ctx.Tracker.IsPollutedAt(root, block)
+	})
 }
 
 // =============================================================================
@@ -376,44 +396,9 @@ func (h *DeferHandler) Handle(instr ssa.Instruction, ctx *HandlerContext) {
 }
 
 func (h *DeferHandler) processCallCommon(callCommon *ssa.CallCommon, pos token.Pos, fn *ssa.Function, ctx *HandlerContext) {
-	callee := callCommon.StaticCallee()
-	if callee == nil {
-		return
-	}
-
-	sig := callee.Signature
-
-	if sig != nil && sig.Recv() != nil && typeutil.IsGormDB(sig.Recv().Type()) {
-		if len(callCommon.Args) == 0 {
-			return
-		}
-		recv := callCommon.Args[0]
-
-		root := ctx.RootTracer.FindMutableRoot(recv)
-		if root == nil {
-			return
-		}
-
-		if ctx.Tracker.IsPollutedAnywhere(root, fn) {
-			ctx.Tracker.AddViolation(root, pos)
-		}
-		return
-	}
-
-	for _, arg := range callCommon.Args {
-		if !typeutil.IsGormDB(arg.Type()) {
-			continue
-		}
-
-		root := ctx.RootTracer.FindMutableRoot(arg)
-		if root == nil {
-			continue
-		}
-
-		if ctx.Tracker.IsPollutedAnywhere(root, fn) {
-			ctx.Tracker.AddViolation(root, pos)
-		}
-	}
+	processGormDBCallCommon(callCommon, pos, ctx, func(root ssa.Value) bool {
+		return ctx.Tracker.IsPollutedAnywhere(root, fn)
+	})
 }
 
 // =============================================================================
@@ -607,6 +592,7 @@ func ClosureCapturesGormDB(mc *ssa.MakeClosure) bool {
 }
 
 // DefaultHandlers returns the default set of instruction handlers.
+// Deprecated: Use DispatchInstruction instead for better performance.
 func DefaultHandlers() []InstructionHandler {
 	return []InstructionHandler{
 		&CallHandler{},
@@ -617,5 +603,35 @@ func DefaultHandlers() []InstructionHandler {
 		&MakeInterfaceHandler{},
 		// Note: DeferHandler is not included here because defers are processed
 		// in a second pass after all regular instructions.
+	}
+}
+
+// singleton handlers for dispatch (avoid allocation per call)
+var (
+	defaultCallHandler          = &CallHandler{}
+	defaultGoHandler            = &GoHandler{}
+	defaultSendHandler          = &SendHandler{}
+	defaultStoreHandler         = &StoreHandler{}
+	defaultMapUpdateHandler     = &MapUpdateHandler{}
+	defaultMakeInterfaceHandler = &MakeInterfaceHandler{}
+)
+
+// DispatchInstruction dispatches an instruction to the appropriate handler.
+// Uses type switch for O(1) dispatch instead of O(n) handler iteration.
+// Note: Does NOT handle *ssa.Defer (defers are processed in a second pass).
+func DispatchInstruction(instr ssa.Instruction, ctx *HandlerContext) {
+	switch i := instr.(type) {
+	case *ssa.Call:
+		defaultCallHandler.Handle(i, ctx)
+	case *ssa.Go:
+		defaultGoHandler.Handle(i, ctx)
+	case *ssa.Send:
+		defaultSendHandler.Handle(i, ctx)
+	case *ssa.Store:
+		defaultStoreHandler.Handle(i, ctx)
+	case *ssa.MapUpdate:
+		defaultMapUpdateHandler.Handle(i, ctx)
+	case *ssa.MakeInterface:
+		defaultMakeInterfaceHandler.Handle(i, ctx)
 	}
 }

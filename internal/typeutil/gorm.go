@@ -6,7 +6,6 @@ package typeutil
 
 import (
 	"go/types"
-	"strings"
 )
 
 const (
@@ -37,7 +36,8 @@ func isGormDBNamed(t types.Type) bool {
 	if obj == nil || obj.Pkg() == nil {
 		return false
 	}
-	return obj.Name() == gormDBType && strings.HasSuffix(obj.Pkg().Path(), gormPkgPath)
+	// Use exact match to prevent false positives from packages like "evil.com/fake-gorm.io/gorm"
+	return obj.Name() == gormDBType && obj.Pkg().Path() == gormPkgPath
 }
 
 // =============================================================================
