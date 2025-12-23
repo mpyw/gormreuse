@@ -67,27 +67,51 @@ func (a *Analyzer) AnalyzeValue(v ssa.Value) State {
 func (a *Analyzer) analyzeValueImpl(v ssa.Value) State {
 	switch val := v.(type) {
 	case *ssa.Parameter:
+		// func foo(db *gorm.DB) { ... }
+		//          ^^
+		// Parameter's purity depends on what the caller passes.
 		if a.checker.IsGormDB(val.Type()) {
 			return Depends(val)
 		}
 		return Clean()
 
 	case *ssa.Const:
+		// return nil
+		//        ^^^
+		// Constants (including nil) are always clean.
 		return Clean()
 
 	case *ssa.Call:
+		// db.Where("x")           // method call
+		// pureHelper(db)          // function call
+		// db.Session(&Session{})  // pure method call
 		return a.analyzeCall(val)
 
 	case *ssa.Phi:
+		// if cond {
+		//     x = db.Session(...)  // Clean
+		// } else {
+		//     x = db               // Depends(db)
+		// }
+		// return x  // Phi node merges both branches → Depends(db)
 		return a.analyzePhi(val)
 
 	case *ssa.Extract:
+		// tx, err := db.Begin()
+		// ^^
+		// Extract gets a value from a tuple (multiple return values).
 		return a.AnalyzeValue(val.Tuple)
 
 	case *ssa.UnOp:
+		// *ptr  // dereference
+		// Trace through to the underlying value.
 		return a.AnalyzeValue(val.X)
 
 	case *ssa.MakeClosure:
+		// f := func() { db.Find(nil) }
+		//      ^^^^^^^^^^^^^^^^^^^^^^^^^
+		// Closure capturing *gorm.DB is treated as Polluted
+		// because we can't track what happens inside.
 		for _, binding := range val.Bindings {
 			if a.checker.IsGormDB(binding.Type()) {
 				return Polluted()
@@ -96,30 +120,54 @@ func (a *Analyzer) analyzeValueImpl(v ssa.Value) State {
 		return Clean()
 
 	case *ssa.FieldAddr, *ssa.Field:
+		// h.db  // struct field access
+		// ^^^^
+		// Conservative: can't track field origin, assume Polluted.
 		return Polluted()
 
 	case *ssa.IndexAddr, *ssa.Index:
+		// dbs[0]  // slice/array index
+		// ^^^^^^
+		// Conservative: can't track which element, assume Polluted.
 		return Polluted()
 
 	case *ssa.Lookup:
+		// m["key"]  // map lookup
+		// ^^^^^^^^
+		// Conservative: can't track map contents, assume Polluted.
 		return Polluted()
 
 	case *ssa.ChangeType:
+		// MyDB(db)  // type alias conversion
+		// ^^^^^^^^
+		// Trace through - same underlying value.
 		return a.AnalyzeValue(val.X)
 
 	case *ssa.Convert:
+		// (*gorm.DB)(ptr)  // type conversion
+		// Trace through - same underlying value.
 		return a.AnalyzeValue(val.X)
 
 	case *ssa.TypeAssert:
+		// v.(*gorm.DB)  // type assertion
+		// ^^^^^^^^^^^^
+		// Trace through - extracts the underlying value.
 		return a.AnalyzeValue(val.X)
 
 	case *ssa.MakeInterface:
+		// var i interface{} = db
+		//                     ^^
+		// Wrapping in interface - trace through.
 		return a.AnalyzeValue(val.X)
 
 	case *ssa.Slice:
+		// dbs[1:3]  // slice operation
+		// ^^^^^^^^
+		// Trace through to the underlying slice.
 		return a.AnalyzeValue(val.X)
 
 	default:
+		// Unknown SSA value type - conservative: assume Polluted.
 		return Polluted()
 	}
 }
