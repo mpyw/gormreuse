@@ -170,6 +170,38 @@ func (a *Analyzer) Analyze() []Violation {
 }
 
 // processFunction processes all instructions in a function and its closures.
+//
+// This method implements a two-pass analysis:
+//
+//	Pass 1 (Regular Instructions):
+//	  - Process regular instructions (Call, Go, Send, Store, etc.)
+//	  - Recursively process closures that capture *gorm.DB
+//	  - Collect defer statements for pass 2
+//
+//	Pass 2 (Defer Statements):
+//	  - Process defers after all regular instructions
+//	  - Defers use IsPollutedAnywhere (not IsPollutedAt)
+//	  - This is because defers execute at function exit
+//
+// Example:
+//
+//	func example(db *gorm.DB) {
+//	    q := db.Where("x")
+//	    defer q.Find(nil)     // Collected in pass 1, processed in pass 2
+//
+//	    f := func() {         // MakeClosure capturing q
+//	        q.Find(nil)       // Processed via recursive call
+//	    }
+//
+//	    q.Find(nil)           // Pass 1: pollutes q
+//	    f()                   // Closure already processed
+//	}                         // Pass 2: defer sees q is polluted → violation
+//
+// Closure recursion:
+//
+//	When a MakeClosure captures *gorm.DB (detected by ClosureCapturesGormDB),
+//	we recursively process the closure function. This ensures pollution
+//	inside closures is tracked in the parent's PollutionTracker.
 func (a *Analyzer) processFunction(fn *ssa.Function, tracker *PollutionTracker, visited map[*ssa.Function]bool) {
 	if fn == nil || fn.Blocks == nil {
 		return

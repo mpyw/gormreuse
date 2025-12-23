@@ -34,6 +34,37 @@ func (l *LoopInfo) IsInLoop(block *ssa.BasicBlock) bool {
 }
 
 // DetectLoops analyzes the function and returns loop information.
+//
+// Loop detection algorithm:
+//
+//  1. Build block index map (block ordering from SSA)
+//  2. Find back-edges: edge A→B where B appears before A in block order
+//  3. Verify back-edge creates a cycle: CanReach(B, A) must be true
+//  4. Mark all blocks between loop head (B) and loop tail (A) as in-loop
+//
+// Example:
+//
+//	for i := range items {  // Block 1 (loop head)
+//	    q.Find(nil)         // Block 2 (loop body)
+//	}                       // Block 2 → Block 1 (back-edge)
+//	// Block 3 (after loop)
+//
+//	Block order: [0:entry, 1:loop.head, 2:loop.body, 3:exit]
+//	Back-edge: Block2 → Block1 (Block1 index < Block2 index)
+//	Cycle check: CanReach(Block1, Block2) = true
+//	Result: {Block1: true, Block2: true}
+//
+// Why cycle check is needed:
+//
+//	if cond {               // Block 1
+//	    // ...              // Block 2
+//	} else {
+//	    // ...              // Block 3 (appears after Block 1 in block order)
+//	}
+//	// merge                // Block 4 (might appear before Block 3!)
+//
+//	Without cycle check, Block4 → Block3 might look like a back-edge,
+//	but it's just merge block ordering. CanReach(Block4, Block3) = false.
 func (c *CFGAnalyzer) DetectLoops(fn *ssa.Function) *LoopInfo {
 	loopBlocks := make(map[*ssa.BasicBlock]bool)
 	if fn.Blocks == nil {
@@ -68,6 +99,35 @@ func (c *CFGAnalyzer) DetectLoops(fn *ssa.Function) *LoopInfo {
 }
 
 // CanReach checks if srcBlock can reach dstBlock in the CFG using BFS.
+//
+// This is a forward reachability check: can we get from src to dst
+// by following successor edges?
+//
+// Example CFG:
+//
+//	        ┌─────┐
+//	        │  0  │ entry
+//	        └──┬──┘
+//	           ↓
+//	        ┌─────┐
+//	   ┌───→│  1  │←───┐ loop head
+//	   │    └──┬──┘    │
+//	   │       ↓       │
+//	   │    ┌─────┐    │
+//	   │    │  2  │────┘ back-edge
+//	   │    └──┬──┘
+//	   │       ↓
+//	   │    ┌─────┐
+//	   └────│  3  │ exit (returns to 1 or exits)
+//	        └─────┘
+//
+//	CanReach(0, 2) = true  (0 → 1 → 2)
+//	CanReach(2, 1) = true  (2 → 1 via back-edge, or 2 → 3 → 1)
+//	CanReach(3, 0) = false (no path from exit to entry)
+//
+// Used for:
+//   - Loop detection: verify back-edges create cycles
+//   - Pollution reachability: can pollution reach a use site?
 func (c *CFGAnalyzer) CanReach(srcBlock, dstBlock *ssa.BasicBlock) bool {
 	if srcBlock == nil || dstBlock == nil {
 		return false
