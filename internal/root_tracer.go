@@ -103,6 +103,10 @@ func (t *RootTracer) trace(v ssa.Value, visited map[ssa.Value]bool) traceResult 
 	if sig == nil || sig.Recv() == nil || !IsGormDB(sig.Recv().Type()) {
 		// Not a *gorm.DB method - could be a helper function
 		if IsGormDB(call.Type()) {
+			// pure function returns immutable
+			if t.IsPureFunction(callee) {
+				return immutableResult()
+			}
 			return mutableRootResult(call)
 		}
 		return immutableResult()
@@ -235,12 +239,8 @@ func (t *RootTracer) isImmutableSource(v ssa.Value) bool {
 		if callee == nil {
 			return false
 		}
-		// Safe Methods (Session, WithContext) return immutable
-		if IsSafeMethod(callee.Name()) {
-			return true
-		}
-		// DB Init Methods (Open, etc.) return immutable
-		if IsDBInitMethod(callee.Name()) {
+		// Immutable-returning methods (Session, WithContext, Open, Begin, etc.)
+		if ReturnsImmutable(callee.Name()) {
 			return true
 		}
 		return false

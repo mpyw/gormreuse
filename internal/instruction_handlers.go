@@ -70,11 +70,11 @@ func (h *CallHandler) Handle(instr ssa.Instruction, ctx *HandlerContext) {
 	}
 
 	methodName := callee.Name()
-	isSafeMethod := IsSafeMethod(methodName)
+	returnsImmutable := ReturnsImmutable(methodName)
 	isTerminal := h.isTerminalCall(call)
 
 	// Skip non-terminal Chain Methods (part of chain construction)
-	if !isTerminal && !isSafeMethod {
+	if !isTerminal && !returnsImmutable {
 		return
 	}
 
@@ -95,7 +95,7 @@ func (h *CallHandler) Handle(instr ssa.Instruction, ctx *HandlerContext) {
 	// Check for same-block pollution
 	if ctx.Tracker.IsPollutedInBlock(root, currentBlock) {
 		ctx.Tracker.AddViolation(root, call.Pos())
-	} else if !isSafeMethod && isTerminal {
+	} else if !returnsImmutable && isTerminal {
 		// Terminal Chain Method - mark as polluted
 		ctx.Tracker.MarkPolluted(root, currentBlock, call.Pos())
 
@@ -128,10 +128,10 @@ func (h *CallHandler) processBoundMethodCall(call *ssa.Call, mc *ssa.MakeClosure
 	}
 
 	methodName := strings.TrimSuffix(mc.Fn.Name(), "$bound")
-	isSafeMethod := IsSafeMethod(methodName)
+	returnsImmutable := ReturnsImmutable(methodName)
 	isTerminal := h.isTerminalCall(call)
 
-	if !isTerminal && !isSafeMethod {
+	if !isTerminal && !returnsImmutable {
 		return
 	}
 
@@ -144,7 +144,7 @@ func (h *CallHandler) processBoundMethodCall(call *ssa.Call, mc *ssa.MakeClosure
 
 	if ctx.Tracker.IsPollutedInBlock(root, currentBlock) {
 		ctx.Tracker.AddViolation(root, call.Pos())
-	} else if !isSafeMethod && isTerminal {
+	} else if !returnsImmutable && isTerminal {
 		ctx.Tracker.MarkPolluted(root, currentBlock, call.Pos())
 
 		if isInLoop && ctx.CFGAnalyzer.IsDefinedOutsideLoop(root, ctx.LoopInfo) {

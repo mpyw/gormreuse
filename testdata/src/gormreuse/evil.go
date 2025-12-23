@@ -2,6 +2,9 @@ package internal
 
 import "gorm.io/gorm"
 
+// DB is a global database connection for testing pure factory functions.
+var DB *gorm.DB
+
 // =============================================================================
 // SHOULD REPORT - Closure tracking (via FreeVar tracing)
 // =============================================================================
@@ -259,6 +262,22 @@ func pureFunctionWithReturn(db *gorm.DB) {
 	_ = helperPureWithQuery(q) // Does NOT mark q as polluted
 
 	q.Find(nil) // OK: q was not polluted
+}
+
+// pureFactoryFunction is a pure function that returns a new *gorm.DB without
+// taking *gorm.DB as argument. This simulates a DB factory/wrapper.
+//
+//gormreuse:pure
+func pureFactoryFunction() *gorm.DB {
+	return DB.WithContext(nil) // Returns immutable
+}
+
+// pureFactoryUsage demonstrates that pure function return values are immutable.
+// This is the key test for the "pure function returns immutable" feature.
+func pureFactoryUsage() {
+	db := pureFactoryFunction()
+	db.Find(nil)
+	db.Find(nil) // OK: pure function returns immutable, can be reused
 }
 
 // =============================================================================
