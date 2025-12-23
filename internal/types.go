@@ -45,11 +45,13 @@ func isGormDBNamed(t types.Type) bool {
 var SafeMethods = map[string]struct{}{
 	"Session":     {},
 	"WithContext": {},
+	"Debug":       {},
 }
 
 // DBInitMethods are methods that create a new DB instance.
 // These are starting points for chains.
 var DBInitMethods = map[string]struct{}{
+	"Open":        {},
 	"Begin":       {},
 	"Transaction": {},
 }
