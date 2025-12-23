@@ -4,6 +4,8 @@ import (
 	"testing"
 
 	"golang.org/x/tools/go/ssa"
+
+	ssapkg "github.com/mpyw/gormreuse/internal/ssa"
 )
 
 // =============================================================================
@@ -13,7 +15,7 @@ import (
 func TestNewAnalyzer(t *testing.T) {
 	pureFuncs := NewPureFuncSet(nil)
 	pureFuncs.Add(PureFuncKey{PkgPath: "test", FuncName: "Pure"})
-	analyzer := NewAnalyzer(nil, pureFuncs)
+	analyzer := newSSAAnalyzer(nil, pureFuncs)
 
 	if analyzer.fn != nil {
 		t.Error("Expected fn to be nil")
@@ -50,18 +52,18 @@ func TestNewChecker(t *testing.T) {
 }
 
 func TestAnalyzer_ProcessFunction_NilFunction(t *testing.T) {
-	analyzer := NewAnalyzer(nil, nil)
-	cfgAnalyzer := NewCFGAnalyzer()
-	tracker := NewPollutionTracker(cfgAnalyzer, nil)
+	analyzer := newSSAAnalyzer(nil, nil)
+	cfgAnalyzer := ssapkg.NewCFGAnalyzer()
+	tracker := ssapkg.NewPollutionTracker(cfgAnalyzer, nil)
 
 	// Should not panic with nil function
 	analyzer.processFunction(nil, tracker, make(map[*ssa.Function]bool))
 }
 
 func TestAnalyzer_ProcessFunction_EmptyFunction(t *testing.T) {
-	analyzer := NewAnalyzer(nil, nil)
-	cfgAnalyzer := NewCFGAnalyzer()
-	tracker := NewPollutionTracker(cfgAnalyzer, nil)
+	analyzer := newSSAAnalyzer(nil, nil)
+	cfgAnalyzer := ssapkg.NewCFGAnalyzer()
+	tracker := ssapkg.NewPollutionTracker(cfgAnalyzer, nil)
 
 	// Function with nil Blocks
 	fn := &ssa.Function{}
@@ -69,9 +71,9 @@ func TestAnalyzer_ProcessFunction_EmptyFunction(t *testing.T) {
 }
 
 func TestAnalyzer_ProcessFunction_AlreadyVisited(t *testing.T) {
-	analyzer := NewAnalyzer(nil, nil)
-	cfgAnalyzer := NewCFGAnalyzer()
-	tracker := NewPollutionTracker(cfgAnalyzer, nil)
+	analyzer := newSSAAnalyzer(nil, nil)
+	cfgAnalyzer := ssapkg.NewCFGAnalyzer()
+	tracker := ssapkg.NewPollutionTracker(cfgAnalyzer, nil)
 
 	fn := &ssa.Function{}
 	visited := map[*ssa.Function]bool{fn: true}
@@ -82,7 +84,7 @@ func TestAnalyzer_ProcessFunction_AlreadyVisited(t *testing.T) {
 
 func TestAnalyzer_Analyze_EmptyFunction(t *testing.T) {
 	fn := &ssa.Function{}
-	analyzer := NewAnalyzer(fn, nil)
+	analyzer := newSSAAnalyzer(fn, nil)
 
 	violations := analyzer.Analyze()
 	if len(violations) != 0 {

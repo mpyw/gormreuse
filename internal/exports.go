@@ -5,8 +5,6 @@ import (
 	"go/ast"
 	"go/token"
 
-	"golang.org/x/tools/go/ssa"
-
 	"github.com/mpyw/gormreuse/internal/directive"
 	ssapkg "github.com/mpyw/gormreuse/internal/ssa"
 )
@@ -77,18 +75,3 @@ type CallHandler = ssapkg.CallHandler
 
 // DeferHandler is an alias for ssapkg.DeferHandler.
 type DeferHandler = ssapkg.DeferHandler
-
-// NewCFGAnalyzer creates a new CFGAnalyzer.
-func NewCFGAnalyzer() *CFGAnalyzer {
-	return ssapkg.NewCFGAnalyzer()
-}
-
-// NewPollutionTracker creates a new PollutionTracker.
-func NewPollutionTracker(cfgAnalyzer *CFGAnalyzer, fn *ssa.Function) *PollutionTracker {
-	return ssapkg.NewPollutionTracker(cfgAnalyzer, fn)
-}
-
-// NewAnalyzer creates a new SSA Analyzer (for test compatibility).
-func NewAnalyzer(fn *ssa.Function, pureFuncs *PureFuncSet) *ssaAnalyzer {
-	return newSSAAnalyzer(fn, pureFuncs)
-}
