@@ -57,7 +57,7 @@ func (a *Analyzer) AnalyzeValue(v ssa.Value) State {
 		return Polluted() // Cycle detection
 	}
 	a.visiting[v] = true
-	defer func() { delete(a.visiting, v) }()
+	defer delete(a.visiting, v)
 
 	state := a.analyzeValueImpl(v)
 	a.cache[v] = state
