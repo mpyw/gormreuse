@@ -6,26 +6,20 @@ import (
 	"golang.org/x/tools/go/ssa"
 
 	"github.com/mpyw/gormreuse/internal/directive"
-	ssapkg "github.com/mpyw/gormreuse/internal/ssa"
+	v2 "github.com/mpyw/gormreuse/internal/ssa/v2"
 )
 
 // =============================================================================
-// ssaAnalyzer Tests (analyzer.go)
+// v2.Analyzer Tests
 // =============================================================================
 
 func TestNewAnalyzer(t *testing.T) {
 	pureFuncs := directive.NewPureFuncSet(nil)
 	pureFuncs.Add(directive.PureFuncKey{PkgPath: "test", FuncName: "Pure"})
-	analyzer := newSSAAnalyzer(nil, pureFuncs)
+	analyzer := v2.NewAnalyzer(nil, pureFuncs)
 
-	if analyzer.fn != nil {
-		t.Error("Expected fn to be nil")
-	}
-	if analyzer.rootTracer == nil {
-		t.Error("Expected rootTracer to be initialized")
-	}
-	if analyzer.cfgAnalyzer == nil {
-		t.Error("Expected cfgAnalyzer to be initialized")
+	if analyzer == nil {
+		t.Error("Expected analyzer to be initialized")
 	}
 }
 
@@ -49,40 +43,19 @@ func TestNewChecker(t *testing.T) {
 	}
 }
 
-func TestAnalyzer_ProcessFunction_NilFunction(t *testing.T) {
-	analyzer := newSSAAnalyzer(nil, nil)
-	cfgAnalyzer := ssapkg.NewCFGAnalyzer()
-	tracker := ssapkg.NewPollutionTracker(cfgAnalyzer, nil)
+func TestAnalyzer_Analyze_NilFunction(t *testing.T) {
+	analyzer := v2.NewAnalyzer(nil, nil)
 
 	// Should not panic with nil function
-	analyzer.processFunction(nil, tracker, make(map[*ssa.Function]bool))
-}
-
-func TestAnalyzer_ProcessFunction_EmptyFunction(t *testing.T) {
-	analyzer := newSSAAnalyzer(nil, nil)
-	cfgAnalyzer := ssapkg.NewCFGAnalyzer()
-	tracker := ssapkg.NewPollutionTracker(cfgAnalyzer, nil)
-
-	// Function with nil Blocks
-	fn := &ssa.Function{}
-	analyzer.processFunction(fn, tracker, make(map[*ssa.Function]bool))
-}
-
-func TestAnalyzer_ProcessFunction_AlreadyVisited(t *testing.T) {
-	analyzer := newSSAAnalyzer(nil, nil)
-	cfgAnalyzer := ssapkg.NewCFGAnalyzer()
-	tracker := ssapkg.NewPollutionTracker(cfgAnalyzer, nil)
-
-	fn := &ssa.Function{}
-	visited := map[*ssa.Function]bool{fn: true}
-
-	// Should return early without processing
-	analyzer.processFunction(fn, tracker, visited)
+	violations := analyzer.Analyze()
+	if len(violations) != 0 {
+		t.Errorf("Expected 0 violations for nil function, got %d", len(violations))
+	}
 }
 
 func TestAnalyzer_Analyze_EmptyFunction(t *testing.T) {
 	fn := &ssa.Function{}
-	analyzer := newSSAAnalyzer(fn, nil)
+	analyzer := v2.NewAnalyzer(fn, nil)
 
 	violations := analyzer.Analyze()
 	if len(violations) != 0 {

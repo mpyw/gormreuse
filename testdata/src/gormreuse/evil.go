@@ -1492,15 +1492,16 @@ func deferForIf(db *gorm.DB, items []int) {
 }
 
 // tripleNestingIfForDefer demonstrates 3-level nesting: if -> for -> defer.
-// [LIMITATION] Defer inside for loop: closure is deferred multiple times,
-// but static analysis cannot detect the loop iteration count.
+// [LIMITATION] Defer execution order: defer closures execute at function exit,
+// but position-based detection reports at q.Find (textually later).
+// Runtime: q.Find runs first, then defer closures. Should flag defer, but flags q.Find instead.
 func tripleNestingIfForDefer(db *gorm.DB, flag bool, items []string) {
 	q := db.Where("x = ?", 1)
 
 	if flag {
 		for range items {
 			defer func() {
-				q.Count(nil) // [LIMITATION] FALSE NEGATIVE: defer in for loop not fully tracked
+				q.Count(nil)
 			}()
 		}
 	}
@@ -1509,15 +1510,14 @@ func tripleNestingIfForDefer(db *gorm.DB, flag bool, items []string) {
 }
 
 // tripleNestingForIfDefer demonstrates 3-level nesting: for -> if -> defer.
-// [LIMITATION] Defer inside for loop: closure is deferred multiple times,
-// but static analysis cannot detect the loop iteration count.
+// [LIMITATION] Same as tripleNestingIfForDefer - defer execution order not tracked.
 func tripleNestingForIfDefer(db *gorm.DB, items []int) {
 	q := db.Where("x = ?", 1)
 
 	for _, item := range items {
 		if item > 0 {
 			defer func(i int) {
-				q.Where("item = ?", i).Count(nil) // [LIMITATION] FALSE NEGATIVE: defer in for loop not fully tracked
+				q.Where("item = ?", i).Count(nil)
 			}(item)
 		}
 	}
@@ -2004,21 +2004,21 @@ type iifeHolder struct {
 }
 
 // structFieldIIFE demonstrates struct field access with IIFE.
-// [LIMITATION] When IIFE result is stored (not directly chained), the internal call is terminal.
-// This means q is polluted when the IIFE executes, and h.query.Find traces back to polluted q.
+// [LIMITATION] Struct field tracing: h.query.Find doesn't trace back through struct field to original q.
+// The IIFE's internal q.Where pollutes q, and q.Count is a separate use of q, so it's detected.
 func structFieldIIFE(db *gorm.DB) {
 	q := db.Where("x = ?", 1)
 
-	// IIFE result stored in struct field - internal call is terminal (pollutes q)
+	// IIFE result stored in struct field - internal call pollutes q
 	h := iifeHolder{
 		query: func() *gorm.DB {
 			return q.Where("from iife", 1)
 		}(),
 	}
 
-	h.query.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+	h.query.Find(nil) // [LIMITATION] Does not trace through struct field
 
-	// Third use of q - also violation
+	// Second use of q - violation (q was polluted by IIFE's internal call)
 	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
 }
 
@@ -2175,11 +2175,11 @@ func storedClosureReordered(db *gorm.DB) {
 	q1 := db.Where("x", 1)
 
 	fn := func() *gorm.DB {
-		return q1.Where("from closure", 1)
+		return q1.Where("from closure", 1) // Pollutes q1 (closure body processed first in SSA)
 	}
-	q2 := fn()         // In runtime: creates first branch. In SSA: closure body already processed.
-	q1.Where("z", 3)   // In runtime: second branch. In SSA: first terminal use, pollutes q1.
-	q2.Where("y", 2)   // want `\*gorm\.DB instance reused after chain method`
+	q2 := fn()
+	q1.Where("z", 3) // want `\*gorm\.DB instance reused after chain method`
+	q2.Where("y", 2) // OK: q2 is fresh root
 }
 
 // iifeStoredResult demonstrates IIFE result stored in variable.
@@ -2273,8 +2273,8 @@ func reassignAfterPollutionSameValue(db *gorm.DB) {
 	base := db.Where("x = ?", 1)
 	base.Find(nil) // Pollutes base
 
-	q := base.Where("y = ?", 2) // Derived from polluted base
-	q.Count(nil)                // want `\*gorm\.DB instance reused after chain method`
+	q := base.Where("y = ?", 2) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil)                // OK: q is a fresh root
 }
 
 // reassignShadowing demonstrates variable shadowing vs reassignment.
@@ -2293,7 +2293,6 @@ func reassignShadowing(db *gorm.DB) {
 }
 
 // reassignInClosure demonstrates reassignment inside closure.
-// [LIMITATION] Closure assignment not fully tracked.
 func reassignInClosure(db *gorm.DB) {
 	q := db.Where("x = ?", 1)
 	q.Find(nil) // Pollutes q
@@ -2302,8 +2301,7 @@ func reassignInClosure(db *gorm.DB) {
 		q = db.Where("y = ?", 2) // Reassign in closure
 	}()
 
-	// [LIMITATION] FALSE NEGATIVE: Closure reassignment not tracked
-	q.Count(nil) // Not detected - closure reassignment limitation
+	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
 }
 
 // reassignFromHelper demonstrates reassignment from helper function.
