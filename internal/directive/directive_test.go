@@ -226,7 +226,7 @@ func notPure() {}
 		t.Fatalf("Failed to parse: %v", err)
 	}
 
-	set := BuildPureFunctionSet(fset, file, "test/pkg")
+	set := BuildPureFunctionSet(file, "test/pkg")
 	if len(set) != 6 {
 		t.Errorf("Expected 6 pure functions, got %d", len(set))
 	}

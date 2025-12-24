@@ -29,16 +29,16 @@ type Violation = pollution.Violation
 
 // Analyzer orchestrates SSA-based analysis for *gorm.DB reuse detection.
 type Analyzer struct {
-	fn         *ssa.Function
-	rootTracer *tracer.RootTracer
+	fn          *ssa.Function
+	rootTracer  *tracer.RootTracer
 	cfgAnalyzer *cfg.Analyzer
 }
 
 // NewAnalyzer creates a new Analyzer for the given function.
 func NewAnalyzer(fn *ssa.Function, pureFuncs *directive.PureFuncSet) *Analyzer {
 	return &Analyzer{
-		fn:         fn,
-		rootTracer: tracer.New(pureFuncs),
+		fn:          fn,
+		rootTracer:  tracer.New(pureFuncs),
 		cfgAnalyzer: cfg.New(),
 	}
 }

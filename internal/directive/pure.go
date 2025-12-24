@@ -250,7 +250,7 @@ func (s *PureFuncSet) hasPureDirectiveInFile(file *ast.File, funcName, receiverT
 //   - PkgPath: full import path (e.g., "github.com/user/pkg")
 //   - ReceiverType: type name without pointer (e.g., "Handler" not "*Handler")
 //   - FuncName: function or method name
-func BuildPureFunctionSet(fset *token.FileSet, file *ast.File, pkgPath string) map[PureFuncKey]struct{} {
+func BuildPureFunctionSet(file *ast.File, pkgPath string) map[PureFuncKey]struct{} {
 	result := make(map[PureFuncKey]struct{})
 
 	ast.Inspect(file, func(n ast.Node) bool {

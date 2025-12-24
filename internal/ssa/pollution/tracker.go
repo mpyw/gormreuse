@@ -45,9 +45,6 @@ type usageInfo struct {
 	pos   token.Pos
 }
 
-// pollutionInfo for backwards compatibility.
-type pollutionInfo = usageInfo
-
 // CFGAnalyzer interface for control flow analysis.
 type CFGAnalyzer interface {
 	CanReach(src, dst *ssa.BasicBlock) bool
@@ -65,22 +62,15 @@ func New(cfgAnalyzer CFGAnalyzer, fn *ssa.Function) *Tracker {
 
 // ProcessBranch records a POLLUTING usage of a mutable root.
 // Non-pure method calls that consume the root.
-func (t *Tracker) ProcessBranch(root ssa.Value, block *ssa.BasicBlock, pos token.Pos) bool {
-	if root == nil {
-		return true
-	}
-
+// Caller must ensure root is not nil.
+func (t *Tracker) ProcessBranch(root ssa.Value, block *ssa.BasicBlock, pos token.Pos) {
 	t.pollutingUses[root] = append(t.pollutingUses[root], usageInfo{block: block, pos: pos})
-	return true
 }
 
 // RecordPureUse records a PURE usage (Session, Debug, etc).
 // These uses check for pollution but don't pollute.
+// Caller must ensure root is not nil.
 func (t *Tracker) RecordPureUse(root ssa.Value, block *ssa.BasicBlock, pos token.Pos) {
-	if root == nil {
-		return
-	}
-
 	t.pureUses[root] = append(t.pureUses[root], usageInfo{block: block, pos: pos})
 }
 
@@ -124,10 +114,8 @@ func (t *Tracker) IsPollutedAt(root ssa.Value, targetBlock *ssa.BasicBlock) bool
 }
 
 // MarkPolluted records a polluting usage (for channel send, slice storage, etc).
+// Caller must ensure root is not nil.
 func (t *Tracker) MarkPolluted(root ssa.Value, block *ssa.BasicBlock, pos token.Pos) {
-	if root == nil {
-		return
-	}
 	t.pollutingUses[root] = append(t.pollutingUses[root], usageInfo{block: block, pos: pos})
 }
 

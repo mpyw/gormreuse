@@ -49,7 +49,7 @@ func run(pass *analysis.Pass) (any, error) {
 		funcIgnores[filename] = directive.BuildFunctionIgnoreSet(pass.Fset, file)
 
 		// Build pure function set for this file
-		for key := range directive.BuildPureFunctionSet(pass.Fset, file, pkgPath) {
+		for key := range directive.BuildPureFunctionSet(file, pkgPath) {
 			pureFuncs.Add(key)
 		}
 	}
