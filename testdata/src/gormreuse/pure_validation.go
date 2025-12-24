@@ -256,6 +256,95 @@ func pureMixedReturnPaths(db *gorm.DB, cond bool) *gorm.DB {
 	return db // Depends(db) - valid!
 }
 
+// PV207: Pure function with variable assignment creating Phi node
+// This tests the inferPhi code path in purity inference
+//
+//gormreuse:pure
+func pureWithPhiNode(db *gorm.DB, cond bool) *gorm.DB {
+	var result *gorm.DB
+	if cond {
+		result = db.Session(&gorm.Session{})
+	} else {
+		result = db.Session(&gorm.Session{})
+	}
+	return result // SSA creates Phi node: phi [then: t0, else: t1]
+}
+
+// PV208: Pure function with Phi node returning Depends
+// Tests Phi node merging with Depends state
+//
+//gormreuse:pure
+func purePhiWithDepends(db *gorm.DB, cond bool) *gorm.DB {
+	var result *gorm.DB
+	if cond {
+		result = db.Session(&gorm.Session{}) // Clean
+	} else {
+		result = db // Depends(db)
+	}
+	return result // Phi merges Clean and Depends(db) → Depends(db)
+}
+
+// PV209: Pure function with Phi node that should report error
+// One branch returns Polluted
+//
+//gormreuse:pure
+func purePhiWithPolluted(db *gorm.DB, cond bool) *gorm.DB {
+	var result *gorm.DB
+	if cond {
+		result = db.Session(&gorm.Session{}) // Clean
+	} else {
+		result = db.Where("x") // want `pure function pollutes \*gorm\.DB argument by calling Where`
+	}
+	return result // want `pure function returns Polluted \*gorm\.DB`
+}
+
+// =============================================================================
+// SSA COVERAGE TESTS - Testing specific SSA node types
+// =============================================================================
+
+// PV210: Extract - multiple return values (Begin returns *gorm.DB)
+//
+//gormreuse:pure
+func pureWithExtract(db *gorm.DB) *gorm.DB {
+	tx := db.Begin() // Begin returns *gorm.DB, no Extract needed in this case
+	return tx
+}
+
+// PV211: UnOp - dereference through pointer
+//
+//gormreuse:pure
+func pureWithUnOp(db **gorm.DB) *gorm.DB {
+	return (*db).Session(&gorm.Session{}) // Dereference *db, then call Session
+}
+
+// PV212: MakeClosure - closure that captures but doesn't pollute
+// NOTE: Returning a closure that captures *gorm.DB is Polluted
+// because we can't track what happens when it's called
+//
+//gormreuse:pure
+func pureReturningClosure(db *gorm.DB) func() {
+	return func() {
+		db.Session(&gorm.Session{}) // captured db, but only calls pure method
+	}
+}
+
+// PV213: TypeAssert - extracting *gorm.DB from interface{}
+//
+//gormreuse:pure
+func pureWithTypeAssert(v interface{}) *gorm.DB {
+	if db, ok := v.(*gorm.DB); ok {
+		return db.Session(&gorm.Session{})
+	}
+	return nil
+}
+
+// PV214: MakeInterface - wrapping in interface and extracting
+//
+//gormreuse:pure
+func pureWithMakeInterface(db *gorm.DB) interface{} {
+	return db.Session(&gorm.Session{}) // Returns Clean wrapped in interface{}
+}
+
 // =============================================================================
 // HELPER FUNCTIONS (not marked as pure)
 // =============================================================================

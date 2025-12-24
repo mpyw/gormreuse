@@ -218,10 +218,9 @@ func (inf *Inferencer) inferValueImpl(v ssa.Value) State {
 //	nonPureHelper(db)       → Polluted (non-pure function with *gorm.DB arg)
 //	fmt.Println("hello")    → Clean    (no *gorm.DB involved)
 func (inf *Inferencer) inferCall(call *ssa.Call) State {
-	// Interface method call: var db gorm.DB; db.Where(...)
-	if call.Call.Method != nil {
-		return inf.inferInterfaceMethodCall(call)
-	}
+	// Interface method calls (call.Call.Method != nil) are not supported
+	// because IsGormDB only matches *gorm.DB (concrete pointer type).
+	// GORM's DB is a struct, so all method calls go through StaticCallee.
 
 	// Static call (concrete type or function)
 	callee := call.Call.StaticCallee()
@@ -252,26 +251,6 @@ func (inf *Inferencer) inferCall(call *ssa.Call) State {
 	}
 
 	return Clean()
-}
-
-// inferInterfaceMethodCall analyzes a method call through an interface.
-//
-// Examples:
-//
-//	var db gorm.DB  // interface type
-//	db.Session(&Session{})  → Clean    (pure builtin)
-//	db.Where("x")           → Polluted (non-pure method)
-//	db.Find(&users)         → Polluted (non-pure method)
-func (inf *Inferencer) inferInterfaceMethodCall(call *ssa.Call) State {
-	recv := call.Call.Value
-	if !typeutil.IsGormDB(recv.Type()) {
-		return Clean()
-	}
-
-	if typeutil.IsPureFunctionBuiltin(call.Call.Method.Name()) {
-		return Clean()
-	}
-	return Polluted()
 }
 
 // inferPureUserFuncCall analyzes a call to a user-defined pure function.

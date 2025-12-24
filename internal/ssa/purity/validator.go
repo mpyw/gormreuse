@@ -153,10 +153,9 @@ func (v *Validator) isPureUserFunc(fn *ssa.Function) bool {
 // =============================================================================
 
 func (v *Validator) checkCallPollution(call *ssa.Call) []Violation {
-	// Interface method call
-	if call.Call.Method != nil {
-		return v.checkInterfaceMethodPollution(call)
-	}
+	// Interface method calls (call.Call.Method != nil) are not supported
+	// because IsGormDB only matches *gorm.DB (concrete pointer type).
+	// GORM's DB is a struct, so all method calls go through StaticCallee.
 
 	// Static call
 	callee := call.Call.StaticCallee()
@@ -170,22 +169,6 @@ func (v *Validator) checkCallPollution(call *ssa.Call) []Violation {
 	}
 
 	return v.checkFunctionCallPollution(call, callee)
-}
-
-func (v *Validator) checkInterfaceMethodPollution(call *ssa.Call) []Violation {
-	recv := call.Call.Value
-	if !typeutil.IsGormDB(recv.Type()) {
-		return nil
-	}
-
-	methodName := call.Call.Method.Name()
-	if v.paramDerived[recv] && !typeutil.IsPureFunctionBuiltin(methodName) {
-		return []Violation{{
-			Pos:     call.Pos(),
-			Message: "pure function pollutes *gorm.DB argument by calling " + methodName,
-		}}
-	}
-	return nil
 }
 
 func (v *Validator) checkStaticMethodPollution(call *ssa.Call, callee *ssa.Function) []Violation {
