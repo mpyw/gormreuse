@@ -2481,3 +2481,205 @@ func pureMethodUsage() {
 	db.Find(nil)
 	db.Find(nil) // OK: pure method returns immutable, can be reused
 }
+
+// =============================================================================
+// SHOULD REPORT - Where-only patterns (no finisher at violation point)
+// These test that detection doesn't depend on isTerminal logic.
+// Even without Find/Count/etc, using a mutable value twice is a violation.
+// =============================================================================
+
+// whereOnlyBasic demonstrates that violation is detected even without finisher.
+// The second branch ends with Where, not Find.
+func whereOnlyBasic(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+
+	q.Where("a").Find(nil) // First branch - pollutes q
+
+	q.Where("b") // want `\*gorm\.DB instance reused after chain method`
+}
+
+// whereOnlyChain demonstrates chained Where without finisher.
+func whereOnlyChain(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+
+	q.Find(nil) // First branch - pollutes q
+
+	q.Where("a").Where("b").Order("c") // want `\*gorm\.DB instance reused after chain method`
+}
+
+// whereOnlyClosure demonstrates closure pollution then Where-only outside.
+func whereOnlyClosure(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+
+	func() {
+		q.Find(nil) // Pollutes q inside closure
+	}()
+
+	q.Where("outside") // want `\*gorm\.DB instance reused after chain method`
+}
+
+// whereOnlyIIFE demonstrates IIFE pollution then Where-only outside.
+func whereOnlyIIFE(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+
+	_ = func() *gorm.DB {
+		return q.Where("from iife")
+	}().Find(nil) // First branch (IIFE chain)
+
+	q.Where("outside") // want `\*gorm\.DB instance reused after chain method`
+}
+
+// whereOnlyLoop demonstrates loop pollution with Where-only.
+func whereOnlyLoop(db *gorm.DB, items []int) {
+	q := db.Where("x = ?", 1)
+
+	for range items {
+		q.Where("in loop") // want `\*gorm\.DB instance reused after chain method`
+	}
+}
+
+// whereOnlyConditional demonstrates conditional with Where-only violation.
+func whereOnlyConditional(db *gorm.DB, flag bool) {
+	q := db.Where("base")
+
+	if flag {
+		q.Find(nil) // First branch
+	} else {
+		q.Count(nil) // First branch (mutually exclusive)
+	}
+
+	q.Where("after conditional") // want `\*gorm\.DB instance reused after chain method`
+}
+
+// whereOnlyDefer demonstrates defer with Where-only.
+func whereOnlyDefer(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+
+	defer q.Where("deferred") // want `\*gorm\.DB instance reused after chain method`
+
+	q.Find(nil)
+}
+
+// whereOnlyGoroutine demonstrates goroutine with Where-only.
+// Note: Both goroutine closure and main code pollute q - analyzer detects reuse.
+func whereOnlyGoroutine(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+
+	go func() {
+		q.Where("in goroutine")
+	}()
+
+	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// whereOnlyStoredClosure demonstrates stored closure with Where-only violation.
+func whereOnlyStoredClosure(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+
+	fn := func() {
+		q.Find(nil) // Pollutes q
+	}
+	fn()
+
+	q.Where("after stored closure") // want `\*gorm\.DB instance reused after chain method`
+}
+
+// whereOnlyStoredClosureReturn demonstrates stored closure returning chain.
+func whereOnlyStoredClosureReturn(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+
+	fn := func() *gorm.DB {
+		return q.Where("from closure")
+	}
+	_ = fn().Find(nil) // First branch
+
+	q.Where("after") // want `\*gorm\.DB instance reused after chain method`
+}
+
+// whereOnlyIIFEStored demonstrates stored IIFE result with Where-only.
+// IIFE creates first branch from q (stored in q2), so q.Where is second branch.
+func whereOnlyIIFEStored(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+
+	q2 := func() *gorm.DB {
+		return q.Where("from iife") // First branch from q
+	}()
+
+	q2.Where("use stored") // Continues q2's chain (OK)
+	q.Where("original")    // want `\*gorm\.DB instance reused after chain method`
+}
+
+// whereOnlyBoundMethod demonstrates bound method with Where-only.
+func whereOnlyBoundMethod(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+
+	where := q.Where
+	where("bound method call") // First use - pollutes q
+
+	q.Where("after bound") // want `\*gorm\.DB instance reused after chain method`
+}
+
+// whereOnlyNestedIIFE demonstrates nested IIFE with Where-only.
+func whereOnlyNestedIIFE(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+
+	_ = func() *gorm.DB {
+		return func() *gorm.DB {
+			return q.Where("nested")
+		}()
+	}().Find(nil) // First branch (entire nested IIFE chain)
+
+	q.Where("after nested") // want `\*gorm\.DB instance reused after chain method`
+}
+
+// whereOnlyIIFEChainContinued demonstrates IIFE chain with Where continuation.
+func whereOnlyIIFEChainContinued(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+
+	_ = func() *gorm.DB {
+		return q.Where("iife inner")
+	}().Where("chained after iife").Find(nil) // First branch
+
+	q.Where("second branch") // want `\*gorm\.DB instance reused after chain method`
+}
+
+// whereOnlyDoubleIIFE demonstrates two IIFEs with Where-only.
+func whereOnlyDoubleIIFE(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+
+	_ = func() *gorm.DB {
+		return q.Where("first iife")
+	}().Find(nil) // First branch
+
+	_ = func() *gorm.DB {
+		return q.Where("second iife") // want `\*gorm\.DB instance reused after chain method`
+	}()
+}
+
+// whereOnlyStructFieldClosure demonstrates struct field with closure and Where-only.
+func whereOnlyStructFieldClosure(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+
+	type holder struct {
+		fn func()
+	}
+	h := holder{
+		fn: func() {
+			q.Find(nil) // Pollutes q
+		},
+	}
+	h.fn()
+
+	q.Where("after struct field closure") // want `\*gorm\.DB instance reused after chain method`
+}
+
+// whereOnlyMultipleBranches demonstrates multiple Where-only branches.
+func whereOnlyMultipleBranches(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+
+	q.Where("branch1").Find(nil) // First branch
+
+	q.Where("branch2") // want `\*gorm\.DB instance reused after chain method`
+	q.Where("branch3") // want `\*gorm\.DB instance reused after chain method`
+	q.Where("branch4") // want `\*gorm\.DB instance reused after chain method`
+}
