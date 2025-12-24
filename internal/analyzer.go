@@ -1,4 +1,37 @@
 // Package internal provides SSA-based analysis for GORM *gorm.DB reuse detection.
+//
+// # Architecture
+//
+// This package serves as the bridge between the public analyzer and the
+// internal SSA analysis machinery:
+//
+//	┌─────────────────────────────────────────────────────────────────────────┐
+//	│                         Analysis Flow                                    │
+//	│                                                                          │
+//	│   analyzer.go (public)                                                   │
+//	│        │                                                                 │
+//	│        ▼                                                                 │
+//	│   internal/analyzer.go   ◀── You are here                                │
+//	│   ┌─────────────────────────────────────────────────────────────────┐   │
+//	│   │  RunSSA()                                                       │   │
+//	│   │    │                                                            │   │
+//	│   │    ├── Skip excluded files/functions                            │   │
+//	│   │    ├── Validate pure function contracts                         │   │
+//	│   │    ├── Run SSA analysis (ssa.Analyzer)                          │   │
+//	│   │    └── Apply ignore directives                                  │   │
+//	│   └─────────────────────────────────────────────────────────────────┘   │
+//	│        │                                                                 │
+//	│        ▼                                                                 │
+//	│   internal/ssa/analyzer.go                                               │
+//	│   (Core SSA analysis)                                                    │
+//	└─────────────────────────────────────────────────────────────────────────┘
+//
+// # Responsibilities
+//
+//   - Orchestrate SSA analysis for all source functions
+//   - Handle function-level and line-level ignore directives
+//   - Report unused ignore directives
+//   - Validate pure function contracts
 package internal
 
 import (
@@ -7,6 +40,10 @@ import (
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/analysis/passes/buildssa"
 	"golang.org/x/tools/go/ssa"
+
+	"github.com/mpyw/gormreuse/internal/directive"
+	ssautil "github.com/mpyw/gormreuse/internal/ssa"
+	"github.com/mpyw/gormreuse/internal/ssa/purity"
 )
 
 // =============================================================================
@@ -14,12 +51,23 @@ import (
 // =============================================================================
 
 // RunSSA performs SSA-based analysis for GORM *gorm.DB reuse detection.
+//
+// This is the main entry point called from the public analyzer. It processes
+// all source functions in the package and reports violations.
+//
+// Processing flow for each function:
+//  1. Skip if file is excluded (generated files, etc.)
+//  2. Skip if function has //gormreuse:ignore directive
+//  3. Validate pure function contract if marked with //gormreuse:pure
+//  4. Run SSA analysis and collect violations
+//  5. Report violations (unless suppressed by line-level ignore)
+//  6. Report unused ignore directives
 func RunSSA(
 	pass *analysis.Pass,
 	ssaInfo *buildssa.SSA,
-	ignoreMaps map[string]IgnoreMap,
-	funcIgnores map[string]map[token.Pos]struct{},
-	pureFuncs *PureFuncSet,
+	ignoreMaps map[string]directive.IgnoreMap,
+	funcIgnores map[string]map[token.Pos]directive.FunctionIgnoreEntry,
+	pureFuncs *directive.PureFuncSet,
 	skipFiles map[string]bool,
 ) {
 	for _, fn := range ssaInfo.SrcFuncs {
@@ -39,14 +87,19 @@ func RunSSA(
 
 		// Check if entire function is ignored
 		if funcIgnoreSet, ok := funcIgnores[filename]; ok {
-			if _, ignored := funcIgnoreSet[fn.Pos()]; ignored {
-				// Mark the ignore directive as used
+			if entry, ignored := funcIgnoreSet[fn.Pos()]; ignored {
+				// Mark the ignore directive as used (use the stored line number)
 				if ignoreMap != nil {
-					fnLine := pass.Fset.Position(fn.Pos()).Line
-					// The ignore comment is on the line before the function name
-					ignoreMap.MarkUsed(fnLine - 1)
+					ignoreMap.MarkUsed(entry.DirectiveLine)
 				}
 				continue
+			}
+		}
+
+		// Validate pure function contracts
+		if pureFuncs != nil && pureFuncs.Contains(fn) {
+			for _, v := range purity.ValidateFunction(fn, pureFuncs) {
+				pass.Reportf(v.Pos, "%s", v.Message)
 			}
 		}
 
@@ -69,14 +122,21 @@ func RunSSA(
 // SSA Checker
 // =============================================================================
 
+// checker wraps SSA analysis with ignore directive handling.
+//
+// It ensures:
+//   - Violations at the same position are only reported once
+//   - Line-level ignore directives suppress violations
+//   - Violations are reported through the analysis.Pass
 type checker struct {
-	pass      *analysis.Pass
-	ignoreMap IgnoreMap
-	pureFuncs *PureFuncSet
-	reported  map[token.Pos]bool
+	pass      *analysis.Pass         // For reporting diagnostics
+	ignoreMap directive.IgnoreMap    // Line-level ignore directives
+	pureFuncs *directive.PureFuncSet // Pure functions for analysis
+	reported  map[token.Pos]bool     // Deduplication of reports
 }
 
-func newChecker(pass *analysis.Pass, ignoreMap IgnoreMap, pureFuncs *PureFuncSet) *checker {
+// newChecker creates a new checker for a specific file.
+func newChecker(pass *analysis.Pass, ignoreMap directive.IgnoreMap, pureFuncs *directive.PureFuncSet) *checker {
 	return &checker{
 		pass:      pass,
 		ignoreMap: ignoreMap,
@@ -85,8 +145,9 @@ func newChecker(pass *analysis.Pass, ignoreMap IgnoreMap, pureFuncs *PureFuncSet
 	}
 }
 
+// checkFunction runs SSA analysis on a single function and reports violations.
 func (c *checker) checkFunction(fn *ssa.Function) {
-	analyzer := NewAnalyzer(fn, c.pureFuncs)
+	analyzer := ssautil.NewAnalyzer(fn, c.pureFuncs)
 	violations := analyzer.Analyze()
 
 	for _, v := range violations {
@@ -94,128 +155,19 @@ func (c *checker) checkFunction(fn *ssa.Function) {
 	}
 }
 
+// report reports a violation if not ignored or already reported.
 func (c *checker) report(pos token.Pos, message string) {
+	// Deduplicate: same position may be reached multiple times
 	if c.reported[pos] {
 		return
 	}
 	c.reported[pos] = true
 
+	// Check if line is ignored
 	line := c.pass.Fset.Position(pos).Line
 	if c.ignoreMap != nil && c.ignoreMap.ShouldIgnore(line) {
-		return
+		return // Suppressed by ignore directive
 	}
 
 	c.pass.Reportf(pos, "%s", message)
-}
-
-// =============================================================================
-// Analyzer - Orchestrates the Analysis Pipeline
-//
-// The Analyzer composes:
-//   - RootTracer: Traces SSA values to mutable roots
-//   - CFGAnalyzer: Analyzes control flow (loops, reachability)
-//   - PollutionTracker: Tracks pollution state and violations
-//   - InstructionHandlers: Process different instruction types (Strategy pattern)
-//
-// Analysis Pipeline:
-//   1. TRACKING PHASE: Process instructions, track pollution
-//   2. DETECTION PHASE: Detect cross-block violations via CFG reachability
-//   3. COLLECTION PHASE: Collect and return all violations
-// =============================================================================
-
-// Analyzer orchestrates the SSA-based analysis for *gorm.DB reuse detection.
-type Analyzer struct {
-	fn           *ssa.Function
-	rootTracer   *RootTracer
-	cfgAnalyzer  *CFGAnalyzer
-	handlers     []InstructionHandler
-	deferHandler *DeferHandler
-}
-
-// NewAnalyzer creates a new Analyzer for the given function.
-func NewAnalyzer(fn *ssa.Function, pureFuncs *PureFuncSet) *Analyzer {
-	return &Analyzer{
-		fn:           fn,
-		rootTracer:   NewRootTracer(pureFuncs),
-		cfgAnalyzer:  NewCFGAnalyzer(),
-		handlers:     DefaultHandlers(),
-		deferHandler: &DeferHandler{},
-	}
-}
-
-// Analyze performs the complete analysis and returns detected violations.
-func (a *Analyzer) Analyze() []Violation {
-	tracker := NewPollutionTracker(a.cfgAnalyzer, a.fn)
-
-	// PHASE 1: TRACKING
-	// Process all instructions and track pollution
-	a.processFunction(a.fn, tracker, make(map[*ssa.Function]bool))
-
-	// PHASE 2: DETECTION
-	// Detect cross-block violations using CFG reachability
-	tracker.DetectReachabilityViolations()
-
-	// PHASE 3: COLLECTION
-	// Return all detected violations
-	return tracker.CollectViolations()
-}
-
-// processFunction processes all instructions in a function and its closures.
-func (a *Analyzer) processFunction(fn *ssa.Function, tracker *PollutionTracker, visited map[*ssa.Function]bool) {
-	if fn == nil || fn.Blocks == nil {
-		return
-	}
-	if visited[fn] {
-		return
-	}
-	visited[fn] = true
-
-	// Detect loops in this function
-	loopInfo := a.cfgAnalyzer.DetectLoops(fn)
-
-	// Create handler context
-	ctx := &HandlerContext{
-		Tracker:     tracker,
-		RootTracer:  a.rootTracer,
-		CFGAnalyzer: a.cfgAnalyzer,
-		LoopInfo:    loopInfo,
-		CurrentFn:   fn,
-	}
-
-	// Collect defers for second pass
-	var defers []*ssa.Defer
-
-	// First pass: process regular instructions
-	for _, block := range fn.Blocks {
-		for _, instr := range block.Instrs {
-			// Check for MakeClosure to process closures recursively
-			if mc, ok := instr.(*ssa.MakeClosure); ok {
-				if closureFn, ok := mc.Fn.(*ssa.Function); ok {
-					if ClosureCapturesGormDB(mc) {
-						a.processFunction(closureFn, tracker, visited)
-					}
-				}
-				continue
-			}
-
-			// Collect defers for second pass
-			if d, ok := instr.(*ssa.Defer); ok {
-				defers = append(defers, d)
-				continue
-			}
-
-			// Dispatch to appropriate handler
-			for _, handler := range a.handlers {
-				if handler.CanHandle(instr) {
-					handler.Handle(instr, ctx)
-					break
-				}
-			}
-		}
-	}
-
-	// Second pass: process defer statements
-	for _, d := range defers {
-		a.deferHandler.Handle(d, ctx)
-	}
 }

@@ -29,6 +29,15 @@ go install github.com/mpyw/gormreuse/cmd/gormreuse@latest
 gormreuse ./...
 ```
 
+### Using [`go vet`](https://pkg.go.dev/cmd/go#hdr-Report_likely_mistakes_in_packages)
+
+Since gormreuse has no custom flags, it can be run via `go vet`:
+
+```bash
+go install github.com/mpyw/gormreuse/cmd/gormreuse@latest
+go vet -vettool=$(which gormreuse) ./...
+```
+
 ### Using [`go tool`](https://pkg.go.dev/cmd/go#hdr-Run_specified_go_tool) (Go 1.24+)
 
 ```bash
@@ -63,20 +72,20 @@ Generated files (containing `// Code generated ... DO NOT EDIT.`) are always exc
 gormreuse -test=false ./...
 ```
 
-## Detection Model: Pollute Semantics
+## Detection Model: Mutable Branching
 
-This linter uses a "pollute" model inspired by Rust's move semantics. The core concept:
+This linter detects when a **mutable `*gorm.DB` branches into multiple code paths**. The core concept:
 
-1. **Immutable-returning methods** (`Session`, `WithContext`, `Begin`, etc.) return an **immutable** instance
-2. **Chain methods** (all others including finishers) **pollute** the receiver if it's mutable-derived
-3. Using a **polluted** mutable instance is a **violation**
+1. **Immutable-returning methods** (`Session`, `WithContext`, `Debug`, etc.) return an **immutable** instance that can branch freely
+2. **All other methods** on a mutable instance create a **branch** that consumes the instance
+3. **Second branch** from the same mutable root is a **violation**
 
 ### Method Classification
 
 | Category                    | Methods                  | Description                    |
 | --------------------------- | ------------------------ | ------------------------------ |
 | Immutable-Returning Methods | [`Session`](https://pkg.go.dev/gorm.io/gorm#DB.Session), [`WithContext`](https://pkg.go.dev/gorm.io/gorm#DB.WithContext), [`Debug`](https://pkg.go.dev/gorm.io/gorm#DB.Debug), [`Open`](https://pkg.go.dev/gorm.io/gorm#Open), [`Begin`](https://pkg.go.dev/gorm.io/gorm#DB.Begin), [`Transaction`](https://pkg.go.dev/gorm.io/gorm#DB.Transaction) | Return new immutable instance |
-| Chain Methods               | All others               | Pollute mutable receiver       |
+| All Other Methods           | `Where`, `Find`, `Count`, `Order`, etc. | Create a branch from receiver |
 
 ### Automatic Pollution Sources
 
@@ -95,37 +104,94 @@ Note: Simple struct literal storage (`_ = &S{db: q}`) without actual field usage
 
 ### Examples
 
-#### Safe: Reuse from immutable
+#### Safe: Branching from immutable
 
 ```go
-// Session at end creates immutable - safe to reuse
+// Session at end creates immutable - safe to branch multiple times
 q := db.Where("active = ?", true).Session(&gorm.Session{})
-q.Count(&count)  // OK
-q.Find(&users)   // OK - q is immutable
+q.Count(&count)  // OK - first branch from q
+q.Find(&users)   // OK - q is immutable, can branch freely
 
-// Branching from immutable is safe
+// Each branch from immutable creates independent mutable chains
 q := db.Where("base").Session(&gorm.Session{})
-q.Where("a").Find(&users1)  // OK - creates new mutable, pollutes it
-q.Where("b").Find(&users2)  // OK - creates another new mutable
+q.Where("a").Find(&users1)  // OK - branch 1 (independent chain)
+q.Where("b").Find(&users2)  // OK - branch 2 (independent chain)
 ```
 
-#### Violation: Reuse from mutable
+#### Violation: Multiple branches from mutable
 
 ```go
-// Mutable instance reused after pollution
-q := db.Where("active = ?", true)  // mutable
-q.Count(&count)  // pollutes q
-q.Find(&users)   // VIOLATION: q already polluted
+// Second branch from mutable is a violation
+q := db.Where("active = ?", true)  // q is mutable
+q.Find(&users)   // first branch from q - OK
+q.Count(&count)  // VIOLATION: second branch from q
+
+// Even without "finisher" - any method creates a branch
+q := db.Where("x")
+q.Where("a")     // first branch from q - OK
+q.Where("b")     // VIOLATION: second branch from q
 
 // Session in middle doesn't help - result is still mutable
-q := db.Session(&gorm.Session{}).Where("x")  // mutable!
-q.Count(&count)  // pollutes q
-q.Find(&users)   // VIOLATION
+q := db.Session(&gorm.Session{}).Where("x")  // q is mutable!
+q.Find(&users)   // first branch - OK
+q.Count(&count)  // VIOLATION: second branch
 
-// Session on polluted value is also a violation
+// Using immutable-returning method on polluted value is also a violation
 q := db.Where("x")
-q.Find(&users)                       // pollutes q
-q.Session(&gorm.Session{}).Count(&c) // VIOLATION: using polluted q
+q.Find(&users)                       // first branch - OK
+q.Session(&gorm.Session{}).Count(&c) // VIOLATION: second branch from q
+```
+
+> [!IMPORTANT]
+> **Chaining without reassignment is a violation!** Each statement using the same variable creates a separate branch:
+> ```go
+> q := db.Where("base")
+> q.Where("a")           // first branch - OK
+> q.Where("b")           // VIOLATION: second branch
+> q.Find(&users)         // VIOLATION: third branch
+> ```
+> **Solution**: Reassign the result or use method chaining in a single expression:
+> ```go
+> // Option 1: Reassign each step
+> q := db.Where("base")
+> q = q.Where("a")
+> q = q.Where("b")
+> q.Find(&users)         // OK - first branch from final q
+>
+> // Option 2: Single chained expression
+> db.Where("base").Where("a").Where("b").Find(&users)  // OK - single chain
+> ```
+
+#### Safe: Variable reassignment
+
+Variable reassignment creates a **new mutable root**, so the variable can be used fresh:
+
+```go
+q := db.Where("x")
+q.Find(&users)        // first branch from original q - OK
+
+q = db.Where("y")     // reassignment creates NEW mutable root
+q.Find(&admins)       // first branch from new q - OK
+
+q = db.Where("z")     // another reassignment
+q.Count(&count)       // first branch from newest q - OK
+```
+
+This is safe because internally, the linter uses [SSA (Static Single Assignment)](https://pkg.go.dev/golang.org/x/tools/go/ssa) form where each assignment creates a distinct value. The new value has no relationship to the previous one.
+
+```go
+// Reassignment in loops is also safe
+for _, filter := range filters {
+    q := db.Where(filter)  // new mutable root each iteration
+    q.Find(&results)       // OK - first branch in this iteration
+}
+
+// Conditional reassignment
+q := db.Where("base")
+if condition {
+    q = db.Where("alt")    // reassignment on this path
+}
+q.Find(&users)             // OK - first branch from whichever root
 ```
 
 ## Directives
@@ -158,15 +224,34 @@ Mark a function as not polluting its `*gorm.DB` argument:
 
 ```go
 //gormreuse:pure
-func countOnly(db *gorm.DB) int64 {
-    var count int64
-    db.Count(&count)
-    return count
+func withTenant(db *gorm.DB, tenantID int) *gorm.DB {
+    return db.Session(&gorm.Session{}).Where("tenant_id = ?", tenantID)
 }
 ```
 
 > [!TIP]
 > All user-defined functions/methods that accept or return `*gorm.DB` are treated as polluting by default. You must add `//gormreuse:pure` to any helper function that safely wraps `*gorm.DB` without polluting it.
+
+> [!IMPORTANT]
+> The linter validates that functions marked `//gormreuse:pure` actually satisfy the pure contract:
+>
+> ```go
+> //gormreuse:pure
+> func badPure(db *gorm.DB) {
+>     db.Where("x")  // ERROR: pure function pollutes *gorm.DB argument by calling Where
+> }
+> ```
+>
+> Valid pure functions must:
+> - NOT call polluting methods (`Where`, `Find`, etc.) directly on `*gorm.DB` **arguments**
+> - May call polluting methods on **immutable values** (e.g., `db.Session(&gorm.Session{}).Where(...)` is OK)
+>
+> **Note**: Pure functions may return mutable `*gorm.DB`. Callers must treat the return value as potentially mutable:
+> ```go
+> q := withTenant(db, 1)  // q is mutable!
+> q.Find(&users)          // first branch - OK
+> q.Count(&count)         // VIOLATION - second branch from mutable q
+> ```
 
 ## Documentation
 
