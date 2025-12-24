@@ -51,11 +51,11 @@ go tool gormreuse ./...
 ### Using [`go run`](https://pkg.go.dev/cmd/go#hdr-Compile_and_run_Go_program)
 
 ```bash
-go run github.com/mpyw/gormreuse/cmd/gormreuse@latest ./...
+go run github.com/mpyw/gormreuse/cmd/gormreuse@v0.9.0 ./...
 ```
 
 > [!CAUTION]
-> To prevent supply chain attacks, pin to a specific version tag instead of `@latest` in CI/CD pipelines (e.g., `@v0.8.0`).
+> To prevent supply chain attacks, pin to a specific version tag instead of `@latest` in CI/CD pipelines (e.g., `@v0.9.0`).
 
 ## Flags
 
