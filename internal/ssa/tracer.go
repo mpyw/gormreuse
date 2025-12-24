@@ -479,6 +479,46 @@ func ClosureCapturesGormDB(mc *ssa.MakeClosure) bool {
 	return false
 }
 
+// IsIIFEReturningGormDB checks if a MakeClosure is an IIFE that returns *gorm.DB.
+// Only these IIFEs should be treated as single chains rather than separate pollution sources.
+//
+// Example patterns:
+//
+//	_ = func() *gorm.DB { return q.Where("x") }().Find(nil)  // Returns *gorm.DB - single chain
+//	func() { q.Find(nil) }()                                  // No return - should track pollution
+//
+// The distinction matters because:
+//   - IIFE returning *gorm.DB: The chain inside is consumed through the return value
+//   - IIFE without return: Direct side-effect modification that should be tracked
+func IsIIFEReturningGormDB(mc *ssa.MakeClosure) bool {
+	// Check if closure returns *gorm.DB
+	closureFn, ok := mc.Fn.(*ssa.Function)
+	if !ok || closureFn.Signature == nil {
+		return false
+	}
+	results := closureFn.Signature.Results()
+	if results == nil || results.Len() == 0 {
+		return false
+	}
+	if !typeutil.IsGormDB(results.At(0).Type()) {
+		return false
+	}
+
+	// Check if immediately invoked
+	refs := mc.Referrers()
+	if refs == nil {
+		return false
+	}
+	for _, ref := range *refs {
+		if call, ok := ref.(*ssa.Call); ok {
+			if call.Call.Value == mc {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // isNilConst checks if a value is a nil constant.
 func isNilConst(v ssa.Value) bool {
 	c, ok := v.(*ssa.Const)

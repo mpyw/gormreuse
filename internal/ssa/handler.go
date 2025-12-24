@@ -237,6 +237,54 @@ func (h *CallHandler) processBoundMethodCall(call *ssa.Call, mc *ssa.MakeClosure
 	ctx.checkAndMarkPollution(root, call.Block(), call.Pos(), isPureBuiltin, isTerminal, isInLoop)
 }
 
+// isBoundMethodCall checks if a MakeClosure is a bound method call (method value).
+// Bound methods have names like "Find$bound" and bind the receiver in Bindings[0].
+func (h *CallHandler) isBoundMethodCall(mc *ssa.MakeClosure) bool {
+	fnName := mc.Fn.Name()
+	return strings.HasSuffix(fnName, "$bound") && len(mc.Bindings) > 0 && typeutil.IsGormDB(mc.Bindings[0].Type())
+}
+
+// processClosureCallReturnPollution handles when a closure is called and returns *gorm.DB.
+// This marks the mutable root as polluted because calling the closure "realizes" the branch.
+//
+// Example:
+//
+//	fn := func() *gorm.DB { return q.Where("x") }
+//	q2 := fn()           // Calling fn() creates a branch from q
+//	q.Where("y")         // Second use of q → violation
+//	q2.Where("z")        // Continues q2's chain (OK)
+func (h *CallHandler) processClosureCallReturnPollution(call *ssa.Call, mc *ssa.MakeClosure, ctx *HandlerContext) {
+	// Only process closures that return *gorm.DB
+	if !typeutil.IsGormDB(call.Type()) {
+		return
+	}
+
+	// Find the closure function
+	closureFn, ok := mc.Fn.(*ssa.Function)
+	if !ok || closureFn == nil {
+		return
+	}
+
+	// Trace through the closure's return statements to find mutable roots
+	for _, block := range closureFn.Blocks {
+		for _, instr := range block.Instrs {
+			ret, ok := instr.(*ssa.Return)
+			if !ok || len(ret.Results) == 0 {
+				continue
+			}
+
+			// Find mutable root of the return value
+			root := ctx.RootTracer.FindMutableRoot(ret.Results[0])
+			if root == nil {
+				continue
+			}
+
+			// Mark the root as polluted - the closure call creates a branch
+			ctx.Tracker.MarkPolluted(root, call.Block(), call.Pos())
+		}
+	}
+}
+
 func (h *CallHandler) checkFunctionCallPollution(call *ssa.Call, ctx *HandlerContext) {
 	callee := call.Call.StaticCallee()
 
@@ -282,6 +330,7 @@ func (h *CallHandler) checkFunctionCallPollution(call *ssa.Call, ctx *HandlerCon
 //	  1. If return type is not *gorm.DB → terminal
 //	  2. If no referrers → terminal
 //	  3. If any referrer uses this as receiver for *gorm.DB method → non-terminal
+//	  4. If result is returned from an IIFE that is chained → non-terminal
 func (h *CallHandler) isTerminalCall(call *ssa.Call) bool {
 	if !typeutil.IsGormDB(call.Type()) {
 		return true
@@ -293,16 +342,260 @@ func (h *CallHandler) isTerminalCall(call *ssa.Call) bool {
 	}
 
 	for _, ref := range *refs {
-		refCall, ok := ref.(*ssa.Call)
-		if !ok {
-			continue
+		// Check if this result is used as receiver for another gorm method
+		if refCall, ok := ref.(*ssa.Call); ok {
+			if h.isGormDBMethodCall(refCall) && len(refCall.Call.Args) > 0 && refCall.Call.Args[0] == call {
+				return false
+			}
 		}
-		if h.isGormDBMethodCall(refCall) && len(refCall.Call.Args) > 0 && refCall.Call.Args[0] == call {
-			return false
+
+		// Check if this result is returned from an IIFE that is chained
+		// (the IIFE result is used in a gorm method call)
+		if ret, ok := ref.(*ssa.Return); ok {
+			if h.isReturnedFromChainedIIFE(call, ret) {
+				return false
+			}
 		}
 	}
 
 	return true
+}
+
+// isReturnedFromChainedClosure checks if a call result is returned from a closure
+// whose result is eventually used. This handles patterns like:
+//
+//	IIFE direct chain: _ = func() *gorm.DB { return q.Where("x") }().Find(nil)
+//	IIFE stored:       h.field = func() *gorm.DB { return q.Where("x") }(); h.field.Find(nil)
+//	Stored closure:    f := func() *gorm.DB { return q.Where("x") }; q2 := f(); q2.Find(nil)
+//	Nested:            _ = func() *gorm.DB { return func() *gorm.DB { return q.Where("x") }() }().Find(nil)
+//
+// The key insight: If a call is RETURNED from a closure that is called somewhere,
+// the returned value forms a chain. The terminal use happens at the call site,
+// not inside the closure. This is "inline expansion" semantics.
+func (h *CallHandler) isReturnedFromChainedIIFE(call *ssa.Call, ret *ssa.Return) bool {
+	visited := make(map[*ssa.Function]bool)
+	return h.isReturnedFromCalledClosureRecursive(ret.Parent(), visited)
+}
+
+// isReturnedFromCalledClosureRecursive checks if a closure function is called somewhere.
+// Any call to the closure means the returned value flows out, so the internal call
+// is non-terminal (inline expansion semantics).
+func (h *CallHandler) isReturnedFromCalledClosureRecursive(fn *ssa.Function, visited map[*ssa.Function]bool) bool {
+	if fn == nil || visited[fn] {
+		return false
+	}
+	visited[fn] = true
+
+	// Find all MakeClosures that reference this function
+	refs := fn.Referrers()
+	if refs == nil {
+		return false
+	}
+	for _, ref := range *refs {
+		mc, ok := ref.(*ssa.MakeClosure)
+		if !ok {
+			continue
+		}
+
+		// Check if this closure is called anywhere (IIFE, stored, or nested)
+		if h.closureIsCalledRecursive(mc, visited) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// closureIsCalledRecursive checks if a closure is called anywhere.
+// Handles IIFE (direct call), stored closures (store + load + call),
+// and nested closures (returned from another closure that is called).
+func (h *CallHandler) closureIsCalledRecursive(mc *ssa.MakeClosure, visited map[*ssa.Function]bool) bool {
+	mcRefs := mc.Referrers()
+	if mcRefs == nil {
+		return false
+	}
+
+	for _, mcRef := range *mcRefs {
+		// Case 1: IIFE - MakeClosure is directly called
+		if closureCall, ok := mcRef.(*ssa.Call); ok && closureCall.Call.Value == mc {
+			return true
+		}
+
+		// Case 2: Stored closure - MakeClosure stored, then loaded and called
+		if store, ok := mcRef.(*ssa.Store); ok {
+			if h.storedValueIsCalledRecursive(store.Addr, visited) {
+				return true
+			}
+		}
+
+		// Case 3: Returned from another closure - check if that closure is called
+		if _, ok := mcRef.(*ssa.Return); ok {
+			parentFn := mc.Parent()
+			if parentFn != nil && h.isReturnedFromCalledClosureRecursive(parentFn, visited) {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// storedValueIsCalledRecursive checks if a stored value is loaded and called.
+func (h *CallHandler) storedValueIsCalledRecursive(addr ssa.Value, visited map[*ssa.Function]bool) bool {
+	addrRefs := addr.Referrers()
+	if addrRefs == nil {
+		return false
+	}
+	for _, addrRef := range *addrRefs {
+		// Look for UnOp (pointer load)
+		if unop, ok := addrRef.(*ssa.UnOp); ok {
+			unopRefs := unop.Referrers()
+			if unopRefs == nil {
+				continue
+			}
+			for _, unopRef := range *unopRefs {
+				if closureCall, ok := unopRef.(*ssa.Call); ok && closureCall.Call.Value == unop {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// isReturnedFromChainedIIFERecursive recursively checks if a function's return value
+// eventually flows to a gorm chain, handling nested closures.
+// DEPRECATED: Use isReturnedFromCalledClosureRecursive instead.
+func (h *CallHandler) isReturnedFromChainedIIFERecursive(fn *ssa.Function, visited map[*ssa.Function]bool) bool {
+	if fn == nil || visited[fn] {
+		return false
+	}
+	visited[fn] = true
+
+	// Find all MakeClosures that reference this function
+	refs := fn.Referrers()
+	if refs == nil {
+		return false
+	}
+	for _, ref := range *refs {
+		mc, ok := ref.(*ssa.MakeClosure)
+		if !ok {
+			continue
+		}
+
+		// Check if any call to this closure has its result used in a gorm chain
+		// or returned from another closure that is chained
+		if h.closureCallResultUsedInChainRecursive(mc, visited) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// closureCallResultUsedInChain checks if any call to a closure has its result
+// used as receiver in a gorm method chain.
+func (h *CallHandler) closureCallResultUsedInChain(mc *ssa.MakeClosure) bool {
+	return h.closureCallResultUsedInChainRecursive(mc, make(map[*ssa.Function]bool))
+}
+
+// closureCallResultUsedInChainRecursive recursively checks closure call results.
+func (h *CallHandler) closureCallResultUsedInChainRecursive(mc *ssa.MakeClosure, visited map[*ssa.Function]bool) bool {
+	mcRefs := mc.Referrers()
+	if mcRefs == nil {
+		return false
+	}
+
+	for _, mcRef := range *mcRefs {
+		// Case 1: IIFE - MakeClosure is directly called
+		if closureCall, ok := mcRef.(*ssa.Call); ok && closureCall.Call.Value == mc {
+			// Check if result is used directly in a gorm chain
+			if h.callResultUsedInGormChain(closureCall) {
+				return true
+			}
+			// Check if result is returned from another closure that is chained
+			if h.callResultReturnedAndChained(closureCall, visited) {
+				return true
+			}
+		}
+
+		// Case 2: Stored closure - MakeClosure stored, then loaded and called
+		if store, ok := mcRef.(*ssa.Store); ok {
+			if h.storedClosureUsedInChainRecursive(store.Addr, visited) {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// callResultReturnedAndChained checks if a call result is returned from a closure
+// and that closure's call result is eventually used in a gorm chain.
+func (h *CallHandler) callResultReturnedAndChained(call *ssa.Call, visited map[*ssa.Function]bool) bool {
+	refs := call.Referrers()
+	if refs == nil {
+		return false
+	}
+	for _, ref := range *refs {
+		if _, ok := ref.(*ssa.Return); ok {
+			// This call result is returned - check if the parent function's
+			// return value eventually flows to a gorm chain
+			parentFn := call.Parent()
+			if parentFn != nil && h.isReturnedFromChainedIIFERecursive(parentFn, visited) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// callResultUsedInGormChain checks if a call's result is used as receiver for a gorm method.
+func (h *CallHandler) callResultUsedInGormChain(call *ssa.Call) bool {
+	refs := call.Referrers()
+	if refs == nil {
+		return false
+	}
+	for _, ref := range *refs {
+		if chainCall, ok := ref.(*ssa.Call); ok {
+			if h.isGormDBMethodCall(chainCall) && len(chainCall.Call.Args) > 0 && chainCall.Call.Args[0] == call {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// storedClosureUsedInChainRecursive checks if a stored closure is called and the result
+// eventually used in a gorm chain (handling nested closures).
+func (h *CallHandler) storedClosureUsedInChainRecursive(addr ssa.Value, visited map[*ssa.Function]bool) bool {
+	// Find loads from this address
+	addrRefs := addr.Referrers()
+	if addrRefs == nil {
+		return false
+	}
+	for _, addrRef := range *addrRefs {
+		// Look for UnOp (pointer load)
+		if unop, ok := addrRef.(*ssa.UnOp); ok {
+			unopRefs := unop.Referrers()
+			if unopRefs == nil {
+				continue
+			}
+			for _, unopRef := range *unopRefs {
+				if closureCall, ok := unopRef.(*ssa.Call); ok && closureCall.Call.Value == unop {
+					// Check if result is used directly in a gorm chain
+					if h.callResultUsedInGormChain(closureCall) {
+						return true
+					}
+					// Check if result is returned from another closure that is chained
+					if h.callResultReturnedAndChained(closureCall, visited) {
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
 }
 
 func (h *CallHandler) isGormDBMethodCall(call *ssa.Call) bool {

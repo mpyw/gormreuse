@@ -6,13 +6,56 @@ This file provides guidance to Claude Code when working with code in this reposi
 
 **gormreuse** is a Go linter that detects unsafe [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) instance reuse after chain methods. It uses [SSA](https://pkg.go.dev/golang.org/x/tools/go/ssa) (Static Single Assignment) form to track `*gorm.DB` values through variable assignments and method chains.
 
+### Core Concept: Mutable Branching Problem
+
+**The fundamental problem this linter detects is when a mutable `*gorm.DB` branches into multiple code paths.**
+
+GORM's chain methods (like `Where`, `Order`, `Limit`) create **shallow clones** that share the internal `Statement` object. When multiple chains branch from the same mutable root, they interfere with each other:
+
+```go
+q := db.Where("x")           // q is mutable (derived from chain method)
+branch1 := q.Where("a")      // Branch 1: shares Statement with q
+branch2 := q.Where("b")      // Branch 2: PROBLEM! Also shares Statement
+// branch1 and branch2 interfere - conditions accumulate unexpectedly
+```
+
+**"Reused" means "second branch from the same mutable root"**. The linter warns when a mutable value is used to create multiple independent chains:
+
+```go
+q := db.Where("x")
+q.Where("a").Find(nil)       // First branch from q - OK
+q.Where("b")                 // Second branch - VIOLATION! (even without Find)
+```
+
+#### IIFE Chains Count as Single Branch
+
+When a mutable value is used inside an IIFE that returns the chain, and that chain is immediately consumed, it counts as **one branch**, not multiple:
+
+```go
+q := db.Where("x")
+_ = func() *gorm.DB {
+    return q.Where("y")
+}().Find(nil)                // First branch (entire IIFE chain) - OK
+q.Count(nil)                 // Second branch - VIOLATION!
+```
+
+The IIFE chain `q.Where("y")...Find(nil)` is a single chain from q. Only `q.Count(nil)` is a separate branch.
+
+**Solution**: Use `Session()` to create isolation before branching:
+
+```go
+q := db.Session(&gorm.Session{}).Where("x")  // q is immutable (Session creates isolation)
+branch1 := q.Where("a")                       // OK: creates new Statement
+branch2 := q.Where("b")                       // OK: creates new Statement
+```
+
 ### Detection Model: Pollute Semantics
 
 The linter uses a "pollute" model inspired by Rust's move semantics:
 
 1. **Immutable-returning methods** ([`Session`](https://pkg.go.dev/gorm.io/gorm#DB.Session), [`WithContext`](https://pkg.go.dev/gorm.io/gorm#DB.WithContext), [`Debug`](https://pkg.go.dev/gorm.io/gorm#DB.Debug), [`Open`](https://pkg.go.dev/gorm.io/gorm#Open), [`Begin`](https://pkg.go.dev/gorm.io/gorm#DB.Begin), [`Transaction`](https://pkg.go.dev/gorm.io/gorm#DB.Transaction)) return a new immutable instance
 2. **Chain Methods** (all others including finishers) pollute the receiver if it's mutable-derived
-3. Using a polluted mutable instance is a violation
+3. Using a polluted mutable instance (second branch) is a violation
 
 ### Directives
 
@@ -80,8 +123,8 @@ The codebase uses several design patterns inspired by [zerologlintctx](https://g
 ### Key Design Decisions
 
 1. **SSA-based analysis**: Uses `go/ssa` to track `*gorm.DB` values through method chains
-2. **Pollute model**: Tracks pollution state of mutable values
-3. **Terminal call detection**: Only processes calls that consume the chain (not chain construction)
+2. **Pollute model**: Tracks pollution state of mutable values (branching = pollution)
+3. **Branch detection**: Detects when mutable `*gorm.DB` is used in multiple code paths
 4. **Mutable root finding**: Traces back to find the origin of each chain
 5. **Conservative approach**: Prefer false positives over false negatives (reduces false-negatives)
 6. **IIFE return tracing**: Traces through immediately invoked function expressions to find mutable roots
@@ -107,20 +150,27 @@ The linter tracks actual usage through struct fields, not just storage.
 ```
 Pollute Model:
   Immutable: Created by Immutable-returning Methods - can be reused freely
-  Mutable:   Created by Chain Methods - gets polluted on first terminal use
+  Mutable:   Created by Chain Methods - gets polluted on first use (any branch)
 
-Terminal Call Detection:
-  q.Find(&users)              <- Terminal: result not used in chain
-  q.Where("...").Find(&users) <- Where is non-terminal, Find is terminal
+Branch Detection:
+  q := db.Where("x")
+  q.Where("a").Find(nil)  <- First branch from q - OK
+  q.Where("b")            <- Second branch from q - VIOLATION (even without Find)
+  q.Count(nil)            <- Third branch from q - VIOLATION
 
 Mutable Root Finding:
   q := db.Where("x").Session(...)  <- q is immutable (Session at end)
   q := db.Session(...).Where("x")  <- q is mutable (Chain after Session)
 
-IIFE Return Tracing:
+IIFE Return Tracing (single chain):
+  q := db.Where("x")
   _ = func() *gorm.DB {
-    return q.Where("x")
-  }().Find(nil)  <- Traces through IIFE return to find q as mutable root
+    return q.Where("y")
+  }().Find(nil)           <- First branch (IIFE chain = single branch) - OK
+  q.Count(nil)            <- Second branch - VIOLATION
+
+  IIFE that returns a chain and is immediately consumed = ONE branch.
+  Only subsequent uses of q from outside the IIFE are separate branches.
 
 Bound Method Tracking:
   find := q.Find    <- MakeClosure with receiver q in Bindings[0]
@@ -195,6 +245,35 @@ When refactoring code, follow these rules strictly:
 - **Nested defer/goroutine**: `go func() { defer q.Find(nil) }()` - deep nested defer/goroutine chains not fully tracked
 
 These are documented in `testdata/src/gormreuse/evil.go` with `[LIMITATION]` markers.
+
+## Known Bugs
+
+### IIFE Return Chain False Positive
+
+**Status**: Bug in analyzer and test expectations
+
+The analyzer incorrectly reports violations on IIFE return chains that should count as a single branch:
+
+```go
+q := db.Where("x")
+_ = func() *gorm.DB {
+    return q.Where("y")
+}().Find(nil)    // BUG: Currently reports violation (should be OK - first branch)
+q.Count(nil)     // Correctly reports violation (second branch)
+```
+
+**Root Cause**: The analyzer processes closures as separate functions. Inside the IIFE, `q.Where("y")` is treated as a "terminal" call (its referrer is `return`, not another gorm method), which marks `q` as polluted before the outer function processes `.Find(nil)`.
+
+**Affected Test Functions** (in `evil.go`):
+- `iifeReturnChain` (line 686)
+- `chainedIIFE` (line 2024)
+- `tripleNestedIIFE` (line 1936)
+- `tripleNestedIIFEWithBranch` (line 1950)
+- `iifeMultipleReturns` (line 1972)
+- `structFieldIIFE` (line 2010)
+- `iifeWithPhiNode` (line 2061)
+
+**Fix Required**: The analyzer should recognize that IIFE return chains consumed immediately are a single branch, not separate branches.
 
 ## Work in Progress
 
