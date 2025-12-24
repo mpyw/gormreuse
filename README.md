@@ -12,12 +12,14 @@ A Go linter that detects unsafe [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB)
 
 ## Background
 
-[GORM](https://pkg.go.dev/gorm.io/gorm)'s chain methods ([`Where`](https://pkg.go.dev/gorm.io/gorm#DB.Where), [`Order`](https://pkg.go.dev/gorm.io/gorm#DB.Order), etc.) modify internal state. Reusing the same [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) instance after chain methods can cause query conditions to accumulate unexpectedly.
+[GORM](https://pkg.go.dev/gorm.io/gorm)'s Traditional API chain methods ([`Where`](https://pkg.go.dev/gorm.io/gorm#DB.Where), [`Order`](https://pkg.go.dev/gorm.io/gorm#DB.Order), etc.) modify internal state. Reusing the same [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) instance after chain methods can cause query conditions to accumulate unexpectedly.
+
+This issue is documented in [GORM's official guide on Method Chaining](https://gorm.io/docs/method_chaining.html#Reusability-and-Safety). While GORM's Generics API (v1.30.0+) provides a safer alternative, many production codebases still use the Traditional API and will continue to maintain it for years. This linter helps catch these bugs in real-world scenarios.
 
 ```go
 q := db.Where("active = ?", true)
 q.Find(&users)  // SELECT * FROM users WHERE active = true
-q.Find(&admins) // Bug: SELECT * FROM users WHERE active = ? AND active = ?
+q.Find(&admins) // Bug: Conditions accumulate unexpectedly
 ```
 
 ## Installation & Usage
@@ -74,22 +76,25 @@ gormreuse -test=false ./...
 
 ## Detection Model: Mutable Branching
 
-This linter detects when a **mutable `*gorm.DB` branches into multiple code paths**. The core concept:
+This linter detects when a **mutable [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) branches into multiple code paths**. The core concept:
 
-1. **Immutable-returning methods** (`Session`, `WithContext`, `Debug`, etc.) return an **immutable** instance that can branch freely
+1. **Immutable-returning methods** ([`Session`](https://pkg.go.dev/gorm.io/gorm#DB.Session), [`WithContext`](https://pkg.go.dev/gorm.io/gorm#DB.WithContext), [`Debug`](https://pkg.go.dev/gorm.io/gorm#DB.Debug), etc.) return an **immutable** instance that can branch freely
 2. **All other methods** on a mutable instance create a **branch** that consumes the instance
 3. **Second branch** from the same mutable root is a **violation**
 
 ### Method Classification
 
+> [!IMPORTANT]
+> This linter analyzes the **Traditional API** ([`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB)) only. The Generics API ([`gorm.G[T]`](https://pkg.go.dev/gorm.io/gorm#G), available since v1.30.0) returns different types ([`Interface[T]`](https://pkg.go.dev/gorm.io/gorm#Interface), [`ChainInterface[T]`](https://pkg.go.dev/gorm.io/gorm#ChainInterface)) and is automatically excluded from analysis.
+
 | Category                    | Methods                  | Description                    |
 | --------------------------- | ------------------------ | ------------------------------ |
 | Immutable-Returning Methods | [`Session`](https://pkg.go.dev/gorm.io/gorm#DB.Session), [`WithContext`](https://pkg.go.dev/gorm.io/gorm#DB.WithContext), [`Debug`](https://pkg.go.dev/gorm.io/gorm#DB.Debug), [`Open`](https://pkg.go.dev/gorm.io/gorm#Open), [`Begin`](https://pkg.go.dev/gorm.io/gorm#DB.Begin), [`Transaction`](https://pkg.go.dev/gorm.io/gorm#DB.Transaction) | Return new immutable instance |
-| All Other Methods           | `Where`, `Find`, `Count`, `Order`, etc. | Create a branch from receiver |
+| All Other Methods           | [`Where`](https://pkg.go.dev/gorm.io/gorm#DB.Where), [`Find`](https://pkg.go.dev/gorm.io/gorm#DB.Find), [`Count`](https://pkg.go.dev/gorm.io/gorm#DB.Count), [`Order`](https://pkg.go.dev/gorm.io/gorm#DB.Order), etc. | Create a branch from receiver |
 
 ### Automatic Pollution Sources
 
-The linter conservatively marks `*gorm.DB` as polluted in these scenarios:
+The linter conservatively marks [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) as polluted in these scenarios:
 
 | Operation                | Description                                              |
 | ------------------------ | -------------------------------------------------------- |
@@ -224,7 +229,7 @@ func legacyCode(db *gorm.DB) {
 
 ### `//gormreuse:pure`
 
-Mark a function as not polluting its `*gorm.DB` argument:
+Mark a function as not polluting its [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) argument:
 
 ```go
 //gormreuse:pure
@@ -234,7 +239,7 @@ func withTenant(db *gorm.DB, tenantID int) *gorm.DB {
 ```
 
 > [!TIP]
-> All user-defined functions/methods that accept or return `*gorm.DB` are treated as polluting by default. You must add `//gormreuse:pure` to any helper function that safely wraps `*gorm.DB` without polluting it.
+> All user-defined functions/methods that accept or return [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) are treated as polluting by default. You must add `//gormreuse:pure` to any helper function that safely wraps [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) without polluting it.
 
 > [!WARNING]
 > The linter validates that functions marked `//gormreuse:pure` actually satisfy the pure contract:
@@ -247,10 +252,10 @@ func withTenant(db *gorm.DB, tenantID int) *gorm.DB {
 > ```
 >
 > Valid pure functions must:
-> - NOT call polluting methods (`Where`, `Find`, etc.) directly on `*gorm.DB` **arguments**
+> - NOT call polluting methods ([`Where`](https://pkg.go.dev/gorm.io/gorm#DB.Where), [`Find`](https://pkg.go.dev/gorm.io/gorm#DB.Find), etc.) directly on [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) **arguments**
 > - MAY call polluting methods on **immutable values** (e.g., `db.Session(&gorm.Session{}).Where(...)` is OK)
 >
-> **Note**: Pure functions MAY return mutable `*gorm.DB`. Callers must treat the return value as potentially mutable:
+> **Note**: Pure functions MAY return mutable [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB). Callers must treat the return value as potentially mutable:
 > ```go
 > q := withTenant(db, 1)  // q is mutable!
 > q.Find(&users)          // first branch - OK
@@ -259,7 +264,7 @@ func withTenant(db *gorm.DB, tenantID int) *gorm.DB {
 
 ### `//gormreuse:immutable-return`
 
-Mark a function as returning an **immutable** `*gorm.DB` (like builtin `Session`, `WithContext`):
+Mark a function as returning an **immutable** [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) (like builtin [`Session`](https://pkg.go.dev/gorm.io/gorm#DB.Session), [`WithContext`](https://pkg.go.dev/gorm.io/gorm#DB.WithContext)):
 
 ```go
 //gormreuse:immutable-return
@@ -275,7 +280,7 @@ func useIt() {
 ```
 
 > [!TIP]
-> Use this directive for DB connection helpers that return a fresh, immutable `*gorm.DB` instance. This allows callers to reuse the returned value freely without worrying about pollution.
+> Use this directive for DB connection helpers that return a fresh, immutable [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) instance. This allows callers to reuse the returned value freely without worrying about pollution.
 
 ### `//gormreuse:pure,immutable-return`
 
