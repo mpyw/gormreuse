@@ -243,37 +243,32 @@ When refactoring code, follow these rules strictly:
 - **Closure assignment**: `f := func() { q = db.Where(...) }; f()` - cross-closure assignment not tracked
 - **Defer inside for loop**: `for range items { defer func() { q.Find(nil) }() }` - closure deferred multiple times not fully tracked
 - **Nested defer/goroutine**: `go func() { defer q.Find(nil) }()` - deep nested defer/goroutine chains not fully tracked
+- **IIFE/closure stored result**: When IIFE/closure result is stored (not directly chained), the closure-internal call is terminal
 
 These are documented in `testdata/src/gormreuse/evil.go` with `[LIMITATION]` markers.
 
-## Known Bugs
+### IIFE/Closure Stored Result Limitation
 
-### IIFE Return Chain False Positive
-
-**Status**: Bug in analyzer and test expectations
-
-The analyzer incorrectly reports violations on IIFE return chains that should count as a single branch:
+When a closure result is stored (in a variable or struct field) rather than directly chained to a gorm method, the closure-internal call is treated as terminal. This means:
 
 ```go
-q := db.Where("x")
-_ = func() *gorm.DB {
-    return q.Where("y")
-}().Find(nil)    // BUG: Currently reports violation (should be OK - first branch)
-q.Count(nil)     // Correctly reports violation (second branch)
+// OK: IIFE result directly chained
+_ = func() *gorm.DB { return q.Where("y") }().Find(nil)  // ONE branch
+q.Count(nil)  // violation (second branch)
+
+// LIMITATION: IIFE result stored
+q2 := func() *gorm.DB { return q.Where("y") }()  // Terminal! Pollutes q
+q2.Find(nil)  // violation (q is polluted)
+q.Count(nil)  // also violation
+
+// LIMITATION: Stored closure with interleaved use
+fn := func() *gorm.DB { return q.Where("y") }
+q2 := fn()
+q.Count(nil)  // Expected: violation. Actual: OK (first terminal)
+q2.Find(nil)  // Expected: OK. Actual: violation (traces to polluted q)
 ```
 
-**Root Cause**: The analyzer processes closures as separate functions. Inside the IIFE, `q.Where("y")` is treated as a "terminal" call (its referrer is `return`, not another gorm method), which marks `q` as polluted before the outer function processes `.Find(nil)`.
-
-**Affected Test Functions** (in `evil.go`):
-- `iifeReturnChain` (line 686)
-- `chainedIIFE` (line 2024)
-- `tripleNestedIIFE` (line 1936)
-- `tripleNestedIIFEWithBranch` (line 1950)
-- `iifeMultipleReturns` (line 1972)
-- `structFieldIIFE` (line 2010)
-- `iifeWithPhiNode` (line 2061)
-
-**Fix Required**: The analyzer should recognize that IIFE return chains consumed immediately are a single branch, not separate branches.
+**Root Cause**: SSA analysis processes closure bodies before closure call sites. The "branch claim" semantics (runtime order) differs from SSA processing order.
 
 ## Work in Progress
 

@@ -2004,19 +2004,21 @@ type iifeHolder struct {
 }
 
 // structFieldIIFE demonstrates struct field access with IIFE.
+// [LIMITATION] When IIFE result is stored (not directly chained), the internal call is terminal.
+// This means q is polluted when the IIFE executes, and h.query.Find traces back to polluted q.
 func structFieldIIFE(db *gorm.DB) {
 	q := db.Where("x = ?", 1)
 
-	// IIFE creates first branch from q, stored in struct field
+	// IIFE result stored in struct field - internal call is terminal (pollutes q)
 	h := iifeHolder{
 		query: func() *gorm.DB {
 			return q.Where("from iife", 1)
 		}(),
 	}
 
-	h.query.Find(nil) // Uses the stored branch (not a new branch from q)
+	h.query.Find(nil) // want `\*gorm\.DB instance reused after chain method`
 
-	// Second branch from q - violation
+	// Third use of q - also violation
 	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
 }
 
@@ -2165,17 +2167,19 @@ func storedClosureChain(db *gorm.DB) {
 }
 
 // storedClosureReordered demonstrates order of calls with stored closure.
-// Even if q1.Where() is called BEFORE q2.Where(), the violation is on q1.Where()
-// because q2 was created from the first branch.
+// [LIMITATION] SSA processing order differs from runtime order.
+// At analysis time, closure body is processed first (q1.Where("from closure") is non-terminal),
+// then q1.Where("z") is first terminal use, then q2.Where("y") is second terminal use.
+// Ideally q1.Where("z") would be the violation, but current implementation reports on q2.Where("y").
 func storedClosureReordered(db *gorm.DB) {
 	q1 := db.Where("x", 1)
 
 	fn := func() *gorm.DB {
 		return q1.Where("from closure", 1)
 	}
-	q2 := fn()         // q2 holds first branch from q1
-	q1.Where("z", 3)   // want `\*gorm\.DB instance reused after chain method`
-	q2.Where("y", 2)   // Uses q2 (which came from first branch)
+	q2 := fn()         // In runtime: creates first branch. In SSA: closure body already processed.
+	q1.Where("z", 3)   // In runtime: second branch. In SSA: first terminal use, pollutes q1.
+	q2.Where("y", 2)   // want `\*gorm\.DB instance reused after chain method`
 }
 
 // iifeStoredResult demonstrates IIFE result stored in variable.

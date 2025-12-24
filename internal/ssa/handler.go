@@ -362,19 +362,19 @@ func (h *CallHandler) isTerminalCall(call *ssa.Call) bool {
 }
 
 // isReturnedFromChainedClosure checks if a call result is returned from a closure
-// whose result is eventually used. This handles patterns like:
+// whose result is IMMEDIATELY used in a gorm chain. This handles patterns like:
 //
 //	IIFE direct chain: _ = func() *gorm.DB { return q.Where("x") }().Find(nil)
-//	IIFE stored:       h.field = func() *gorm.DB { return q.Where("x") }(); h.field.Find(nil)
-//	Stored closure:    f := func() *gorm.DB { return q.Where("x") }; q2 := f(); q2.Find(nil)
-//	Nested:            _ = func() *gorm.DB { return func() *gorm.DB { return q.Where("x") }() }().Find(nil)
+//	Nested IIFE:       _ = func() *gorm.DB { return func() *gorm.DB { return q.Where("x") }() }().Find(nil)
 //
-// The key insight: If a call is RETURNED from a closure that is called somewhere,
-// the returned value forms a chain. The terminal use happens at the call site,
-// not inside the closure. This is "inline expansion" semantics.
+// The key insight: Only when the closure result flows DIRECTLY into a gorm chain
+// (conceptually inline-expanded) should the internal call be non-terminal.
+//
+// When the result is stored (q2 := func(){}()), the internal call IS terminal
+// because a branch is created at the closure call site.
 func (h *CallHandler) isReturnedFromChainedIIFE(call *ssa.Call, ret *ssa.Return) bool {
 	visited := make(map[*ssa.Function]bool)
-	return h.isReturnedFromCalledClosureRecursive(ret.Parent(), visited)
+	return h.isReturnedFromChainedIIFERecursive(ret.Parent(), visited)
 }
 
 // isReturnedFromCalledClosureRecursive checks if a closure function is called somewhere.
