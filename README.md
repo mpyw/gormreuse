@@ -196,6 +196,9 @@ q.Find(&users)             // OK - first branch from whichever root
 
 ## Directives
 
+- Directives can be combined with commas: `//gormreuse:pure,immutable-return`
+- Trailing comments use `//`: `//gormreuse:ignore // reason here`
+
 ### `//gormreuse:ignore`
 
 Suppress warnings for a specific line:
@@ -203,7 +206,7 @@ Suppress warnings for a specific line:
 ```go
 q := db.Where("active = ?", true)
 q.Find(&users)
-//gormreuse:ignore
+//gormreuse:ignore // intentional reuse for pagination
 q.Count(&count)  // Suppressed
 ```
 
@@ -216,23 +219,24 @@ func legacyCode(db *gorm.DB) {
 }
 ```
 
-**Note:** Unused `//gormreuse:ignore` directives are reported as warnings. This helps keep the codebase clean by identifying stale ignore comments.
+> [!WARNING]
+> Unused `//gormreuse:ignore` directives are reported as warnings. This helps keep the codebase clean by identifying stale ignore comments.
 
 ### `//gormreuse:pure`
 
 Mark a function as not polluting its `*gorm.DB` argument:
 
-```go
-//gormreuse:pure
-func withTenant(db *gorm.DB, tenantID int) *gorm.DB {
-    return db.Session(&gorm.Session{}).Where("tenant_id = ?", tenantID)
-}
-```
-
 > [!TIP]
 > All user-defined functions/methods that accept or return `*gorm.DB` are treated as polluting by default. You must add `//gormreuse:pure` to any helper function that safely wraps `*gorm.DB` without polluting it.
+>
+> ```go
+> //gormreuse:pure
+> func withTenant(db *gorm.DB, tenantID int) *gorm.DB {
+>     return db.Session(&gorm.Session{}).Where("tenant_id = ?", tenantID)
+> }
+> ```
 
-> [!IMPORTANT]
+> [!WARNING]
 > The linter validates that functions marked `//gormreuse:pure` actually satisfy the pure contract:
 >
 > ```go
@@ -244,14 +248,51 @@ func withTenant(db *gorm.DB, tenantID int) *gorm.DB {
 >
 > Valid pure functions must:
 > - NOT call polluting methods (`Where`, `Find`, etc.) directly on `*gorm.DB` **arguments**
-> - May call polluting methods on **immutable values** (e.g., `db.Session(&gorm.Session{}).Where(...)` is OK)
+> - MAY call polluting methods on **immutable values** (e.g., `db.Session(&gorm.Session{}).Where(...)` is OK)
 >
-> **Note**: Pure functions may return mutable `*gorm.DB`. Callers must treat the return value as potentially mutable:
+> **Note**: Pure functions MAY return mutable `*gorm.DB`. Callers must treat the return value as potentially mutable:
 > ```go
 > q := withTenant(db, 1)  // q is mutable!
 > q.Find(&users)          // first branch - OK
 > q.Count(&count)         // VIOLATION - second branch from mutable q
 > ```
+
+### `//gormreuse:immutable-return`
+
+Mark a function as returning an **immutable** `*gorm.DB` (like builtin `Session`, `WithContext`):
+
+```go
+//gormreuse:immutable-return
+func GetDB() *gorm.DB {
+    return globalDB.Session(&gorm.Session{})
+}
+
+func useIt() {
+    db := GetDB()
+    db.Where("x").Find(&users)
+    db.Where("y").Find(&admins) // OK - GetDB returns immutable
+}
+```
+
+### `//gormreuse:pure,immutable-return`
+
+The recommended pattern for DB connection helpers - combines both guarantees:
+
+```go
+//gormreuse:pure,immutable-return
+func GetTenantDB(db *gorm.DB, tenantID int) *gorm.DB {
+    return db.Session(&gorm.Session{}).Where("tenant_id = ?", tenantID)
+}
+
+func useIt(db *gorm.DB) {
+    tenant1 := GetTenantDB(db, 1)
+    tenant2 := GetTenantDB(db, 2)
+    tenant1.Where("x").Find(&users)   // OK
+    tenant2.Where("y").Find(&admins)  // OK
+    tenant1.Count(&count)             // OK - immutable-return
+    db.Find(&all)                     // OK - pure (db not polluted)
+}
+```
 
 ## Documentation
 

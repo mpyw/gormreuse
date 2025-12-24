@@ -68,6 +68,7 @@ func RunSSA(
 	ignoreMaps map[string]directive.IgnoreMap,
 	funcIgnores map[string]map[token.Pos]directive.FunctionIgnoreEntry,
 	pureFuncs *directive.PureFuncSet,
+	immutableReturnFuncs *directive.ImmutableReturnFuncSet,
 	skipFiles map[string]bool,
 ) {
 	for _, fn := range ssaInfo.SrcFuncs {
@@ -103,7 +104,7 @@ func RunSSA(
 			}
 		}
 
-		chk := newChecker(pass, ignoreMap, pureFuncs)
+		chk := newChecker(pass, ignoreMap, pureFuncs, immutableReturnFuncs)
 		chk.checkFunction(fn)
 	}
 
@@ -129,25 +130,27 @@ func RunSSA(
 //   - Line-level ignore directives suppress violations
 //   - Violations are reported through the analysis.Pass
 type checker struct {
-	pass      *analysis.Pass         // For reporting diagnostics
-	ignoreMap directive.IgnoreMap    // Line-level ignore directives
-	pureFuncs *directive.PureFuncSet // Pure functions for analysis
-	reported  map[token.Pos]bool     // Deduplication of reports
+	pass                 *analysis.Pass                    // For reporting diagnostics
+	ignoreMap            directive.IgnoreMap               // Line-level ignore directives
+	pureFuncs            *directive.PureFuncSet            // Pure functions for analysis
+	immutableReturnFuncs *directive.ImmutableReturnFuncSet // Immutable-return functions
+	reported             map[token.Pos]bool                // Deduplication of reports
 }
 
 // newChecker creates a new checker for a specific file.
-func newChecker(pass *analysis.Pass, ignoreMap directive.IgnoreMap, pureFuncs *directive.PureFuncSet) *checker {
+func newChecker(pass *analysis.Pass, ignoreMap directive.IgnoreMap, pureFuncs *directive.PureFuncSet, immutableReturnFuncs *directive.ImmutableReturnFuncSet) *checker {
 	return &checker{
-		pass:      pass,
-		ignoreMap: ignoreMap,
-		pureFuncs: pureFuncs,
-		reported:  make(map[token.Pos]bool),
+		pass:                 pass,
+		ignoreMap:            ignoreMap,
+		pureFuncs:            pureFuncs,
+		immutableReturnFuncs: immutableReturnFuncs,
+		reported:             make(map[token.Pos]bool),
 	}
 }
 
 // checkFunction runs SSA analysis on a single function and reports violations.
 func (c *checker) checkFunction(fn *ssa.Function) {
-	analyzer := ssautil.NewAnalyzer(fn, c.pureFuncs)
+	analyzer := ssautil.NewAnalyzer(fn, c.pureFuncs, c.immutableReturnFuncs)
 	violations := analyzer.Analyze()
 
 	for _, v := range violations {

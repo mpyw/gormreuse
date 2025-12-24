@@ -91,12 +91,16 @@ import (
 // Note: User-defined pure functions (//gormreuse:pure) are NOT immutable sources.
 // They may return mutable values - only builtin pure methods guarantee immutable returns.
 type RootTracer struct {
-	pureFuncs *directive.PureFuncSet // User-defined pure functions
+	pureFuncs            *directive.PureFuncSet            // User-defined pure functions
+	immutableReturnFuncs *directive.ImmutableReturnFuncSet // Functions returning immutable *gorm.DB
 }
 
 // New creates a new RootTracer.
-func New(pureFuncs *directive.PureFuncSet) *RootTracer {
-	return &RootTracer{pureFuncs: pureFuncs}
+func New(pureFuncs *directive.PureFuncSet, immutableReturnFuncs *directive.ImmutableReturnFuncSet) *RootTracer {
+	return &RootTracer{
+		pureFuncs:            pureFuncs,
+		immutableReturnFuncs: immutableReturnFuncs,
+	}
 }
 
 // FindMutableRoot finds the mutable root for a receiver value.
@@ -246,8 +250,13 @@ func (t *RootTracer) traceCall(call *ssa.Call, visited map[ssa.Value]bool) ssa.V
 	if sig == nil || sig.Recv() == nil || !typeutil.IsGormDB(sig.Recv().Type()) {
 		// Not a gorm method - if it returns *gorm.DB, treat as root
 		if typeutil.IsGormDB(call.Type()) {
+			// Builtin pure function returns immutable
 			if t.IsImmutableReturningBuiltin(callee) {
-				return nil // Builtin pure function returns immutable
+				return nil
+			}
+			// User-defined immutable-return function returns immutable
+			if t.immutableReturnFuncs != nil && t.immutableReturnFuncs.Contains(callee) {
+				return nil
 			}
 			// User-defined pure or non-pure function: treat call as mutable root
 			// (user-defined pure functions may return mutable values)
@@ -581,9 +590,10 @@ func (t *RootTracer) traceAllAllocStores(alloc *ssa.Alloc, visited map[ssa.Value
 //   - Parameter: function arguments are treated as fresh values
 //   - Const: constant values (especially nil)
 //   - Builtin pure function call: returns immutable *gorm.DB (e.g., Session())
+//   - User-defined immutable-return function: marked with //gormreuse:immutable-return
 //
-// Note: User-defined pure functions are NOT immutable sources - they may return
-// mutable values. Only builtin pure methods guarantee immutable return values.
+// Note: User-defined pure functions (without immutable-return) are NOT immutable sources -
+// they may return mutable values.
 func (t *RootTracer) isImmutableSource(v ssa.Value) bool {
 	switch val := v.(type) {
 	case *ssa.Parameter:
@@ -594,10 +604,16 @@ func (t *RootTracer) isImmutableSource(v ssa.Value) bool {
 		// Constants (including nil) are immutable
 		return true
 	case *ssa.Call:
-		// Only builtin pure function calls return immutable values
-		// User-defined pure functions may return mutable values
 		callee := val.Call.StaticCallee()
-		return t.IsImmutableReturningBuiltin(callee)
+		// Builtin pure function calls return immutable values
+		if t.IsImmutableReturningBuiltin(callee) {
+			return true
+		}
+		// User-defined immutable-return functions return immutable values
+		if t.immutableReturnFuncs != nil && t.immutableReturnFuncs.Contains(callee) {
+			return true
+		}
+		return false
 	default:
 		return false
 	}

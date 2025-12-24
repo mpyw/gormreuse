@@ -3,18 +3,18 @@ package internal
 import "gorm.io/gorm"
 
 // =============================================================================
-// Pure Function Validation Test Cases
+// Directive Validation Test Cases
 //
-// This file tests validation of //gormreuse:pure directive.
-// Pure functions must:
-//   1. NOT pollute *gorm.DB arguments (no chain method calls on them)
-//   2. Return immutable *gorm.DB if returning one (Session/WithContext/etc. result)
+// This file tests validation and behavior of gormreuse directives:
 //
-// Test Matrix Variables:
-//   - Has *gorm.DB argument: yes/no
-//   - Returns *gorm.DB: yes/no
-//   - What's done with argument: nothing / pure builtin / non-pure / pass to pure func / pass to non-pure func
-//   - What's returned: arg directly / pure builtin result / non-pure result / pure func result / non-pure func result
+//   //gormreuse:pure             - Function doesn't pollute *gorm.DB arguments
+//   //gormreuse:immutable-return - Function returns immutable *gorm.DB (like Session)
+//   //gormreuse:pure,immutable-return - Both guarantees combined
+//
+// Test Sections:
+//   1. Pure function validation (PV prefix) - tests pure contract enforcement
+//   2. Immutable-return function behavior (IR prefix) - tests return value treated as immutable
+//   3. Combined pure,immutable-return (PIR prefix) - tests both guarantees
 // =============================================================================
 
 // =============================================================================
@@ -591,3 +591,310 @@ func pureNoGormArgHelper(x int) int {
 func regularHelper(x int) int {
 	return x + 1
 }
+
+// #############################################################################
+// #############################################################################
+// ##                                                                         ##
+// ##              IMMUTABLE-RETURN DIRECTIVE TEST CASES                      ##
+// ##                                                                         ##
+// #############################################################################
+// #############################################################################
+
+// =============================================================================
+// SHOULD NOT REPORT - immutable-return function returns are treated as immutable
+//
+// The //gormreuse:immutable-return directive marks a function as returning
+// immutable *gorm.DB, similar to builtin methods like Session() and WithContext().
+// Callers can safely reuse the return value without Session() wrapping.
+// =============================================================================
+
+// IR001: Basic immutable-return function - return value can be reused
+//
+//gormreuse:immutable-return
+func getImmutableDB() *gorm.DB {
+	return globalDB.Session(&gorm.Session{})
+}
+
+func useImmutableReturn() {
+	db := getImmutableDB()
+	db.Where("x").Find(nil)
+	db.Where("y").Find(nil) // OK: getImmutableDB returns immutable
+}
+
+// IR002: immutable-return with Session - common pattern for DB connection helpers
+//
+//gormreuse:immutable-return
+func getDBWithSession() *gorm.DB {
+	return globalDB.Session(&gorm.Session{})
+}
+
+func useDBWithSession() {
+	db := getDBWithSession()
+	db.Where("a").Find(nil)
+	db.Where("b").Find(nil) // OK: getDBWithSession returns immutable
+}
+
+// IR003: immutable-return method on struct - repository pattern
+type IRRepository struct {
+	db *gorm.DB
+}
+
+//gormreuse:immutable-return
+func (r *IRRepository) DB() *gorm.DB {
+	return r.db.Session(&gorm.Session{})
+}
+
+func useRepositoryDB(r *IRRepository) {
+	db := r.DB()
+	db.Where("x").Find(nil)
+	db.Where("y").Find(nil) // OK: IRRepository.DB returns immutable
+}
+
+// IR004: immutable-return used in conditional branches
+//
+//gormreuse:immutable-return
+func getDBForTenant(tenantID int) *gorm.DB {
+	return globalDB.Session(&gorm.Session{}).Where("tenant_id = ?", tenantID)
+}
+
+func useDBInBranches(cond bool) {
+	db := getDBForTenant(1)
+	if cond {
+		db.Where("x").Find(nil)
+	} else {
+		db.Where("y").Find(nil)
+	}
+	db.Count(nil) // OK: getDBForTenant returns immutable
+}
+
+// IR005: immutable-return in loop - each iteration gets fresh immutable
+//
+//gormreuse:immutable-return
+func getFreshDB() *gorm.DB {
+	return globalDB.Session(&gorm.Session{})
+}
+
+func useInLoop(items []int) {
+	for _, item := range items {
+		db := getFreshDB()
+		db.Where("item = ?", item).Find(nil)
+		db.Count(nil) // OK: each iteration gets fresh immutable
+	}
+}
+
+// IR006: immutable-return chained with other calls
+func useImmutableChained() {
+	getImmutableDB().Where("x").Find(nil)
+	getImmutableDB().Where("y").Find(nil) // OK: each call returns fresh immutable
+}
+
+// IR007: immutable-return assigned to multiple variables
+func useMultipleAssignments() {
+	db1 := getImmutableDB()
+	db2 := getImmutableDB()
+	db1.Where("x").Find(nil)
+	db2.Where("y").Find(nil)
+	db1.Count(nil) // OK: db1 is immutable
+	db2.Count(nil) // OK: db2 is immutable
+}
+
+// =============================================================================
+// SHOULD REPORT - immutable-return doesn't prevent reuse of mutable intermediates
+//
+// The immutable-return directive only affects the RETURN VALUE of the function.
+// If you create mutable intermediates inside the function and pass them around,
+// normal reuse rules still apply.
+// =============================================================================
+
+// IR101: Using immutable-return result, then deriving mutable from it
+func deriveMutableFromImmutable() {
+	db := getImmutableDB() // immutable
+	q := db.Where("x")     // q is mutable (derived from chain method)
+	q.Find(nil)
+	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// IR102: Mixing immutable-return with regular chain methods
+func mixImmutableAndMutable(db *gorm.DB) {
+	imm := getImmutableDB()
+	q := db.Where("x") // q is mutable
+	imm.Find(nil)      // OK: imm is immutable
+	q.Find(nil)
+	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// #############################################################################
+// #############################################################################
+// ##                                                                         ##
+// ##        COMBINED PURE + IMMUTABLE-RETURN DIRECTIVE TEST CASES            ##
+// ##                                                                         ##
+// #############################################################################
+// #############################################################################
+
+// =============================================================================
+// SHOULD NOT REPORT - pure,immutable-return provides both guarantees
+//
+// //gormreuse:pure,immutable-return means:
+//   1. The function doesn't pollute *gorm.DB arguments (pure)
+//   2. The function returns immutable *gorm.DB (immutable-return)
+//
+// This is the recommended pattern for DB connection helpers that take a context
+// or other parameters and return a configured *gorm.DB.
+// =============================================================================
+
+// PIR001: Basic pure,immutable-return - the ideal DB helper pattern
+//
+//gormreuse:pure,immutable-return
+func getDB() *gorm.DB {
+	return globalDB.Session(&gorm.Session{})
+}
+
+func usePureImmutableReturn() {
+	db := getDB()
+	db.Where("x").Find(nil)
+	db.Where("y").Find(nil) // OK: getDB returns immutable
+}
+
+// PIR002: pure,immutable-return with *gorm.DB argument - wraps existing DB
+//
+//gormreuse:pure,immutable-return
+func wrapDB(db *gorm.DB) *gorm.DB {
+	return db.Session(&gorm.Session{})
+}
+
+func useWrapDB(db *gorm.DB) {
+	wrapped := wrapDB(db)
+	wrapped.Where("x").Find(nil)
+	wrapped.Where("y").Find(nil) // OK: wrapDB returns immutable
+	db.Find(nil)                 // OK: db not polluted by wrapDB (pure)
+}
+
+// PIR003: pure,immutable-return with multiple DB arguments
+//
+//gormreuse:pure,immutable-return
+func selectDB(db1 *gorm.DB, db2 *gorm.DB, useFirst bool) *gorm.DB {
+	if useFirst {
+		return db1.Session(&gorm.Session{})
+	}
+	return db2.Session(&gorm.Session{})
+}
+
+func useSelectDB(db1 *gorm.DB, db2 *gorm.DB) {
+	selected := selectDB(db1, db2, true)
+	selected.Where("x").Find(nil)
+	selected.Where("y").Find(nil) // OK: selectDB returns immutable
+	db1.Find(nil)                 // OK: db1 not polluted
+	db2.Find(nil)                 // OK: db2 not polluted
+}
+
+// PIR004: pure,immutable-return tenant isolation pattern
+//
+//gormreuse:pure,immutable-return
+func getTenantDB(db *gorm.DB, tenantID int) *gorm.DB {
+	return db.Session(&gorm.Session{}).Where("tenant_id = ?", tenantID)
+}
+
+func useTenantDB(db *gorm.DB) {
+	tenant1 := getTenantDB(db, 1)
+	tenant2 := getTenantDB(db, 2)
+	tenant1.Where("x").Find(nil)
+	tenant2.Where("y").Find(nil)
+	tenant1.Count(nil) // OK: getTenantDB returns immutable
+	tenant2.Count(nil) // OK: getTenantDB returns immutable
+	db.Find(nil)       // OK: db not polluted
+}
+
+// PIR005: pure,immutable-return with method receiver
+type DBFactory struct {
+	baseDB *gorm.DB
+}
+
+//gormreuse:pure,immutable-return
+func (f *DBFactory) NewDB() *gorm.DB {
+	return f.baseDB.Session(&gorm.Session{})
+}
+
+func useDBFactory(f *DBFactory) {
+	db1 := f.NewDB()
+	db2 := f.NewDB()
+	db1.Where("x").Find(nil)
+	db2.Where("y").Find(nil)
+	db1.Count(nil) // OK: NewDB returns immutable
+	db2.Count(nil) // OK: NewDB returns immutable
+}
+
+// =============================================================================
+// SHOULD REPORT - pure,immutable-return still validates pure contract
+//
+// Even with immutable-return, the pure contract is still enforced.
+// If the function pollutes its *gorm.DB argument, it will be reported.
+// =============================================================================
+
+// PIR101: pure,immutable-return but pollutes argument
+//
+//gormreuse:pure,immutable-return
+func badPureImmutable(db *gorm.DB) *gorm.DB {
+	db.Where("x") // want `pure function pollutes \*gorm\.DB argument by calling Where`
+	return db.Session(&gorm.Session{})
+}
+
+// PIR102: pure,immutable-return but passes to non-pure function
+//
+//gormreuse:pure,immutable-return
+func badPureImmutablePassesNonPure(db *gorm.DB) *gorm.DB {
+	nonPureHelper(db) // want `pure function passes \*gorm\.DB argument to non-pure function nonPureHelper`
+	return db.Session(&gorm.Session{})
+}
+
+// =============================================================================
+// EDGE CASES - Directive combinations and special scenarios
+// =============================================================================
+
+// PIR201: Only immutable-return (no pure) - can pollute argument
+// This function pollutes its argument but that's allowed without pure directive.
+// The return value is still treated as immutable.
+//
+//gormreuse:immutable-return
+func immutableOnlyPollutes(db *gorm.DB) *gorm.DB {
+	db.Where("pollute") // No error - not marked as pure
+	return db.Session(&gorm.Session{})
+}
+
+func useImmutableOnlyPollutes(db *gorm.DB) {
+	result := immutableOnlyPollutes(db)
+	result.Where("x").Find(nil)
+	result.Where("y").Find(nil) // OK: return is immutable
+	// Note: db is polluted by immutableOnlyPollutes, but we don't track that
+}
+
+// PIR202: immutable-return called multiple times in sequence
+func multipleImmutableCalls() {
+	db1 := getImmutableDB()
+	db1.Where("a").Find(nil)
+
+	db2 := getImmutableDB()
+	db2.Where("b").Find(nil)
+
+	db1.Count(nil) // OK: db1 is from immutable-return
+	db2.Count(nil) // OK: db2 is from immutable-return
+}
+
+// PIR203: Nested pure,immutable-return calls
+//
+//gormreuse:pure,immutable-return
+func outerPureImmutable(db *gorm.DB) *gorm.DB {
+	return wrapDB(db) // wrapDB is also pure,immutable-return
+}
+
+func useNestedPureImmutable(db *gorm.DB) {
+	result := outerPureImmutable(db)
+	result.Where("x").Find(nil)
+	result.Where("y").Find(nil) // OK: returns immutable
+	db.Find(nil)                // OK: db not polluted
+}
+
+// =============================================================================
+// HELPER - Global DB for testing
+// =============================================================================
+
+var globalDB *gorm.DB
