@@ -226,15 +226,15 @@ func legacyCode(db *gorm.DB) {
 
 Mark a function as not polluting its `*gorm.DB` argument:
 
+```go
+//gormreuse:pure
+func withTenant(db *gorm.DB, tenantID int) *gorm.DB {
+    return db.Session(&gorm.Session{}).Where("tenant_id = ?", tenantID)
+}
+```
+
 > [!TIP]
 > All user-defined functions/methods that accept or return `*gorm.DB` are treated as polluting by default. You must add `//gormreuse:pure` to any helper function that safely wraps `*gorm.DB` without polluting it.
->
-> ```go
-> //gormreuse:pure
-> func withTenant(db *gorm.DB, tenantID int) *gorm.DB {
->     return db.Session(&gorm.Session{}).Where("tenant_id = ?", tenantID)
-> }
-> ```
 
 > [!WARNING]
 > The linter validates that functions marked `//gormreuse:pure` actually satisfy the pure contract:
@@ -273,6 +273,9 @@ func useIt() {
     db.Where("y").Find(&admins) // OK - GetDB returns immutable
 }
 ```
+
+> [!TIP]
+> Use this directive for DB connection helpers that return a fresh, immutable `*gorm.DB` instance. This allows callers to reuse the returned value freely without worrying about pollution.
 
 ### `//gormreuse:pure,immutable-return`
 
