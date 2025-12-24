@@ -1,4 +1,36 @@
 // Package pollution provides pollution state tracking for gormreuse.
+//
+// # Overview
+//
+// This package implements the "pollute model" for tracking *gorm.DB usage.
+// It records usage sites during the first pass, then detects violations
+// via CFG reachability in the second pass.
+//
+// # Two-Phase Detection
+//
+//	┌─────────────────────────────────────────────────────────────────────────┐
+//	│                      Detection Pipeline                                  │
+//	│                                                                          │
+//	│   Phase 1: RECORDING                  Phase 2: DETECTION                 │
+//	│   ──────────────────                  ──────────────────                 │
+//	│                                                                          │
+//	│   q := db.Where("x")                  For each root with 2+ uses:        │
+//	│   q.Find(nil) ──────▶ Record use #1      Check CFG reachability          │
+//	│   q.Count(nil) ─────▶ Record use #2      If use#1 → use#2: VIOLATION     │
+//	│                                                                          │
+//	│   ┌───────────────────────────────────────────────────────────────┐     │
+//	│   │  pollutingUses[root] = [{block1, pos1}, {block2, pos2}]       │     │
+//	│   └───────────────────────────────────────────────────────────────┘     │
+//	└─────────────────────────────────────────────────────────────────────────┘
+//
+// # Pure vs Polluting Uses
+//
+//   - Polluting uses (ProcessBranch): Where, Find, Count, etc.
+//     These "consume" the root and mark it polluted
+//   - Pure uses (RecordPureUse): Session, Debug, WithContext
+//     These CHECK for pollution but don't pollute themselves
+//
+// A pure use after a polluting use is still a violation (polluted root).
 package pollution
 
 import (

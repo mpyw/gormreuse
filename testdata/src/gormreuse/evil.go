@@ -273,12 +273,13 @@ func pureFactoryFunction() *gorm.DB {
 	return DB.WithContext(nil) // Returns immutable
 }
 
-// pureFactoryUsage demonstrates that pure function return values are immutable.
-// This is the key test for the "pure function returns immutable" feature.
+// pureFactoryUsage demonstrates that user-defined pure function return values are MUTABLE.
+// Pure functions only guarantee they don't pollute arguments - return values may be mutable.
+// Callers must treat return values as mutable roots.
 func pureFactoryUsage() {
 	db := pureFactoryFunction()
 	db.Find(nil)
-	db.Find(nil) // OK: pure function returns immutable, can be reused
+	db.Find(nil) // want `\*gorm\.DB instance reused after chain method`
 }
 
 // =============================================================================
@@ -2472,12 +2473,13 @@ func (o *OrmWrapper) GetDB() *gorm.DB {
 	return DB.WithContext(nil)
 }
 
-// pureMethodUsage demonstrates that pure method return values are immutable.
+// pureMethodUsage demonstrates that user-defined pure method return values are MUTABLE.
+// Pure methods only guarantee they don't pollute arguments - return values may be mutable.
 func pureMethodUsage() {
 	wrapper := &OrmWrapper{}
 	db := wrapper.GetDB()
 	db.Find(nil)
-	db.Find(nil) // OK: pure method returns immutable, can be reused
+	db.Find(nil) // want `\*gorm\.DB instance reused after chain method`
 }
 
 // =============================================================================
@@ -2680,4 +2682,32 @@ func whereOnlyMultipleBranches(db *gorm.DB) {
 	q.Where("branch2") // want `\*gorm\.DB instance reused after chain method`
 	q.Where("branch3") // want `\*gorm\.DB instance reused after chain method`
 	q.Where("branch4") // want `\*gorm\.DB instance reused after chain method`
+}
+
+// =============================================================================
+// Chaining Without Reassignment (README [!IMPORTANT] examples)
+// =============================================================================
+
+// chainingWithoutReassignmentViolation demonstrates the violation pattern
+// from README: each separate statement creates a branch from q.
+func chainingWithoutReassignmentViolation(db *gorm.DB) {
+	q := db.Where("base")
+	q.Where("a")     // first branch - OK
+	q.Where("b")     // want `\*gorm\.DB instance reused after chain method`
+	q.Find(nil)      // want `\*gorm\.DB instance reused after chain method`
+}
+
+// chainingWithReassignmentSafe demonstrates the solution: reassign each step.
+// Each reassignment creates a new SSA value, so only the final Find is a branch.
+func chainingWithReassignmentSafe(db *gorm.DB) {
+	q := db.Where("base")
+	q = q.Where("a")
+	q = q.Where("b")
+	q.Find(nil) // OK - first branch from final q
+}
+
+// singleChainedExpressionSafe demonstrates the other solution: single expression.
+// The entire chain is one expression, so it's a single branch.
+func singleChainedExpressionSafe(db *gorm.DB) {
+	db.Where("base").Where("a").Where("b").Find(nil) // OK - single chain
 }

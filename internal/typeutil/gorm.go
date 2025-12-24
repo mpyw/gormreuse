@@ -1,7 +1,34 @@
 // Package typeutil provides type-related utilities for GORM analysis.
 //
-// It includes functions to check if a type is *gorm.DB and to identify
-// immutable-returning GORM methods (Session, WithContext, Debug, etc.).
+// # Overview
+//
+// This package provides utilities to:
+//   - Check if a type is *gorm.DB
+//   - Identify immutable-returning (pure) GORM methods
+//
+// # Type Detection
+//
+// The IsGormDB function checks if a type is exactly *gorm.io/gorm.DB.
+// It uses exact package path matching to prevent false positives from
+// malicious packages like "evil.com/fake-gorm.io/gorm".
+//
+// # Pure Method Classification
+//
+// GORM methods are classified as:
+//
+//	┌─────────────────────────────────────────────────────────────────────────┐
+//	│  Method Category  │  Examples             │  Returns                    │
+//	├─────────────────────────────────────────────────────────────────────────┤
+//	│  Pure (clone:1)   │  Session, WithContext │  New immutable *gorm.DB     │
+//	│                   │  Debug, Open, Begin   │  (safe to reuse result)     │
+//	├─────────────────────────────────────────────────────────────────────────┤
+//	│  Non-pure         │  Where, Find, Count   │  Mutable *gorm.DB           │
+//	│  (all others)     │  Order, Limit, etc.   │  (shares internal state)    │
+//	└─────────────────────────────────────────────────────────────────────────┘
+//
+// Pure methods return a new *gorm.DB with clone:1, which creates a fresh
+// Statement and is safe to reuse. Non-pure methods create shallow clones
+// that share the internal Statement.
 package typeutil
 
 import (
@@ -61,10 +88,13 @@ var immutableReturningMethods = map[string]struct{}{
 	"Transaction": {},
 }
 
-// IsPureFunctionBuiltin returns true if the builtin method/function is pure.
-// Pure functions don't pollute arguments and return immutable *gorm.DB.
-// This includes Session, WithContext, Debug, Open, Begin, Transaction.
-func IsPureFunctionBuiltin(name string) bool {
+// IsImmutableReturningBuiltin returns true if the builtin method returns immutable *gorm.DB.
+// These methods (Session, WithContext, Debug, Open, Begin, Transaction) return a new
+// immutable instance that can be branched freely without pollution.
+//
+// Note: This is different from user-defined pure functions (//gormreuse:pure),
+// which only guarantee no argument pollution - they may return mutable values.
+func IsImmutableReturningBuiltin(name string) bool {
 	_, ok := immutableReturningMethods[name]
 	return ok
 }

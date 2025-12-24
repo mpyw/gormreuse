@@ -1,4 +1,37 @@
-// Package handler provides instruction handlers for gormreuse.
+// Package handler provides SSA instruction handlers for gormreuse.
+//
+// # Overview
+//
+// This package provides handlers for different SSA instruction types that
+// can involve *gorm.DB values. Each handler checks for pollution and records
+// usage for later violation detection.
+//
+// # Instruction Types Handled
+//
+//	┌─────────────────────────────────────────────────────────────────────────┐
+//	│  Instruction Type  │  Handler          │  Purpose                       │
+//	├─────────────────────────────────────────────────────────────────────────┤
+//	│  *ssa.Call         │  CallHandler      │  Method calls, function calls  │
+//	│  *ssa.Go           │  GoHandler        │  go func() { ... }             │
+//	│  *ssa.Defer        │  DeferHandler     │  defer func() { ... }          │
+//	│  *ssa.Send         │  SendHandler      │  ch <- db (channel send)       │
+//	│  *ssa.Store        │  StoreHandler     │  slice[i] = db (slice elem)    │
+//	│  *ssa.MapUpdate    │  MapUpdateHandler │  map[k] = db (map storage)     │
+//	│  *ssa.MakeInterface│  MakeInterfaceHandler │ interface{}(db)            │
+//	└─────────────────────────────────────────────────────────────────────────┘
+//
+// # Type Switch Dispatch
+//
+// The Dispatch function uses type switch for O(1) dispatch to handlers:
+//
+//	switch i := instr.(type) {
+//	case *ssa.Call:    (&CallHandler{}).Handle(i, ctx)
+//	case *ssa.Go:      (&GoHandler{}).Handle(i, ctx)
+//	...
+//	}
+//
+// This is more efficient than reflection-based dispatch for a small number
+// of known types.
 package handler
 
 import (
@@ -14,19 +47,32 @@ import (
 )
 
 // Context provides shared context for instruction handlers.
+//
+// This struct is created per-function and passed to all handlers during
+// the instruction processing pass.
 type Context struct {
-	Tracker    *pollution.Tracker
-	RootTracer *tracer.RootTracer
-	CFG        *cfg.Analyzer
-	LoopInfo   *cfg.LoopInfo
-	CurrentFn  *ssa.Function
+	Tracker    *pollution.Tracker // Records usage and detects violations
+	RootTracer *tracer.RootTracer // Traces values to mutable roots
+	CFG        *cfg.Analyzer      // Control flow graph analysis
+	LoopInfo   *cfg.LoopInfo      // Loop detection results for current function
+	CurrentFn  *ssa.Function      // The function being analyzed
 }
 
 // CallHandler handles *ssa.Call instructions.
 //
+// This is the most complex handler, covering:
+//   - Direct gorm method calls: q.Find(nil)
+//   - Bound method calls: find := q.Find; find(nil)
+//   - Function calls with *gorm.DB arguments
+//
+// # Uniform Processing
+//
 // Every gorm chain method use is processed uniformly:
-// - First use from a root: OK, marks root polluted
-// - Second+ use from same root: VIOLATION at that call site
+//   - First use from a root: OK, marks root polluted
+//   - Second+ use from same root: VIOLATION at that call site
+//
+// There's no distinction between "terminal" and "non-terminal" methods.
+// All uses are recorded, and violations are detected via CFG reachability.
 type CallHandler struct{}
 
 // Handle processes a Call instruction.
@@ -53,7 +99,7 @@ func (h *CallHandler) Handle(call *ssa.Call, ctx *Context) {
 	}
 
 	methodName := callee.Name()
-	isPureBuiltin := typeutil.IsPureFunctionBuiltin(methodName)
+	isImmutableReturning := typeutil.IsImmutableReturningBuiltin(methodName)
 
 	// Get receiver
 	if len(call.Call.Args) == 0 {
@@ -69,7 +115,7 @@ func (h *CallHandler) Handle(call *ssa.Call, ctx *Context) {
 
 	// KEY CHANGE: Process ALL calls uniformly (no isTerminal skip)
 	// Record usage (violations detected later in DetectViolations)
-	if isPureBuiltin {
+	if isImmutableReturning {
 		// Pure methods check for pollution but don't pollute
 		ctx.Tracker.RecordPureUse(root, call.Block(), call.Pos())
 	} else {
@@ -106,7 +152,7 @@ func (h *CallHandler) processBoundMethodCall(call *ssa.Call, mc *ssa.MakeClosure
 	}
 
 	methodName := strings.TrimSuffix(mc.Fn.Name(), "$bound")
-	isPureBuiltin := typeutil.IsPureFunctionBuiltin(methodName)
+	isImmutableReturning := typeutil.IsImmutableReturningBuiltin(methodName)
 
 	root := ctx.RootTracer.FindMutableRoot(recv)
 	if root == nil {
@@ -114,7 +160,7 @@ func (h *CallHandler) processBoundMethodCall(call *ssa.Call, mc *ssa.MakeClosure
 	}
 
 	// Record usage (violations detected later)
-	if isPureBuiltin {
+	if isImmutableReturning {
 		// Pure methods check for pollution but don't pollute
 		ctx.Tracker.RecordPureUse(root, call.Block(), call.Pos())
 	} else {

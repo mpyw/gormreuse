@@ -49,13 +49,13 @@ branch1 := q.Where("a")                       // OK: creates new Statement
 branch2 := q.Where("b")                       // OK: creates new Statement
 ```
 
-### Detection Model: Pollute Semantics
+### Detection Model: Mutable Branching
 
-The linter uses a "pollute" model inspired by Rust's move semantics:
+The linter detects when a mutable `*gorm.DB` branches into multiple code paths:
 
 1. **Immutable-returning methods** ([`Session`](https://pkg.go.dev/gorm.io/gorm#DB.Session), [`WithContext`](https://pkg.go.dev/gorm.io/gorm#DB.WithContext), [`Debug`](https://pkg.go.dev/gorm.io/gorm#DB.Debug), [`Open`](https://pkg.go.dev/gorm.io/gorm#Open), [`Begin`](https://pkg.go.dev/gorm.io/gorm#DB.Begin), [`Transaction`](https://pkg.go.dev/gorm.io/gorm#DB.Transaction)) return a new immutable instance
-2. **Chain Methods** (all others including finishers) pollute the receiver if it's mutable-derived
-3. Using a polluted mutable instance (second branch) is a violation
+2. **All other methods** on a mutable instance create a **branch** that consumes the instance
+3. **Second branch** from the same mutable root is a **violation**
 
 ### Directives
 
@@ -68,57 +68,108 @@ The linter uses a "pollute" model inspired by Rust's move semantics:
 
 ```
 gormreuse/
-├── cmd/
-│   └── gormreuse/              # CLI entry point (singlechecker)
-│       └── main.go
-├── docs/
-│   └── PURE_VALIDATION_DESIGN.md  # Design doc for 3-state purity model
-├── internal/                   # SSA-based analysis (modular design)
-│   ├── analyzer.go             # Analyzer orchestrator, entry point
-│   ├── exports.go              # Re-exports for backward compatibility
-│   ├── purity_adapter.go       # Adapter for purity validation
-│   ├── typeutil/               # Type utilities
-│   │   └── gorm.go             # GORM type checks, immutable method list
+├── analyzer.go                 # Public analyzer definition (go/analysis entry point)
+├── analyzer_test.go            # Integration tests using analysistest
+├── cmd/gormreuse/main.go       # CLI entry point (singlechecker)
+│
+├── internal/                   # Internal implementation
+│   ├── analyzer.go             # SSA analysis orchestrator (RunSSA entry point)
+│   │
 │   ├── directive/              # Comment directive handling
-│   │   ├── common.go           # Shared directive utilities
-│   │   ├── ignore.go           # //gormreuse:ignore handling
-│   │   └── pure.go             # //gormreuse:pure handling
-│   └── ssa/                    # SSA analysis package
-│       ├── doc.go              # Package documentation
-│       ├── tracer.go           # SSATracer, RootTracer
-│       ├── pollution.go        # CFGAnalyzer, PollutionTracker
-│       ├── handler.go          # Instruction handlers (type switch dispatch)
-│       └── purity/             # [WIP] 3-state purity analysis
-│           ├── state.go        # PurityState type (Clean/Polluted/Depends)
-│           ├── inference.go    # Purity state inference (Inferencer)
-│           └── validator.go    # Pure function contract validator
-├── testdata/
-│   └── src/
-│       ├── gormreuse/          # Test fixtures
-│       │   ├── basic.go        # Basic patterns
-│       │   ├── advanced.go     # Complex patterns
-│       │   ├── evil.go         # Edge cases, closures, defer, goroutines
-│       │   ├── ignore.go       # Directive tests
-│       │   └── pure_validation.go  # Pure function validation tests
-│       └── gorm.io/gorm/       # Library stub
-├── e2e/
-│   └── internal/               # SQL behavior verification tests (separate module)
-│       └── realexec_test.go
-├── analyzer.go                 # Public analyzer definition
-├── analyzer_test.go            # Integration tests
-└── README.md
+│   │   ├── directive.go        # Directive detection (hasDirective, IsIgnore/IsPure)
+│   │   ├── ignore.go           # //gormreuse:ignore - IgnoreMap, unused tracking
+│   │   └── pure.go             # //gormreuse:pure - PureFuncSet, function key matching
+│   │
+│   ├── ssa/                    # SSA-based analysis (modular subpackages)
+│   │   ├── analyzer.go         # Analyzer - orchestrates analysis phases
+│   │   │
+│   │   ├── tracer/             # Value tracing to find mutable roots
+│   │   │   └── root.go         # RootTracer - traces SSA values to mutable origins
+│   │   │
+│   │   ├── pollution/          # Pollution state tracking
+│   │   │   └── tracker.go      # Tracker - records uses, detects violations
+│   │   │
+│   │   ├── cfg/                # Control flow graph analysis
+│   │   │   └── analyzer.go     # Analyzer - loop detection, reachability
+│   │   │
+│   │   ├── handler/            # SSA instruction handlers
+│   │   │   └── call.go         # Handlers for Call, Go, Defer, Send, Store, etc.
+│   │   │
+│   │   └── purity/             # 3-state purity analysis for //gormreuse:pure
+│   │       ├── state.go        # PurityState (Clean/Polluted/Depends)
+│   │       ├── inference.go    # Inferencer - infers purity of SSA values
+│   │       └── validator.go    # ValidateFunction - checks pure contracts
+│   │
+│   └── typeutil/               # Type utilities
+│       └── gorm.go             # IsGormDB, IsPureFunctionBuiltin
+│
+├── testdata/src/               # Test fixtures
+│   ├── gormreuse/              # Analyzer test cases
+│   │   ├── basic.go            # Basic patterns
+│   │   ├── advanced.go         # Complex patterns
+│   │   ├── evil.go             # Edge cases with [LIMITATION] markers
+│   │   ├── ignore.go           # //gormreuse:ignore tests
+│   │   └── pure_validation.go  # //gormreuse:pure validation tests
+│   └── gorm.io/gorm/           # GORM stub for testing
+│
+├── e2e/internal/               # SQL behavior verification (separate module)
+│
+└── docs/                       # Design documents
+    ├── PURE_VALIDATION_DESIGN.md
+    └── CODE_REVIEW.md
+```
+
+### Analysis Pipeline
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         analyzer.go (public)                            │
+│  Analyzer.Run() → buildssa → internal.RunSSA()                         │
+└─────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                      internal/analyzer.go                               │
+│  For each function:                                                     │
+│    1. Check ignores (directive.IgnoreMap)                              │
+│    2. Validate pure functions (purity.ValidateFunction)                │
+│    3. Detect violations (ssa.Analyzer)                                 │
+└─────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                        ssa/analyzer.go                                  │
+│  Three-phase analysis:                                                  │
+│    PHASE 1: TRACKING    - Process instructions, record usages          │
+│    PHASE 2: DETECTION   - DetectViolations() via CFG reachability      │
+│    PHASE 3: COLLECTION  - Return violations list                       │
+└─────────────────────────────────────────────────────────────────────────┘
+                                    │
+                    ┌───────────────┼───────────────┐
+                    ▼               ▼               ▼
+              ┌──────────┐   ┌──────────┐   ┌──────────┐
+              │  tracer  │   │ pollution│   │   cfg    │
+              │ RootTracer│   │ Tracker  │   │ Analyzer │
+              └──────────┘   └──────────┘   └──────────┘
+                    │               │               │
+                    └───────────────┼───────────────┘
+                                    ▼
+                            ┌──────────────┐
+                            │   handler    │
+                            │  Dispatch()  │
+                            └──────────────┘
 ```
 
 ### Design Patterns
 
-The codebase uses several design patterns inspired by [zerologlintctx](https://github.com/mpyw/zerologlintctx):
-
-1. **Composition over Inheritance**: `Analyzer` composes `RootTracer`, `CFGAnalyzer`, `PollutionTracker`
-2. **Type Switch Dispatch**: `DispatchInstruction` routes SSA instructions to handlers via type switch (O(1) dispatch)
-3. **Validated State Pattern**: `traceResult` type with explicit states (`Immutable`, `MutableRoot`)
-4. **Mechanism vs Policy Separation**:
-   - `SSATracer`: HOW to traverse SSA values (mechanism)
-   - `RootTracer`: WHAT constitutes a mutable root (policy)
+1. **Composition over Inheritance**: `Analyzer` composes `RootTracer`, `cfg.Analyzer`, `pollution.Tracker`
+2. **Type Switch Dispatch**: `handler.Dispatch()` routes SSA instructions to handlers via type switch
+3. **Two-Phase Detection**: First collect all uses, then detect violations via CFG reachability
+4. **Separation of Concerns**:
+   - `tracer/`: WHERE is the mutable root? (value tracing)
+   - `pollution/`: WHAT uses exist and are they violations? (state tracking)
+   - `cfg/`: CAN use A reach use B? (control flow)
+   - `handler/`: HOW to process each instruction type? (dispatch)
 
 ### Key Design Decisions
 
@@ -176,6 +227,14 @@ Bound Method Tracking:
   find := q.Find    <- MakeClosure with receiver q in Bindings[0]
   find(nil)         <- SSA: Call with Value=*ssa.MakeClosure, Fn.Name()="Find$bound"
                    <- Receiver extracted from Bindings[0] for pollution tracking
+
+Reassignment Behavior:
+  q := db.Where("x")   <- SSA: q_1 = call db.Where("x")
+  q.Find(nil)          <- First branch from q_1 - OK
+  q = db.Where("y")    <- SSA: q_2 = call db.Where("y") (NEW SSA value)
+  q.Find(nil)          <- First branch from q_2 - OK (no relation to q_1)
+
+  Each assignment creates a new SSA value, so reassignment = new mutable root.
 ```
 
 ## Development Commands
@@ -243,32 +302,32 @@ When refactoring code, follow these rules strictly:
 - **Closure assignment**: `f := func() { q = db.Where(...) }; f()` - cross-closure assignment not tracked
 - **Defer inside for loop**: `for range items { defer func() { q.Find(nil) }() }` - closure deferred multiple times not fully tracked
 - **Nested defer/goroutine**: `go func() { defer q.Find(nil) }()` - deep nested defer/goroutine chains not fully tracked
-- **IIFE/closure stored result**: When IIFE/closure result is stored (not directly chained), the closure-internal call is terminal
+- **IIFE/closure stored result**: When IIFE/closure result is stored (not directly chained), branch tracking differs from runtime order
 
 These are documented in `testdata/src/gormreuse/evil.go` with `[LIMITATION]` markers.
 
 ### IIFE/Closure Stored Result Limitation
 
-When a closure result is stored (in a variable or struct field) rather than directly chained to a gorm method, the closure-internal call is treated as terminal. This means:
+When a closure result is stored (in a variable or struct field) rather than directly chained to a gorm method, branch tracking may differ from runtime behavior:
 
 ```go
 // OK: IIFE result directly chained
 _ = func() *gorm.DB { return q.Where("y") }().Find(nil)  // ONE branch
 q.Count(nil)  // violation (second branch)
 
-// LIMITATION: IIFE result stored
-q2 := func() *gorm.DB { return q.Where("y") }()  // Terminal! Pollutes q
-q2.Find(nil)  // violation (q is polluted)
+// LIMITATION: IIFE result stored - both q and q2 are treated as branching from q
+q2 := func() *gorm.DB { return q.Where("y") }()  // First branch from q
+q2.Find(nil)  // violation (q2 traces back to q, which is already used)
 q.Count(nil)  // also violation
 
 // LIMITATION: Stored closure with interleaved use
 fn := func() *gorm.DB { return q.Where("y") }
 q2 := fn()
-q.Count(nil)  // Expected: violation. Actual: OK (first terminal)
-q2.Find(nil)  // Expected: OK. Actual: violation (traces to polluted q)
+q.Count(nil)  // Expected: violation. Actual: may not detect correctly
+q2.Find(nil)  // Expected: OK. Actual: may report as violation
 ```
 
-**Root Cause**: SSA analysis processes closure bodies before closure call sites. The "branch claim" semantics (runtime order) differs from SSA processing order.
+**Root Cause**: SSA analysis processes closure bodies before closure call sites. The branch tracking order differs from runtime execution order.
 
 ## Work in Progress
 
@@ -276,24 +335,21 @@ q2.Find(nil)  // Expected: OK. Actual: violation (traces to polluted q)
 
 **Design Document**: [`docs/PURE_VALIDATION_DESIGN.md`](docs/PURE_VALIDATION_DESIGN.md)
 
-The `//gormreuse:pure` directive validation is being enhanced with a 3-state purity model:
-
-| State | Meaning | Example |
-|-------|---------|---------|
-| `Clean` | Always immutable | `db.Session(&gorm.Session{})` |
-| `Polluted` | Tainted, unsafe | `db.Where("x")` after terminal use |
-| `Depends(param)` | Depends on argument | `return db` (identity function) |
-
-This enables accurate validation of pure functions that return their arguments unchanged:
+The `//gormreuse:pure` directive validates that a function **doesn't pollute its `*gorm.DB` arguments**:
 
 ```go
 //gormreuse:pure
-func identity(db *gorm.DB) *gorm.DB {
-    return db  // OK: Depends(db) - doesn't pollute, state depends on caller
+func withTenant(db *gorm.DB, tenantID int) *gorm.DB {
+    return db.Session(&gorm.Session{}).Where("tenant_id = ?", tenantID) // OK
 }
 ```
 
-**Implementation Status**: See `docs/PURE_VALIDATION_DESIGN.md` for detailed design and progress.
+**Key semantics**:
+- Pure functions must NOT call polluting methods on `*gorm.DB` **arguments**
+- Pure functions MAY call polluting methods on **immutable values** (e.g., Session result)
+- Pure functions MAY return mutable `*gorm.DB` - callers must treat return values as potentially mutable
+
+The 3-state purity model (`Clean`, `Polluted`, `Depends`) is used internally to track value states through SSA analysis. See `docs/PURE_VALIDATION_DESIGN.md` for details.
 
 ## Related Projects
 

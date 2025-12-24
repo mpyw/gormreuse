@@ -1,4 +1,37 @@
 // Package internal provides SSA-based analysis for GORM *gorm.DB reuse detection.
+//
+// # Architecture
+//
+// This package serves as the bridge between the public analyzer and the
+// internal SSA analysis machinery:
+//
+//	┌─────────────────────────────────────────────────────────────────────────┐
+//	│                         Analysis Flow                                    │
+//	│                                                                          │
+//	│   analyzer.go (public)                                                   │
+//	│        │                                                                 │
+//	│        ▼                                                                 │
+//	│   internal/analyzer.go   ◀── You are here                                │
+//	│   ┌─────────────────────────────────────────────────────────────────┐   │
+//	│   │  RunSSA()                                                       │   │
+//	│   │    │                                                            │   │
+//	│   │    ├── Skip excluded files/functions                            │   │
+//	│   │    ├── Validate pure function contracts                         │   │
+//	│   │    ├── Run SSA analysis (ssa.Analyzer)                          │   │
+//	│   │    └── Apply ignore directives                                  │   │
+//	│   └─────────────────────────────────────────────────────────────────┘   │
+//	│        │                                                                 │
+//	│        ▼                                                                 │
+//	│   internal/ssa/analyzer.go                                               │
+//	│   (Core SSA analysis)                                                    │
+//	└─────────────────────────────────────────────────────────────────────────┘
+//
+// # Responsibilities
+//
+//   - Orchestrate SSA analysis for all source functions
+//   - Handle function-level and line-level ignore directives
+//   - Report unused ignore directives
+//   - Validate pure function contracts
 package internal
 
 import (
@@ -18,6 +51,17 @@ import (
 // =============================================================================
 
 // RunSSA performs SSA-based analysis for GORM *gorm.DB reuse detection.
+//
+// This is the main entry point called from the public analyzer. It processes
+// all source functions in the package and reports violations.
+//
+// Processing flow for each function:
+//  1. Skip if file is excluded (generated files, etc.)
+//  2. Skip if function has //gormreuse:ignore directive
+//  3. Validate pure function contract if marked with //gormreuse:pure
+//  4. Run SSA analysis and collect violations
+//  5. Report violations (unless suppressed by line-level ignore)
+//  6. Report unused ignore directives
 func RunSSA(
 	pass *analysis.Pass,
 	ssaInfo *buildssa.SSA,
@@ -78,13 +122,20 @@ func RunSSA(
 // SSA Checker
 // =============================================================================
 
+// checker wraps SSA analysis with ignore directive handling.
+//
+// It ensures:
+//   - Violations at the same position are only reported once
+//   - Line-level ignore directives suppress violations
+//   - Violations are reported through the analysis.Pass
 type checker struct {
-	pass      *analysis.Pass
-	ignoreMap directive.IgnoreMap
-	pureFuncs *directive.PureFuncSet
-	reported  map[token.Pos]bool
+	pass      *analysis.Pass         // For reporting diagnostics
+	ignoreMap directive.IgnoreMap    // Line-level ignore directives
+	pureFuncs *directive.PureFuncSet // Pure functions for analysis
+	reported  map[token.Pos]bool     // Deduplication of reports
 }
 
+// newChecker creates a new checker for a specific file.
 func newChecker(pass *analysis.Pass, ignoreMap directive.IgnoreMap, pureFuncs *directive.PureFuncSet) *checker {
 	return &checker{
 		pass:      pass,
@@ -94,6 +145,7 @@ func newChecker(pass *analysis.Pass, ignoreMap directive.IgnoreMap, pureFuncs *d
 	}
 }
 
+// checkFunction runs SSA analysis on a single function and reports violations.
 func (c *checker) checkFunction(fn *ssa.Function) {
 	analyzer := ssautil.NewAnalyzer(fn, c.pureFuncs)
 	violations := analyzer.Analyze()
@@ -103,15 +155,18 @@ func (c *checker) checkFunction(fn *ssa.Function) {
 	}
 }
 
+// report reports a violation if not ignored or already reported.
 func (c *checker) report(pos token.Pos, message string) {
+	// Deduplicate: same position may be reached multiple times
 	if c.reported[pos] {
 		return
 	}
 	c.reported[pos] = true
 
+	// Check if line is ignored
 	line := c.pass.Fset.Position(pos).Line
 	if c.ignoreMap != nil && c.ignoreMap.ShouldIgnore(line) {
-		return
+		return // Suppressed by ignore directive
 	}
 
 	c.pass.Reportf(pos, "%s", message)

@@ -1,8 +1,44 @@
 // Package directive handles gormreuse comment directives.
 //
-// Supported directives:
-//   - //gormreuse:ignore - Suppress warnings for the next line or same line
-//   - //gormreuse:pure - Mark function/method as not polluting its *gorm.DB argument
+// # Supported Directives
+//
+// The package supports two directive types:
+//
+//	//gormreuse:ignore - Suppress warnings for the next line or same line
+//	//gormreuse:pure   - Mark function/method as not polluting its *gorm.DB argument
+//
+// # Directive Placement
+//
+// Directives can be placed:
+//   - On the line before the affected code (most common)
+//   - On the same line as the affected code
+//   - On a function declaration (function-level ignore/pure)
+//   - Before the package declaration (file-level ignore)
+//
+// # Examples
+//
+// Line-level ignore:
+//
+//	//gormreuse:ignore
+//	q.Find(nil)  // This violation is suppressed
+//
+// Same-line ignore:
+//
+//	q.Find(nil)  //gormreuse:ignore
+//
+// Function-level ignore:
+//
+//	//gormreuse:ignore
+//	func legacy() {
+//	    // All violations in this function are suppressed
+//	}
+//
+// Pure function marking:
+//
+//	//gormreuse:pure
+//	func safeQuery(db *gorm.DB) *gorm.DB {
+//	    return db.Session(&gorm.Session{})
+//	}
 package directive
 
 import "strings"

@@ -1,12 +1,35 @@
 // Package gormreuse provides a static analysis tool for detecting unsafe
 // *gorm.DB instance reuse in Go code.
 //
-// GORM's chain methods (Where, Order, etc.) modify internal state. Reusing
-// the same *gorm.DB instance after chain methods can cause query conditions
-// to accumulate unexpectedly.
+// # Problem
 //
-// This analyzer detects such patterns and suggests using Session() or
-// WithContext() to create safe, reusable instances.
+// GORM's chain methods (Where, Order, etc.) create shallow clones that share
+// internal state. When a mutable *gorm.DB branches into multiple code paths,
+// the branches interfere with each other:
+//
+//	q := db.Where("x")
+//	q.Where("a").Find(&r1)  // Branch 1: WHERE x AND a
+//	q.Where("b").Find(&r2)  // Branch 2: WHERE x AND a AND b ← Bug! "a" leaked
+//
+// # Solution
+//
+// Use Session() to create an immutable instance before branching:
+//
+//	q := db.Session(&gorm.Session{}).Where("x")
+//	q.Where("a").Find(&r1)  // Branch 1: WHERE x AND a
+//	q.Where("b").Find(&r2)  // Branch 2: WHERE x AND b ← Correct!
+//
+// # This Analyzer
+//
+// Detects when a mutable *gorm.DB is used to create multiple branches.
+// The first branch is OK; second and subsequent branches are violations.
+//
+// # Directives
+//
+// Suppress false positives with:
+//
+//	//gormreuse:ignore - Suppress for next line or same line
+//	//gormreuse:pure   - Mark function as not polluting *gorm.DB
 package gormreuse
 
 import (
@@ -21,6 +44,17 @@ import (
 )
 
 // Analyzer is the main analyzer for gormreuse.
+//
+// It requires the buildssa analyzer to build SSA form of the code,
+// then performs reuse detection via pollution tracking.
+//
+// Usage with go vet:
+//
+//	go vet -vettool=$(which gormreuse) ./...
+//
+// Usage programmatically:
+//
+//	analysis.Run([]*analysis.Analyzer{gormreuse.Analyzer}, pkgs)
 var Analyzer = &analysis.Analyzer{
 	Name:     "gormreuse",
 	Doc:      "detects unsafe *gorm.DB instance reuse after chain methods",

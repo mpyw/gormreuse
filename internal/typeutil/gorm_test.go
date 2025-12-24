@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func TestIsPureFunctionBuiltin(t *testing.T) {
+func TestIsImmutableReturningBuiltin(t *testing.T) {
 	tests := []struct {
 		name     string
 		method   string
@@ -26,8 +26,8 @@ func TestIsPureFunctionBuiltin(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := IsPureFunctionBuiltin(tt.method); got != tt.expected {
-				t.Errorf("IsPureFunctionBuiltin(%q) = %v, want %v", tt.method, got, tt.expected)
+			if got := IsImmutableReturningBuiltin(tt.method); got != tt.expected {
+				t.Errorf("IsImmutableReturningBuiltin(%q) = %v, want %v", tt.method, got, tt.expected)
 			}
 		})
 	}

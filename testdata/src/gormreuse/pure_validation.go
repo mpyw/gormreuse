@@ -58,17 +58,19 @@ func pureReturnsArgDirectly(db *gorm.DB) *gorm.DB {
 }
 
 // PV006: Pure function returns non-pure method result on argument
+// Note: The "returns Polluted" is no longer an error - pure only guarantees no argument pollution.
 //
 //gormreuse:pure
 func pureReturnsWhereResult(db *gorm.DB) *gorm.DB {
-	return db.Where("x") // want `pure function pollutes \*gorm\.DB argument by calling Where` `pure function returns Polluted \*gorm\.DB`
+	return db.Where("x") // want `pure function pollutes \*gorm\.DB argument by calling Where`
 }
 
 // PV007: Pure function returns non-pure function result
+// Note: The "returns Polluted" is no longer an error - pure only guarantees no argument pollution.
 //
 //gormreuse:pure
 func pureReturnsNonPureFuncResult(db *gorm.DB) *gorm.DB {
-	return nonPureHelperReturns(db) // want `pure function passes \*gorm\.DB argument to non-pure function nonPureHelperReturns` `pure function returns Polluted \*gorm\.DB`
+	return nonPureHelperReturns(db) // want `pure function passes \*gorm\.DB argument to non-pure function nonPureHelperReturns`
 }
 
 // PV008: Pure function with multiple DB args, pollutes one
@@ -168,6 +170,22 @@ func pureNoGormReturn(db *gorm.DB) int {
 //gormreuse:pure
 func pureChainsPure(db *gorm.DB) *gorm.DB {
 	return db.Session(&gorm.Session{}).WithContext(nil) // OK: both pure
+}
+
+// PV111b: Pure function chains Session then non-pure (direct chain, no assignment)
+// Session() returns immutable, so Where() on it doesn't pollute db.
+//
+//gormreuse:pure
+func pureSessionThenWhereDirect(db *gorm.DB) {
+	db.Session(&gorm.Session{}).Where("x") // OK: Where on immutable doesn't pollute db
+}
+
+// PV111c: Pure function returns Session().Where() chain (README example pattern)
+// This is safe because Session() returns immutable, Where() operates on that.
+//
+//gormreuse:pure
+func pureReturnsSessionWhereChain(db *gorm.DB, tenantID int) *gorm.DB {
+	return db.Session(&gorm.Session{}).Where("tenant_id = ?", tenantID) // OK
 }
 
 // PV112: Pure function with conditional return (both branches pure)
@@ -285,7 +303,7 @@ func purePhiWithDepends(db *gorm.DB, cond bool) *gorm.DB {
 }
 
 // PV209: Pure function with Phi node that should report error
-// One branch returns Polluted
+// One branch pollutes the argument (the return being Polluted is no longer an error).
 //
 //gormreuse:pure
 func purePhiWithPolluted(db *gorm.DB, cond bool) *gorm.DB {
@@ -295,7 +313,7 @@ func purePhiWithPolluted(db *gorm.DB, cond bool) *gorm.DB {
 	} else {
 		result = db.Where("x") // want `pure function pollutes \*gorm\.DB argument by calling Where`
 	}
-	return result // want `pure function returns Polluted \*gorm\.DB`
+	return result // OK now - pure doesn't guarantee immutable return
 }
 
 // =============================================================================
@@ -359,27 +377,27 @@ func pureReturnsDeref(ptr **gorm.DB) *gorm.DB {
 }
 
 // PV216: Return struct field directly (FieldAddr + UnOp)
-// Conservative: struct fields are Polluted
+// No argument pollution - OK (pure doesn't guarantee immutable return).
 //
 //gormreuse:pure
 func pureReturnsStructField(h *dbHolder) *gorm.DB {
-	return h.db // want `pure function returns Polluted \*gorm\.DB`
+	return h.db // OK - no *gorm.DB argument pollution
 }
 
 // PV217: Return slice element directly (IndexAddr + UnOp)
-// Conservative: slice elements are Polluted
+// No argument pollution - OK (pure doesn't guarantee immutable return).
 //
 //gormreuse:pure
 func pureReturnsSliceElement(dbs []*gorm.DB) *gorm.DB {
-	return dbs[0] // want `pure function returns Polluted \*gorm\.DB`
+	return dbs[0] // OK - no *gorm.DB argument pollution
 }
 
 // PV218: Return map value directly (Lookup)
-// Conservative: map values are Polluted
+// No argument pollution - OK (pure doesn't guarantee immutable return).
 //
 //gormreuse:pure
 func pureReturnsMapValue(m map[string]*gorm.DB) *gorm.DB {
-	return m["key"] // want `pure function returns Polluted \*gorm\.DB`
+	return m["key"] // OK - no *gorm.DB argument pollution
 }
 
 // PV219: Return type assertion result directly (TypeAssert)
@@ -517,11 +535,12 @@ func pureCallsRegularFunc() int {
 
 // PV233: Tests inferPureUserFuncCall IsPolluted() branch
 // The argument to the inner pure function is Polluted (db.Where result)
+// Note: "returns Polluted" is no longer an error - pure only checks argument pollution.
 //
 //gormreuse:pure
 func pureCallsWithPollutedArg(db *gorm.DB) *gorm.DB {
 	polluted := db.Where("x")           // want `pure function pollutes \*gorm\.DB argument by calling Where`
-	return pureHelperReturns(polluted)  // want `pure function returns Polluted \*gorm\.DB`
+	return pureHelperReturns(polluted)  // OK now - return value purity not checked
 }
 
 // =============================================================================

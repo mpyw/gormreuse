@@ -235,7 +235,7 @@ func (inf *Inferencer) inferCall(call *ssa.Call) State {
 	// Method call on *gorm.DB (concrete type)
 	// e.g., (*gorm.DB).Where(db, "x")
 	if sig := callee.Signature; sig != nil && sig.Recv() != nil && typeutil.IsGormDB(sig.Recv().Type()) {
-		if typeutil.IsPureFunctionBuiltin(callee.Name()) {
+		if typeutil.IsImmutableReturningBuiltin(callee.Name()) {
 			return Clean()
 		}
 		return Polluted()

@@ -5,13 +5,25 @@ import (
 	"go/token"
 )
 
+// =============================================================================
+// Ignore Directive Handling
+// =============================================================================
+
 // ignoreEntry tracks an ignore directive and whether it was used.
+// Used to report "unused ignore directive" warnings.
 type ignoreEntry struct {
-	pos  token.Pos // Position of the ignore comment
+	pos  token.Pos // Position of the ignore comment (for reporting unused)
 	used bool      // Whether this ignore was actually used to suppress a warning
 }
 
 // IgnoreMap tracks line numbers that have ignore comments.
+//
+// Keys:
+//   - Positive integer: line number with ignore directive
+//   - -1: special marker for file-level ignore
+//
+// The map is built during AST scanning and used during violation reporting
+// to determine if a violation should be suppressed.
 type IgnoreMap map[int]*ignoreEntry
 
 // BuildIgnoreMap scans a file for ignore comments and returns a map.
