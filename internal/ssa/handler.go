@@ -516,32 +516,22 @@ func (h *MakeInterfaceHandler) Handle(instr ssa.Instruction, ctx *HandlerContext
 	ctx.Tracker.MarkPolluted(root, mi.Block(), mi.Pos())
 }
 
-// singleton handlers for dispatch (avoid allocation per call)
-var (
-	defaultCallHandler          = &CallHandler{}
-	defaultGoHandler            = &GoHandler{}
-	defaultSendHandler          = &SendHandler{}
-	defaultStoreHandler         = &StoreHandler{}
-	defaultMapUpdateHandler     = &MapUpdateHandler{}
-	defaultMakeInterfaceHandler = &MakeInterfaceHandler{}
-)
-
 // DispatchInstruction dispatches an instruction to the appropriate handler.
 // Uses type switch for O(1) dispatch instead of O(n) handler iteration.
 // Note: Does NOT handle *ssa.Defer (defers are processed in a second pass).
 func DispatchInstruction(instr ssa.Instruction, ctx *HandlerContext) {
 	switch i := instr.(type) {
 	case *ssa.Call:
-		defaultCallHandler.Handle(i, ctx)
+		(&CallHandler{}).Handle(i, ctx)
 	case *ssa.Go:
-		defaultGoHandler.Handle(i, ctx)
+		(&GoHandler{}).Handle(i, ctx)
 	case *ssa.Send:
-		defaultSendHandler.Handle(i, ctx)
+		(&SendHandler{}).Handle(i, ctx)
 	case *ssa.Store:
-		defaultStoreHandler.Handle(i, ctx)
+		(&StoreHandler{}).Handle(i, ctx)
 	case *ssa.MapUpdate:
-		defaultMapUpdateHandler.Handle(i, ctx)
+		(&MapUpdateHandler{}).Handle(i, ctx)
 	case *ssa.MakeInterface:
-		defaultMakeInterfaceHandler.Handle(i, ctx)
+		(&MakeInterfaceHandler{}).Handle(i, ctx)
 	}
 }
