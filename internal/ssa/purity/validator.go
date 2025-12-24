@@ -131,21 +131,13 @@ func (v *Validator) trackCallDerivation(call *ssa.Call) {
 	for _, arg := range call.Call.Args {
 		if typeutil.IsGormDB(arg.Type()) && v.paramDerived[arg] {
 			if result := call.Value(); result != nil && typeutil.IsGormDB(result.Type()) {
-				if !v.isPureUserFunc(callee) {
+				if !v.pureFuncs.Contains(callee) {
 					v.paramDerived[result] = true
 				}
 			}
 			break
 		}
 	}
-}
-
-// isPureUserFunc checks if a function is marked as pure by the user.
-func (v *Validator) isPureUserFunc(fn *ssa.Function) bool {
-	if v.pureFuncs == nil {
-		return false
-	}
-	return v.pureFuncs.Contains(fn)
 }
 
 // =============================================================================
@@ -190,7 +182,7 @@ func (v *Validator) checkStaticMethodPollution(call *ssa.Call, callee *ssa.Funct
 func (v *Validator) checkFunctionCallPollution(call *ssa.Call, callee *ssa.Function) []Violation {
 	var violations []Violation
 	for _, arg := range call.Call.Args {
-		if typeutil.IsGormDB(arg.Type()) && v.paramDerived[arg] && !v.isPureUserFunc(callee) {
+		if typeutil.IsGormDB(arg.Type()) && v.paramDerived[arg] && !v.pureFuncs.Contains(callee) {
 			violations = append(violations, Violation{
 				Pos:     call.Pos(),
 				Message: "pure function passes *gorm.DB argument to non-pure function " + callee.Name(),

@@ -346,6 +346,198 @@ func pureWithMakeInterface(db *gorm.DB) interface{} {
 }
 
 // =============================================================================
+// DIRECT RETURN TESTS - Testing SSA types returned directly
+// =============================================================================
+
+// PV215: Return dereferenced pointer (UnOp) directly
+// UnOp traces through to underlying Parameter (**gorm.DB), which is not *gorm.DB
+// so it returns Clean - this is OK (conservative edge case)
+//
+//gormreuse:pure
+func pureReturnsDeref(ptr **gorm.DB) *gorm.DB {
+	return *ptr // OK: traces to ptr (Clean - not *gorm.DB type)
+}
+
+// PV216: Return struct field directly (FieldAddr + UnOp)
+// Conservative: struct fields are Polluted
+//
+//gormreuse:pure
+func pureReturnsStructField(h *dbHolder) *gorm.DB {
+	return h.db // want `pure function returns Polluted \*gorm\.DB`
+}
+
+// PV217: Return slice element directly (IndexAddr + UnOp)
+// Conservative: slice elements are Polluted
+//
+//gormreuse:pure
+func pureReturnsSliceElement(dbs []*gorm.DB) *gorm.DB {
+	return dbs[0] // want `pure function returns Polluted \*gorm\.DB`
+}
+
+// PV218: Return map value directly (Lookup)
+// Conservative: map values are Polluted
+//
+//gormreuse:pure
+func pureReturnsMapValue(m map[string]*gorm.DB) *gorm.DB {
+	return m["key"] // want `pure function returns Polluted \*gorm\.DB`
+}
+
+// PV219: Return type assertion result directly (TypeAssert)
+// TypeAssert traces through to underlying value (interface{})
+// Since interface{} is not *gorm.DB, returns Clean
+//
+//gormreuse:pure
+func pureReturnsTypeAssertDirect(v interface{}) *gorm.DB {
+	return v.(*gorm.DB) // OK: traces to v (Clean - interface{} not *gorm.DB)
+}
+
+// PV220: Return type alias conversion (ChangeType)
+// ChangeType traces through to underlying parameter
+//
+//gormreuse:pure
+func pureReturnsChangeType(db MyGormDB) *gorm.DB {
+	return (*gorm.DB)(db) // Returns Depends(db) - valid
+}
+
+// PV221: Pure function with non-gorm.DB parameter (tests Parameter branch)
+//
+//gormreuse:pure
+func pureWithNonGormParam(x int, db *gorm.DB) *gorm.DB {
+	_ = x // x is not *gorm.DB, should return Clean for x's Parameter
+	return db.Session(&gorm.Session{})
+}
+
+// PV222: Return slice of dbs (Slice operation)
+// Slice traces through to underlying slice
+//
+//gormreuse:pure
+func pureReturnsSlice(dbs []*gorm.DB) []*gorm.DB {
+	return dbs[1:3] // Returns Depends on underlying - but validator doesn't check slices
+}
+
+// =============================================================================
+// TRACE TO PARAMETER TESTS - Testing traceToParameterImpl coverage
+// =============================================================================
+
+// PV223: Call pure function with dereferenced pointer (UnOp trace)
+//
+//gormreuse:pure
+func pureCallsWithDeref(ptr **gorm.DB) *gorm.DB {
+	return pureHelperReturns(*ptr) // arg is UnOp(*ptr), traces to ptr Parameter
+}
+
+// PV224: Call pure function through Phi node
+// Tests Phi node tracing in traceToParameterImpl
+//
+//gormreuse:pure
+func pureCallsWithPhi(db *gorm.DB, cond bool) *gorm.DB {
+	var x *gorm.DB
+	if cond {
+		x = db
+	} else {
+		x = db
+	}
+	return pureHelperReturns(x) // arg is Phi, both edges trace to same db param
+}
+
+// PV225: Call pure function with Phi to different params (trace fails)
+// Tests that Phi with different params returns false
+//
+//gormreuse:pure
+func pureCallsWithDifferentParams(db1 *gorm.DB, db2 *gorm.DB, cond bool) *gorm.DB {
+	var x *gorm.DB
+	if cond {
+		x = db1
+	} else {
+		x = db2
+	}
+	return pureHelperReturns(x) // Phi traces to different params → falls back to InferValue
+}
+
+// =============================================================================
+// INFER VALUE IMPL COVERAGE TESTS - Testing more SSA types
+// =============================================================================
+
+// PV226: Extract from tuple return (tests Extract branch)
+//
+//gormreuse:pure
+func pureReturnsExtract(db *gorm.DB) *gorm.DB {
+	tx, _ := tupleReturner(db)
+	return tx // tx is Extract instruction
+}
+
+// PV227: ChangeType with defined type (tests ChangeType branch)
+// Uses defined type DefinedDB, not alias
+//
+//gormreuse:pure
+func pureReturnsDefinedType(db DefinedDB) *gorm.DB {
+	return (*gorm.DB)(db) // ChangeType from DefinedDB to *gorm.DB
+}
+
+// PV228: Pure function returns defined type directly
+// Tests ChangeType for return value
+//
+//gormreuse:pure
+func pureAcceptsDefinedType(db *gorm.DB) DefinedDB {
+	return DefinedDB(db.Session(&gorm.Session{})) // Returns DefinedDB
+}
+
+// PV229: Call pure function with ChangeType argument
+// Tests ChangeType in traceToParameterImpl
+//
+//gormreuse:pure
+func pureCallsWithDefinedType(db DefinedDB) *gorm.DB {
+	return pureHelperReturns((*gorm.DB)(db)) // arg is ChangeType
+}
+
+// PV230: Tests inferPureUserFuncCall with no gorm.DB args
+// The pure helper is called but returns Clean (no deps)
+//
+//gormreuse:pure
+func pureCallsNoGormArgs() int {
+	return pureNoGormArgHelper(42) // Pure function with no *gorm.DB args
+}
+
+// PV231: Tests inferPureUserFuncCall with argument that has Depends state
+// arg to pureHelperReturns comes from another pure function result
+//
+//gormreuse:pure
+func pureCallsWithDependsArg(db *gorm.DB) *gorm.DB {
+	intermediate := pureHelperReturns(db)      // intermediate is Clean
+	return pureHelperReturns(intermediate)     // tests InferValue path with Clean arg
+}
+
+// PV232: Tests inferCall path where function has no *gorm.DB args
+// This should return Clean in the "no *gorm.DB args" branch
+//
+//gormreuse:pure
+func pureCallsRegularFunc() int {
+	return regularHelper(42) // Non-pure function but no *gorm.DB args
+}
+
+// PV233: Tests inferPureUserFuncCall IsPolluted() branch
+// The argument to the inner pure function is Polluted (db.Where result)
+//
+//gormreuse:pure
+func pureCallsWithPollutedArg(db *gorm.DB) *gorm.DB {
+	polluted := db.Where("x")           // want `pure function pollutes \*gorm\.DB argument by calling Where`
+	return pureHelperReturns(polluted)  // want `pure function returns Polluted \*gorm\.DB`
+}
+
+// =============================================================================
+// HELPER TYPES
+// =============================================================================
+
+type dbHolder struct {
+	db *gorm.DB
+}
+
+type MyGormDB = *gorm.DB
+
+// DefinedDB is a defined type (not alias) - SSA uses ChangeType for conversions
+type DefinedDB *gorm.DB
+
+// =============================================================================
 // HELPER FUNCTIONS (not marked as pure)
 // =============================================================================
 
@@ -360,4 +552,23 @@ func nonPureHelperReturns(db *gorm.DB) *gorm.DB {
 //gormreuse:pure
 func pureHelperReturns(db *gorm.DB) *gorm.DB {
 	return db.Session(&gorm.Session{})
+}
+
+// tupleReturner returns a tuple for testing Extract
+//
+//gormreuse:pure
+func tupleReturner(db *gorm.DB) (*gorm.DB, error) {
+	return db.Session(&gorm.Session{}), nil
+}
+
+// pureNoGormArgHelper is a pure function with no *gorm.DB args
+//
+//gormreuse:pure
+func pureNoGormArgHelper(x int) int {
+	return x * 2
+}
+
+// regularHelper is a non-pure function with no *gorm.DB args
+func regularHelper(x int) int {
+	return x + 1
 }

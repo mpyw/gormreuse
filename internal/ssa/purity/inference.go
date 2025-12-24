@@ -140,10 +140,10 @@ func (inf *Inferencer) inferValueImpl(v ssa.Value) State {
 		return inf.InferValue(val.X)
 
 	case *ssa.MakeClosure:
-		// f := func() { db.Find(nil) }
-		//      ^^^^^^^^^^^^^^^^^^^^^^^^^
-		// Closure capturing *gorm.DB is treated as Polluted
-		// because we can't track what happens inside.
+		// NOTE: This branch is defensive code - unlikely to be reached.
+		// MakeClosure produces function types, not *gorm.DB.
+		// We only call InferValue on *gorm.DB type values.
+		// Kept for completeness in case of unexpected SSA patterns.
 		for _, binding := range val.Bindings {
 			if typeutil.IsGormDB(binding.Type()) {
 				return Polluted()
@@ -176,7 +176,8 @@ func (inf *Inferencer) inferValueImpl(v ssa.Value) State {
 		return inf.InferValue(val.X)
 
 	case *ssa.Convert:
-		// (*gorm.DB)(ptr)  // type conversion
+		// NOTE: Defensive code - rarely reached in practice.
+		// Convert is for explicit type conversions (e.g., unsafe.Pointer).
 		// Trace through - same underlying value.
 		return inf.InferValue(val.X)
 
@@ -187,19 +188,21 @@ func (inf *Inferencer) inferValueImpl(v ssa.Value) State {
 		return inf.InferValue(val.X)
 
 	case *ssa.MakeInterface:
-		// var i interface{} = db
-		//                     ^^
+		// NOTE: Defensive code - unlikely to be reached.
+		// MakeInterface produces interface{} type, not *gorm.DB.
 		// Wrapping in interface - trace through.
 		return inf.InferValue(val.X)
 
 	case *ssa.Slice:
-		// dbs[1:3]  // slice operation
-		// ^^^^^^^^
+		// NOTE: Defensive code - unlikely to be reached.
+		// Slice produces slice types, not *gorm.DB.
 		// Trace through to the underlying slice.
 		return inf.InferValue(val.X)
 
 	default:
-		// Unknown SSA value type - conservative: assume Polluted.
+		// NOTE: Defensive code - should not be reached.
+		// All known SSA types that can produce *gorm.DB are handled above.
+		// Conservative: assume Polluted for unexpected cases.
 		return Polluted()
 	}
 }
@@ -239,7 +242,7 @@ func (inf *Inferencer) inferCall(call *ssa.Call) State {
 	}
 
 	// User-defined pure function: //gormreuse:pure func helper(db *gorm.DB) *gorm.DB
-	if inf.isPureUserFunc(callee) {
+	if inf.pureFuncs.Contains(callee) {
 		return inf.inferPureUserFuncCall(call)
 	}
 
@@ -287,14 +290,6 @@ func (inf *Inferencer) inferPureUserFuncCall(call *ssa.Call) State {
 		return Depends(deps...)
 	}
 	return Clean()
-}
-
-// isPureUserFunc checks if a function is marked as pure by the user.
-func (inf *Inferencer) isPureUserFunc(fn *ssa.Function) bool {
-	if inf.pureFuncs == nil {
-		return false
-	}
-	return inf.pureFuncs.Contains(fn)
 }
 
 // =============================================================================
