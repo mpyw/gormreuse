@@ -24,7 +24,6 @@ type Context struct {
 
 // CallHandler handles *ssa.Call instructions.
 //
-// Key difference from v1: NO isTerminal concept.
 // Every gorm chain method use is processed uniformly:
 // - First use from a root: OK, marks root polluted
 // - Second+ use from same root: VIOLATION at that call site

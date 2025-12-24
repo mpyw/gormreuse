@@ -13,9 +13,8 @@ import (
 
 // RootTracer traces SSA values to find mutable *gorm.DB roots.
 //
-// Key difference from v1:
-// - Variable assignment (Store to Alloc) creates a NEW mutable root
-// - This prevents violation from propagating through assigned variables
+// Variable assignment (Store to Alloc) creates a NEW mutable root,
+// which prevents violation from propagating through assigned variables.
 //
 // Example:
 //
