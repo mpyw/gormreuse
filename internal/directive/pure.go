@@ -251,6 +251,169 @@ func (s *PureFuncSet) hasPureDirectiveInFile(file *ast.File, funcName, receiverT
 //   - ReceiverType: type name without pointer (e.g., "Handler" not "*Handler")
 //   - FuncName: function or method name
 func BuildPureFunctionSet(file *ast.File, pkgPath string) map[PureFuncKey]struct{} {
+	return buildFunctionSet(file, pkgPath, IsPureDirective)
+}
+
+// =============================================================================
+// ImmutableReturnFuncSet - Functions that return immutable *gorm.DB
+// =============================================================================
+
+// ImmutableReturnFuncSet is a set of functions that return immutable *gorm.DB.
+// These functions are treated like builtin immutable-returning methods (Session, WithContext).
+type ImmutableReturnFuncSet struct {
+	known map[PureFuncKey]struct{}
+	fset  *token.FileSet
+	cache map[string]*ast.File
+}
+
+// NewImmutableReturnFuncSet creates a new ImmutableReturnFuncSet.
+func NewImmutableReturnFuncSet(fset *token.FileSet) *ImmutableReturnFuncSet {
+	return &ImmutableReturnFuncSet{
+		known: make(map[PureFuncKey]struct{}),
+		fset:  fset,
+		cache: make(map[string]*ast.File),
+	}
+}
+
+// Add adds a function key to the set.
+func (s *ImmutableReturnFuncSet) Add(key PureFuncKey) {
+	if s != nil && s.known != nil {
+		s.known[key] = struct{}{}
+	}
+}
+
+// Contains checks if the given SSA function is in the set or has immutable-return directive.
+func (s *ImmutableReturnFuncSet) Contains(fn *ssa.Function) bool {
+	if fn == nil {
+		return false
+	}
+
+	// First, check the pre-built set (for current package)
+	if s != nil && s.known != nil {
+		key := PureFuncKey{
+			FuncName: fn.Name(),
+		}
+		if fn.Pkg != nil && fn.Pkg.Pkg != nil {
+			key.PkgPath = fn.Pkg.Pkg.Path()
+		}
+		sig := fn.Signature
+		if sig != nil && sig.Recv() != nil {
+			key.ReceiverType = formatReceiverType(sig.Recv().Type())
+		}
+		if _, exists := s.known[key]; exists {
+			return true
+		}
+	}
+
+	// Second, check the SSA function's syntax for immutable-return directive
+	return s.hasImmutableReturnDirective(fn)
+}
+
+// hasImmutableReturnDirective checks if an SSA function has //gormreuse:immutable-return.
+func (s *ImmutableReturnFuncSet) hasImmutableReturnDirective(fn *ssa.Function) bool {
+	if fn == nil {
+		return false
+	}
+
+	// Try getting syntax from the SSA function
+	syntax := fn.Syntax()
+	if syntax != nil {
+		if funcDecl, ok := syntax.(*ast.FuncDecl); ok && funcDecl.Doc != nil {
+			for _, c := range funcDecl.Doc.List {
+				if IsImmutableReturnDirective(c.Text) {
+					return true
+				}
+			}
+		}
+	}
+
+	// Fallback: parse the source file for external packages
+	if s == nil || s.fset == nil {
+		return false
+	}
+
+	obj := fn.Object()
+	if obj == nil {
+		return false
+	}
+
+	pos := obj.Pos()
+	if !pos.IsValid() {
+		return false
+	}
+
+	position := s.fset.Position(pos)
+	filename := position.Filename
+	if filename == "" {
+		return false
+	}
+
+	file := s.parseFile(filename)
+	if file == nil {
+		return false
+	}
+
+	funcName := fn.Name()
+	var receiverType string
+	if sig := fn.Signature; sig != nil && sig.Recv() != nil {
+		receiverType = formatReceiverType(sig.Recv().Type())
+	}
+
+	return s.hasDirectiveInFile(file, funcName, receiverType)
+}
+
+// parseFile parses a Go source file with caching.
+func (s *ImmutableReturnFuncSet) parseFile(filename string) *ast.File {
+	if file, ok := s.cache[filename]; ok {
+		return file
+	}
+	file, err := parser.ParseFile(s.fset, filename, nil, parser.ParseComments)
+	if err != nil {
+		s.cache[filename] = nil
+		return nil
+	}
+	s.cache[filename] = file
+	return file
+}
+
+// hasDirectiveInFile checks if a function in a file has immutable-return directive.
+func (s *ImmutableReturnFuncSet) hasDirectiveInFile(file *ast.File, funcName, receiverType string) bool {
+	for _, decl := range file.Decls {
+		funcDecl, ok := decl.(*ast.FuncDecl)
+		if !ok || funcDecl.Name.Name != funcName {
+			continue
+		}
+
+		declReceiverType := ""
+		if funcDecl.Recv != nil && len(funcDecl.Recv.List) > 0 {
+			declReceiverType = stripPointer(exprToString(funcDecl.Recv.List[0].Type))
+		}
+		if declReceiverType != receiverType {
+			continue
+		}
+
+		if funcDecl.Doc != nil {
+			for _, c := range funcDecl.Doc.List {
+				if IsImmutableReturnDirective(c.Text) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// BuildImmutableReturnFunctionSet builds a set of functions marked with immutable-return.
+func BuildImmutableReturnFunctionSet(file *ast.File, pkgPath string) map[PureFuncKey]struct{} {
+	return buildFunctionSet(file, pkgPath, IsImmutableReturnDirective)
+}
+
+// =============================================================================
+// Common Helper
+// =============================================================================
+
+// buildFunctionSet builds a set of functions matching the given directive checker.
+func buildFunctionSet(file *ast.File, pkgPath string, isDirective func(string) bool) map[PureFuncKey]struct{} {
 	result := make(map[PureFuncKey]struct{})
 
 	ast.Inspect(file, func(n ast.Node) bool {
@@ -258,13 +421,12 @@ func BuildPureFunctionSet(file *ast.File, pkgPath string) map[PureFuncKey]struct
 		case *ast.FuncDecl:
 			if node.Doc != nil {
 				for _, c := range node.Doc.List {
-					if IsPureDirective(c.Text) {
+					if isDirective(c.Text) {
 						key := PureFuncKey{
 							PkgPath:  pkgPath,
 							FuncName: node.Name.Name,
 						}
 						if node.Recv != nil && len(node.Recv.List) > 0 {
-							// Method - extract receiver type (without pointer)
 							key.ReceiverType = stripPointer(exprToString(node.Recv.List[0].Type))
 						}
 						result[key] = struct{}{}

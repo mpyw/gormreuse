@@ -16,7 +16,7 @@ func TestIsIgnoreDirective(t *testing.T) {
 		{"exact match", "//gormreuse:ignore", true},
 		{"with space", "// gormreuse:ignore", true},
 		{"with extra spaces", "//  gormreuse:ignore", true},
-		{"with suffix", "//gormreuse:ignore reason", true},
+		{"with comment", "//gormreuse:ignore // reason", true},
 		{"wrong directive", "//gormreuse:pure", false},
 		{"random comment", "// some comment", false},
 		{"empty", "//", false},

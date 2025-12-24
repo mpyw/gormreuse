@@ -1324,7 +1324,7 @@ func deferInsideForWithCondition(db *gorm.DB, items []int) {
 
 	for _, item := range items {
 		if item > 0 {
-			//gormreuse:ignore - TEST FRAMEWORK ISSUE: diagnostic reported but want comment not matched
+			//gormreuse:ignore // TEST FRAMEWORK ISSUE: diagnostic reported but want comment not matched
 			defer q.Where("item = ?", item).Count(nil)
 		}
 	}
@@ -1338,7 +1338,7 @@ func deferInsideNestedFor(db *gorm.DB) {
 
 	for i := 0; i < 2; i++ {
 		for j := 0; j < 2; j++ {
-			//gormreuse:ignore - TEST FRAMEWORK ISSUE: diagnostic reported but want comment not matched
+			//gormreuse:ignore // TEST FRAMEWORK ISSUE: diagnostic reported but want comment not matched
 			defer q.Where("i = ? AND j = ?", i, j).Count(nil)
 		}
 	}
@@ -1356,7 +1356,7 @@ func forInsideDefer(db *gorm.DB, items []string) {
 
 	defer func() {
 		for range items {
-			//gormreuse:ignore - TEST FRAMEWORK ISSUE: diagnostic reported but want comment not matched
+			//gormreuse:ignore // TEST FRAMEWORK ISSUE: diagnostic reported but want comment not matched
 			q.Count(nil)
 		}
 	}()
@@ -1371,7 +1371,7 @@ func nestedForInsideDefer(db *gorm.DB) {
 	defer func() {
 		for i := 0; i < 2; i++ {
 			for j := 0; j < 2; j++ {
-				//gormreuse:ignore - TEST FRAMEWORK ISSUE: diagnostic reported but want comment not matched
+				//gormreuse:ignore // TEST FRAMEWORK ISSUE: diagnostic reported but want comment not matched
 				q.Find(nil)
 			}
 		}
@@ -1452,7 +1452,7 @@ func forIfDefer(db *gorm.DB, items []int) {
 
 	for _, item := range items {
 		if item > 0 {
-			//gormreuse:ignore - TEST FRAMEWORK ISSUE
+			//gormreuse:ignore // TEST FRAMEWORK ISSUE
 			defer q.Where("item = ?", item).Count(nil)
 		}
 	}
@@ -1467,7 +1467,7 @@ func deferIfFor(db *gorm.DB, flag bool, items []string) {
 	defer func() {
 		if flag {
 			for range items {
-				//gormreuse:ignore - TEST FRAMEWORK ISSUE
+				//gormreuse:ignore // TEST FRAMEWORK ISSUE
 				q.Count(nil)
 			}
 		}
@@ -1483,7 +1483,7 @@ func deferForIf(db *gorm.DB, items []int) {
 	defer func() {
 		for _, item := range items {
 			if item > 0 {
-				//gormreuse:ignore - TEST FRAMEWORK ISSUE
+				//gormreuse:ignore // TEST FRAMEWORK ISSUE
 				q.Count(nil)
 			}
 		}
@@ -1533,7 +1533,7 @@ func tripleNestingDeferIfFor(db *gorm.DB, flag bool, items []string) {
 	defer func() {
 		if flag {
 			for range items {
-				//gormreuse:ignore - TEST FRAMEWORK ISSUE
+				//gormreuse:ignore // TEST FRAMEWORK ISSUE
 				q.Count(nil)
 			}
 		}
@@ -1549,7 +1549,7 @@ func tripleNestingDeferForIf(db *gorm.DB, items []int) {
 	defer func() {
 		for _, item := range items {
 			if item > 0 {
-				//gormreuse:ignore - TEST FRAMEWORK ISSUE
+				//gormreuse:ignore // TEST FRAMEWORK ISSUE
 				q.Count(nil)
 			}
 		}
@@ -1600,7 +1600,7 @@ func quadNestingDeferIfForIf(db *gorm.DB, a bool, items []int) {
 		if a {
 			for _, item := range items {
 				if item > 0 {
-					//gormreuse:ignore - TEST FRAMEWORK ISSUE
+					//gormreuse:ignore // TEST FRAMEWORK ISSUE
 					q.Count(nil)
 				}
 			}
@@ -1618,7 +1618,7 @@ func quadNestingDeferForIfFor(db *gorm.DB, outer []bool) {
 		for _, flag := range outer {
 			if flag {
 				for i := 0; i < 2; i++ {
-					//gormreuse:ignore - TEST FRAMEWORK ISSUE
+					//gormreuse:ignore // TEST FRAMEWORK ISSUE
 					q.Count(nil)
 				}
 			}

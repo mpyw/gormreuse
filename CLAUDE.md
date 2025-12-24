@@ -61,8 +61,13 @@ The linter detects when a mutable `*gorm.DB` branches into multiple code paths:
 
 - `//gormreuse:ignore` - Suppress warnings for the next line or same line
 - `//gormreuse:pure` - Mark function/method as not polluting its `*gorm.DB` argument
+- `//gormreuse:immutable-return` - Mark function/method as returning immutable `*gorm.DB` (like Session/WithContext)
 
-> **Important**: All user-defined functions/methods that accept or return `*gorm.DB` are treated as polluting by default. You must add `//gormreuse:pure` to any helper function that safely wraps `*gorm.DB` without polluting it.
+Directives can be combined with commas: `//gormreuse:pure,immutable-return`
+
+Trailing comments use `//`: `//gormreuse:ignore // reason here`
+
+> **Important**: All user-defined functions/methods that accept or return `*gorm.DB` are treated as polluting by default. Use `//gormreuse:pure` to mark functions that don't pollute arguments, and `//gormreuse:immutable-return` to mark functions whose return value can be safely reused (like DB connection helpers).
 
 ## Architecture
 
@@ -107,7 +112,7 @@ gormreuse/
 │   │   ├── advanced.go         # Complex patterns
 │   │   ├── evil.go             # Edge cases with [LIMITATION] markers
 │   │   ├── ignore.go           # //gormreuse:ignore tests
-│   │   └── pure_validation.go  # //gormreuse:pure validation tests
+│   │   └── directive_validation.go  # Directive tests (pure, immutable-return)
 │   └── gorm.io/gorm/           # GORM stub for testing
 │
 └── e2e/internal/               # SQL behavior verification (separate module)

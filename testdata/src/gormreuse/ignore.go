@@ -37,7 +37,7 @@ func ignoreMultiple(db *gorm.DB) {
 func ignoreWithReason(db *gorm.DB) {
 	q := db.Where("active = ?", true)
 	q.Find(nil)
-	// gormreuse:ignore - intentional reuse for pagination
+	//gormreuse:ignore // intentional reuse for pagination
 	q.Count(nil)
 }
 
