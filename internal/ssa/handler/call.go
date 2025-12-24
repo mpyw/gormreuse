@@ -7,9 +7,9 @@ import (
 
 	"golang.org/x/tools/go/ssa"
 
-	"github.com/mpyw/gormreuse/internal/ssa/v2/cfg"
-	"github.com/mpyw/gormreuse/internal/ssa/v2/pollution"
-	"github.com/mpyw/gormreuse/internal/ssa/v2/tracer"
+	"github.com/mpyw/gormreuse/internal/ssa/cfg"
+	"github.com/mpyw/gormreuse/internal/ssa/pollution"
+	"github.com/mpyw/gormreuse/internal/ssa/tracer"
 	"github.com/mpyw/gormreuse/internal/typeutil"
 )
 

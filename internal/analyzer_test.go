@@ -6,17 +6,17 @@ import (
 	"golang.org/x/tools/go/ssa"
 
 	"github.com/mpyw/gormreuse/internal/directive"
-	v2 "github.com/mpyw/gormreuse/internal/ssa/v2"
+	ssautil "github.com/mpyw/gormreuse/internal/ssa"
 )
 
 // =============================================================================
-// v2.Analyzer Tests
+// Analyzer Tests
 // =============================================================================
 
 func TestNewAnalyzer(t *testing.T) {
 	pureFuncs := directive.NewPureFuncSet(nil)
 	pureFuncs.Add(directive.PureFuncKey{PkgPath: "test", FuncName: "Pure"})
-	analyzer := v2.NewAnalyzer(nil, pureFuncs)
+	analyzer := ssautil.NewAnalyzer(nil, pureFuncs)
 
 	if analyzer == nil {
 		t.Error("Expected analyzer to be initialized")
@@ -44,7 +44,7 @@ func TestNewChecker(t *testing.T) {
 }
 
 func TestAnalyzer_Analyze_NilFunction(t *testing.T) {
-	analyzer := v2.NewAnalyzer(nil, nil)
+	analyzer := ssautil.NewAnalyzer(nil, nil)
 
 	// Should not panic with nil function
 	violations := analyzer.Analyze()
@@ -55,7 +55,7 @@ func TestAnalyzer_Analyze_NilFunction(t *testing.T) {
 
 func TestAnalyzer_Analyze_EmptyFunction(t *testing.T) {
 	fn := &ssa.Function{}
-	analyzer := v2.NewAnalyzer(fn, nil)
+	analyzer := ssautil.NewAnalyzer(fn, nil)
 
 	violations := analyzer.Analyze()
 	if len(violations) != 0 {

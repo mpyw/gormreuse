@@ -9,8 +9,8 @@ import (
 	"golang.org/x/tools/go/ssa"
 
 	"github.com/mpyw/gormreuse/internal/directive"
+	ssautil "github.com/mpyw/gormreuse/internal/ssa"
 	"github.com/mpyw/gormreuse/internal/ssa/purity"
-	v2 "github.com/mpyw/gormreuse/internal/ssa/v2"
 )
 
 // =============================================================================
@@ -95,7 +95,7 @@ func newChecker(pass *analysis.Pass, ignoreMap directive.IgnoreMap, pureFuncs *d
 }
 
 func (c *checker) checkFunction(fn *ssa.Function) {
-	analyzer := v2.NewAnalyzer(fn, c.pureFuncs)
+	analyzer := ssautil.NewAnalyzer(fn, c.pureFuncs)
 	violations := analyzer.Analyze()
 
 	for _, v := range violations {

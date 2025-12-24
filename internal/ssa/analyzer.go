@@ -1,6 +1,6 @@
-// Package v2 provides SSA-based analysis for gormreuse linter.
+// Package ssa provides SSA-based analysis for gormreuse linter.
 //
-// # Key Design Differences from v1
+// # Key Design Principles
 //
 // 1. No isTerminal concept - all gorm calls are processed uniformly
 // 2. Variable assignment creates new mutable root (cleaner ownership model)
@@ -12,16 +12,16 @@
 //   - tracer/   : SSA value tracing (RootTracer)
 //   - pollution/: Pollution state tracking (Tracker)
 //   - cfg/      : Control flow analysis (Analyzer, LoopInfo)
-package v2
+package ssa
 
 import (
 	"golang.org/x/tools/go/ssa"
 
 	"github.com/mpyw/gormreuse/internal/directive"
-	"github.com/mpyw/gormreuse/internal/ssa/v2/cfg"
-	"github.com/mpyw/gormreuse/internal/ssa/v2/handler"
-	"github.com/mpyw/gormreuse/internal/ssa/v2/pollution"
-	"github.com/mpyw/gormreuse/internal/ssa/v2/tracer"
+	"github.com/mpyw/gormreuse/internal/ssa/cfg"
+	"github.com/mpyw/gormreuse/internal/ssa/handler"
+	"github.com/mpyw/gormreuse/internal/ssa/pollution"
+	"github.com/mpyw/gormreuse/internal/ssa/tracer"
 )
 
 // Violation represents a detected reuse violation.
