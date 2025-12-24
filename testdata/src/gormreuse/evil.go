@@ -250,10 +250,11 @@ func pureFunction(db *gorm.DB) {
 }
 
 // helperPureWithQuery is a pure helper that creates a new chain.
+// It must use Session() to ensure it returns an immutable *gorm.DB.
 //
 //gormreuse:pure
 func helperPureWithQuery(db *gorm.DB) *gorm.DB {
-	return db.Where("extra = ?", 1) // Returns new chain, doesn't pollute original
+	return db.Session(&gorm.Session{}).Where("extra = ?", 1).Session(&gorm.Session{}) // Creates immutable copy
 }
 
 // pureFunctionWithReturn demonstrates pure function returning new chain.
@@ -272,12 +273,13 @@ func pureFactoryFunction() *gorm.DB {
 	return DB.WithContext(nil) // Returns immutable
 }
 
-// pureFactoryUsage demonstrates that pure function return values are immutable.
-// This is the key test for the "pure function returns immutable" feature.
+// pureFactoryUsage demonstrates that user-defined pure function return values are MUTABLE.
+// Pure functions only guarantee they don't pollute arguments - return values may be mutable.
+// Callers must treat return values as mutable roots.
 func pureFactoryUsage() {
 	db := pureFactoryFunction()
 	db.Find(nil)
-	db.Find(nil) // OK: pure function returns immutable, can be reused
+	db.Find(nil) // want `\*gorm\.DB instance reused after chain method`
 }
 
 // =============================================================================
@@ -679,12 +681,12 @@ func iifeWithArgument(db *gorm.DB) {
 func iifeReturnChain(db *gorm.DB) {
 	q := db.Where("x = ?", 1)
 
-	// IIFE returns the result of Where, which is chained and pollutes q
+	// IIFE returns the result of Where - this is the first branch from q
 	_ = func() *gorm.DB {
 		return q.Where("y = ?", 2)
-	}().Find(nil) // want `\*gorm\.DB instance reused after chain method`
+	}().Find(nil) // First branch (IIFE chain counts as single branch)
 
-	// Detected: q was polluted through the IIFE chain
+	// Second branch from q - violation
 	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
 }
 
@@ -1491,15 +1493,16 @@ func deferForIf(db *gorm.DB, items []int) {
 }
 
 // tripleNestingIfForDefer demonstrates 3-level nesting: if -> for -> defer.
-// [LIMITATION] Defer inside for loop: closure is deferred multiple times,
-// but static analysis cannot detect the loop iteration count.
+// [LIMITATION] Defer execution order: defer closures execute at function exit,
+// but position-based detection reports at q.Find (textually later).
+// Runtime: q.Find runs first, then defer closures. Should flag defer, but flags q.Find instead.
 func tripleNestingIfForDefer(db *gorm.DB, flag bool, items []string) {
 	q := db.Where("x = ?", 1)
 
 	if flag {
 		for range items {
 			defer func() {
-				q.Count(nil) // [LIMITATION] FALSE NEGATIVE: defer in for loop not fully tracked
+				q.Count(nil)
 			}()
 		}
 	}
@@ -1508,15 +1511,14 @@ func tripleNestingIfForDefer(db *gorm.DB, flag bool, items []string) {
 }
 
 // tripleNestingForIfDefer demonstrates 3-level nesting: for -> if -> defer.
-// [LIMITATION] Defer inside for loop: closure is deferred multiple times,
-// but static analysis cannot detect the loop iteration count.
+// [LIMITATION] Same as tripleNestingIfForDefer - defer execution order not tracked.
 func tripleNestingForIfDefer(db *gorm.DB, items []int) {
 	q := db.Where("x = ?", 1)
 
 	for _, item := range items {
 		if item > 0 {
 			defer func(i int) {
-				q.Where("item = ?", i).Count(nil) // [LIMITATION] FALSE NEGATIVE: defer in for loop not fully tracked
+				q.Where("item = ?", i).Count(nil)
 			}(item)
 		}
 	}
@@ -1926,14 +1928,16 @@ func ultimateIfForDeferChaos(db *gorm.DB, a, b bool, outer []int, inner []string
 func tripleNestedIIFE(db *gorm.DB) {
 	q := db.Where("x = ?", 1)
 
+	// First branch - triple nested IIFE counts as single branch
 	_ = func() *gorm.DB {
 		return func() *gorm.DB {
 			return func() *gorm.DB {
 				return q.Where("nested", 1)
 			}()
 		}()
-	}().Find(nil) // want `\*gorm\.DB instance reused after chain method`
+	}().Find(nil)
 
+	// Second branch - violation
 	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
 }
 
@@ -1941,13 +1945,15 @@ func tripleNestedIIFE(db *gorm.DB) {
 func tripleNestedIIFEWithBranch(db *gorm.DB, cond bool) {
 	q := db.Where("x = ?", 1)
 
+	// First branch - IIFE with conditional returns counts as single branch
 	_ = func() *gorm.DB {
 		if cond {
 			return q.Where("branch1", 1)
 		}
 		return q.Where("branch2", 2)
-	}().Find(nil) // want `\*gorm\.DB instance reused after chain method`
+	}().Find(nil)
 
+	// Second branch - violation
 	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
 }
 
@@ -1959,6 +1965,7 @@ func tripleNestedIIFEWithBranch(db *gorm.DB, cond bool) {
 func iifeMultipleReturns(db *gorm.DB, flag int) {
 	q := db.Where("x = ?", 1)
 
+	// First branch - IIFE with switch counts as single branch
 	_ = func() *gorm.DB {
 		switch flag {
 		case 0:
@@ -1968,8 +1975,9 @@ func iifeMultipleReturns(db *gorm.DB, flag int) {
 		default:
 			return q.Where("default", -1)
 		}
-	}().Find(nil) // want `\*gorm\.DB instance reused after chain method`
+	}().Find(nil)
 
+	// Second branch - violation
 	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
 }
 
@@ -1997,17 +2005,22 @@ type iifeHolder struct {
 }
 
 // structFieldIIFE demonstrates struct field access with IIFE.
+// [LIMITATION] Struct field tracing: h.query.Find doesn't trace back through struct field to original q.
+// The IIFE's internal q.Where pollutes q, and q.Count is a separate use of q, so it's detected.
 func structFieldIIFE(db *gorm.DB) {
 	q := db.Where("x = ?", 1)
 
+	// IIFE result stored in struct field - internal call pollutes q
 	h := iifeHolder{
 		query: func() *gorm.DB {
 			return q.Where("from iife", 1)
 		}(),
 	}
 
-	h.query.Find(nil) // want `\*gorm\.DB instance reused after chain method`
-	q.Count(nil)      // want `\*gorm\.DB instance reused after chain method`
+	h.query.Find(nil) // [LIMITATION] Does not trace through struct field
+
+	// Second use of q - violation (q was polluted by IIFE's internal call)
+	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
 }
 
 // =============================================================================
@@ -2018,10 +2031,12 @@ func structFieldIIFE(db *gorm.DB) {
 func chainedIIFE(db *gorm.DB) {
 	q := db.Where("x = ?", 1)
 
+	// First branch - chained IIFE counts as single branch
 	_ = func() *gorm.DB {
 		return q.Where("first", 1)
-	}().Where("second", 2).Find(nil) // want `\*gorm\.DB instance reused after chain method`
+	}().Where("second", 2).Find(nil)
 
+	// Second branch - violation
 	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
 }
 
@@ -2055,11 +2070,129 @@ func iifeWithPhiNode(db *gorm.DB, cond bool) {
 		q = db.Where("branch2", 2)
 	}
 
+	// First branch - IIFE counts as single branch
 	_ = func() *gorm.DB {
 		return q.Where("from phi", 1)
-	}().Find(nil) // want `\*gorm\.DB instance reused after chain method`
+	}().Find(nil)
 
+	// Second branch - violation
 	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// =============================================================================
+// EVIL PATTERNS - IIFE with Argument Returning Chain
+// =============================================================================
+
+// iifeArgumentReturnsChain demonstrates IIFE that receives *gorm.DB as argument and returns chain.
+// This pattern passes the value as parameter instead of capturing as FreeVar.
+func iifeArgumentReturnsChain(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+
+	// First branch - IIFE with argument counts as single branch
+	_ = func(inner *gorm.DB) *gorm.DB {
+		return inner.Where("from arg", 1)
+	}(q).Find(nil)
+
+	// Second branch - violation
+	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// iifeArgumentAndFreeVarMixed demonstrates IIFE with both argument and FreeVar.
+func iifeArgumentAndFreeVarMixed(db *gorm.DB) {
+	q1 := db.Where("q1", 1)
+	q2 := db.Where("q2", 2)
+
+	// First branch from q1 (argument), first branch from q2 (FreeVar)
+	_ = func(inner *gorm.DB) *gorm.DB {
+		_ = q2.Where("freevar").Find(nil) // q2 FreeVar - pollutes q2
+		return inner.Where("arg", 1)
+	}(q1).Find(nil)
+
+	q1.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q2.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// =============================================================================
+// EVIL PATTERNS - Complex Nested FreeVar + Argument (5-6 levels)
+// =============================================================================
+
+// deepNestedMixedCapture demonstrates 6-level nesting with mixed FreeVar and Argument.
+// Level 1: FreeVar q1
+// Level 2: Argument (from level 1)
+// Level 3: FreeVar q2
+// Level 4: Argument (from level 3)
+// Level 5: FreeVar q3
+// Level 6: Argument (from level 5) + return
+func deepNestedMixedCapture(db *gorm.DB) {
+	q1 := db.Where("q1", 1)
+	q2 := db.Where("q2", 2)
+	q3 := db.Where("q3", 3)
+
+	// Complex 6-level nesting - entire chain counts as single branch from each q
+	_ = func() *gorm.DB { // Level 1: captures q1 as FreeVar
+		return func(l1 *gorm.DB) *gorm.DB { // Level 2: receives q1 as argument
+			return func() *gorm.DB { // Level 3: captures q2 as FreeVar
+				return func(l3 *gorm.DB) *gorm.DB { // Level 4: receives from level 3
+					return func() *gorm.DB { // Level 5: captures q3 as FreeVar
+						return func(l5 *gorm.DB) *gorm.DB { // Level 6: receives from level 5
+							return l5.Where("level6", 6)
+						}(q3.Where("level5", 5))
+					}().Where("merge", l3)
+				}(q2.Where("level3", 3))
+			}().Where("merge", l1)
+		}(q1.Where("level1", 1))
+	}().Find(nil)
+
+	// All second branches - violations
+	q1.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q2.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q3.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// =============================================================================
+// EVIL PATTERNS - Stored Closure (User's test cases)
+// =============================================================================
+
+// storedClosureChain demonstrates stored closure returning a chain.
+// The closure result flows to q2, so q2.Where() continues the same chain.
+func storedClosureChain(db *gorm.DB) {
+	q1 := db.Where("x", 1)
+
+	// Stored closure (not IIFE) - same semantics as IIFE
+	fn := func() *gorm.DB {
+		return q1.Where("from closure", 1)
+	}
+	q2 := fn()         // q2 holds first branch from q1
+	q2.Where("y", 2)   // Continues q2's chain (OK)
+	q1.Where("z", 3)   // want `\*gorm\.DB instance reused after chain method`
+}
+
+// storedClosureReordered demonstrates order of calls with stored closure.
+// [LIMITATION] SSA processing order differs from runtime order.
+// At analysis time, closure body is processed first (q1.Where("from closure") is non-terminal),
+// then q1.Where("z") is first terminal use, then q2.Where("y") is second terminal use.
+// Ideally q1.Where("z") would be the violation, but current implementation reports on q2.Where("y").
+func storedClosureReordered(db *gorm.DB) {
+	q1 := db.Where("x", 1)
+
+	fn := func() *gorm.DB {
+		return q1.Where("from closure", 1) // Pollutes q1 (closure body processed first in SSA)
+	}
+	q2 := fn()
+	q1.Where("z", 3) // want `\*gorm\.DB instance reused after chain method`
+	q2.Where("y", 2) // OK: q2 is fresh root
+}
+
+// iifeStoredResult demonstrates IIFE result stored in variable.
+func iifeStoredResult(db *gorm.DB) {
+	q1 := db.Where("x", 1)
+
+	// IIFE result stored
+	q2 := func() *gorm.DB {
+		return q1.Where("from iife", 1)
+	}()
+	q2.Where("y", 2)   // Continues q2's chain (OK)
+	q1.Where("z", 3)   // want `\*gorm\.DB instance reused after chain method`
 }
 
 // =============================================================================
@@ -2141,8 +2274,8 @@ func reassignAfterPollutionSameValue(db *gorm.DB) {
 	base := db.Where("x = ?", 1)
 	base.Find(nil) // Pollutes base
 
-	q := base.Where("y = ?", 2) // Derived from polluted base
-	q.Count(nil)                // want `\*gorm\.DB instance reused after chain method`
+	q := base.Where("y = ?", 2) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil)                // OK: q is a fresh root
 }
 
 // reassignShadowing demonstrates variable shadowing vs reassignment.
@@ -2161,7 +2294,6 @@ func reassignShadowing(db *gorm.DB) {
 }
 
 // reassignInClosure demonstrates reassignment inside closure.
-// [LIMITATION] Closure assignment not fully tracked.
 func reassignInClosure(db *gorm.DB) {
 	q := db.Where("x = ?", 1)
 	q.Find(nil) // Pollutes q
@@ -2170,8 +2302,7 @@ func reassignInClosure(db *gorm.DB) {
 		q = db.Where("y = ?", 2) // Reassign in closure
 	}()
 
-	// [LIMITATION] FALSE NEGATIVE: Closure reassignment not tracked
-	q.Count(nil) // Not detected - closure reassignment limitation
+	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
 }
 
 // reassignFromHelper demonstrates reassignment from helper function.
@@ -2342,10 +2473,241 @@ func (o *OrmWrapper) GetDB() *gorm.DB {
 	return DB.WithContext(nil)
 }
 
-// pureMethodUsage demonstrates that pure method return values are immutable.
+// pureMethodUsage demonstrates that user-defined pure method return values are MUTABLE.
+// Pure methods only guarantee they don't pollute arguments - return values may be mutable.
 func pureMethodUsage() {
 	wrapper := &OrmWrapper{}
 	db := wrapper.GetDB()
 	db.Find(nil)
-	db.Find(nil) // OK: pure method returns immutable, can be reused
+	db.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// =============================================================================
+// SHOULD REPORT - Where-only patterns (no finisher at violation point)
+// These test that detection doesn't depend on isTerminal logic.
+// Even without Find/Count/etc, using a mutable value twice is a violation.
+// =============================================================================
+
+// whereOnlyBasic demonstrates that violation is detected even without finisher.
+// The second branch ends with Where, not Find.
+func whereOnlyBasic(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+
+	q.Where("a").Find(nil) // First branch - pollutes q
+
+	q.Where("b") // want `\*gorm\.DB instance reused after chain method`
+}
+
+// whereOnlyChain demonstrates chained Where without finisher.
+func whereOnlyChain(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+
+	q.Find(nil) // First branch - pollutes q
+
+	q.Where("a").Where("b").Order("c") // want `\*gorm\.DB instance reused after chain method`
+}
+
+// whereOnlyClosure demonstrates closure pollution then Where-only outside.
+func whereOnlyClosure(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+
+	func() {
+		q.Find(nil) // Pollutes q inside closure
+	}()
+
+	q.Where("outside") // want `\*gorm\.DB instance reused after chain method`
+}
+
+// whereOnlyIIFE demonstrates IIFE pollution then Where-only outside.
+func whereOnlyIIFE(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+
+	_ = func() *gorm.DB {
+		return q.Where("from iife")
+	}().Find(nil) // First branch (IIFE chain)
+
+	q.Where("outside") // want `\*gorm\.DB instance reused after chain method`
+}
+
+// whereOnlyLoop demonstrates loop pollution with Where-only.
+func whereOnlyLoop(db *gorm.DB, items []int) {
+	q := db.Where("x = ?", 1)
+
+	for range items {
+		q.Where("in loop") // want `\*gorm\.DB instance reused after chain method`
+	}
+}
+
+// whereOnlyConditional demonstrates conditional with Where-only violation.
+func whereOnlyConditional(db *gorm.DB, flag bool) {
+	q := db.Where("base")
+
+	if flag {
+		q.Find(nil) // First branch
+	} else {
+		q.Count(nil) // First branch (mutually exclusive)
+	}
+
+	q.Where("after conditional") // want `\*gorm\.DB instance reused after chain method`
+}
+
+// whereOnlyDefer demonstrates defer with Where-only.
+func whereOnlyDefer(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+
+	defer q.Where("deferred") // want `\*gorm\.DB instance reused after chain method`
+
+	q.Find(nil)
+}
+
+// whereOnlyGoroutine demonstrates goroutine with Where-only.
+// Note: Both goroutine closure and main code pollute q - analyzer detects reuse.
+func whereOnlyGoroutine(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+
+	go func() {
+		q.Where("in goroutine")
+	}()
+
+	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// whereOnlyStoredClosure demonstrates stored closure with Where-only violation.
+func whereOnlyStoredClosure(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+
+	fn := func() {
+		q.Find(nil) // Pollutes q
+	}
+	fn()
+
+	q.Where("after stored closure") // want `\*gorm\.DB instance reused after chain method`
+}
+
+// whereOnlyStoredClosureReturn demonstrates stored closure returning chain.
+func whereOnlyStoredClosureReturn(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+
+	fn := func() *gorm.DB {
+		return q.Where("from closure")
+	}
+	_ = fn().Find(nil) // First branch
+
+	q.Where("after") // want `\*gorm\.DB instance reused after chain method`
+}
+
+// whereOnlyIIFEStored demonstrates stored IIFE result with Where-only.
+// IIFE creates first branch from q (stored in q2), so q.Where is second branch.
+func whereOnlyIIFEStored(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+
+	q2 := func() *gorm.DB {
+		return q.Where("from iife") // First branch from q
+	}()
+
+	q2.Where("use stored") // Continues q2's chain (OK)
+	q.Where("original")    // want `\*gorm\.DB instance reused after chain method`
+}
+
+// whereOnlyBoundMethod demonstrates bound method with Where-only.
+func whereOnlyBoundMethod(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+
+	where := q.Where
+	where("bound method call") // First use - pollutes q
+
+	q.Where("after bound") // want `\*gorm\.DB instance reused after chain method`
+}
+
+// whereOnlyNestedIIFE demonstrates nested IIFE with Where-only.
+func whereOnlyNestedIIFE(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+
+	_ = func() *gorm.DB {
+		return func() *gorm.DB {
+			return q.Where("nested")
+		}()
+	}().Find(nil) // First branch (entire nested IIFE chain)
+
+	q.Where("after nested") // want `\*gorm\.DB instance reused after chain method`
+}
+
+// whereOnlyIIFEChainContinued demonstrates IIFE chain with Where continuation.
+func whereOnlyIIFEChainContinued(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+
+	_ = func() *gorm.DB {
+		return q.Where("iife inner")
+	}().Where("chained after iife").Find(nil) // First branch
+
+	q.Where("second branch") // want `\*gorm\.DB instance reused after chain method`
+}
+
+// whereOnlyDoubleIIFE demonstrates two IIFEs with Where-only.
+func whereOnlyDoubleIIFE(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+
+	_ = func() *gorm.DB {
+		return q.Where("first iife")
+	}().Find(nil) // First branch
+
+	_ = func() *gorm.DB {
+		return q.Where("second iife") // want `\*gorm\.DB instance reused after chain method`
+	}()
+}
+
+// whereOnlyStructFieldClosure demonstrates struct field with closure and Where-only.
+func whereOnlyStructFieldClosure(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+
+	type holder struct {
+		fn func()
+	}
+	h := holder{
+		fn: func() {
+			q.Find(nil) // Pollutes q
+		},
+	}
+	h.fn()
+
+	q.Where("after struct field closure") // want `\*gorm\.DB instance reused after chain method`
+}
+
+// whereOnlyMultipleBranches demonstrates multiple Where-only branches.
+func whereOnlyMultipleBranches(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+
+	q.Where("branch1").Find(nil) // First branch
+
+	q.Where("branch2") // want `\*gorm\.DB instance reused after chain method`
+	q.Where("branch3") // want `\*gorm\.DB instance reused after chain method`
+	q.Where("branch4") // want `\*gorm\.DB instance reused after chain method`
+}
+
+// =============================================================================
+// Chaining Without Reassignment (README [!IMPORTANT] examples)
+// =============================================================================
+
+// chainingWithoutReassignmentViolation demonstrates the violation pattern
+// from README: each separate statement creates a branch from q.
+func chainingWithoutReassignmentViolation(db *gorm.DB) {
+	q := db.Where("base")
+	q.Where("a")     // first branch - OK
+	q.Where("b")     // want `\*gorm\.DB instance reused after chain method`
+	q.Find(nil)      // want `\*gorm\.DB instance reused after chain method`
+}
+
+// chainingWithReassignmentSafe demonstrates the solution: reassign each step.
+// Each reassignment creates a new SSA value, so only the final Find is a branch.
+func chainingWithReassignmentSafe(db *gorm.DB) {
+	q := db.Where("base")
+	q = q.Where("a")
+	q = q.Where("b")
+	q.Find(nil) // OK - first branch from final q
+}
+
+// singleChainedExpressionSafe demonstrates the other solution: single expression.
+// The entire chain is one expression, so it's a single branch.
+func singleChainedExpressionSafe(db *gorm.DB) {
+	db.Where("base").Where("a").Where("b").Find(nil) // OK - single chain
 }
