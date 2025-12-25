@@ -97,8 +97,8 @@
  		// Phi created here
  	}
  
- 	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
- 	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+ 	q.Find(nil)   // OK: first use after loop with conditional assignments only
+ 	q.Count(nil)  // want `\*gorm\.DB instance reused after chain method`
  }
  
  // =============================================================================

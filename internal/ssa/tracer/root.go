@@ -334,6 +334,57 @@ func isSwapPhiPair(phiA, phiB *ssa.Phi) bool {
 	return false
 }
 
+// findSwapPhiSibling finds a swap-pair sibling of phi in the same block.
+// Returns the sibling phi if found, nil otherwise.
+func findSwapPhiSibling(phi *ssa.Phi) *ssa.Phi {
+	block := phi.Block()
+	for _, instr := range block.Instrs {
+		if otherPhi, ok := instr.(*ssa.Phi); ok {
+			if otherPhi != phi && isSwapPhiPair(phi, otherPhi) {
+				return otherPhi
+			}
+		}
+	}
+	return nil
+}
+
+// getLoopHeaderPhiEdges checks if all edges of phi are loop-header phis.
+// Returns the loop-header phi edges if all edges are loop-header phis, nil otherwise.
+func getLoopHeaderPhiEdges(phi *ssa.Phi, loopInfo *cfg.LoopInfo) []*ssa.Phi {
+	if loopInfo == nil {
+		return nil
+	}
+
+	var loopHeaderPhis []*ssa.Phi
+	for _, edge := range phi.Edges {
+		edgePhi, ok := edge.(*ssa.Phi)
+		if !ok || !loopInfo.IsLoopHeader(edgePhi.Block()) {
+			return nil
+		}
+		loopHeaderPhis = append(loopHeaderPhis, edgePhi)
+	}
+	return loopHeaderPhis
+}
+
+// collectInitialEdgeRoots collects roots from the initial edges (not back-edges)
+// of loop-header phis. This is used to detect pre-loop pollution.
+// Also includes the swap-phi itself as a root.
+func (t *RootTracer) collectInitialEdgeRoots(loopHeaderPhis []*ssa.Phi, swapPhi ssa.Value, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) []ssa.Value {
+	var roots []ssa.Value
+	for _, loopPhi := range loopHeaderPhis {
+		// Get the initial edge (first edge, not back-edge)
+		if len(loopPhi.Edges) > 0 {
+			initialEdge := loopPhi.Edges[0]
+			if !isNilConst(initialEdge) && !visited[initialEdge] {
+				roots = append(roots, t.traceAll(initialEdge, visited, loopInfo)...)
+			}
+		}
+	}
+	// Also include the swap-phi itself as a root
+	roots = append(roots, swapPhi)
+	return roots
+}
+
 func (t *RootTracer) tracePhi(phi *ssa.Phi, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) ssa.Value {
 	// For loop-header Phi nodes, prioritize back-edges over initial edges
 	// This ensures we return the loop-internal assignment result, not the pre-loop initial value
@@ -384,38 +435,14 @@ func (t *RootTracer) tracePhi(phi *ssa.Phi, visited map[ssa.Value]bool, loopInfo
 	}
 
 	// For non-loop-header Phi (regular conditional merge)
-	// Check if this Phi forms a swap-pair with another Phi in the same block
-	// Only treat as independent if swapping loop-header phis (loop variables)
+	// Check if this Phi forms a swap-pair with loop-header phis (loop variable swap)
 	// Example: t16 = phi [2: t5, 4: t6] where t5 and t6 are loop-header phis
-	if loopInfo != nil {
-		block := phi.Block()
-		for _, instr := range block.Instrs {
-			if otherPhi, ok := instr.(*ssa.Phi); ok {
-				if otherPhi != phi {
-					if isSwapPhiPair(phi, otherPhi) {
-						// Check if all edges are loop-header phis
-						allEdgesAreLoopHeaderPhi := true
-						for _, edge := range phi.Edges {
-							if edgePhi, ok := edge.(*ssa.Phi); ok {
-								if !loopInfo.IsLoopHeader(edgePhi.Block()) {
-									allEdgesAreLoopHeaderPhi = false
-									break
-								}
-							} else {
-								allEdgesAreLoopHeaderPhi = false
-								break
-							}
-						}
-
-						if allEdgesAreLoopHeaderPhi {
-							// Loop variable swap - return phi as independent root
-							return phi
-						}
-						// Simple conditional swap - fall through to regular tracing
-					}
-				}
-			}
+	if loopInfo != nil && findSwapPhiSibling(phi) != nil {
+		if loopHeaderPhis := getLoopHeaderPhiEdges(phi, loopInfo); loopHeaderPhis != nil {
+			// Loop variable swap - return phi as independent root
+			return phi
 		}
+		// Simple conditional swap - fall through to regular tracing
 	}
 
 	// Regular tracing
@@ -632,53 +659,13 @@ func (t *RootTracer) traceAll(v ssa.Value, visited map[ssa.Value]bool, loopInfo 
 	switch val := v.(type) {
 	case *ssa.Phi:
 		// Check for swap-phi pattern first
-		// For loop variable swaps, we need to check INITIAL edges of loop-header phis
-		// to detect pre-loop pollution that can propagate through the swap
-		if loopInfo != nil && !loopInfo.IsLoopHeader(val.Block()) {
-			// Non-loop-header Phi inside a loop - check for swap pattern
-			block := val.Block()
-			for _, instr := range block.Instrs {
-				if otherPhi, ok := instr.(*ssa.Phi); ok {
-					if otherPhi != val {
-						if isSwapPhiPair(val, otherPhi) {
-							// Check if edges are loop-header phis (loop variable swap)
-							var loopHeaderPhis []*ssa.Phi
-							for _, edge := range val.Edges {
-								if edgePhi, ok := edge.(*ssa.Phi); ok {
-									if loopInfo.IsLoopHeader(edgePhi.Block()) {
-										loopHeaderPhis = append(loopHeaderPhis, edgePhi)
-									} else {
-										loopHeaderPhis = nil
-										break
-									}
-								} else {
-									loopHeaderPhis = nil
-									break
-								}
-							}
-
-							if len(loopHeaderPhis) > 0 {
-								// Loop variable swap - collect roots from INITIAL edges only
-								// (not back-edges, to detect pre-loop pollution)
-								var roots []ssa.Value
-								for _, loopPhi := range loopHeaderPhis {
-									// Get the initial edge (first edge, not back-edge)
-									if len(loopPhi.Edges) > 0 {
-										initialEdge := loopPhi.Edges[0]
-										if !isNilConst(initialEdge) && !visited[initialEdge] {
-											roots = append(roots, t.traceAll(initialEdge, visited, loopInfo)...)
-										}
-									}
-								}
-								// Also include the swap-phi itself as a root
-								roots = append(roots, val)
-								return roots
-							}
-							// Simple conditional swap - fall through to collect all roots
-						}
-					}
-				}
+		// For loop variable swaps, collect roots from INITIAL edges to detect pre-loop pollution
+		if loopInfo != nil && !loopInfo.IsLoopHeader(val.Block()) && findSwapPhiSibling(val) != nil {
+			if loopHeaderPhis := getLoopHeaderPhiEdges(val, loopInfo); loopHeaderPhis != nil {
+				// Loop variable swap - collect roots from initial edges + swap-phi itself
+				return t.collectInitialEdgeRoots(loopHeaderPhis, val, visited, loopInfo)
 			}
+			// Simple conditional swap - fall through to collect all roots
 		}
 
 		// Regular Phi - collect roots from ALL edges
@@ -718,45 +705,10 @@ func (t *RootTracer) traceAllPointerLoads(ptr ssa.Value, visited map[ssa.Value]b
 	case *ssa.Phi:
 		// Check for swap-phi pattern first
 		// For loop variable swaps, check initial edges for pre-loop pollution
-		if loopInfo != nil && !loopInfo.IsLoopHeader(p.Block()) {
-			block := p.Block()
-			for _, instr := range block.Instrs {
-				if otherPhi, ok := instr.(*ssa.Phi); ok {
-					if otherPhi != p {
-						if isSwapPhiPair(p, otherPhi) {
-							// Check if edges are loop-header phis
-							var loopHeaderPhis []*ssa.Phi
-							for _, edge := range p.Edges {
-								if edgePhi, ok := edge.(*ssa.Phi); ok {
-									if loopInfo.IsLoopHeader(edgePhi.Block()) {
-										loopHeaderPhis = append(loopHeaderPhis, edgePhi)
-									} else {
-										loopHeaderPhis = nil
-										break
-									}
-								} else {
-									loopHeaderPhis = nil
-									break
-								}
-							}
-
-							if len(loopHeaderPhis) > 0 {
-								// Loop variable swap - collect roots from initial edges
-								var roots []ssa.Value
-								for _, loopPhi := range loopHeaderPhis {
-									if len(loopPhi.Edges) > 0 {
-										initialEdge := loopPhi.Edges[0]
-										if !isNilConst(initialEdge) && !visited[initialEdge] {
-											roots = append(roots, t.traceAll(initialEdge, visited, loopInfo)...)
-										}
-									}
-								}
-								roots = append(roots, p)
-								return roots
-							}
-						}
-					}
-				}
+		if loopInfo != nil && !loopInfo.IsLoopHeader(p.Block()) && findSwapPhiSibling(p) != nil {
+			if loopHeaderPhis := getLoopHeaderPhiEdges(p, loopInfo); loopHeaderPhis != nil {
+				// Loop variable swap - collect roots from initial edges + swap-phi itself
+				return t.collectInitialEdgeRoots(loopHeaderPhis, p, visited, loopInfo)
 			}
 		}
 

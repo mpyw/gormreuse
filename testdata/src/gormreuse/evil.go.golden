@@ -78,17 +78,17 @@ func loopAssignmentOnly(db *gorm.DB, items []int) {
 // loopConditionalAssignment demonstrates loop with conditional assignment.
 // Loop has only assignments (no finisher methods), so first use after loop is OK.
 func loopConditionalAssignment(db *gorm.DB, flags []bool) {
-	q := db.Where("base")
+	q := db.Where("base").Session(&gorm.Session{})
 
 	for _, flag := range flags {
 		if flag {
-			q = q.Where("flagged")  // Conditional assignment
+			q = q.Where("flagged").Session(&gorm.Session{})  // Conditional assignment
 		}
 		// Phi created here
 	}
 
-	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Find(nil)   // OK: first use after loop with conditional assignments only
+	q.Count(nil)  // want `\*gorm\.DB instance reused after chain method`
 }
 
 // =============================================================================

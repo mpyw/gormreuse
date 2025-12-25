@@ -492,8 +492,8 @@
  		// Loop creates Phi at each iteration
  	}
  
- 	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
- 	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+ 	q.Find(nil)   // OK: first use after nested conditionals with assignments only
+ 	q.Count(nil)  // want `\*gorm\.DB instance reused after chain method`
  }
  
  // nestedIfChaosMultipleVars demonstrates multiple variables with nested ifs.
@@ -743,7 +743,7 @@
  			}
  		}
  
- 		q.Count(nil) // OK: Phi result from nested loop used once per outer iteration
+ 		q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
  	}
  
  	q.First(nil) // want `\*gorm\.DB instance reused after chain method`
@@ -915,8 +915,7 @@
  
  // chaosVariableSwapLoop demonstrates swapping in loop.
  func chaosVariableSwapLoop(db *gorm.DB, items []int) {
--	q1 := db.Where("q1")
-+	q1 := db.Where("q1").Session(&gorm.Session{})
+ 	q1 := db.Where("q1")
  	q2 := db.Where("q2")
  
  	for _, item := range items {
@@ -926,12 +925,11 @@
  			q1 = q2
  			q2 = temp
  		}
--		q1 = q1.Where("item", item)
-+		q1 = q1.Where("item", item).Session(&gorm.Session{})
+ 		q1 = q1.Where("item", item)
  	}
  
- 	q1.Find(nil) // want `\*gorm\.DB instance reused after chain method`
- 	q2.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+ 	q1.Find(nil) // OK: first use after loop with assignments only
+ 	q2.Find(nil) // OK: first use (q2 never used in loop)
  }
  
  // chaosMultipleSwaps demonstrates multiple swaps creating complex Phi patterns.
