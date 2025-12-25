@@ -34,8 +34,8 @@ type IgnoreMap map[int]*ignoreEntry
 //	//gormreuse:ignore         // Line 5 → map[5] (line-level)
 //	q.Find(nil)                // Line 6 → ignored (line 5 covers line 6)
 //
-//	// File-level ignore (in package doc):
-//	// gormreuse:ignore        // → map[-1] (special marker)
+//	// File-level ignore (before package declaration):
+//	//gormreuse:ignore         // → map[-1] (special marker)
 //	package main               // All lines ignored
 //
 // The returned map uses line numbers as keys:
@@ -44,24 +44,35 @@ type IgnoreMap map[int]*ignoreEntry
 func BuildIgnoreMap(fset *token.FileSet, file *ast.File) IgnoreMap {
 	m := make(IgnoreMap)
 
-	// Check for file-level ignore (comment before package declaration)
+	// Get package declaration line for file-level ignore detection
+	packageLine := fset.Position(file.Package).Line
+
+	// Check all comments for ignore directives
 	for _, cg := range file.Comments {
 		for _, c := range cg.List {
 			pos := fset.Position(c.Pos())
-			// File-level ignore: before package or at the very start
 			if IsIgnoreDirective(c.Text) {
-				// Mark this line
-				m[pos.Line] = &ignoreEntry{pos: c.Pos(), used: false}
+				// Check if this is a file-level ignore (comment before package declaration)
+				// A comment is considered file-level if it appears on the line immediately
+				// before the package declaration, or within a few lines before it
+				if pos.Line < packageLine && pos.Line >= packageLine-5 {
+					// File-level ignore: mark all lines as ignored
+					// We use line -1 as a special marker
+					// File-level ignores are always considered "used" (no warning for them)
+					m[-1] = &ignoreEntry{pos: c.Pos(), used: true}
+				} else {
+					// Regular line-level ignore
+					m[pos.Line] = &ignoreEntry{pos: c.Pos(), used: false}
+				}
 			}
 		}
 	}
 
-	// Check for file-level ignore in doc comments
+	// Also check for file-level ignore in doc comments (package documentation)
 	if file.Doc != nil {
 		for _, c := range file.Doc.List {
 			if IsIgnoreDirective(c.Text) {
 				// File-level ignore: mark all lines as ignored
-				// We use line -1 as a special marker
 				// File-level ignores are always considered "used" (no warning for them)
 				m[-1] = &ignoreEntry{pos: c.Pos(), used: true}
 			}
