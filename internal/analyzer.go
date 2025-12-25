@@ -73,6 +73,12 @@ func RunSSA(
 	immutableReturnFuncs *directive.ImmutableReturnFuncSet,
 	skipFiles map[string]bool,
 ) {
+	// Share a single reported map across all functions to deduplicate
+	// violations across parent functions and their closures.
+	// When a closure accesses a parent scope variable, the same violation
+	// may be detected from both the parent function and the closure.
+	globalReported := make(map[token.Pos]bool)
+
 	for _, fn := range ssaInfo.SrcFuncs {
 		pos := fn.Pos()
 		if !pos.IsValid() {
@@ -106,7 +112,7 @@ func RunSSA(
 			}
 		}
 
-		chk := newChecker(pass, ignoreMap, pureFuncs, immutableReturnFuncs)
+		chk := newChecker(pass, ignoreMap, pureFuncs, immutableReturnFuncs, globalReported)
 		chk.checkFunction(fn)
 	}
 
@@ -140,13 +146,15 @@ type checker struct {
 }
 
 // newChecker creates a new checker for a specific file.
-func newChecker(pass *analysis.Pass, ignoreMap directive.IgnoreMap, pureFuncs *directive.PureFuncSet, immutableReturnFuncs *directive.ImmutableReturnFuncSet) *checker {
+// The reported map is shared across all functions to deduplicate violations
+// across parent functions and their closures.
+func newChecker(pass *analysis.Pass, ignoreMap directive.IgnoreMap, pureFuncs *directive.PureFuncSet, immutableReturnFuncs *directive.ImmutableReturnFuncSet, reported map[token.Pos]bool) *checker {
 	return &checker{
 		pass:                 pass,
 		ignoreMap:            ignoreMap,
 		pureFuncs:            pureFuncs,
 		immutableReturnFuncs: immutableReturnFuncs,
-		reported:             make(map[token.Pos]bool),
+		reported:             reported,
 	}
 }
 

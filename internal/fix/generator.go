@@ -44,6 +44,7 @@ import (
 	"golang.org/x/tools/go/ssa"
 
 	"github.com/mpyw/gormreuse/internal/ssa/pollution"
+	"github.com/mpyw/gormreuse/internal/typeutil"
 )
 
 // Generator generates SuggestedFix for a violation.
@@ -143,6 +144,16 @@ func (g *Generator) findNonFinisherUses(uses []pollution.UsageInfo) []pollution.
 
 // isNonFinisherExprStmt checks if a position is a non-finisher expression statement.
 // Non-finisher means the result is not used (e.g., q.Where("a") without assignment).
+//
+// Returns true only when ALL of the following conditions are met:
+//  1. The statement is an ExprStmt (expression used as statement)
+//  2. The top-level expression is a *gorm.DB method call (checked via receiver type)
+//  3. The method is a non-finisher (chainable method like Where, Limit, etc.)
+//  4. The receiver is assignable (variable, field, etc.)
+//
+// This prevents inappropriate fixes for non-GORM expressions like:
+//
+//	require.NoError(t, tx.Create(...).Error)
 func (g *Generator) isNonFinisherExprStmt(pos token.Pos) bool {
 	// Find the AST node at this position
 	file := g.findFileContaining(pos)
@@ -162,6 +173,11 @@ func (g *Generator) isNonFinisherExprStmt(pos token.Pos) bool {
 		return false
 	}
 
+	// Check if pos is within the ExprStmt's expression
+	if exprStmt.X.Pos() > pos || pos > exprStmt.X.End() {
+		return false
+	}
+
 	// Check if it's a call expression
 	callExpr, ok := exprStmt.X.(*ast.CallExpr)
 	if !ok {
@@ -171,6 +187,21 @@ func (g *Generator) isNonFinisherExprStmt(pos token.Pos) bool {
 	// Check if it's a method call (selector expression)
 	sel, ok := callExpr.Fun.(*ast.SelectorExpr)
 	if !ok {
+		return false
+	}
+
+	// Check if the receiver's type is *gorm.DB
+	// This prevents false positives for non-GORM methods like require.NoError
+	if g.pass.TypesInfo != nil {
+		receiverType := g.pass.TypesInfo.TypeOf(sel.X)
+		if receiverType == nil || !typeutil.IsGormDB(receiverType) {
+			return false
+		}
+	}
+
+	// Check if the receiver is assignable (variable, field, etc.)
+	// This prevents fixes for non-assignable receivers like function call results
+	if g.extractAssignableLHS(sel.X) == "" {
 		return false
 	}
 

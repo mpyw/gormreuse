@@ -4,7 +4,9 @@ package gorm
 import "context"
 
 // DB is the main database struct.
-type DB struct{}
+type DB struct {
+	Error error
+}
 
 // Session configuration
 type Session struct {

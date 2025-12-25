@@ -380,8 +380,8 @@ type Repository interface {
 // interfaceMethodPollution demonstrates interface method pollution detection.
 // Interface methods taking *gorm.DB are assumed to pollute it.
 func interfaceMethodPollution(db *gorm.DB, repo Repository) {
-	q := db.Where("x = ?", 1)
-	repo = repo.Query(q) // Interface method assumed to pollute q
+	q := db.Where("x = ?", 1).Session(&gorm.Session{})
+	repo.Query(q) // Interface method assumed to pollute q
 
 	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
 }
