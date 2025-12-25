@@ -2133,11 +2133,9 @@
  func iifeWithPhiNode(db *gorm.DB, cond bool) {
  	var q *gorm.DB
  	if cond {
--		q = db.Where("branch1", 1)
-+		q = db.Where("branch1", 1).Session(&gorm.Session{})
+ 		q = db.Where("branch1", 1)
  	} else {
--		q = db.Where("branch2", 2)
-+		q = db.Where("branch2", 2).Session(&gorm.Session{})
+ 		q = db.Where("branch2", 2)
  	}
  
  	// First branch - IIFE counts as single branch
@@ -2327,13 +2325,11 @@
  // reassignConditionalPartial demonstrates partial reassignment in conditional.
  // Only one branch reassigns - other branch uses polluted value.
  func reassignConditionalPartial(db *gorm.DB, flag bool) {
--	q := db.Where("x = ?", 1)
-+	q := db.Where("x = ?", 1).Session(&gorm.Session{})
+ 	q := db.Where("x = ?", 1)
  	q.Find(nil) // Pollutes q
  
  	if flag {
--		q = db.Where("y = ?", 2) // Reassigns q in this branch only
-+		q = db.Where("y = ?", 2).Session(&gorm.Session{}) // Reassigns q in this branch only
+ 		q = db.Where("y = ?", 2) // Reassigns q in this branch only
  	}
  
  	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
@@ -2509,14 +2505,12 @@
  // reassignPointerDeref demonstrates reassignment through pointer.
  // [LIMITATION] Pointer dereference reassignment tracking not fully supported.
  func reassignPointerDeref(db *gorm.DB) {
--	q := db.Where("x = ?", 1)
-+	q := db.Where("x = ?", 1).Session(&gorm.Session{})
+ 	q := db.Where("x = ?", 1)
  	p := &q
  
  	(*p).Find(nil) // Pollutes through pointer
  
--	*p = db.Where("y = ?", 2) // Reassign through pointer
-+	*p = db.Where("y = ?", 2).Session(&gorm.Session{}) // Reassign through pointer
+ 	*p = db.Where("y = ?", 2) // Reassign through pointer
  
  	// [LIMITATION] FALSE POSITIVE: Pointer reassignment creates new root tracking
  	q.Find(nil)  // want `\*gorm\.DB instance reused after chain method`
@@ -2851,8 +2845,7 @@
  	if cond {
  		q = db.Where("branch1", 1).Session(&gorm.Session{}) // Already immutable
  	} else {
--		q = db.Where("branch2", 2) // Needs Session
-+		q = db.Where("branch2", 2).Session(&gorm.Session{}) // Needs Session
+ 		q = db.Where("branch2", 2) // Needs Session
  	}
  
  	q.Find(nil)
@@ -2866,8 +2859,7 @@
  	if cond {
  		q = db.Where("branch1", 1).Session(&gorm.Session{}).Where("after") // Immutable (Session in chain)
  	} else {
--		q = db.Where("branch2", 2) // Needs Session
-+		q = db.Where("branch2", 2).Session(&gorm.Session{}) // Needs Session
+ 		q = db.Where("branch2", 2) // Needs Session
  	}
  
  	q.Find(nil)
@@ -2879,13 +2871,11 @@
  func phiThreeBranchesMiddleImmutable(db *gorm.DB, mode int) {
  	var q *gorm.DB
  	if mode == 1 {
--		q = db.Where("branch1", 1) // Needs Session
-+		q = db.Where("branch1", 1).Session(&gorm.Session{}) // Needs Session
+ 		q = db.Where("branch1", 1) // Needs Session
  	} else if mode == 2 {
  		q = db.Where("branch2", 2).Session(&gorm.Session{}) // Already immutable
  	} else {
--		q = db.Where("branch3", 3) // Needs Session
-+		q = db.Where("branch3", 3).Session(&gorm.Session{}) // Needs Session
+ 		q = db.Where("branch3", 3) // Needs Session
  	}
  
  	q.Find(nil)
@@ -2898,16 +2888,13 @@
  	var q *gorm.DB
  	switch mode {
  	case 1:
--		q = db.Where("case1", 1) // Needs Session
-+		q = db.Where("case1", 1).Session(&gorm.Session{}) // Needs Session
+ 		q = db.Where("case1", 1) // Needs Session
  	case 2:
  		q = db.Where("case2", 2).Session(&gorm.Session{}) // Already immutable
  	case 3:
--		q = db.Where("case3", 3) // Needs Session
-+		q = db.Where("case3", 3).Session(&gorm.Session{}) // Needs Session
+ 		q = db.Where("case3", 3) // Needs Session
  	default:
--		q = db.Where("default") // Needs Session
-+		q = db.Where("default").Session(&gorm.Session{}) // Needs Session
+ 		q = db.Where("default") // Needs Session
  	}
  
  	q.Find(nil)

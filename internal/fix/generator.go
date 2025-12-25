@@ -319,7 +319,11 @@ func (g *Generator) generateSessionEditsForRoot(pos token.Pos, root ssa.Value) [
 
 // generatePhiEdgeEdits generates Session edits for all edges of a Phi node.
 // Only generates edits for edges that don't already have Session.
+// OPTIMIZATION: Only add Session to edges that are used multiple times.
 func (g *Generator) generatePhiEdgeEdits(phi *ssa.Phi) []analysis.TextEdit {
+	// Count how many times each edge value is used (excluding Phi itself)
+	edgeUseCounts := g.countEdgeUses(phi)
+
 	var edits []analysis.TextEdit
 	for _, edge := range phi.Edges {
 		// Skip nil constants
@@ -329,6 +333,12 @@ func (g *Generator) generatePhiEdgeEdits(phi *ssa.Phi) []analysis.TextEdit {
 
 		// Skip if this edge is already immutable (has Session, WithContext, etc.)
 		if g.isImmutableValue(edge) {
+			continue
+		}
+
+		// OPTIMIZATION: Skip if this edge is only used once (in the Phi)
+		// In that case, Session is not needed for this edge
+		if edgeUseCounts[edge] <= 1 {
 			continue
 		}
 
@@ -344,6 +354,31 @@ func (g *Generator) generatePhiEdgeEdits(phi *ssa.Phi) []analysis.TextEdit {
 		}
 	}
 	return edits
+}
+
+// countEdgeUses counts how many times each Phi edge is used (excluding the Phi itself).
+// Returns a map from edge value to use count.
+func (g *Generator) countEdgeUses(phi *ssa.Phi) map[ssa.Value]int {
+	counts := make(map[ssa.Value]int)
+
+	for _, edge := range phi.Edges {
+		if edge == nil {
+			continue
+		}
+
+		// Count uses via referrers
+		if refs := edge.Referrers(); refs != nil {
+			for _, ref := range *refs {
+				// Don't count the Phi itself
+				if ref == phi {
+					continue
+				}
+				counts[edge]++
+			}
+		}
+	}
+
+	return counts
 }
 
 // findPhiUsingValue finds a Phi node that uses the given value as an edge,
