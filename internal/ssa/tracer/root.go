@@ -305,8 +305,92 @@ func (t *RootTracer) traceNonCall(v ssa.Value, visited map[ssa.Value]bool, loopI
 	}
 }
 
-// isSwapPhiPair checks if two Phi nodes form a swap pattern:
-// phiA = phi [..., x, y] and phiB = phi [..., y, x]
+// isSwapPhiPair checks if two Phi nodes form a swap pattern.
+//
+// A swap pattern occurs when two Phi nodes in the same block have edges that are
+// swapped versions of each other. This typically happens when variables are swapped
+// in conditional code.
+//
+// # Pattern Detection
+//
+// Given two Phi nodes:
+//
+//	phiA = phi [pred0: x, pred1: y, ...]
+//	phiB = phi [pred0: y, pred1: x, ...]
+//	                ^^^       ^^^
+//	                swapped!
+//
+// The function returns true if there exists at least one pair of edges (i, j) where:
+//   - phiA.Edges[i] == phiB.Edges[j]  AND
+//   - phiA.Edges[j] == phiB.Edges[i]
+//
+// # Example 1: Variable Swap in Loop
+//
+// Go code:
+//
+//	q1 := db.Where("q1")
+//	q2 := db.Where("q2")
+//	for _, item := range items {
+//	    if item%2 == 0 {
+//	        temp := q1
+//	        q1 = q2  // Swap
+//	        q2 = temp
+//	    }
+//	    q1 = q1.Where(...)
+//	}
+//
+// SSA representation:
+//
+//	Block 1 (loop header):
+//	  t5 = phi [entry: t1, back: t23] #q1
+//	  t6 = phi [entry: t3, back: t17] #q2
+//
+//	Block 5 (after if, inside loop):
+//	  t16 = phi [no-swap: t5, swap: t6] #q1
+//	  t17 = phi [no-swap: t6, swap: t5] #q2
+//	                      ^^        ^^
+//	                      These are swapped!
+//
+// In this case:
+//   - t16 has edges [t5, t6]
+//   - t17 has edges [t6, t5]  ← swapped!
+//   - isSwapPhiPair(t16, t17) returns true
+//
+// # Example 2: Conditional Swap (Non-Loop)
+//
+// Go code:
+//
+//	q1 := db.Where("q1")
+//	q2 := db.Where("q2")
+//	if swap {
+//	    q1, q2 = q2, q1  // Modern swap syntax
+//	}
+//	q1.Find(nil)
+//
+// SSA representation:
+//
+//	Block 0 (entry):
+//	  t1 = db.Where("q1")
+//	  t3 = db.Where("q2")
+//
+//	Block 2 (after if):
+//	  t7 = phi [no-swap: t1, swap: t3] #q1
+//	  t8 = phi [no-swap: t3, swap: t1] #q2
+//	                      ^^        ^^
+//	                      Also swapped!
+//
+// In this case:
+//   - t7 has edges [t1, t3]
+//   - t8 has edges [t3, t1]  ← swapped!
+//   - isSwapPhiPair(t7, t8) returns true
+//
+// # Why This Matters
+//
+// Detecting swap patterns is crucial for correct pollution tracking:
+//   - In loops with only assignments: swapped variables remain independent
+//   - In conditionals with pre-pollution: swap propagates pollution to both
+//
+// See collectInitialEdgeRoots() for how this is used in pollution detection.
 func isSwapPhiPair(phiA, phiB *ssa.Phi) bool {
 	if len(phiA.Edges) != len(phiB.Edges) {
 		return false
@@ -335,7 +419,50 @@ func isSwapPhiPair(phiA, phiB *ssa.Phi) bool {
 }
 
 // findSwapPhiSibling finds a swap-pair sibling of phi in the same block.
-// Returns the sibling phi if found, nil otherwise.
+//
+// When variables are swapped (e.g., q1, q2 = q2, q1), SSA creates two Phi nodes
+// in the same block with swapped edges. This function searches for that sibling.
+//
+// # Search Process
+//
+// Given a Phi node, this function:
+//  1. Iterates through all instructions in the same basic block
+//  2. For each Phi instruction found:
+//     - Skip if it's the same phi (self)
+//     - Check if it forms a swap-pair using isSwapPhiPair()
+//  3. Returns the first matching sibling, or nil if none found
+//
+// # Example: Loop Variable Swap
+//
+// SSA block structure:
+//
+//	Block 5 (if.done - after conditional swap):
+//	  t16 = phi [no-swap: t5, swap: t6] #q1  ← Input phi
+//	  t17 = phi [no-swap: t6, swap: t5] #q2  ← Sibling found!
+//	  t18 = phi [...]                        ← Not a swap-pair, skipped
+//	  ...
+//
+// Given t16 as input:
+//   - findSwapPhiSibling(t16) returns t17
+//   - findSwapPhiSibling(t17) returns t16 (symmetric)
+//
+// # Why Search in Same Block?
+//
+// Swap Phi nodes ALWAYS appear in the same basic block because:
+//   - They represent the merge point after a conditional branch
+//   - Both variables are updated at the exact same control flow point
+//   - SSA ensures all Phi nodes for a block are at the block's start
+//
+// # Usage Pattern
+//
+// This is used as a quick check to detect swap patterns:
+//
+//	if findSwapPhiSibling(phi) != nil {
+//	    // This phi is part of a swap - apply special handling
+//	    ...
+//	}
+//
+// See tracePhi(), traceAll(), and traceAllPointerLoads() for actual usage.
 func findSwapPhiSibling(phi *ssa.Phi) *ssa.Phi {
 	block := phi.Block()
 	for _, instr := range block.Instrs {
@@ -348,8 +475,90 @@ func findSwapPhiSibling(phi *ssa.Phi) *ssa.Phi {
 	return nil
 }
 
-// getLoopHeaderPhiEdges checks if all edges of phi are loop-header phis.
-// Returns the loop-header phi edges if all edges are loop-header phis, nil otherwise.
+// getLoopHeaderPhiEdges checks if all edges of a Phi are loop-header Phis.
+//
+// This function distinguishes between two types of swap patterns:
+//  1. Loop variable swaps: Swap between loop-header Phis (loop iteration variables)
+//  2. Simple conditional swaps: Swap between non-Phi values or non-loop-header Phis
+//
+// Only loop variable swaps (type 1) need special handling for pollution tracking.
+//
+// # Detection Criteria
+//
+// Returns non-nil (list of loop-header Phis) if ALL of these conditions hold:
+//   - loopInfo is available (we're analyzing loop context)
+//   - ALL edges of phi are *ssa.Phi nodes
+//   - ALL edge Phis are loop-header Phis (checked via loopInfo.IsLoopHeader)
+//
+// Returns nil if ANY edge is:
+//   - Not a Phi node (e.g., a Call, Const, Parameter)
+//   - A Phi node but not in a loop-header block
+//
+// # Example 1: Loop Variable Swap (Returns Non-Nil)
+//
+// Go code:
+//
+//	for _, item := range items {
+//	    if item%2 == 0 {
+//	        q1, q2 = q2, q1  // Swap loop variables
+//	    }
+//	    q1 = q1.Where(...)
+//	}
+//
+// SSA structure:
+//
+//	Block 1 (loop header):
+//	  t5 = phi [entry: t1, back: t23] #q1  ← Loop-header Phi
+//	  t6 = phi [entry: t3, back: t17] #q2  ← Loop-header Phi
+//
+//	Block 5 (after if, inside loop):
+//	  t16 = phi [no-swap: t5, swap: t6] #q1
+//	               edges: [t5, t6]
+//	                       ^^  ^^
+//	                       Both are loop-header Phis!
+//
+// For t16:
+//   - Edge 0 (t5): IsLoopHeader(t5.Block()) == true ✓
+//   - Edge 1 (t6): IsLoopHeader(t6.Block()) == true ✓
+//   - Result: Returns [t5, t6]
+//
+// # Example 2: Conditional Swap (Returns Nil)
+//
+// Go code:
+//
+//	q1 := db.Where("q1")
+//	q2 := db.Where("q2")
+//	if swap {
+//	    q1, q2 = q2, q1  // Simple conditional swap
+//	}
+//
+// SSA structure:
+//
+//	Block 0:
+//	  t1 = db.Where("q1")  ← Call, not a Phi
+//	  t3 = db.Where("q2")  ← Call, not a Phi
+//
+//	Block 2 (after if):
+//	  t7 = phi [no-swap: t1, swap: t3] #q1
+//	             edges: [t1, t3]
+//	                     ^^  ^^
+//	                     Both are Calls, not Phis!
+//
+// For t7:
+//   - Edge 0 (t1): Not a Phi node → Return nil immediately
+//   - Result: Returns nil
+//
+// # Why This Distinction Matters
+//
+// Loop variable swaps keep variables independent during loop iteration:
+//   - Assignments in loop don't pollute (they're just updates)
+//   - Need to check INITIAL values (before loop) for pre-pollution
+//
+// Simple conditional swaps propagate pollution:
+//   - If one value is polluted, both become polluted after merge
+//   - Need to check ALL possible values from all branches
+//
+// See collectInitialEdgeRoots() for how loop variable swaps are handled.
 func getLoopHeaderPhiEdges(phi *ssa.Phi, loopInfo *cfg.LoopInfo) []*ssa.Phi {
 	if loopInfo == nil {
 		return nil
@@ -366,9 +575,120 @@ func getLoopHeaderPhiEdges(phi *ssa.Phi, loopInfo *cfg.LoopInfo) []*ssa.Phi {
 	return loopHeaderPhis
 }
 
-// collectInitialEdgeRoots collects roots from the initial edges (not back-edges)
-// of loop-header phis. This is used to detect pre-loop pollution.
-// Also includes the swap-phi itself as a root.
+// collectInitialEdgeRoots collects roots from INITIAL edges (entry edges) of
+// loop-header Phis, used to detect pre-loop pollution that can propagate through swaps.
+//
+// # Why Only Initial Edges?
+//
+// Loop-header Phis have two types of edges:
+//  1. Initial edge (index 0): Value entering the loop from outside
+//  2. Back-edge (index 1+): Value from loop body (loop iteration update)
+//
+// For loop variable swaps, we only care about pollution from BEFORE the loop starts:
+//   - If variables are clean entering the loop → they stay independent during iteration
+//   - If one is polluted before loop → swap propagates pollution to both
+//
+// Back-edges represent loop-internal assignments (e.g., q1 = q1.Where(...)) which
+// don't pollute the variables themselves - they're just updates.
+//
+// # The Two Scenarios
+//
+// ## Scenario 1: Clean Variables Before Loop (No Violation)
+//
+// Go code:
+//
+//	q1 := db.Where("q1")  // Clean
+//	q2 := db.Where("q2")  // Clean
+//	for _, item := range items {
+//	    if item%2 == 0 {
+//	        q1, q2 = q2, q1  // Swap
+//	    }
+//	    q1 = q1.Where(...)   // Assignment (not polluting)
+//	}
+//	q1.Find(nil)  // First actual use - OK
+//	q2.Find(nil)  // First actual use - OK
+//
+// SSA trace for q2.Find():
+//
+//	Block 1 (loop header):
+//	  t5 = phi [entry: t1, back: t23] #q1
+//	            initial ^^       ^^^ back-edge (assignment result)
+//	  t6 = phi [entry: t3, back: t17] #q2
+//	            initial ^^       ^^^ back-edge (swap result)
+//
+//	Block 5 (swap merge):
+//	  t16 = phi [t5, t6]  ← Swap-phi for q1
+//	  t17 = phi [t6, t5]  ← Swap-phi for q2
+//
+// For q2.Find():
+//   - FindMutableRoot(t6) → t17 (swap-phi, treated as independent)
+//   - FindAllMutableRoots(t6) calls this function:
+//     → collectInitialEdgeRoots([t5, t6], t17, ...)
+//     → Traces t5's initial edge: t1 (clean, no pollution)
+//     → Traces t6's initial edge: t3 (clean, no pollution)
+//     → Returns [t1, t3, t17]
+//   - Check pollution: t1 (clean), t3 (clean), t17 (clean)
+//   - Result: No violation ✓
+//
+// ## Scenario 2: Pre-Polluted Variable (Violation Detected)
+//
+// Go code:
+//
+//	q1 := db.Where("q1")
+//	q2 := db.Where("q2")
+//	q1.Find(nil)  // ← Pollute q1 BEFORE loop
+//	for _, item := range items {
+//	    if item%2 == 0 {
+//	        q1, q2 = q2, q1  // Swap propagates pollution!
+//	    }
+//	    q1 = q1.Where(...)  // ← Uses potentially polluted value
+//	}
+//
+// SSA trace for q1.Where() inside loop:
+//
+//	Block 0:
+//	  t1 = db.Where("q1")
+//	  t3 = db.Where("q2")
+//	  t1.Find(nil)  ← t1 is now polluted
+//
+//	Block 1 (loop header):
+//	  t5 = phi [entry: t1, back: t23]  ← t1 is polluted!
+//	            initial ^^
+//	  t6 = phi [entry: t3, back: t17]
+//	            initial ^^
+//
+//	Block 5 (swap merge):
+//	  t16 = phi [t5, t6]  ← May contain t1 (polluted) or t6 (clean)
+//	  t17 = phi [t6, t5]  ← May contain t6 (clean) or t5 (polluted)
+//
+// For t16.Where() (the assignment in loop):
+//   - FindMutableRoot(t16) → t16 (swap-phi)
+//   - FindAllMutableRoots(t16) calls this function:
+//     → collectInitialEdgeRoots([t5, t6], t16, ...)
+//     → Traces t5's initial edge: t1 (POLLUTED! ✗)
+//     → Traces t6's initial edge: t3 (clean)
+//     → Returns [t1, t3, t16]
+//   - Check pollution: t1 is polluted!
+//   - Result: Violation detected ✓
+//
+// # Implementation Details
+//
+// For each loop-header Phi:
+//  1. Get the first edge (index 0) - this is the initial/entry edge
+//  2. Skip if nil constant or already visited (cycle detection)
+//  3. Recursively trace using traceAll() to find all possible roots
+//  4. Collect all roots from all loop-header Phis
+//  5. Add the swap-phi itself as a root (for independent tracking)
+//
+// # Return Value
+//
+// Returns a list of roots that includes:
+//   - All roots from initial edges of all loop-header Phis
+//   - The swap-phi itself (for treating it as an independent root in some contexts)
+//
+// This allows pollution detection to:
+//   - Check if ANY initial value was polluted before the loop
+//   - Treat the swap-phi as a separate entity for FindMutableRoot()
 func (t *RootTracer) collectInitialEdgeRoots(loopHeaderPhis []*ssa.Phi, swapPhi ssa.Value, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) []ssa.Value {
 	var roots []ssa.Value
 	for _, loopPhi := range loopHeaderPhis {
@@ -434,18 +754,112 @@ func (t *RootTracer) tracePhi(phi *ssa.Phi, visited map[ssa.Value]bool, loopInfo
 		return nil
 	}
 
-	// For non-loop-header Phi (regular conditional merge)
-	// Check if this Phi forms a swap-pair with loop-header phis (loop variable swap)
-	// Example: t16 = phi [2: t5, 4: t6] where t5 and t6 are loop-header phis
+	// =========================================================================
+	// NON-LOOP-HEADER PHI: Conditional Merge Patterns
+	// =========================================================================
+	//
+	// Non-loop-header Phis represent merges in conditional code (if/else).
+	// We need to handle several patterns correctly:
+	//
+	// ## Pattern 1: Loop Variable Swap (Special Case)
+	//
+	// When variables are swapped inside a loop:
+	//
+	//   for _, item := range items {
+	//       if item%2 == 0 {
+	//           q1, q2 = q2, q1  // ← Creates swap-phi
+	//       }
+	//       q1 = q1.Where(...)    // ← Uses merged value
+	//   }
+	//
+	// SSA:
+	//   Block 1 (loop header):
+	//     t5 = phi [entry, back] #q1
+	//     t6 = phi [entry, back] #q2
+	//   Block 5 (after if):
+	//     t16 = phi [no-swap: t5, swap: t6]  ← Swap-phi
+	//     t17 = phi [no-swap: t6, swap: t5]  ← Swap-phi sibling
+	//
+	// For loop variable swaps, we treat the swap-phi itself as the root,
+	// keeping q1 and q2 independent during loop iteration.
+	//
+	// ## Pattern 2: Reassignment to Same Symbol in If (Regular Phi)
+	//
+	// When a variable is reassigned in only one branch:
+	//
+	//   q := db.Where("base")
+	//   if cond {
+	//       q = q.Where("extra")  // ← Reassignment
+	//   }
+	//   q.Find(nil)  // ← Uses merged value
+	//
+	// SSA:
+	//   Block 0:
+	//     t1 = db.Where("base")
+	//   Block 1 (if.then):
+	//     t2 = t1.Where("extra")
+	//   Block 2 (if.done):
+	//     t3 = phi [no-if: t1, if: t2] #q
+	//                      ^^      ^^
+	//                      Different values, but same LINEAGE
+	//
+	// This is NOT a swap (no sibling), just a regular conditional update.
+	// We trace through the phi normally to find the root (t1 or t2's root).
+	//
+	// ## Pattern 3: Different Symbols Merged (Regular Phi)
+	//
+	// When different variables are assigned in different branches:
+	//
+	//   var q *gorm.DB
+	//   if cond {
+	//       q = db.Where("a")  // ← First definition
+	//   } else {
+	//       q = db.Where("b")  // ← Second definition
+	//   }
+	//   q.Find(nil)  // ← Uses merged value
+	//
+	// SSA:
+	//   Block 2 (if.done):
+	//     t3 = phi [if: t1, else: t2] #q
+	//                   ^^       ^^
+	//                   Different roots, need to check ALL
+	//
+	// This is also NOT a swap, we trace through normally and FindAllMutableRoots
+	// will collect all possible roots (t1 and t2) for pollution checking.
+	//
+	// ## Detection Logic
+	//
+	// We only apply special swap-phi handling if ALL conditions are met:
+	//   1. loopInfo != nil (we're inside a loop context)
+	//   2. findSwapPhiSibling(phi) != nil (this phi has a swap sibling)
+	//   3. getLoopHeaderPhiEdges(phi) != nil (edges are loop-header phis)
+	//
+	// If any condition fails, we fall through to regular tracing.
+	//
 	if loopInfo != nil && findSwapPhiSibling(phi) != nil {
 		if loopHeaderPhis := getLoopHeaderPhiEdges(phi, loopInfo); loopHeaderPhis != nil {
-			// Loop variable swap - return phi as independent root
+			// Loop variable swap detected - return phi as independent root
+			// This prevents cross-contamination between swapped loop variables
 			return phi
 		}
-		// Simple conditional swap - fall through to regular tracing
+		// Has a swap sibling but not swapping loop-header phis
+		// (e.g., conditional swap outside loop) - fall through to regular tracing
 	}
 
-	// Regular tracing
+	// =========================================================================
+	// REGULAR TRACING: Standard Phi Handling
+	// =========================================================================
+	//
+	// For all other cases (non-swap phis, or swaps without loop context):
+	//   - Trace through all edges to find the first mutable root
+	//   - Skip nil constants and already-visited values (cycle detection)
+	//   - Return the first root found, or nil if no root exists
+	//
+	// This handles:
+	//   - Simple reassignment in if: q = q.Where("x") in one branch
+	//   - Different values merged: if { q = a } else { q = b }
+	//   - Conditional swaps outside loops
+	//
 	for _, edge := range phi.Edges {
 		if isNilConst(edge) || visited[edge] {
 			continue
@@ -658,17 +1072,84 @@ func (t *RootTracer) traceAll(v ssa.Value, visited map[ssa.Value]bool, loopInfo 
 
 	switch val := v.(type) {
 	case *ssa.Phi:
-		// Check for swap-phi pattern first
-		// For loop variable swaps, collect roots from INITIAL edges to detect pre-loop pollution
+		// =====================================================================
+		// PHI NODE: Collect All Possible Roots for Pollution Checking
+		// =====================================================================
+		//
+		// Unlike FindMutableRoot() which returns the PRIMARY root for a value,
+		// FindAllMutableRoots() must return ALL possible roots that could
+		// contribute pollution. This is critical for conditional code where
+		// different branches may have different pollution states.
+		//
+		// ## Why We Need All Roots
+		//
+		// Consider:
+		//   q1 := db.Where("a")
+		//   q2 := db.Where("b")
+		//   q1.Find(nil)  // Pollute q1
+		//   var q *gorm.DB
+		//   if cond {
+		//       q = q1  // Branch 1: polluted
+		//   } else {
+		//       q = q2  // Branch 2: clean
+		//   }
+		//   q.Count(nil)  // ← Need to check BOTH q1 and q2
+		//
+		// The phi after the if has edges [q1, q2]. We must check if ANY
+		// of these roots is polluted, not just pick one.
+		//
+		// ## Special Case: Loop Variable Swaps
+		//
+		// However, loop variable swaps need special handling:
+		//
+		//   q1 := db.Where("q1")  // Clean
+		//   q2 := db.Where("q2")  // Clean
+		//   for _, item := range items {
+		//       if item%2 == 0 {
+		//           q1, q2 = q2, q1  // Swap
+		//       }
+		//       q1 = q1.Where(...)  // Assignment
+		//   }
+		//
+		// SSA creates swap-phi nodes inside the loop. These should NOT
+		// mix pollution between q1 and q2 during iteration, because they're
+		// just swapping roles, not creating cross-contamination.
+		//
+		// BUT we still need to check if q1 or q2 were polluted BEFORE
+		// entering the loop, because that pollution would propagate.
+		//
+		// Solution: For loop variable swaps, return:
+		//   - INITIAL edges of loop-header phis (pre-loop values)
+		//   - The swap-phi itself (as an independent entity)
+		//
+		// This allows pollution checking to:
+		//   - Detect pre-loop pollution: check if t1 or t3 is polluted
+		//   - Treat swap-phi independently: t16 and t17 have separate pollution
+		//
 		if loopInfo != nil && !loopInfo.IsLoopHeader(val.Block()) && findSwapPhiSibling(val) != nil {
 			if loopHeaderPhis := getLoopHeaderPhiEdges(val, loopInfo); loopHeaderPhis != nil {
-				// Loop variable swap - collect roots from initial edges + swap-phi itself
+				// Loop variable swap detected:
+				// Return initial edges (to check pre-loop pollution) + swap-phi itself
 				return t.collectInitialEdgeRoots(loopHeaderPhis, val, visited, loopInfo)
 			}
-			// Simple conditional swap - fall through to collect all roots
+			// Has swap sibling but not loop variables (e.g., conditional swap outside loop)
+			// Fall through to collect all roots normally
 		}
 
-		// Regular Phi - collect roots from ALL edges
+		// =====================================================================
+		// REGULAR PHI: Collect Roots from All Edges
+		// =====================================================================
+		//
+		// For non-swap phis, or swaps outside loop context:
+		//   - Recursively trace ALL edges
+		//   - Collect roots from each edge
+		//   - Return union of all roots found
+		//
+		// This handles:
+		//   - Conditional assignment: if { q = a } else { q = b }
+		//   - Reassignment in one branch: if { q = q.Where(...) }
+		//   - Conditional swaps outside loops
+		//
 		var roots []ssa.Value
 		for _, edge := range val.Edges {
 			if isNilConst(edge) || visited[edge] {
