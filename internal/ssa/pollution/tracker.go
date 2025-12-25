@@ -184,6 +184,37 @@ func (t *Tracker) getAllUses(root ssa.Value) []UsageInfo {
 	return allUses
 }
 
+// checkViolationsBetween checks if any source use can reach any target use.
+// Returns positions of target uses that are reachable from a source use.
+func (t *Tracker) checkViolationsBetween(targets, sources []UsageInfo, root ssa.Value, allUses []UsageInfo) {
+	for _, target := range targets {
+		for _, src := range sources {
+			// Skip self-comparison for same-list checks
+			if src.Pos == target.Pos && src.Block == target.Block {
+				continue
+			}
+
+			// Only report if src is BEFORE target (earlier position)
+			if src.Pos >= target.Pos {
+				continue
+			}
+
+			// Different functions (closure): position order is sufficient
+			if src.Block != nil && target.Block != nil &&
+				src.Block.Parent() != target.Block.Parent() {
+				t.addViolationWithContext(target.Pos, root, allUses)
+				break
+			}
+
+			// Same function: check CFG reachability
+			if t.isReachable(src.Block, target.Block) {
+				t.addViolationWithContext(target.Pos, root, allUses)
+				break
+			}
+		}
+	}
+}
+
 // DetectViolations performs violation detection after all uses are recorded.
 // For each root with multiple uses, check if an earlier use can reach a later one.
 func (t *Tracker) DetectViolations() {
@@ -192,39 +223,8 @@ func (t *Tracker) DetectViolations() {
 		if len(uses) <= 1 {
 			continue // Need at least 2 polluting uses for a violation
 		}
-
-		// Combine all uses (polluting + pure) for fix generation
-		allUses := append([]UsageInfo{}, uses...)
-		if pureUses, ok := t.pureUses[root]; ok {
-			allUses = append(allUses, pureUses...)
-		}
-
-		// For each pair of uses, check if the earlier one can reach the later one
-		for i, target := range uses {
-			for j, src := range uses {
-				if i == j {
-					continue
-				}
-
-				// Only report if src is BEFORE target (earlier position)
-				if src.Pos >= target.Pos {
-					continue
-				}
-
-				// Different functions (closure): position order is sufficient
-				if src.Block != nil && target.Block != nil &&
-					src.Block.Parent() != target.Block.Parent() {
-					t.addViolationWithContext(target.Pos, root, allUses)
-					break
-				}
-
-				// Same function: check CFG reachability
-				if t.isReachable(src.Block, target.Block) {
-					t.addViolationWithContext(target.Pos, root, allUses)
-					break
-				}
-			}
-		}
+		allUses := t.getAllUses(root)
+		t.checkViolationsBetween(uses, uses, root, allUses)
 	}
 
 	// Check pure uses against polluting uses
@@ -232,34 +232,10 @@ func (t *Tracker) DetectViolations() {
 	for root, pureUses := range t.pureUses {
 		pollutingUses := t.pollutingUses[root]
 		if len(pollutingUses) == 0 {
-			continue // No polluting uses for this root
+			continue
 		}
-
-		// Combine all uses for fix generation
-		allUses := append([]UsageInfo{}, pollutingUses...)
-		allUses = append(allUses, pureUses...)
-
-		for _, pureUse := range pureUses {
-			for _, pollutingUse := range pollutingUses {
-				// Only report if polluting is BEFORE pure (earlier position)
-				if pollutingUse.Pos >= pureUse.Pos {
-					continue
-				}
-
-				// Different functions (closure): position order is sufficient
-				if pollutingUse.Block != nil && pureUse.Block != nil &&
-					pollutingUse.Block.Parent() != pureUse.Block.Parent() {
-					t.addViolationWithContext(pureUse.Pos, root, allUses)
-					break
-				}
-
-				// Same function: check CFG reachability
-				if t.isReachable(pollutingUse.Block, pureUse.Block) {
-					t.addViolationWithContext(pureUse.Pos, root, allUses)
-					break
-				}
-			}
-		}
+		allUses := t.getAllUses(root)
+		t.checkViolationsBetween(pureUses, pollutingUses, root, allUses)
 	}
 
 	// Check assignment uses against polluting uses
@@ -267,37 +243,10 @@ func (t *Tracker) DetectViolations() {
 	for root, assignmentUses := range t.assignmentUses {
 		pollutingUses := t.pollutingUses[root]
 		if len(pollutingUses) == 0 {
-			continue // No polluting uses for this root
+			continue
 		}
-
-		// Combine all uses for fix generation
-		allUses := append([]UsageInfo{}, pollutingUses...)
-		allUses = append(allUses, assignmentUses...)
-		if pureUses, ok := t.pureUses[root]; ok {
-			allUses = append(allUses, pureUses...)
-		}
-
-		for _, assignmentUse := range assignmentUses {
-			for _, pollutingUse := range pollutingUses {
-				// Only report if polluting is BEFORE assignment (earlier position)
-				if pollutingUse.Pos >= assignmentUse.Pos {
-					continue
-				}
-
-				// Different functions (closure): position order is sufficient
-				if pollutingUse.Block != nil && assignmentUse.Block != nil &&
-					pollutingUse.Block.Parent() != assignmentUse.Block.Parent() {
-					t.addViolationWithContext(assignmentUse.Pos, root, allUses)
-					break
-				}
-
-				// Same function: check CFG reachability
-				if t.isReachable(pollutingUse.Block, assignmentUse.Block) {
-					t.addViolationWithContext(assignmentUse.Pos, root, allUses)
-					break
-				}
-			}
-		}
+		allUses := t.getAllUses(root)
+		t.checkViolationsBetween(assignmentUses, pollutingUses, root, allUses)
 	}
 }
 

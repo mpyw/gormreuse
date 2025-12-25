@@ -818,15 +818,21 @@ type GoHandler struct{}
 
 // Handle processes a Go instruction.
 func (h *GoHandler) Handle(g *ssa.Go, ctx *Context) {
-	processGormDBCallCommon(&g.Call, g.Pos(), g.Block(), ctx)
+	block := g.Block()
+	processGormDBCallCommonWith(&g.Call, g.Pos(), ctx, func(root ssa.Value) bool {
+		return ctx.Tracker.IsPollutedAt(root, block)
+	})
 }
 
 // DeferHandler handles *ssa.Defer instructions.
 type DeferHandler struct{}
 
 // Handle processes a Defer instruction.
+// Defer uses IsPollutedAnywhere because it executes at function exit.
 func (h *DeferHandler) Handle(d *ssa.Defer, ctx *Context) {
-	processGormDBCallCommonDefer(&d.Call, d.Pos(), ctx)
+	processGormDBCallCommonWith(&d.Call, d.Pos(), ctx, func(root ssa.Value) bool {
+		return ctx.Tracker.IsPollutedAnywhere(root)
+	})
 }
 
 // SendHandler handles *ssa.Send instructions.
@@ -902,8 +908,11 @@ func (h *MakeInterfaceHandler) Handle(mi *ssa.MakeInterface, ctx *Context) {
 	ctx.Tracker.MarkPolluted(root, mi.Block(), mi.Pos())
 }
 
-// processGormDBCallCommon processes gorm calls in go statements.
-func processGormDBCallCommon(callCommon *ssa.CallCommon, pos token.Pos, block *ssa.BasicBlock, ctx *Context) {
+// pollutionChecker is a function that checks if a root is polluted.
+type pollutionChecker func(root ssa.Value) bool
+
+// processGormDBCallCommonWith processes gorm calls with a custom pollution checker.
+func processGormDBCallCommonWith(callCommon *ssa.CallCommon, pos token.Pos, ctx *Context, isPolluted pollutionChecker) {
 	callee := callCommon.StaticCallee()
 	if callee == nil {
 		return
@@ -923,7 +932,7 @@ func processGormDBCallCommon(callCommon *ssa.CallCommon, pos token.Pos, block *s
 			return
 		}
 
-		if ctx.Tracker.IsPollutedAt(root, block) {
+		if isPolluted(root) {
 			ctx.Tracker.AddViolationWithRoot(pos, root)
 		}
 		return
@@ -940,52 +949,7 @@ func processGormDBCallCommon(callCommon *ssa.CallCommon, pos token.Pos, block *s
 			continue
 		}
 
-		if ctx.Tracker.IsPollutedAt(root, block) {
-			ctx.Tracker.AddViolationWithRoot(pos, root)
-		}
-	}
-}
-
-// processGormDBCallCommonDefer processes gorm calls in defer statements.
-func processGormDBCallCommonDefer(callCommon *ssa.CallCommon, pos token.Pos, ctx *Context) {
-	callee := callCommon.StaticCallee()
-	if callee == nil {
-		return
-	}
-
-	sig := callee.Signature
-
-	// Method call on *gorm.DB
-	if sig != nil && sig.Recv() != nil && typeutil.IsGormDB(sig.Recv().Type()) {
-		if len(callCommon.Args) == 0 {
-			return
-		}
-		recv := callCommon.Args[0]
-
-		root := ctx.RootTracer.FindMutableRoot(recv, ctx.LoopInfo)
-		if root == nil {
-			return
-		}
-
-		// Defer: check if polluted anywhere (executes at function exit)
-		if ctx.Tracker.IsPollutedAnywhere(root) {
-			ctx.Tracker.AddViolationWithRoot(pos, root)
-		}
-		return
-	}
-
-	// Function call with *gorm.DB arguments
-	for _, arg := range callCommon.Args {
-		if !typeutil.IsGormDB(arg.Type()) {
-			continue
-		}
-
-		root := ctx.RootTracer.FindMutableRoot(arg, ctx.LoopInfo)
-		if root == nil {
-			continue
-		}
-
-		if ctx.Tracker.IsPollutedAnywhere(root) {
+		if isPolluted(root) {
 			ctx.Tracker.AddViolationWithRoot(pos, root)
 		}
 	}
