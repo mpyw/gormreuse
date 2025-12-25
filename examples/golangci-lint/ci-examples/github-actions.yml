@@ -1,0 +1,52 @@
+# GitHub Actions workflow example for using gormreuse with golangci-lint
+# Copy this to .github/workflows/lint.yml in your project
+
+name: Lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  golangci-lint:
+    name: golangci-lint with gormreuse
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Install golangci-lint
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | \
+            sh -s -- -b $(go env GOPATH)/bin v1.63.4
+
+      # Cache the custom binary to speed up subsequent runs
+      - name: Cache custom golangci-lint binary
+        id: cache-custom-gcl
+        uses: actions/cache@v4
+        with:
+          path: ./custom-gcl
+          key: custom-gcl-${{ runner.os }}-${{ hashFiles('.custom-gcl.yml') }}
+
+      - name: Build custom golangci-lint
+        if: steps.cache-custom-gcl.outputs.cache-hit != 'true'
+        run: golangci-lint custom
+
+      - name: Run linters
+        run: ./custom-gcl run ./...
+
+      # Optional: Upload results to GitHub Code Scanning
+      - name: Upload SARIF results
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: golangci-lint.sarif
+        continue-on-error: true

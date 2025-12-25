@@ -59,6 +59,57 @@ go run github.com/mpyw/gormreuse/cmd/gormreuse@v0.9.0 ./...
 > [!CAUTION]
 > To prevent supply chain attacks, pin to a specific version tag instead of `@latest` in CI/CD pipelines (e.g., `@v0.9.0`).
 
+### Using with [golangci-lint](https://golangci-lint.run/)
+
+gormreuse can be integrated with golangci-lint using either the Module Plugin System (recommended) or Go Plugin System.
+
+#### Module Plugin System (Recommended)
+
+The Module Plugin System is easier to use and doesn't require matching Go versions.
+
+1. Create `.custom-gcl.yml` in your project root:
+
+```yaml
+version: v1.63.4  # Use latest golangci-lint version
+plugins:
+  - module: github.com/mpyw/gormreuse
+    import: github.com/mpyw/gormreuse
+    version: v0.9.0
+```
+
+2. Build custom golangci-lint binary:
+
+```bash
+golangci-lint custom
+```
+
+This creates `./custom-gcl` (or `custom-gcl.exe` on Windows).
+
+3. Configure in `.golangci.yaml`:
+
+```yaml
+linters:
+  enable:
+    - gormreuse
+
+linters-settings:
+  gormreuse:
+    # Configuration options (see Flags section)
+```
+
+4. Run the custom binary:
+
+```bash
+./custom-gcl run ./...
+```
+
+#### Go Plugin System (Advanced)
+
+For the Go Plugin System approach, see [docs/golangci-lint-integration.md](./docs/golangci-lint-integration.md).
+
+> [!TIP]
+> For CI/CD integration and troubleshooting, see the [full integration guide](./docs/golangci-lint-integration.md).
+
 ## Flags
 
 | Flag | Default | Description |

@@ -1,0 +1,9 @@
+# golangci-lint Module Plugin Configuration for gormreuse
+# See: https://golangci-lint.run/docs/plugins/module-plugins/
+
+version: v1.63.4  # golangci-lint version to use
+
+plugins:
+  - module: github.com/mpyw/gormreuse
+    import: github.com/mpyw/gormreuse
+    version: v0.9.0  # Pin to specific version for reproducibility

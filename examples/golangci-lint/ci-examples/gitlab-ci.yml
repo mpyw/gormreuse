@@ -1,0 +1,31 @@
+# GitLab CI configuration example for using gormreuse with golangci-lint
+# Copy this to .gitlab-ci.yml in your project
+
+stages:
+  - test
+
+lint:
+  stage: test
+  image: golang:1.24
+
+  before_script:
+    # Install golangci-lint
+    - curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh |
+        sh -s -- -b $(go env GOPATH)/bin v1.63.4
+    - export PATH=$PATH:$(go env GOPATH)/bin
+
+  script:
+    # Build custom golangci-lint with gormreuse
+    - golangci-lint custom
+    # Run linters
+    - ./custom-gcl run ./...
+
+  cache:
+    key: ${CI_COMMIT_REF_SLUG}
+    paths:
+      - .cache/golangci-lint
+      - custom-gcl
+
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
