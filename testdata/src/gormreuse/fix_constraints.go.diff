@@ -1,6 +1,6 @@
 --- fix_constraints.go	1970-01-01 00:00:00
 +++ fix_constraints.go.golden	1970-01-01 00:00:00
-@@ -1,441 +1,441 @@
+@@ -1,484 +1,484 @@
  package internal
  
  import (
@@ -464,4 +464,51 @@
 +	q := db.Where("base").Session(&gorm.Session{})
  	q.Find(nil)
  	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+ }
+ 
+ // =============================================================================
+ // PART 6: EDGE CASES - Function calls in arguments
+ // =============================================================================
+ 
+ // Helper functions for argument edge case testing
+ func buildCondition(v interface{}) interface{} { return v }
+ func computeValue(v int) int                   { return v }
+ 
+ // argumentContainsFunctionCall demonstrates function call in Where argument.
+ // The innermost *gorm.DB call should still be identified correctly as q.Where,
+ // not the argument function call.
+ // Fix: q = q.Where(buildCondition("x"))
+ func argumentContainsFunctionCall(db *gorm.DB) {
+ 	q := db.Where("base")
+-	q.Where(buildCondition("x"))
++	q = q.Where(buildCondition("x"))
+ 	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+ }
+ 
+ // argumentMultipleNestedCalls demonstrates deeply nested function calls in argument.
+ // Fix: q = q.Where(buildCondition(computeValue(42)))
+ func argumentMultipleNestedCalls(db *gorm.DB) {
+ 	q := db.Where("base")
+-	q.Where(buildCondition(computeValue(42)))
++	q = q.Where(buildCondition(computeValue(42)))
+ 	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+ }
+ 
+ // methodChainWithFunctionCallArgs demonstrates method chain where each method
+ // has function call arguments.
+ // Fix: q = q.Where(buildCondition("x")).Order(buildCondition("y"))
+ func methodChainWithFunctionCallArgs(db *gorm.DB) {
+-	q := db.Where("base")
++	q := db.Where("base").Session(&gorm.Session{})
+ 	q.Where(buildCondition("x")).Order(buildCondition("y"))
+ 	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+ }
+ 
+ // complexArgumentExpression demonstrates complex expression in argument.
+ // Fix: q = q.Where("id = ?", computeValue(42))
+ func complexArgumentExpression(db *gorm.DB) {
+ 	q := db.Where("base")
+-	q.Where("id = ?", computeValue(42))
++	q = q.Where("id = ?", computeValue(42))
+ 	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
  }

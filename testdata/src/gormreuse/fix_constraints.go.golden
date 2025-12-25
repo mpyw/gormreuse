@@ -45,9 +45,31 @@ func localVariableMultiple(db *gorm.DB) {
 // 1.2 Parent scope variables (closure capture)
 // ───────────────────────────────────────────────────────────────────────────
 
-// NOTE: Closure test cases removed due to known bug in fix generator
-// that generates duplicate assignments (q = q = q.Where("inner"))
-// See evil.go for closure pattern testing without fixes
+// [BUG] parentScopeVariable demonstrates reassignment to parent scope variable.
+// KNOWN BUG: Generates duplicate assignments (q = q = q.Where("inner"))
+// This is invalid syntax but kept to document the bug.
+func parentScopeVariable(db *gorm.DB) {
+	q := db.Where("outer")
+
+	func() {
+		q = q = q.Where("inner")
+		q.Find(nil) // want `\*gorm\.DB instance reused after chain method` `\*gorm\.DB instance reused after chain method`
+	}()
+}
+
+// [BUG] nestedClosureFixConstraints demonstrates reassignment in deeply nested closures.
+// KNOWN BUG: Generates duplicate assignments (q = q = q = q.Where("deep"))
+// This is invalid syntax but kept to document the bug.
+func nestedClosureFixConstraints(db *gorm.DB) {
+	q := db.Where("base")
+
+	func() {
+		func() {
+			q = q = q = q.Where("deep")
+			q.Find(nil) // want `\*gorm\.DB instance reused after chain method` `\*gorm\.DB instance reused after chain method` `\*gorm\.DB instance reused after chain method`
+		}()
+	}()
+}
 
 // ───────────────────────────────────────────────────────────────────────────
 // 1.3 Global variables
@@ -438,4 +460,47 @@ func whySessionWorks(db *gorm.DB) {
 	q := db.Where("base").Session(&gorm.Session{})
 	q.Find(nil)
 	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// =============================================================================
+// PART 6: EDGE CASES - Function calls in arguments
+// =============================================================================
+
+// Helper functions for argument edge case testing
+func buildCondition(v interface{}) interface{} { return v }
+func computeValue(v int) int                   { return v }
+
+// argumentContainsFunctionCall demonstrates function call in Where argument.
+// The innermost *gorm.DB call should still be identified correctly as q.Where,
+// not the argument function call.
+// Fix: q = q.Where(buildCondition("x"))
+func argumentContainsFunctionCall(db *gorm.DB) {
+	q := db.Where("base")
+	q = q.Where(buildCondition("x"))
+	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// argumentMultipleNestedCalls demonstrates deeply nested function calls in argument.
+// Fix: q = q.Where(buildCondition(computeValue(42)))
+func argumentMultipleNestedCalls(db *gorm.DB) {
+	q := db.Where("base")
+	q = q.Where(buildCondition(computeValue(42)))
+	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// methodChainWithFunctionCallArgs demonstrates method chain where each method
+// has function call arguments.
+// Fix: q = q.Where(buildCondition("x")).Order(buildCondition("y"))
+func methodChainWithFunctionCallArgs(db *gorm.DB) {
+	q := db.Where("base").Session(&gorm.Session{})
+	q.Where(buildCondition("x")).Order(buildCondition("y"))
+	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// complexArgumentExpression demonstrates complex expression in argument.
+// Fix: q = q.Where("id = ?", computeValue(42))
+func complexArgumentExpression(db *gorm.DB) {
+	q := db.Where("base")
+	q = q.Where("id = ?", computeValue(42))
+	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
 }
