@@ -123,14 +123,6 @@ func (t *Tracker) isReachable(pollutedBlock, targetBlock *ssa.BasicBlock) bool {
 	return t.cfgAnalyzer.CanReach(pollutedBlock, targetBlock)
 }
 
-// addViolation records a violation.
-func (t *Tracker) addViolation(pos token.Pos) {
-	t.violations = append(t.violations, Violation{
-		Pos:     pos,
-		Message: "*gorm.DB instance reused after chain method (use .Session(&gorm.Session{}) to make it safe)",
-	})
-}
-
 // addViolationWithContext adds a violation with root and uses information for fix generation.
 func (t *Tracker) addViolationWithContext(pos token.Pos, root ssa.Value, allUses []UsageInfo) {
 	t.violations = append(t.violations, Violation{
@@ -163,9 +155,18 @@ func (t *Tracker) MarkPolluted(root ssa.Value, block *ssa.BasicBlock, pos token.
 	t.pollutingUses[root] = append(t.pollutingUses[root], UsageInfo{Block: block, Pos: pos})
 }
 
-// AddViolation explicitly adds a violation.
-func (t *Tracker) AddViolation(pos token.Pos) {
-	t.addViolation(pos)
+// AddViolationWithRoot adds a violation with root information for fix generation.
+func (t *Tracker) AddViolationWithRoot(pos token.Pos, root ssa.Value) {
+	allUses := t.getAllUses(root)
+	t.addViolationWithContext(pos, root, allUses)
+}
+
+// getAllUses returns all uses (pure + polluting) for a root.
+func (t *Tracker) getAllUses(root ssa.Value) []UsageInfo {
+	var allUses []UsageInfo
+	allUses = append(allUses, t.pureUses[root]...)
+	allUses = append(allUses, t.pollutingUses[root]...)
+	return allUses
 }
 
 // DetectViolations performs violation detection after all uses are recorded.

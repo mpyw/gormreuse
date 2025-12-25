@@ -155,7 +155,22 @@ func (c *checker) checkFunction(fn *ssa.Function) {
 	analyzer := ssautil.NewAnalyzer(fn, c.pureFuncs, c.immutableReturnFuncs)
 	violations := analyzer.Analyze()
 
+	// Deduplicate violations by root to avoid generating duplicate fixes.
+	// Multiple violations from the same root (e.g., tripleUse) should only
+	// generate one set of fixes.
+	seenRoots := make(map[ssa.Value]bool)
+
 	for _, v := range violations {
+		// For fix generation, only process one violation per root
+		if v.Root != nil && seenRoots[v.Root] {
+			// Still report the violation, but don't generate duplicate fixes
+			c.reportViolationWithoutFix(v)
+			continue
+		}
+		if v.Root != nil {
+			seenRoots[v.Root] = true
+		}
+
 		c.reportViolation(v)
 	}
 }
@@ -185,5 +200,30 @@ func (c *checker) reportViolation(v pollution.Violation) {
 		Pos:            pos,
 		Message:        v.Message,
 		SuggestedFixes: suggestedFixes,
+	})
+}
+
+// reportViolationWithoutFix reports a violation without generating fixes.
+// Used for duplicate violations from the same root to avoid generating
+// duplicate fixes while still reporting all violation positions.
+func (c *checker) reportViolationWithoutFix(v pollution.Violation) {
+	pos := v.Pos
+
+	// Deduplicate: same position may be reached multiple times
+	if c.reported[pos] {
+		return
+	}
+	c.reported[pos] = true
+
+	// Check if line is ignored
+	line := c.pass.Fset.Position(pos).Line
+	if c.ignoreMap != nil && c.ignoreMap.ShouldIgnore(line) {
+		return // Suppressed by ignore directive
+	}
+
+	// Report without suggested fixes
+	c.pass.Report(analysis.Diagnostic{
+		Pos:     pos,
+		Message: v.Message,
 	})
 }

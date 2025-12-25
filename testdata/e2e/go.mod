@@ -1,4 +1,4 @@
-module github.com/mpyw/gormreuse/e2e/internal
+module github.com/mpyw/gormreuse/testdata/e2e
 
 go 1.24.0
 

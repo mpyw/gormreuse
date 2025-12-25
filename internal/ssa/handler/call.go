@@ -124,7 +124,7 @@ func (h *CallHandler) Handle(call *ssa.Call, ctx *Context) {
 
 		// Loop with external root - immediate violation (only for non-pure methods)
 		if isInLoop && ctx.CFG.IsDefinedOutsideLoop(root, ctx.LoopInfo) {
-			ctx.Tracker.AddViolation(call.Pos())
+			ctx.Tracker.AddViolationWithRoot(call.Pos(), root)
 		}
 	}
 
@@ -135,7 +135,7 @@ func (h *CallHandler) Handle(call *ssa.Call, ctx *Context) {
 			continue
 		}
 		if ctx.Tracker.IsPollutedAt(r, call.Block()) {
-			ctx.Tracker.AddViolation(call.Pos())
+			ctx.Tracker.AddViolationWithRoot(call.Pos(), r)
 		}
 	}
 }
@@ -169,7 +169,7 @@ func (h *CallHandler) processBoundMethodCall(call *ssa.Call, mc *ssa.MakeClosure
 
 		// Loop with external root - immediate violation (only for non-pure methods)
 		if isInLoop && ctx.CFG.IsDefinedOutsideLoop(root, ctx.LoopInfo) {
-			ctx.Tracker.AddViolation(call.Pos())
+			ctx.Tracker.AddViolationWithRoot(call.Pos(), root)
 		}
 	}
 }
@@ -329,7 +329,7 @@ func processGormDBCallCommon(callCommon *ssa.CallCommon, pos token.Pos, block *s
 		}
 
 		if ctx.Tracker.IsPollutedAt(root, block) {
-			ctx.Tracker.AddViolation(pos)
+			ctx.Tracker.AddViolationWithRoot(pos, root)
 		}
 		return
 	}
@@ -346,7 +346,7 @@ func processGormDBCallCommon(callCommon *ssa.CallCommon, pos token.Pos, block *s
 		}
 
 		if ctx.Tracker.IsPollutedAt(root, block) {
-			ctx.Tracker.AddViolation(pos)
+			ctx.Tracker.AddViolationWithRoot(pos, root)
 		}
 	}
 }
@@ -374,7 +374,7 @@ func processGormDBCallCommonDefer(callCommon *ssa.CallCommon, pos token.Pos, ctx
 
 		// Defer: check if polluted anywhere (executes at function exit)
 		if ctx.Tracker.IsPollutedAnywhere(root) {
-			ctx.Tracker.AddViolation(pos)
+			ctx.Tracker.AddViolationWithRoot(pos, root)
 		}
 		return
 	}
@@ -391,7 +391,7 @@ func processGormDBCallCommonDefer(callCommon *ssa.CallCommon, pos token.Pos, ctx
 		}
 
 		if ctx.Tracker.IsPollutedAnywhere(root) {
-			ctx.Tracker.AddViolation(pos)
+			ctx.Tracker.AddViolationWithRoot(pos, root)
 		}
 	}
 }
