@@ -143,6 +143,18 @@ func (g *Generator) findNonFinisherUses(uses []pollution.UsageInfo) []pollution.
 
 // isNonFinisherExprStmt checks if a position is a non-finisher expression statement.
 // Non-finisher means the result is not used (e.g., q.Where("a") without assignment).
+//
+// IMPORTANT: Reassignment is only valid when the *gorm.DB call is the DIRECT
+// expression in the ExprStmt, not nested inside another function call.
+//
+// Valid for reassignment:
+//   q.Where("a")  // ExprStmt with CallExpr at top level
+//
+// NOT valid for reassignment (nested calls):
+//   require.NoError(t, db.Save(&x).Error)  // *gorm.DB call nested inside require.NoError
+//   memtests.TruncateSchemaTables(db)      // *gorm.DB passed as argument
+//
+// For nested cases, we can only use Session strategy, not reassignment.
 func (g *Generator) isNonFinisherExprStmt(pos token.Pos) bool {
 	// Find the AST node at this position
 	file := g.findFileContaining(pos)
@@ -162,14 +174,42 @@ func (g *Generator) isNonFinisherExprStmt(pos token.Pos) bool {
 		return false
 	}
 
-	// Check if it's a call expression
-	callExpr, ok := exprStmt.X.(*ast.CallExpr)
-	if !ok {
+	// Find the innermost *gorm.DB CallExpr at this position
+	innerCallExpr := g.findInnermostCallExpr(file, pos)
+	if innerCallExpr == nil {
 		return false
 	}
 
-	// Check if it's a method call (selector expression)
-	sel, ok := callExpr.Fun.(*ast.SelectorExpr)
+	// CRITICAL CHECK 1: The innermost *gorm.DB call must be the SAME as (or parent of)
+	// the ExprStmt's direct expression. If not, the *gorm.DB call is nested
+	// inside another function call, and we cannot use reassignment.
+	//
+	// Example:
+	//   ExprStmt: require.NoError(t, db.Save(&x).Error)
+	//   ExprStmt.X: require.NoError(...)  <- This is NOT the *gorm.DB call!
+	//   Innermost: db.Save(...)           <- This IS the *gorm.DB call
+	//   These are different, so return false
+
+	// Check if ExprStmt.X is the innermost call or contains it through selectors
+	if !g.isDirectOrSelectorOf(exprStmt.X, innerCallExpr) {
+		return false
+	}
+
+	// CRITICAL CHECK 2: The OUTERMOST expression must return *gorm.DB, not error or void.
+	// Example:
+	//   q.Where("x").Find(nil).Error  <- Returns error, not *gorm.DB
+	//   We cannot do: q = q.Where("x").Find(nil).Error (type mismatch!)
+	//
+	// If ExprStmt.X is a SelectorExpr accessing .Error or other non-DB fields,
+	// we cannot use reassignment.
+	if _, ok := exprStmt.X.(*ast.SelectorExpr); ok {
+		// ExprStmt.X is a selector (e.g., call.Error, call.RowsAffected)
+		// This means the outermost expression doesn't return *gorm.DB
+		return false
+	}
+
+	// Now check if innermost call is a method call (selector expression)
+	sel, ok := innerCallExpr.Fun.(*ast.SelectorExpr)
 	if !ok {
 		return false
 	}
@@ -512,6 +552,57 @@ func (g *Generator) traceForImmutable(v ssa.Value, visited map[ssa.Value]bool) b
 // =============================================================================
 // AST Helper Methods
 // =============================================================================
+
+// isDirectOrSelectorOf checks if expr is target or a SelectorExpr chain ending with target.
+// Examples:
+//   expr = target                          -> true (direct match)
+//   expr = target.Error                    -> true (selector of target)
+//   expr = target.Where("x").Error         -> true (selector chain of target)
+//   expr = otherFunc(target)               -> false (target is argument, not direct)
+func (g *Generator) isDirectOrSelectorOf(expr ast.Expr, target *ast.CallExpr) bool {
+	if expr == target {
+		return true
+	}
+
+	// Check if expr is a SelectorExpr whose X eventually leads to target
+	sel, ok := expr.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+
+	// Recursively check if sel.X is or contains target
+	return g.isDirectOrSelectorOf(sel.X, target)
+}
+
+// findInnermostCallExpr finds the innermost CallExpr that contains the given position.
+// Returns nil if no CallExpr is found.
+func (g *Generator) findInnermostCallExpr(file *ast.File, pos token.Pos) *ast.CallExpr {
+	var bestMatch *ast.CallExpr
+	var bestMatchSize token.Pos = token.Pos(1<<31 - 1) // Max value
+
+	ast.Inspect(file, func(n ast.Node) bool {
+		if n == nil {
+			return false
+		}
+
+		// Look for CallExpr that contains the position
+		if callExpr, ok := n.(*ast.CallExpr); ok {
+			// Check if this call contains the target position
+			if callExpr.Pos() <= pos && pos <= callExpr.End() {
+				// Keep the smallest (innermost) match
+				size := callExpr.End() - callExpr.Pos()
+				if size < bestMatchSize {
+					bestMatch = callExpr
+					bestMatchSize = size
+				}
+			}
+		}
+
+		return n.Pos() <= pos
+	})
+
+	return bestMatch
+}
 
 // findFileContaining finds the AST file containing the given position.
 func (g *Generator) findFileContaining(pos token.Pos) *ast.File {
