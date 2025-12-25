@@ -554,6 +554,7 @@ func chaosPolluteMultipleTimes(db *gorm.DB, a, b, c, d bool) {
 }
 
 // chaosPolluteThenReassign demonstrates pollution followed by reassignment in nested branches.
+// TODO: fix generator cannot handle this complex case (multiple fresh instances in nested branches)
 func chaosPolluteThenReassign(db *gorm.DB, a, b, c bool) {
 	q := db.Where("base")
 
