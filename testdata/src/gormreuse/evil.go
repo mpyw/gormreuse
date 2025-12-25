@@ -6,6 +6,60 @@ import "gorm.io/gorm"
 var DB *gorm.DB
 
 // =============================================================================
+// SHOULD REPORT - Conditional usage (finisher methods in conditionals)
+// =============================================================================
+
+// conditionalUsageBothMayExecute demonstrates both Find and Count may execute conditionally.
+func conditionalUsageBothMayExecute(db *gorm.DB, flag1, flag2 bool) {
+	q := db.Where("base")
+
+	if flag1 {
+		q.Find(nil)
+	}
+
+	if flag2 {
+		q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	}
+}
+
+// conditionalUsageEitherOr demonstrates either Find or Count executes.
+// Note: Linter does NOT report this as violation (mutually exclusive branches).
+func conditionalUsageEitherOr(db *gorm.DB, flag bool) {
+	q := db.Where("base")
+
+	if flag {
+		q.Find(nil)
+	} else {
+		q.Count(nil) // OK: mutually exclusive with Find
+	}
+}
+
+// conditionalUsageOneConditionalOneUnconditional demonstrates one conditional, one unconditional.
+func conditionalUsageOneConditionalOneUnconditional(db *gorm.DB, flag bool) {
+	q := db.Where("base")
+
+	if flag {
+		q.Find(nil)
+	}
+
+	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// conditionalUsageNestedConditions demonstrates nested conditionals with usage.
+func conditionalUsageNestedConditions(db *gorm.DB, a, b bool) {
+	q := db.Where("base")
+
+	if a {
+		q.Find(nil)
+		if b {
+			q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+		}
+	} else {
+		q.First(nil) // OK: mutually exclusive with Find branch
+	}
+}
+
+// =============================================================================
 // SHOULD REPORT - Closure tracking (via FreeVar tracing)
 // =============================================================================
 
