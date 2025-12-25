@@ -94,14 +94,14 @@ func (g *Generator) Generate(v pollution.Violation) []analysis.SuggestedFix {
 	// Generate TextEdits
 	var edits []analysis.TextEdit
 
-	// Add reassignments for non-finisher uses
+	// PHASE 1: Add reassignments for non-finisher uses (Rule 1)
 	for _, use := range nonFinisherUses {
 		if edit := g.generateReassignmentEdit(use.Pos); edit != nil {
 			edits = append(edits, *edit)
 		}
 	}
 
-	// Add Session to roots that need it
+	// PHASE 2: Add Session to roots that need it (Rule 2)
 	for _, root := range rootsNeedingSession {
 		if edit := g.generateSessionEdit(root.Pos()); edit != nil {
 			edits = append(edits, *edit)
@@ -111,6 +111,12 @@ func (g *Generator) Generate(v pollution.Violation) []analysis.SuggestedFix {
 	if len(edits) == 0 {
 		return nil
 	}
+
+	// Sort edits by position (earlier positions first)
+	// This ensures correct application order
+	sort.Slice(edits, func(i, j int) bool {
+		return edits[i].Pos < edits[j].Pos
+	})
 
 	return []analysis.SuggestedFix{
 		{
@@ -235,16 +241,28 @@ func (g *Generator) findRootsNeedingSession(virtualUses map[ssa.Value][]pollutio
 }
 
 // generateReassignmentEdit generates a TextEdit for reassignment.
-// Inserts "q = " before the expression.
+// Inserts "q = " before the statement.
 func (g *Generator) generateReassignmentEdit(pos token.Pos) *analysis.TextEdit {
 	varName := g.getVariableNameAtPos(pos)
 	if varName == "" {
 		return nil
 	}
 
+	// Find the statement containing this position
+	file := g.findFileContaining(pos)
+	if file == nil {
+		return nil
+	}
+
+	stmt := g.findStmtAtPos(file, pos)
+	if stmt == nil {
+		return nil
+	}
+
+	// Insert at the beginning of the statement
 	return &analysis.TextEdit{
-		Pos:     pos,
-		End:     pos,
+		Pos:     stmt.Pos(),
+		End:     stmt.Pos(),
 		NewText: []byte(varName + " = "),
 	}
 }
@@ -305,30 +323,114 @@ func (g *Generator) getCallResultAtPos(pos token.Pos) ssa.Value {
 	return nil
 }
 
-// getVariableNameAtPos gets the variable name at the given position.
+// getVariableNameAtPos gets the assignable left-hand side expression at the given position.
+// Returns the full expression that can be assigned to (e.g., "q", "obj.field").
+// Returns empty string if not assignable (e.g., function call result).
 func (g *Generator) getVariableNameAtPos(pos token.Pos) string {
 	file := g.findFileContaining(pos)
 	if file == nil {
 		return ""
 	}
 
-	stmt := g.findStmtAtPos(file, pos)
-	if stmt == nil {
-		return ""
-	}
+	// Find the CallExpr that contains or starts at this position
+	var lhs string
+	ast.Inspect(file, func(n ast.Node) bool {
+		if n == nil {
+			return false
+		}
 
-	// For ExprStmt, extract the receiver variable name
-	if exprStmt, ok := stmt.(*ast.ExprStmt); ok {
-		if callExpr, ok := exprStmt.X.(*ast.CallExpr); ok {
-			if sel, ok := callExpr.Fun.(*ast.SelectorExpr); ok {
-				if ident, ok := sel.X.(*ast.Ident); ok {
-					return ident.Name
+		// Look for CallExpr that matches the position
+		if callExpr, ok := n.(*ast.CallExpr); ok {
+			// Check if this is the call at the target position
+			if callExpr.Pos() <= pos && pos <= callExpr.End() {
+				// Extract receiver from selector (e.g., q.Where -> q)
+				if sel, ok := callExpr.Fun.(*ast.SelectorExpr); ok {
+					lhs = g.extractAssignableLHS(sel.X)
+					return false // Found it, stop searching
 				}
 			}
 		}
-	}
 
-	return ""
+		return n.Pos() <= pos
+	})
+
+	return lhs
+}
+
+// extractAssignableLHS extracts the assignable left-hand side from an expression.
+// Returns empty string if the expression is not assignable.
+//
+// Assignable expressions in Go:
+// - Identifiers: x
+// - Field selectors: x.f
+// - Index expressions: x[i]
+// - Pointer indirection: *ptr
+// - Parenthesized expressions: (x)
+//
+// Not assignable:
+// - Function calls: f()
+// - Slice expressions: x[i:j]
+// - Type assertions: x.(T)
+// - Literals, composite literals
+func (g *Generator) extractAssignableLHS(expr ast.Expr) string {
+	// Use a buffer to reconstruct the expression as we traverse
+	return g.extractAssignableLHSImpl(expr)
+}
+
+func (g *Generator) extractAssignableLHSImpl(expr ast.Expr) string {
+	switch e := expr.(type) {
+	case *ast.Ident:
+		// Simple identifier: q
+		return e.Name
+
+	case *ast.SelectorExpr:
+		// Field selector: obj.field
+		base := g.extractAssignableLHSImpl(e.X)
+		if base == "" {
+			return ""
+		}
+		return base + "." + e.Sel.Name
+
+	case *ast.IndexExpr:
+		// Index expression: arr[i], map[key]
+		// Assignable, but complex to reconstruct with dynamic index
+		// For now, return empty to skip
+		// TODO: Could use go/printer to format the full expression
+		return ""
+
+	case *ast.StarExpr:
+		// Pointer indirection: *ptr
+		base := g.extractAssignableLHSImpl(e.X)
+		if base == "" {
+			return ""
+		}
+		return "*" + base
+
+	case *ast.ParenExpr:
+		// Parenthesized expression: (x)
+		// Recurse to unwrap
+		return g.extractAssignableLHSImpl(e.X)
+
+	case *ast.CallExpr:
+		// Function call: not assignable
+		return ""
+
+	case *ast.SliceExpr:
+		// Slice expression: not assignable
+		return ""
+
+	case *ast.TypeAssertExpr:
+		// Type assertion: not assignable
+		return ""
+
+	case *ast.BasicLit, *ast.CompositeLit:
+		// Literals: not assignable
+		return ""
+
+	default:
+		// Other expressions: conservatively treat as not assignable
+		return ""
+	}
 }
 
 // getCallExprEndPos gets the end position of the CallExpr at the given position.
