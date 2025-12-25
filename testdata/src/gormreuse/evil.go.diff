@@ -2690,7 +2690,8 @@
  
  	q.Find(nil) // First branch - pollutes q
  
- 	q.Where("a").Where("b").Order("c") // want `\*gorm\.DB instance reused after chain method`
+-	q.Where("a").Where("b").Order("c") // want `\*gorm\.DB instance reused after chain method`
++	q = q.Where("a").Where("b").Order("c") // want `\*gorm\.DB instance reused after chain method`
  }
  
  // whereOnlyClosure demonstrates closure pollution then Where-only outside.
