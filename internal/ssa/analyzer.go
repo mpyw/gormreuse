@@ -73,7 +73,7 @@ type Analyzer struct {
 //   - fn: The SSA function to analyze (can be nil, will return no violations)
 //   - pureFuncs: Set of functions marked with //gormreuse:pure directive
 //   - immutableReturnFuncs: Set of functions marked with //gormreuse:immutable-return directive
-func NewAnalyzer(fn *ssa.Function, pureFuncs *directive.PureFuncSet, immutableReturnFuncs *directive.ImmutableReturnFuncSet) *Analyzer {
+func NewAnalyzer(fn *ssa.Function, pureFuncs, immutableReturnFuncs *directive.DirectiveFuncSet) *Analyzer {
 	return &Analyzer{
 		fn:          fn,
 		rootTracer:  tracer.New(pureFuncs, immutableReturnFuncs),
@@ -97,7 +97,7 @@ func NewAnalyzer(fn *ssa.Function, pureFuncs *directive.PureFuncSet, immutableRe
 // Closures that capture *gorm.DB are processed recursively to detect
 // violations across closure boundaries.
 func (a *Analyzer) Analyze() []Violation {
-	tracker := pollution.New(a.cfgAnalyzer, a.fn)
+	tracker := pollution.New(a.cfgAnalyzer)
 
 	// PHASE 1: TRACKING
 	// Process all instructions and record usages

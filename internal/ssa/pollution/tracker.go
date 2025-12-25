@@ -79,9 +79,6 @@ type Tracker struct {
 
 	// cfgAnalyzer for reachability checks.
 	cfgAnalyzer CFGAnalyzer
-
-	// analyzedFn is the root function being analyzed.
-	analyzedFn *ssa.Function
 }
 
 // CFGAnalyzer interface for control flow analysis.
@@ -90,13 +87,12 @@ type CFGAnalyzer interface {
 }
 
 // New creates a new Tracker.
-func New(cfgAnalyzer CFGAnalyzer, fn *ssa.Function) *Tracker {
+func New(cfgAnalyzer CFGAnalyzer) *Tracker {
 	return &Tracker{
 		pollutingUses:  make(map[ssa.Value][]UsageInfo),
 		pureUses:       make(map[ssa.Value][]UsageInfo),
 		assignmentUses: make(map[ssa.Value][]UsageInfo),
 		cfgAnalyzer:    cfgAnalyzer,
-		analyzedFn:     fn,
 	}
 }
 

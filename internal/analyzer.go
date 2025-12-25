@@ -69,8 +69,7 @@ func RunSSA(
 	ssaInfo *buildssa.SSA,
 	ignoreMaps map[string]directive.IgnoreMap,
 	funcIgnores map[string]map[token.Pos]directive.FunctionIgnoreEntry,
-	pureFuncs *directive.PureFuncSet,
-	immutableReturnFuncs *directive.ImmutableReturnFuncSet,
+	pureFuncs, immutableReturnFuncs *directive.DirectiveFuncSet,
 	skipFiles map[string]bool,
 ) {
 	// Share a single reported map across all functions to deduplicate
@@ -138,17 +137,17 @@ func RunSSA(
 //   - Line-level ignore directives suppress violations
 //   - Violations are reported through the analysis.Pass
 type checker struct {
-	pass                 *analysis.Pass                    // For reporting diagnostics
-	ignoreMap            directive.IgnoreMap               // Line-level ignore directives
-	pureFuncs            *directive.PureFuncSet            // Pure functions for analysis
-	immutableReturnFuncs *directive.ImmutableReturnFuncSet // Immutable-return functions
-	reported             map[token.Pos]bool                // Deduplication of reports
+	pass                 *analysis.Pass              // For reporting diagnostics
+	ignoreMap            directive.IgnoreMap         // Line-level ignore directives
+	pureFuncs            *directive.DirectiveFuncSet // Pure functions for analysis
+	immutableReturnFuncs *directive.DirectiveFuncSet // Immutable-return functions
+	reported             map[token.Pos]bool          // Deduplication of reports
 }
 
 // newChecker creates a new checker for a specific file.
 // The reported map is shared across all functions to deduplicate violations
 // across parent functions and their closures.
-func newChecker(pass *analysis.Pass, ignoreMap directive.IgnoreMap, pureFuncs *directive.PureFuncSet, immutableReturnFuncs *directive.ImmutableReturnFuncSet, reported map[token.Pos]bool) *checker {
+func newChecker(pass *analysis.Pass, ignoreMap directive.IgnoreMap, pureFuncs, immutableReturnFuncs *directive.DirectiveFuncSet, reported map[token.Pos]bool) *checker {
 	return &checker{
 		pass:                 pass,
 		ignoreMap:            ignoreMap,
