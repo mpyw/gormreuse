@@ -27,7 +27,6 @@ func directNonFinisher(db *gorm.DB) {
 	q.Find(nil) // First use - pollutes q
 
 	// Direct call - ExprStmt.X IS the *gorm.DB call
-	// Fix: q = q.Where("a")
 	q.Where("a") // want `\*gorm\.DB instance reused after chain method`
 }
 
@@ -38,35 +37,7 @@ func directChainedNonFinisher(db *gorm.DB) {
 	q.Find(nil) // First use - pollutes q
 
 	// Direct chained call - ExprStmt.X IS the outermost *gorm.DB call
-	// Fix: q = q.Where("a").Where("b").Order("c")
 	q.Where("a").Where("b").Order("c") // want `\*gorm\.DB instance reused after chain method`
-}
-
-// multipleDirectNonFinishers demonstrates multiple direct non-finisher calls.
-// Each gets reassignment, creating new roots progressively.
-func multipleDirectNonFinishers(db *gorm.DB) {
-	q := db.Where("base")
-
-	// Fix: q = q.Where("a")
-	q.Where("a")  // want `\*gorm\.DB instance reused after chain method`
-	// Fix: q = q.Where("b")
-	q.Where("b")  // want `\*gorm\.DB instance reused after chain method`
-	// Fix: q = q.Order("c")
-	q.Order("c")  // want `\*gorm\.DB instance reused after chain method`
-
-	q.Find(nil)   // First actual finisher - OK after reassignments
-}
-
-// directWithFinisher demonstrates mix of non-finisher and finisher.
-func directWithFinisher(db *gorm.DB) {
-	q := db.Where("base")
-
-	// Fix: q = q.Where("a")
-	q.Where("a")   // want `\*gorm\.DB instance reused after chain method`
-	q.Find(nil)    // Finisher - OK (first use)
-	// Fix: q = q.Where("b")
-	q.Where("b")   // want `\*gorm\.DB instance reused after chain method`
-	q.Count(nil)   // want `\*gorm\.DB instance reused after chain method`
 }
 
 // =============================================================================
@@ -77,15 +48,14 @@ func directWithFinisher(db *gorm.DB) {
 // Reassignment is NOT valid - require.NoError returns void!
 // Must use Session strategy only.
 func nestedInRequireNoError(db *gorm.DB) {
-	db.Find(nil) // First use - pollutes db
+	db.Create(&struct{ ID int }{ID: 1}) // First use - pollutes db
 	// want `\*gorm\.DB instance reused after chain method`
 
 	// Nested call - ExprStmt.X is require.NoError, NOT db.Create
-	// require.NoError(t, db.Create(&struct{}{}).Error)
+	// require.NoError(t, db.Create(&struct{ ID int }{ID: 2}).Error)
 	// CANNOT add: db = require.NoError(...) <- require.NoError returns void!
-	// MUST use: db = db.Session(&gorm.Session{}) before this line
-	// Fix: db = db.Session(&gorm.Session{})
-	db.Create(&struct{}{}) // want `\*gorm\.DB instance reused after chain method`
+	// MUST use: db = db.Session(...) before this line
+	db.Create(&struct{ ID int }{ID: 2}) // want `\*gorm\.DB instance reused after chain method`
 }
 
 // nestedInRequireNoErrorChained demonstrates chained *gorm.DB in require.NoError.

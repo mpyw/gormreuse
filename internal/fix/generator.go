@@ -221,25 +221,6 @@ func (g *Generator) isNonFinisherExprStmt(pos token.Pos) bool {
 }
 
 // isFinisher checks if a method name is a GORM finisher method.
-// Finishers are methods that END a chain semantically.
-//
-// Although Create/Save/Update/Delete technically return *gorm.DB,
-// we treat them as finishers because:
-//   1. Users treat them as ending a logical operation
-//   2. Chaining after them is confusing and not idiomatic
-//   3. When used as ExprStmt (result unused), it's intentional
-//
-// Query execution finishers:
-//   - Find, First, Last, Take: Load data into destination
-//   - Count, Pluck: Aggregate operations
-//   - Row, Rows, Scan, ScanRows: Raw query access
-//
-// Data manipulation finishers (semantic):
-//   - Create, Save, Update, Updates, Delete
-//
-// Other:
-//   - Exec: Raw SQL execution
-//   - Transaction: Transaction wrapper
 func isFinisher(methodName string) bool {
 	finishers := map[string]bool{
 		"Find":        true,
@@ -252,11 +233,11 @@ func isFinisher(methodName string) bool {
 		"Row":         true,
 		"Rows":        true,
 		"ScanRows":    true,
-		"Create":      true, // Semantic finisher (idiomatic usage)
-		"Save":        true, // Semantic finisher (idiomatic usage)
-		"Update":      true, // Semantic finisher (idiomatic usage)
-		"Updates":     true, // Semantic finisher (idiomatic usage)
-		"Delete":      true, // Semantic finisher (idiomatic usage)
+		"Create":      true,
+		"Save":        true,
+		"Update":      true,
+		"Updates":     true,
+		"Delete":      true,
 		"Exec":        true,
 		"Transaction": true,
 	}
