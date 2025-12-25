@@ -92,12 +92,12 @@ import (
 // Note: User-defined pure functions (//gormreuse:pure) are NOT immutable sources.
 // They may return mutable values - only builtin pure methods guarantee immutable returns.
 type RootTracer struct {
-	pureFuncs            *directive.PureFuncSet            // User-defined pure functions
-	immutableReturnFuncs *directive.ImmutableReturnFuncSet // Functions returning immutable *gorm.DB
+	pureFuncs            *directive.DirectiveFuncSet // User-defined pure functions
+	immutableReturnFuncs *directive.DirectiveFuncSet // Functions returning immutable *gorm.DB
 }
 
 // New creates a new RootTracer.
-func New(pureFuncs *directive.PureFuncSet, immutableReturnFuncs *directive.ImmutableReturnFuncSet) *RootTracer {
+func New(pureFuncs, immutableReturnFuncs *directive.DirectiveFuncSet) *RootTracer {
 	return &RootTracer{
 		pureFuncs:            pureFuncs,
 		immutableReturnFuncs: immutableReturnFuncs,

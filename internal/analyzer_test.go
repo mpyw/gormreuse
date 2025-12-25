@@ -16,7 +16,7 @@ import (
 
 func TestNewAnalyzer(t *testing.T) {
 	pureFuncs := directive.NewPureFuncSet(nil)
-	pureFuncs.Add(directive.PureFuncKey{PkgPath: "test", FuncName: "Pure"})
+	pureFuncs.Add(directive.FuncKey{PkgPath: "test", FuncName: "Pure"})
 	immutableReturnFuncs := directive.NewImmutableReturnFuncSet(nil)
 	analyzer := ssautil.NewAnalyzer(nil, pureFuncs, immutableReturnFuncs)
 

@@ -233,14 +233,14 @@ func notPure() {}
 
 	tests := []struct {
 		name string
-		key  PureFuncKey
+		key  FuncKey
 	}{
-		{"regular function", PureFuncKey{PkgPath: "test/pkg", FuncName: "pureFunc"}},
-		{"value receiver method", PureFuncKey{PkgPath: "test/pkg", ReceiverType: "Receiver", FuncName: "pureValueMethod"}},
-		{"pointer receiver method", PureFuncKey{PkgPath: "test/pkg", ReceiverType: "Receiver", FuncName: "purePointerMethod"}},
-		{"generic function", PureFuncKey{PkgPath: "test/pkg", FuncName: "pureGenericFunc"}},
-		{"generic value receiver method", PureFuncKey{PkgPath: "test/pkg", ReceiverType: "GenericReceiver", FuncName: "pureGenericValueMethod"}},
-		{"generic pointer receiver method", PureFuncKey{PkgPath: "test/pkg", ReceiverType: "GenericReceiver", FuncName: "pureGenericPointerMethod"}},
+		{"regular function", FuncKey{PkgPath: "test/pkg", FuncName: "pureFunc"}},
+		{"value receiver method", FuncKey{PkgPath: "test/pkg", ReceiverType: "Receiver", FuncName: "pureValueMethod"}},
+		{"pointer receiver method", FuncKey{PkgPath: "test/pkg", ReceiverType: "Receiver", FuncName: "purePointerMethod"}},
+		{"generic function", FuncKey{PkgPath: "test/pkg", FuncName: "pureGenericFunc"}},
+		{"generic value receiver method", FuncKey{PkgPath: "test/pkg", ReceiverType: "GenericReceiver", FuncName: "pureGenericValueMethod"}},
+		{"generic pointer receiver method", FuncKey{PkgPath: "test/pkg", ReceiverType: "GenericReceiver", FuncName: "pureGenericPointerMethod"}},
 	}
 
 	for _, tt := range tests {

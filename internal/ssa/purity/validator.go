@@ -26,7 +26,7 @@ type Violation struct {
 // Validator validates pure function contracts.
 type Validator struct {
 	fn           *ssa.Function
-	pureFuncs    *directive.PureFuncSet
+	pureFuncs    *directive.DirectiveFuncSet
 	paramDerived map[ssa.Value]bool
 }
 
@@ -36,7 +36,7 @@ type Validator struct {
 // Note: Pure functions MAY return mutable *gorm.DB values. The "pure" contract only
 // guarantees that the function doesn't pollute its arguments - callers must treat
 // the return value as potentially mutable.
-func ValidateFunction(fn *ssa.Function, pureFuncs *directive.PureFuncSet) []Violation {
+func ValidateFunction(fn *ssa.Function, pureFuncs *directive.DirectiveFuncSet) []Violation {
 	if fn == nil || fn.Blocks == nil {
 		return nil
 	}
