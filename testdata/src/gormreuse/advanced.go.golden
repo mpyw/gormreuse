@@ -174,39 +174,23 @@ func reassignNewInstance(db *gorm.DB) {
 // =============================================================================
 // SHOULD REPORT - Conditional chain extension (common pattern)
 // =============================================================================
-//
-// KNOWN ISSUE: The following test cases demonstrate a linter bug.
-// The linter incorrectly flags certain uses as violations due to overly conservative
-// pollution tracking when reassignment happens inside conditional blocks.
-//
-// Specifically, when `q = q.Where()` occurs inside an if-block:
-//   - The linter treats q.Where() as a "branch" from the original q
-//   - Then flags subsequent uses as "reuse" even though they're the first actual use
-//
-// Expected behavior:
-//   - In conditionalExtendPartialNoPollution, only q.Count() should be flagged
-//   - q.Find() should NOT be flagged (it's the first use in both paths)
-//
-// This affects common GORM patterns like:
-//   q := db.Where("base")
-//   if condition { q = q.Where("extra") }
-//   q.Find(&results)  // Should be OK, but currently flagged
 
 // conditionalExtendPartialWithPollution demonstrates conditional extension with initial pollution.
 // One branch extends polluted q - that extension is a violation.
 func conditionalExtendPartialWithPollution(db *gorm.DB, flag bool) {
-	q := db.Where("x = ?", 1).Session(&gorm.Session{})
+	q := db.Where("x = ?", 1)
 	q.Find(nil) // Pollutes q
 
 	if flag {
-		q = q.Where("y = ?", 2).Session(&gorm.Session{}) // want `\*gorm\.DB instance reused after chain method`
+		q = q.Where("y = ?", 2) // want `\*gorm\.DB instance reused after chain method`
 	}
 
 	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
 }
 
 // conditionalExtendBothWithPollution demonstrates conditional extension in both branches with initial pollution.
-// Both branches extend polluted q - both are violations.
+// Both branches extend polluted q - both assignments are violations.
+// After assignment, new roots are created and subsequent use is OK.
 func conditionalExtendBothWithPollution(db *gorm.DB, flag bool) {
 	q := db.Where("x = ?", 1).Session(&gorm.Session{})
 	q.Find(nil) // Pollutes q
@@ -217,33 +201,49 @@ func conditionalExtendBothWithPollution(db *gorm.DB, flag bool) {
 		q = q.Where("z = ?", 3) // want `\*gorm\.DB instance reused after chain method`
 	}
 
-	q.Count(nil) // Safe - both branches created new q
+	q.Count(nil) // OK: both branches created new q via assignment
 }
 
 // conditionalExtendPartialNoPollution demonstrates conditional extension without initial pollution.
-// Extending q in one branch creates a branch from original q.
+// Assignment in conditional creates new root - first use after is OK.
 func conditionalExtendPartialNoPollution(db *gorm.DB, flag bool) {
 	q := db.Where("x = ?", 1).Session(&gorm.Session{})
 
 	if flag {
-		q = q.Where("y = ?", 2).Session(&gorm.Session{}) // First branch from original q
+		q = q.Where("y = ?", 2).Session(&gorm.Session{}) // Assignment creates new root from original q
 	}
 
-	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Find(nil)                 // OK: first actual use
 	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
 }
 
 // conditionalExtendBothNoPollution demonstrates conditional extension in both branches without initial pollution.
-// Both branches extend q, creating Phi node with two mutable roots.
+// Both branches create new roots via assignment - first use after is OK.
 func conditionalExtendBothNoPollution(db *gorm.DB, flag bool) {
 	q := db.Where("x = ?", 1)
 
 	if flag {
-		q = q.Where("y = ?", 2).Session(&gorm.Session{}) // Creates new root
+		q = q.Where("y = ?", 2).Session(&gorm.Session{}) // Assignment creates new root
 	} else {
-		q = q.Where("z = ?", 3).Session(&gorm.Session{}) // Creates new root
+		q = q.Where("z = ?", 3).Session(&gorm.Session{}) // Assignment creates new root
 	}
 
-	q.Find(nil)
+	q.Find(nil)                 // OK: first actual use
+	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// conditionalExtendThreeBranches demonstrates three-way branch with partial assignment.
+// Phi merges: original + two assignments. All paths have first use, so Find is OK.
+func conditionalExtendThreeBranches(db *gorm.DB, n int) {
+	q := db.Where("x = ?", 1).Session(&gorm.Session{}) // Mutable root
+
+	if n == 1 {
+		q = q.Where("y = ?", 2).Session(&gorm.Session{}) // Assignment creates new root
+	} else if n == 2 {
+		q = q.Where("z = ?", 3).Session(&gorm.Session{}) // Assignment creates new root
+	}
+	// else: q remains unchanged (original mutable root)
+
+	q.Find(nil)  // OK: Phi(q_1, q_2, q_3) - all first use
 	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
 }
