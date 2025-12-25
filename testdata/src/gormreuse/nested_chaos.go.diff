@@ -1,6 +1,6 @@
 --- nested_chaos.go	1970-01-01 00:00:00
 +++ nested_chaos.go.golden	1970-01-01 00:00:00
-@@ -1,1202 +1,1202 @@
+@@ -1,1205 +1,1205 @@
  package internal
  
  import "gorm.io/gorm"
@@ -284,6 +284,7 @@
  // =============================================================================
  
  // nestedIfMixedChainLevel1 demonstrates immediate chain at outer level.
+ // TODO: fix generator cannot handle this (should add Session to base, but doesn't)
  func nestedIfMixedChainLevel1(db *gorm.DB, a, b bool) {
  	q := db.Where("base")
  	if a {
@@ -498,8 +499,8 @@
  	q2 := db.Where("base2")
  
  	if a {
--		q1 = q1.Where("q1_a")
-+		q1 = q1.Where("q1_a").Session(&gorm.Session{}).Session(&gorm.Session{})
+-		q1 = q1.Where("q1_a") // TODO: fix generator adds duplicate .Session().Session() here
++		q1 = q1.Where("q1_a").Session(&gorm.Session{}) // TODO: fix generator adds duplicate .Session().Session() here
  		if b {
 -			q2 = q2.Where("q2_b")
 +			q2 = q2.Where("q2_b").Session(&gorm.Session{})
@@ -522,6 +523,7 @@
  }
  
  // nestedIfChaosReassignmentInBranch demonstrates reassignment in nested branches.
+ // TODO: fix generator cannot handle this complex case (fresh instance in one branch, polluted in others)
  func nestedIfChaosReassignmentInBranch(db *gorm.DB, a, b, c bool) {
  	q := db.Where("base")
  
@@ -595,6 +597,7 @@
  }
  
  // chaosPolluteThenReassign demonstrates pollution followed by reassignment in nested branches.
+ // TODO: fix generator cannot handle this complex case (multiple fresh instances in nested branches)
  func chaosPolluteThenReassign(db *gorm.DB, a, b, c bool) {
  	q := db.Where("base")
  
@@ -701,8 +704,8 @@
  
  	for _, item := range items {
  		if item > threshold {
--			q = q.Where("greater", item)
-+			q = q.Where("greater", item).Session(&gorm.Session{}).Session(&gorm.Session{})
+-			q = q.Where("greater", item) // TODO: fix generator adds duplicate .Session().Session() here
++			q = q.Where("greater", item).Session(&gorm.Session{}) // TODO: fix generator adds duplicate .Session().Session() here
  
  			if item%2 == 0 {
  				q.Find(nil)

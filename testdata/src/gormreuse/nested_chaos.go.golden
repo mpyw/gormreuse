@@ -260,6 +260,7 @@ func nestedIfEarlyReturnBothLevels(db *gorm.DB, a, b, c bool) {
 // =============================================================================
 
 // nestedIfMixedChainLevel1 demonstrates immediate chain at outer level.
+// TODO: fix generator cannot handle this (should add Session to base, but doesn't)
 func nestedIfMixedChainLevel1(db *gorm.DB, a, b bool) {
 	q := db.Where("base")
 	if a {
@@ -464,7 +465,7 @@ func nestedIfChaosMultipleVars(db *gorm.DB, a, b bool) {
 	q2 := db.Where("base2")
 
 	if a {
-		q1 = q1.Where("q1_a").Session(&gorm.Session{}).Session(&gorm.Session{})
+		q1 = q1.Where("q1_a").Session(&gorm.Session{}) // TODO: fix generator adds duplicate .Session().Session() here
 		if b {
 			q2 = q2.Where("q2_b").Session(&gorm.Session{})
 		} else {
@@ -483,6 +484,7 @@ func nestedIfChaosMultipleVars(db *gorm.DB, a, b bool) {
 }
 
 // nestedIfChaosReassignmentInBranch demonstrates reassignment in nested branches.
+// TODO: fix generator cannot handle this complex case (fresh instance in one branch, polluted in others)
 func nestedIfChaosReassignmentInBranch(db *gorm.DB, a, b, c bool) {
 	q := db.Where("base")
 
@@ -553,6 +555,7 @@ func chaosPolluteMultipleTimes(db *gorm.DB, a, b, c, d bool) {
 }
 
 // chaosPolluteThenReassign demonstrates pollution followed by reassignment in nested branches.
+// TODO: fix generator cannot handle this complex case (multiple fresh instances in nested branches)
 func chaosPolluteThenReassign(db *gorm.DB, a, b, c bool) {
 	q := db.Where("base")
 
@@ -655,7 +658,7 @@ func chaosPolluteInLoop(db *gorm.DB, items []int, threshold int) {
 
 	for _, item := range items {
 		if item > threshold {
-			q = q.Where("greater", item).Session(&gorm.Session{}).Session(&gorm.Session{})
+			q = q.Where("greater", item).Session(&gorm.Session{}) // TODO: fix generator adds duplicate .Session().Session() here
 
 			if item%2 == 0 {
 				q.Find(nil)

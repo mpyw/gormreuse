@@ -465,7 +465,7 @@ func nestedIfChaosMultipleVars(db *gorm.DB, a, b bool) {
 	q2 := db.Where("base2")
 
 	if a {
-		q1 = q1.Where("q1_a") // TODO: fix generator adds duplicate .Session().Session() here
+		q1 = q1.Where("q1_a")
 		if b {
 			q2 = q2.Where("q2_b")
 		} else {
@@ -658,7 +658,7 @@ func chaosPolluteInLoop(db *gorm.DB, items []int, threshold int) {
 
 	for _, item := range items {
 		if item > threshold {
-			q = q.Where("greater", item) // TODO: fix generator adds duplicate .Session().Session() here
+			q = q.Where("greater", item)
 
 			if item%2 == 0 {
 				q.Find(nil)
