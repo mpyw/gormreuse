@@ -123,6 +123,7 @@ func (t *Tracker) RecordAssignment(root ssa.Value, block *ssa.BasicBlock, pos to
 }
 
 // isReachable checks if pollution can reach the target block.
+// {!! ここの見出しと，各ステップに丁寧な説明がほしい !!}
 func (t *Tracker) isReachable(pollutedBlock, targetBlock *ssa.BasicBlock) bool {
 	if pollutedBlock == nil || targetBlock == nil {
 		return false
@@ -186,6 +187,7 @@ func (t *Tracker) getAllUses(root ssa.Value) []UsageInfo {
 
 // DetectViolations performs violation detection after all uses are recorded.
 // For each root with multiple uses, check if an earlier use can reach a later one.
+// {!! ここの見出しと，各ステップに丁寧な説明がほしい。この関数長いし複雑なので超重要 !!}
 func (t *Tracker) DetectViolations() {
 	// Check violations between polluting uses (non-pure methods)
 	for root, uses := range t.pollutingUses {
@@ -307,6 +309,7 @@ func (t *Tracker) CollectViolations() []Violation {
 }
 
 // IsPollutedAnywhere checks if root has any usage (for defer).
+// {!! このメソッドいらなくない？無駄やん !!}
 func (t *Tracker) IsPollutedAnywhere(root ssa.Value) bool {
 	return t.IsPolluted(root)
 }

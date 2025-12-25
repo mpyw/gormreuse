@@ -98,6 +98,8 @@ func (l *LoopInfo) IsLoopHeader(block *ssa.BasicBlock) bool {
 
 // CanReach checks if srcBlock can reach dstBlock in the CFG using BFS.
 //
+// {!! ここにもう少し何をしてるか説明を！図解ほしい！ !!}
+//
 // This is used for violation detection: if an earlier use of a mutable root
 // can reach a later use, the later use is a violation.
 //
@@ -135,6 +137,8 @@ func (a *Analyzer) CanReach(src, dst *ssa.BasicBlock) bool {
 }
 
 // DetectLoops analyzes the function and returns loop information.
+//
+// {!! ここにもう少し何をしてるか説明を！図解ほしい！ !!}
 //
 // Algorithm:
 //  1. Assign index to each block based on order in fn.Blocks
