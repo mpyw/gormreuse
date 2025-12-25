@@ -302,6 +302,21 @@ func useIt(db *gorm.DB) {
 }
 ```
 
+## Performance
+
+The analyzer is designed for production use with minimal overhead:
+
+```
+BenchmarkAnalyzer-16    ~1.1s/op    ~191 MB/op    ~1.64M allocs/op
+```
+
+Benchmark on Apple M4 Max analyzing the full test suite. Performance scales linearly with codebase size.
+
+To run benchmarks:
+```bash
+go test -bench=. -benchmem ./...
+```
+
 ## Documentation
 
 - [CLAUDE.md](./CLAUDE.md) - AI assistant guidance for development
@@ -311,6 +326,9 @@ func useIt(db *gorm.DB) {
 ```bash
 # Run tests
 go test ./...
+
+# Run benchmarks
+go test -bench=. -benchmem ./...
 
 # Build CLI
 go build -o bin/gormreuse ./cmd/gormreuse
