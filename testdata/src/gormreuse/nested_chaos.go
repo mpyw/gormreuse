@@ -454,7 +454,9 @@ func nestedIfChaosWithLoops(db *gorm.DB, flags []bool) {
 		// Loop creates Phi at each iteration
 	}
 
-	// TODO: False positive - loop only has assignments, Find should be OK
+	// TODO: Bug - loop with conditional assignments inside causes both uses to be flagged
+	// Expected: Only Count should be flagged (Find is first actual use)
+	// Actual: Both are flagged (false positive for Find)
 	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
 	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
 }

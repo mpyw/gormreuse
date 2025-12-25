@@ -454,7 +454,9 @@ func nestedIfChaosWithLoops(db *gorm.DB, flags []bool) {
 		// Loop creates Phi at each iteration
 	}
 
-	// TODO: False positive - loop only has assignments, Find should be OK
+	// TODO: Bug - loop with conditional assignments inside causes both uses to be flagged
+	// Expected: Only Count should be flagged (Find is first actual use)
+	// Actual: Both are flagged (false positive for Find)
 	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
 	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
 }
@@ -465,7 +467,7 @@ func nestedIfChaosMultipleVars(db *gorm.DB, a, b bool) {
 	q2 := db.Where("base2")
 
 	if a {
-		q1 = q1.Where("q1_a").Session(&gorm.Session{}) // TODO: fix generator adds duplicate .Session().Session() here
+		q1 = q1.Where("q1_a").Session(&gorm.Session{})
 		if b {
 			q2 = q2.Where("q2_b").Session(&gorm.Session{})
 		} else {
@@ -658,7 +660,7 @@ func chaosPolluteInLoop(db *gorm.DB, items []int, threshold int) {
 
 	for _, item := range items {
 		if item > threshold {
-			q = q.Where("greater", item).Session(&gorm.Session{}) // TODO: fix generator adds duplicate .Session().Session() here
+			q = q.Where("greater", item).Session(&gorm.Session{})
 
 			if item%2 == 0 {
 				q.Find(nil)

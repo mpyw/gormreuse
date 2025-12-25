@@ -60,6 +60,24 @@ func conditionalUsageNestedConditions(db *gorm.DB, a, b bool) {
 }
 
 // =============================================================================
+// SHOULD REPORT - Loop with assignment only (false positive bug investigation)
+// =============================================================================
+
+// loopAssignmentOnly demonstrates loop with only assignments, no finisher methods.
+// EXPECTED: First use after loop should be OK, second use should be violation.
+// ACTUAL: Both uses flagged as violation (FALSE POSITIVE).
+func loopAssignmentOnly(db *gorm.DB, items []int) {
+	q := db.Where("base").Session(&gorm.Session{})
+
+	for _, item := range items {
+		q = q.Where("item", item).Session(&gorm.Session{})  // Assignment only, no finisher
+	}
+
+	q.Find(nil)   // OK: first actual use (loop only had assignments)
+	q.Count(nil)  // want `\*gorm\.DB instance reused after chain method`
+}
+
+// =============================================================================
 // SHOULD REPORT - Closure tracking (via FreeVar tracing)
 // =============================================================================
 
