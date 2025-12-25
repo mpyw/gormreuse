@@ -64,8 +64,6 @@ func conditionalUsageNestedConditions(db *gorm.DB, a, b bool) {
 // =============================================================================
 
 // loopAssignmentOnly demonstrates loop with only assignments, no finisher methods.
-// EXPECTED: First use after loop should be OK, second use should be violation.
-// ACTUAL: Both uses flagged as violation (FALSE POSITIVE).
 func loopAssignmentOnly(db *gorm.DB, items []int) {
 	q := db.Where("base").Session(&gorm.Session{})
 
@@ -75,6 +73,22 @@ func loopAssignmentOnly(db *gorm.DB, items []int) {
 
 	q.Find(nil)   // OK: first actual use (loop only had assignments)
 	q.Count(nil)  // want `\*gorm\.DB instance reused after chain method`
+}
+
+// loopConditionalAssignment demonstrates loop with conditional assignment.
+// This is the minimal reproduction of the nestedIfChaosWithLoops false positive.
+func loopConditionalAssignment(db *gorm.DB, flags []bool) {
+	q := db.Where("base")
+
+	for _, flag := range flags {
+		if flag {
+			q = q.Where("flagged")  // Conditional assignment
+		}
+		// Phi created here
+	}
+
+	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
 }
 
 // =============================================================================
