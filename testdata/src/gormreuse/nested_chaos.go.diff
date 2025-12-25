@@ -1,6 +1,6 @@
 --- nested_chaos.go	1970-01-01 00:00:00
 +++ nested_chaos.go.golden	1970-01-01 00:00:00
-@@ -1,1037 +1,1037 @@
+@@ -1,1202 +1,1202 @@
  package internal
  
  import "gorm.io/gorm"
@@ -487,6 +487,7 @@
  		// Loop creates Phi at each iteration
  	}
  
+ 	// TODO: False positive - loop only has assignments, Find should be OK
  	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
  	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
  }
@@ -844,6 +845,180 @@
  
  	q1.Last(nil) // want `\*gorm\.DB instance reused after chain method`
  	q2.Last(nil) // want `\*gorm\.DB instance reused after chain method`
+ }
+ 
+ // chaosVariableSwap demonstrates variable swapping patterns.
+ func chaosVariableSwap(db *gorm.DB, a, b bool) {
+-	q1 := db.Where("q1_base")
+-	q2 := db.Where("q2_base")
++	q1 := db.Where("q1_base").Session(&gorm.Session{})
++	q2 := db.Where("q2_base").Session(&gorm.Session{})
+ 
+ 	q1.Find(nil) // Pollute q1
+ 	q2.Count(nil) // Pollute q2
+ 
+ 	// Classic swap using temporary variable (assignments don't trigger violations)
+ 	q3 := q1
+ 	q1 = q2
+ 	q2 = q3
+ 
+ 	// After swap: q1 = old q2 (polluted), q2 = old q1 (polluted)
+ 	q1.First(nil) // want `\*gorm\.DB instance reused after chain method`
+ 	q2.Last(nil) // want `\*gorm\.DB instance reused after chain method`
+ }
+ 
+ // chaosVariableSwapConditional demonstrates conditional swapping.
+ func chaosVariableSwapConditional(db *gorm.DB, swap bool) {
+ 	q1 := db.Where("q1_base")
+ 	q2 := db.Where("q2_base")
+ 
+ 	q1.Find(nil) // Pollute q1
+ 
+ 	if swap {
+ 		// Swap q1 and q2
+ 		temp := q1
+ 		q1 = q2
+ 		q2 = temp
+ 	}
+ 
+ 	// After conditional: q1 might be swapped or not
+ 	q1.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+ 	q2.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+ }
+ 
+ // chaosVariableSwapChain demonstrates swapping with chaining.
+ func chaosVariableSwapChain(db *gorm.DB) {
+ 	q1 := db.Where("q1")
+ 	q2 := db.Where("q2")
+ 
+ 	// Swap using chains
+-	temp := q1.Where("q1_ext")
+-	q1 = q2.Where("q2_ext")
++	temp := q1.Where("q1_ext").Session(&gorm.Session{})
++	q1 = q2.Where("q2_ext").Session(&gorm.Session{})
+ 	q2 = temp
+ 
+ 	q1.Find(nil)
+ 	q1.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+ 
+ 	q2.Find(nil)
+ 	q2.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+ }
+ 
+ // chaosVariableSwapLoop demonstrates swapping in loop.
+ func chaosVariableSwapLoop(db *gorm.DB, items []int) {
+ 	q1 := db.Where("q1")
+ 	q2 := db.Where("q2")
+ 
+ 	for _, item := range items {
+ 		if item%2 == 0 {
+ 			// Swap on even iterations
+ 			temp := q1
+ 			q1 = q2
+ 			q2 = temp
+ 		}
+ 		q1 = q1.Where("item", item)
+ 	}
+ 
+ 	q1.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+ 	q2.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+ }
+ 
+ // chaosMultipleSwaps demonstrates multiple swaps creating complex Phi patterns.
+ func chaosMultipleSwaps(db *gorm.DB, a, b, c bool) {
+-	q1 := db.Where("q1")
+-	q2 := db.Where("q2")
++	q1 := db.Where("q1").Session(&gorm.Session{})
++	q2 := db.Where("q2").Session(&gorm.Session{})
+ 	q3 := db.Where("q3")
+ 
+ 	q1.Find(nil) // Pollute q1
+ 
+ 	if a {
+ 		// First swap: q1 <-> q2
+ 		temp := q1
+ 		q1 = q2
+ 		q2 = temp
+ 	}
+ 
+ 	if b {
+ 		// Second swap: q2 <-> q3
+ 		temp := q2
+ 		q2 = q3
+ 		q3 = temp
+ 	}
+ 
+ 	if c {
+ 		// Third swap: q1 <-> q3
+ 		temp := q1
+ 		q1 = q3
+ 		q3 = temp
+ 	}
+ 
+ 	// Complex Phi patterns after multiple conditional swaps
+ 	q1.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+ 	q2.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+ 	q3.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+ }
+ 
+ // chaosModernSwapSyntax demonstrates modern Go swap syntax (a, b = b, a).
+ func chaosModernSwapSyntax(db *gorm.DB, a bool) {
+-	q1 := db.Where("q1")
+-	q2 := db.Where("q2")
++	q1 := db.Where("q1").Session(&gorm.Session{})
++	q2 := db.Where("q2").Session(&gorm.Session{})
+ 
+ 	q1.Find(nil) // Pollute q1
+ 	q2.Count(nil) // Pollute q2
+ 
+ 	// Modern Go swap syntax
+ 	q1, q2 = q2, q1
+ 
+ 	// After swap: q1 = old q2 (polluted), q2 = old q1 (polluted)
+ 	q1.First(nil) // want `\*gorm\.DB instance reused after chain method`
+ 	q2.Last(nil) // want `\*gorm\.DB instance reused after chain method`
+ }
+ 
+ // chaosModernSwapConditional demonstrates modern swap syntax with conditionals.
+ func chaosModernSwapConditional(db *gorm.DB, a, b bool) {
+ 	q1 := db.Where("q1")
+ 	q2 := db.Where("q2")
+ 	q3 := db.Where("q3")
+ 
+ 	q1.Find(nil) // Pollute q1
+ 
+ 	if a {
+ 		q1, q2 = q2, q1 // Swap polluted q1 with clean q2
+ 	}
+ 
+ 	if b {
+ 		q2, q3 = q3, q2 // Swap (possibly polluted) q2 with clean q3
+ 	}
+ 
+ 	// All three may be polluted depending on branches
+ 	q1.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+ 	q2.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+ 	q3.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+ }
+ 
+ // chaosModernSwapLoop demonstrates modern swap syntax in loops.
+ func chaosModernSwapLoop(db *gorm.DB, flags []bool) {
+-	q1 := db.Where("q1")
++	q1 := db.Where("q1").Session(&gorm.Session{})
+ 	q2 := db.Where("q2")
+ 
+ 	q1.Find(nil) // Pollute q1
+ 
+ 	for _, flag := range flags {
+ 		if flag {
+ 			q1, q2 = q2, q1 // Swap back and forth
+ 		}
+-		q1 = q1.Where("extend", flag) // want `\*gorm\.DB instance reused after chain method`
++		q1 = q1.Where("extend", flag).Session(&gorm.Session{}) // want `\*gorm\.DB instance reused after chain method`
+ 	}
+ 
+ 	q1.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+ 	q2.Count(nil) // want `\*gorm\.DB instance reused after chain method`
  }
  
  // chaosUltimateStressTest demonstrates the ultimate stress test with everything mixed.
