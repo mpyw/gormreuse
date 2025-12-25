@@ -64,6 +64,7 @@ go run github.com/mpyw/gormreuse/cmd/gormreuse@latest ./...
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-test` | `true` | Analyze test files (`*_test.go`) — built-in driver flag |
+| `-fix` | `false` | Apply suggested fixes automatically — built-in driver flag |
 
 Generated files (containing `// Code generated ... DO NOT EDIT.`) are always excluded and cannot be opted in.
 
@@ -72,7 +73,78 @@ Generated files (containing `// Code generated ... DO NOT EDIT.`) are always exc
 ```bash
 # Exclude test files from analysis
 gormreuse -test=false ./...
+
+# Apply automatic fixes
+gormreuse -fix ./...
 ```
+
+## Automatic Fixes
+
+The `-fix` flag enables automatic repair of violations using two complementary strategies:
+
+### Strategy 1: Reassignment (Creating New Roots)
+
+Adds reassignment for non-finisher method calls, creating a new mutable root at each step:
+
+```go
+// Before
+q := db.Where("base")
+q.Where("a")           // VIOLATION: 1st branch (non-finisher)
+q.Where("b").Find(nil) // VIOLATION: 2nd branch (finisher)
+
+// After -fix
+q := db.Where("base")
+q = q.Where("a")       // ← Reassignment creates new root
+q.Where("b").Find(nil) // OK: first branch from new root
+```
+
+**When applied:**
+- Non-finisher methods (chain builders like `Where`, `Order`, `Limit`)
+- Result is not assigned to a variable
+- Expression used as a statement (not part of a larger expression)
+
+### Strategy 2: Session (Making Roots Immutable)
+
+Adds `.Session(&gorm.Session{})` to make branch roots immutable when reassignment alone isn't sufficient:
+
+```go
+// Before
+q := db.Where("base")
+q.Where("a").Find(nil) // First branch
+q.Where("b").Find(nil) // VIOLATION: second branch
+
+// After -fix
+q := db.Where("base").Session(&gorm.Session{})  // ← Immutable root
+q.Where("a").Find(nil) // OK: independent chain from immutable root
+q.Where("b").Find(nil) // OK: independent chain from immutable root
+```
+
+**When applied:**
+- A root still has 2+ branches after simulating Phase 1 reassignments
+- Special handling for Phi nodes (conditional branches): adds Session to each incoming edge
+
+### Combined Example
+
+Both strategies work together for complex cases:
+
+```go
+// Before
+q := db.Where("base")
+q.Where("a")           // non-finisher
+q.Where("b").Find(nil) // finisher
+q.Where("c")           // non-finisher
+q.Where("d").Find(nil) // finisher
+
+// After -fix (both strategies applied)
+q := db.Where("base")
+q = q.Where("a").Session(&gorm.Session{})  // Reassignment + Session
+q.Where("b").Find(nil)
+q = q.Where("c")                            // Reassignment
+q.Where("d").Find(nil)
+```
+
+> [!TIP]
+> The fix generator intelligently determines which strategy to apply. Run `gormreuse -fix ./...` to automatically repair all violations in your codebase.
 
 ## Detection Model: Mutable Branching
 
