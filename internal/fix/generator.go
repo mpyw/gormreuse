@@ -152,7 +152,8 @@ func (g *Generator) findNonFinisherUses(uses []pollution.UsageInfo) []pollution.
 //  4. The receiver is assignable (variable, field, etc.)
 //
 // This prevents inappropriate fixes for non-GORM expressions like:
-//   require.NoError(t, tx.Create(...).Error)
+//
+//	require.NoError(t, tx.Create(...).Error)
 func (g *Generator) isNonFinisherExprStmt(pos token.Pos) bool {
 	// Find the AST node at this position
 	file := g.findFileContaining(pos)
@@ -173,7 +174,7 @@ func (g *Generator) isNonFinisherExprStmt(pos token.Pos) bool {
 	}
 
 	// Check if pos is within the ExprStmt's expression
-	if !(exprStmt.X.Pos() <= pos && pos <= exprStmt.X.End()) {
+	if exprStmt.X.Pos() > pos || pos > exprStmt.X.End() {
 		return false
 	}
 
