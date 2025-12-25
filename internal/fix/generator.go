@@ -550,29 +550,21 @@ func (g *Generator) getVariableNameAtPos(pos token.Pos) string {
 		return ""
 	}
 
-	// Find the INNERMOST CallExpr that contains this position
-	// We need to continue traversing to find the most specific match,
-	// not stop at the first (outermost) match.
-	// Example: require.NoError(t, db.Save(&x).Error)
-	//   - Outer call: require.NoError (wrong!)
-	//   - Inner call: db.Save (correct!)
-	var bestMatch *ast.CallExpr
-	var bestMatchSize token.Pos = token.Pos(1<<31 - 1) // Max value
-
+	// Find the CallExpr that contains or starts at this position
+	var lhs string
 	ast.Inspect(file, func(n ast.Node) bool {
 		if n == nil {
 			return false
 		}
 
-		// Look for CallExpr that contains the position
+		// Look for CallExpr that matches the position
 		if callExpr, ok := n.(*ast.CallExpr); ok {
-			// Check if this call contains the target position
+			// Check if this is the call at the target position
 			if callExpr.Pos() <= pos && pos <= callExpr.End() {
-				// Keep the smallest (innermost) match
-				size := callExpr.End() - callExpr.Pos()
-				if size < bestMatchSize {
-					bestMatch = callExpr
-					bestMatchSize = size
+				// Extract receiver from selector (e.g., q.Where -> q)
+				if sel, ok := callExpr.Fun.(*ast.SelectorExpr); ok {
+					lhs = g.extractAssignableLHS(sel.X)
+					return false // Found it, stop searching
 				}
 			}
 		}
@@ -580,16 +572,7 @@ func (g *Generator) getVariableNameAtPos(pos token.Pos) string {
 		return n.Pos() <= pos
 	})
 
-	if bestMatch == nil {
-		return ""
-	}
-
-	// Extract receiver from selector (e.g., q.Where -> q)
-	if sel, ok := bestMatch.Fun.(*ast.SelectorExpr); ok {
-		return g.extractAssignableLHS(sel.X)
-	}
-
-	return ""
+	return lhs
 }
 
 // extractAssignableLHS extracts the assignable left-hand side from an expression.
@@ -675,33 +658,21 @@ func (g *Generator) getCallExprEndPos(pos token.Pos) token.Pos {
 		return token.NoPos
 	}
 
-	// Find the INNERMOST CallExpr that contains this position
-	// Same reasoning as getVariableNameAtPos - need the most specific match
-	var bestMatch *ast.CallExpr
-	var bestMatchSize token.Pos = token.Pos(1<<31 - 1) // Max value
-
+	var callEnd token.Pos
 	ast.Inspect(file, func(n ast.Node) bool {
 		if n == nil {
 			return false
 		}
-		// Find the CallExpr that contains this position
+		// Find the CallExpr that starts at or contains this position
 		if callExpr, ok := n.(*ast.CallExpr); ok {
 			if callExpr.Pos() <= pos && pos < callExpr.End() {
-				// Keep the smallest (innermost) match
-				size := callExpr.End() - callExpr.Pos()
-				if size < bestMatchSize {
-					bestMatch = callExpr
-					bestMatchSize = size
-				}
+				callEnd = callExpr.End()
+				return false
 			}
 		}
 		return n.Pos() <= pos
 	})
-
-	if bestMatch == nil {
-		return token.NoPos
-	}
-	return bestMatch.End()
+	return callEnd
 }
 
 // deduplicateEdits removes duplicate edits (same position and new text).
