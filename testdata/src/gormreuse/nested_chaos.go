@@ -260,6 +260,7 @@ func nestedIfEarlyReturnBothLevels(db *gorm.DB, a, b, c bool) {
 // =============================================================================
 
 // nestedIfMixedChainLevel1 demonstrates immediate chain at outer level.
+// TODO: fix generator cannot handle this (should add Session to base, but doesn't)
 func nestedIfMixedChainLevel1(db *gorm.DB, a, b bool) {
 	q := db.Where("base")
 	if a {
