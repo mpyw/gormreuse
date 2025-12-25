@@ -55,8 +55,10 @@
 package tracer
 
 import (
+	"fmt"
 	"go/token"
 	"go/types"
+	"os"
 
 	"golang.org/x/tools/go/ssa"
 
@@ -305,6 +307,35 @@ func (t *RootTracer) traceNonCall(v ssa.Value, visited map[ssa.Value]bool, loopI
 	}
 }
 
+// isSwapPhiPair checks if two Phi nodes form a swap pattern:
+// phiA = phi [..., x, y] and phiB = phi [..., y, x]
+func isSwapPhiPair(phiA, phiB *ssa.Phi) bool {
+	if len(phiA.Edges) != len(phiB.Edges) {
+		return false
+	}
+
+	// Check if there's at least one pair of swapped edges
+	for i := 0; i < len(phiA.Edges); i++ {
+		edgeA := phiA.Edges[i]
+		edgeB := phiB.Edges[i]
+
+		// Look for the swapped pattern in other edges
+		for j := 0; j < len(phiA.Edges); j++ {
+			if i == j {
+				continue
+			}
+			otherA := phiA.Edges[j]
+			otherB := phiB.Edges[j]
+
+			// Check if (edgeA, edgeB) == (otherB, otherA) - swap pattern
+			if edgeA == otherB && edgeB == otherA {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (t *RootTracer) tracePhi(phi *ssa.Phi, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) ssa.Value {
 	// For loop-header Phi nodes, prioritize back-edges over initial edges
 	// This ensures we return the loop-internal assignment result, not the pre-loop initial value
@@ -354,7 +385,44 @@ func (t *RootTracer) tracePhi(phi *ssa.Phi, visited map[ssa.Value]bool, loopInfo
 		return nil
 	}
 
-	// For non-loop-header Phi (regular conditional merge), use first non-nil root
+	// For non-loop-header Phi (regular conditional merge)
+	// Check if this Phi forms a swap-pair with another Phi in the same block
+	// Only treat as independent if swapping loop-header phis (loop variables)
+	// Example: t16 = phi [2: t5, 4: t6] where t5 and t6 are loop-header phis
+	if loopInfo != nil {
+		block := phi.Block()
+		for _, instr := range block.Instrs {
+			if otherPhi, ok := instr.(*ssa.Phi); ok {
+				if otherPhi != phi {
+					if isSwapPhiPair(phi, otherPhi) {
+						// Check if all edges are loop-header phis
+						allEdgesAreLoopHeaderPhi := true
+						for _, edge := range phi.Edges {
+							if edgePhi, ok := edge.(*ssa.Phi); ok {
+								if !loopInfo.IsLoopHeader(edgePhi.Block()) {
+									allEdgesAreLoopHeaderPhi = false
+									break
+								}
+							} else {
+								allEdgesAreLoopHeaderPhi = false
+								break
+							}
+						}
+
+						if allEdgesAreLoopHeaderPhi {
+							// Loop variable swap - return phi as independent root
+							fmt.Fprintf(os.Stderr, "DEBUG: Found loop variable swap-phi pair: %v and %v\n", phi, otherPhi)
+							return phi
+						}
+						// Simple conditional swap - fall through to regular tracing
+						fmt.Fprintf(os.Stderr, "DEBUG: Found conditional swap-phi pair (not loop vars): %v and %v\n", phi, otherPhi)
+					}
+				}
+			}
+		}
+	}
+
+	// Regular tracing
 	for _, edge := range phi.Edges {
 		if isNilConst(edge) || visited[edge] {
 			continue
@@ -567,7 +635,57 @@ func (t *RootTracer) traceAll(v ssa.Value, visited map[ssa.Value]bool, loopInfo 
 
 	switch val := v.(type) {
 	case *ssa.Phi:
-		// Collect roots from ALL Phi edges
+		// Check for swap-phi pattern first
+		// For loop variable swaps, we need to check INITIAL edges of loop-header phis
+		// to detect pre-loop pollution that can propagate through the swap
+		if loopInfo != nil && !loopInfo.IsLoopHeader(val.Block()) {
+			// Non-loop-header Phi inside a loop - check for swap pattern
+			block := val.Block()
+			for _, instr := range block.Instrs {
+				if otherPhi, ok := instr.(*ssa.Phi); ok {
+					if otherPhi != val {
+						if isSwapPhiPair(val, otherPhi) {
+							// Check if edges are loop-header phis (loop variable swap)
+							var loopHeaderPhis []*ssa.Phi
+							for _, edge := range val.Edges {
+								if edgePhi, ok := edge.(*ssa.Phi); ok {
+									if loopInfo.IsLoopHeader(edgePhi.Block()) {
+										loopHeaderPhis = append(loopHeaderPhis, edgePhi)
+									} else {
+										loopHeaderPhis = nil
+										break
+									}
+								} else {
+									loopHeaderPhis = nil
+									break
+								}
+							}
+
+							if len(loopHeaderPhis) > 0 {
+								// Loop variable swap - collect roots from INITIAL edges only
+								// (not back-edges, to detect pre-loop pollution)
+								var roots []ssa.Value
+								for _, loopPhi := range loopHeaderPhis {
+									// Get the initial edge (first edge, not back-edge)
+									if len(loopPhi.Edges) > 0 {
+										initialEdge := loopPhi.Edges[0]
+										if !isNilConst(initialEdge) && !visited[initialEdge] {
+											roots = append(roots, t.traceAll(initialEdge, visited, loopInfo)...)
+										}
+									}
+								}
+								// Also include the swap-phi itself as a root
+								roots = append(roots, val)
+								return roots
+							}
+							// Simple conditional swap - fall through to collect all roots
+						}
+					}
+				}
+			}
+		}
+
+		// Regular Phi - collect roots from ALL edges
 		var roots []ssa.Value
 		for _, edge := range val.Edges {
 			if isNilConst(edge) || visited[edge] {
@@ -602,6 +720,51 @@ func (t *RootTracer) traceAllPointerLoads(ptr ssa.Value, visited map[ssa.Value]b
 	case *ssa.Alloc:
 		return t.traceAllAllocStores(p, visited, loopInfo)
 	case *ssa.Phi:
+		// Check for swap-phi pattern first
+		// For loop variable swaps, check initial edges for pre-loop pollution
+		if loopInfo != nil && !loopInfo.IsLoopHeader(p.Block()) {
+			block := p.Block()
+			for _, instr := range block.Instrs {
+				if otherPhi, ok := instr.(*ssa.Phi); ok {
+					if otherPhi != p {
+						if isSwapPhiPair(p, otherPhi) {
+							// Check if edges are loop-header phis
+							var loopHeaderPhis []*ssa.Phi
+							for _, edge := range p.Edges {
+								if edgePhi, ok := edge.(*ssa.Phi); ok {
+									if loopInfo.IsLoopHeader(edgePhi.Block()) {
+										loopHeaderPhis = append(loopHeaderPhis, edgePhi)
+									} else {
+										loopHeaderPhis = nil
+										break
+									}
+								} else {
+									loopHeaderPhis = nil
+									break
+								}
+							}
+
+							if len(loopHeaderPhis) > 0 {
+								// Loop variable swap - collect roots from initial edges
+								var roots []ssa.Value
+								for _, loopPhi := range loopHeaderPhis {
+									if len(loopPhi.Edges) > 0 {
+										initialEdge := loopPhi.Edges[0]
+										if !isNilConst(initialEdge) && !visited[initialEdge] {
+											roots = append(roots, t.traceAll(initialEdge, visited, loopInfo)...)
+										}
+									}
+								}
+								roots = append(roots, p)
+								return roots
+							}
+						}
+					}
+				}
+			}
+		}
+
+		// Regular Phi - traverse all edges
 		var roots []ssa.Value
 		for _, edge := range p.Edges {
 			if isNilConst(edge) || visited[edge] {
