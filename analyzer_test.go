@@ -132,9 +132,11 @@ func TestGenerateDiffFiles(t *testing.T) {
 			diffBytes = bytes.ReplaceAll(diffBytes, []byte(tmpOriginal), []byte(filename))
 			diffBytes = bytes.ReplaceAll(diffBytes, []byte(tmpFixed), []byte(filename+".golden"))
 
-			// Replace timestamps with placeholder (format: "YYYY-MM-DD HH:MM:SS")
-			// Example: "2025-12-25 19:03:15" -> "1970-01-01 00:00:00"
-			timestampRegex := regexp.MustCompile(`\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}`)
+			// Replace timestamps with placeholder
+			// Handles both macOS (no TZ) and Linux (with TZ) formats:
+			// macOS: "2025-12-25 19:03:15" -> "1970-01-01 00:00:00"
+			// Linux: "2025-12-25 19:03:15.123456789 +0000" -> "1970-01-01 00:00:00"
+			timestampRegex := regexp.MustCompile(`\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(\.\d+)?( [+-]\d{4})?`)
 			diffBytes = timestampRegex.ReplaceAll(diffBytes, []byte("1970-01-01 00:00:00"))
 
 			// Write diff file
@@ -261,13 +263,33 @@ func TestDiffFilesUpToDate(t *testing.T) {
 		diffBytes = bytes.ReplaceAll(diffBytes, []byte(tmpOriginal), []byte(filename))
 		diffBytes = bytes.ReplaceAll(diffBytes, []byte(tmpFixed), []byte(filename+".golden"))
 
-		timestampRegex := regexp.MustCompile(`\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}`)
+		timestampRegex := regexp.MustCompile(`\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(\.\d+)?( [+-]\d{4})?`)
 		diffBytes = timestampRegex.ReplaceAll(diffBytes, []byte("1970-01-01 00:00:00"))
 
 		// Compare with existing diff file
 		if !bytes.Equal(beforeContent, diffBytes) {
-			t.Errorf("%s.diff is out of date.\nRun: go test -run TestGenerateDiffFiles\nThen commit the changes.", filename)
-			t.Logf("Expected %d bytes, got %d bytes", len(beforeContent), len(diffBytes))
+			// Write current and expected to temp files for diffing
+			tmpBefore := filepath.Join(os.TempDir(), "before_"+filename+".diff")
+			tmpAfter := filepath.Join(os.TempDir(), "after_"+filename+".diff")
+			defer func() { _ = os.Remove(tmpBefore) }()
+			defer func() { _ = os.Remove(tmpAfter) }()
+
+			if err := os.WriteFile(tmpBefore, beforeContent, 0644); err != nil {
+				t.Fatalf("Failed to write temp before: %v", err)
+			}
+			if err := os.WriteFile(tmpAfter, diffBytes, 0644); err != nil {
+				t.Fatalf("Failed to write temp after: %v", err)
+			}
+
+			// Show diff between current and expected
+			var metaDiff bytes.Buffer
+			metaCmd := exec.Command("diff", "-u", tmpBefore, tmpAfter)
+			metaCmd.Stdout = &metaDiff
+			metaCmd.Stderr = &metaDiff
+			_ = metaCmd.Run()
+
+			t.Errorf("%s.diff is out of date.\nRun: go test -run TestGenerateDiffFiles\nThen commit the changes.\n\nDiff between current and expected:\n%s",
+				filename, metaDiff.String())
 		}
 	}
 }

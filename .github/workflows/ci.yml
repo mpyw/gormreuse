@@ -38,11 +38,6 @@ jobs:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
         continue-on-error: true
 
-      - name: Check generated diff files are up to date
-        run: |
-          go test -run TestGenerateDiffFiles
-          git diff --exit-code testdata/src/gormreuse/*.diff || (echo "Error: Generated diff files are out of date. Run 'go test -run TestGenerateDiffFiles' and commit the changes." && exit 1)
-
   lint:
     name: Lint
     runs-on: ubuntu-latest
