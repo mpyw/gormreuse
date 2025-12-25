@@ -1,6 +1,10 @@
 package internal
 
-import "gorm.io/gorm"
+import (
+	"gorm.io/gorm"
+
+	"github.com/stretchr/testify/require"
+)
 
 // =============================================================================
 // SHOULD REPORT - Derived variables without Session
@@ -246,4 +250,297 @@ func conditionalExtendThreeBranches(db *gorm.DB, n int) {
 
 	q.Find(nil)  // OK: Phi(q_1, q_2, q_3) - all first use
 	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// =============================================================================
+// FIX GENERATION - Should NOT generate inappropriate fixes
+// =============================================================================
+
+// These test cases verify that fix generation is appropriate.
+// The fix generator should only add reassignment (q = q.Where(...))
+// when the top-level expression is a *gorm.DB non-finisher method call.
+
+// nonFinisherOnlyGeneratesFix demonstrates that non-finisher expr statements
+// get the reassignment fix (q = q.Where("x")).
+func nonFinisherOnlyGeneratesFix(db *gorm.DB) {
+	q := db.Where("base")
+	q.Where("filter1") // Non-finisher expr stmt - should get "q = q.Where("filter1")" fix
+	q.Find(nil)        // want `\*gorm\.DB instance reused after chain method`
+}
+
+// finisherDoesNotGenerateReassignmentFix demonstrates that finisher calls
+// do NOT get reassignment fix (would be wrong to do "q = q.Find(nil)").
+func finisherDoesNotGenerateReassignmentFix(db *gorm.DB) {
+	q := db.Where("base")
+	q.Find(nil)
+	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// =============================================================================
+// CLOSURE DEDUPLICATION - Should report only ONCE per position
+// =============================================================================
+
+// parentScopeVariable demonstrates that violations from closures accessing
+// parent scope variables should be reported only once, not duplicated.
+// Previously, this would report the same violation multiple times
+// (once from parent function, once from closure).
+func parentScopeVariable(db *gorm.DB) {
+	q := db.Where("outer")
+	func() {
+		q.Where("inner")
+		q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+	}()
+}
+
+// nestedClosureFixDedup demonstrates nested closures should not
+// cause duplicate diagnostics at the same position.
+func nestedClosureFixDedup(db *gorm.DB) {
+	q := db.Where("base")
+	func() {
+		func() {
+			q.Where("deep")
+			q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+		}()
+	}()
+}
+
+// tripleNestedClosureDedup demonstrates deeply nested closures.
+// Should report only one violation, not 3 (one per closure scope).
+func tripleNestedClosureDedup(db *gorm.DB) {
+	q := db.Where("base")
+	func() {
+		func() {
+			func() {
+				q.Where("level3")
+				q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+			}()
+		}()
+	}()
+}
+
+// =============================================================================
+// NESTED ARGUMENTS - q.Or(q.Where(), q.Where()) patterns
+// =============================================================================
+
+// nestedArgsFromMutableParent demonstrates reuse of mutable q in nested args.
+// When q is mutable, using it multiple times in Or() arguments is a violation.
+func nestedArgsFromMutableParent(db *gorm.DB) {
+	q := db.Where("base") // q is mutable
+	q.Or(
+		q.Where("a"), // want `\*gorm\.DB instance reused after chain method`
+		q.Where("b"), // want `\*gorm\.DB instance reused after chain method`
+	).Find(nil)
+}
+
+// nestedArgsFromImmutableParent demonstrates safe nested args with immutable q.
+// When q is immutable (ends with Session), multiple branches are safe.
+func nestedArgsFromImmutableParent(db *gorm.DB) {
+	q := db.Where("base").Session(&gorm.Session{}) // q is immutable
+	q.Or(
+		q.Where("a"),
+		q.Where("b"),
+	).Find(nil) // OK: q is immutable, can branch freely
+}
+
+// nestedArgsFromMutableThenReuse shows reuse after nested args.
+func nestedArgsFromMutableThenReuse(db *gorm.DB) {
+	q := db.Where("base") // q is mutable
+	q.Or(
+		q.Where("a"), // want `\*gorm\.DB instance reused after chain method`
+		q.Where("b"), // want `\*gorm\.DB instance reused after chain method`
+	).Find(nil)
+	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// nestedArgsSingleUse demonstrates that even single nested arg is a violation
+// because q.Or(q.Where("a")) uses q twice: once for q.Where("a"), once for q.Or(...).
+func nestedArgsSingleUse(db *gorm.DB) {
+	q := db.Where("base")
+	q.Or(
+		q.Where("a"), // want `\*gorm\.DB instance reused after chain method`
+	).Find(nil)
+	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// =============================================================================
+// WRAPPED IN NON-GORM FUNCTIONS - require.NoError(t, tx.Create(...).Error)
+// =============================================================================
+
+// wrappedInRequireNoError demonstrates GORM calls wrapped in require.NoError.
+// The fix generator should NOT generate inappropriate fixes like:
+//
+//	tx = require.NoError(t, tx.Create(...).Error)  // WRONG!
+//
+// Instead, no reassignment fix should be generated for these cases because
+// the top-level expression is not a *gorm.DB method call.
+func wrappedInRequireNoError(tx *gorm.DB, t require.TestingT) {
+	require.NoError(t, tx.Create(nil).Error)
+	require.NoError(t, tx.Create(nil).Error)
+	require.NoError(t, tx.Create(nil).Error)
+}
+
+// wrappedInRequireNoErrorMixed demonstrates mixed usage patterns.
+func wrappedInRequireNoErrorMixed(tx *gorm.DB, t require.TestingT) {
+	require.NoError(t, tx.Create(nil).Error)
+	tx.Create(nil)
+}
+
+// =============================================================================
+// FUNCTION ARGUMENT PATTERNS - q.Where() passed to various function types
+// =============================================================================
+
+// Helper functions for testing argument passing patterns
+
+// voidFunc accepts *gorm.DB and returns nothing.
+// By default, functions are assumed to pollute their arguments.
+func voidFunc(db *gorm.DB) {
+}
+
+// returnsDB accepts *gorm.DB and returns *gorm.DB.
+// By default, assumed to pollute argument and return mutable result.
+func returnsDB(db *gorm.DB) *gorm.DB {
+	return db
+}
+
+// pureReturnsDB accepts *gorm.DB and returns *gorm.DB.
+// Marked pure: does NOT pollute argument, but returns mutable result.
+//
+//gormreuse:pure
+func pureReturnsDB(db *gorm.DB) *gorm.DB {
+	return db
+}
+
+// immutableReturnReturnsDB accepts *gorm.DB and returns *gorm.DB.
+// Marked immutable-return: may pollute argument, but returns immutable result.
+//
+//gormreuse:immutable-return
+func immutableReturnReturnsDB(db *gorm.DB) *gorm.DB {
+	return db.Session(&gorm.Session{})
+}
+
+// pureImmutableReturnReturnsDB accepts *gorm.DB and returns *gorm.DB.
+// Marked pure,immutable-return: does NOT pollute argument AND returns immutable result.
+//
+//gormreuse:pure,immutable-return
+func pureImmutableReturnReturnsDB(db *gorm.DB) *gorm.DB {
+	return db.Session(&gorm.Session{})
+}
+
+// --- Test cases for passing q.Where() to void function ---
+
+// passToVoidFunc demonstrates passing q.Where() to a void function.
+// voidFunc is assumed to pollute its argument, so q is polluted after the call.
+func passToVoidFunc(db *gorm.DB) {
+	q := db.Where("base")
+	voidFunc(q.Where("a"))
+	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// --- Test cases for passing q.Where() to function returning *gorm.DB ---
+
+// passToReturnsDB demonstrates passing q.Where() to a function returning *gorm.DB.
+// returnsDB is assumed to pollute its argument and return mutable result.
+func passToReturnsDB(db *gorm.DB) {
+	q := db.Where("base")
+	result := returnsDB(q.Where("a"))
+	q.Find(nil)      // want `\*gorm\.DB instance reused after chain method`
+	result.Find(nil) // OK: first use of result
+	result.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// --- Test cases for passing q.Where() to pure function ---
+
+// passToPureReturnsDB demonstrates passing q.Where() to a pure function.
+// pureReturnsDB does NOT pollute its argument, but q.Where("a") itself
+// is a use of q (creates a branch), so q is polluted after this call.
+// The result is mutable.
+func passToPureReturnsDB(db *gorm.DB) {
+	q := db.Where("base")
+	result := pureReturnsDB(q.Where("a"))
+	q.Find(nil)      // want `\*gorm\.DB instance reused after chain method`
+	result.Find(nil) // OK: first use of result
+	result.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// --- Test cases for passing q.Where() to immutable-return function ---
+
+// passToImmutableReturnReturnsDB demonstrates passing q.Where() to immutable-return function.
+// immutableReturnReturnsDB may pollute argument, but returns immutable result.
+func passToImmutableReturnReturnsDB(db *gorm.DB) {
+	q := db.Where("base")
+	result := immutableReturnReturnsDB(q.Where("a"))
+	q.Find(nil)      // want `\*gorm\.DB instance reused after chain method`
+	result.Find(nil) // OK: result is immutable
+	result.Find(nil) // OK: result is immutable, can reuse freely
+}
+
+// --- Test cases for passing q.Where() to pure,immutable-return function ---
+
+// passToPureImmutableReturnReturnsDB demonstrates passing q.Where() to pure,immutable-return function.
+// pureImmutableReturnReturnsDB does NOT pollute its argument AND returns immutable result.
+// However, q.Where("a") itself is a use of q (creates a branch), so q is polluted.
+func passToPureImmutableReturnReturnsDB(db *gorm.DB) {
+	q := db.Where("base")
+	result := pureImmutableReturnReturnsDB(q.Where("a"))
+	q.Find(nil)      // want `\*gorm\.DB instance reused after chain method`
+	result.Find(nil) // OK: result is immutable
+	result.Find(nil) // OK: result is immutable, can reuse freely
+}
+
+// --- Multiple calls to same function ---
+
+// multipleCallsToVoidFunc demonstrates multiple calls passing q.Where() to void function.
+func multipleCallsToVoidFunc(db *gorm.DB) {
+	q := db.Where("base")
+	voidFunc(q.Where("a"))
+	voidFunc(q.Where("b")) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// multipleCallsToPureFunc demonstrates multiple calls passing q.Where() to pure function.
+// Even though pure function doesn't pollute, q.Where() itself uses q each time.
+func multipleCallsToPureFunc(db *gorm.DB) {
+	q := db.Where("base")
+	pureReturnsDB(q.Where("a"))
+	pureReturnsDB(q.Where("b")) // want `\*gorm\.DB instance reused after chain method`
+	q.Find(nil)                 // want `\*gorm\.DB instance reused after chain method`
+}
+
+// =============================================================================
+// PURE FUNCTION EFFECT - Passing q directly (not q.Where())
+// =============================================================================
+
+// passQDirectlyToNonPure demonstrates passing q directly to non-pure function.
+// Non-pure function pollutes its argument, so q is polluted after the call.
+func passQDirectlyToNonPure(db *gorm.DB) {
+	q := db.Where("base")
+	voidFunc(q)
+	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// passQDirectlyToPure demonstrates passing q directly to pure function.
+// Pure function does NOT pollute its argument, so q is NOT polluted after the call.
+func passQDirectlyToPure(db *gorm.DB) {
+	q := db.Where("base")
+	pureReturnsDB(q)
+	q.Find(nil) // OK: pure function doesn't pollute q
+	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// passQDirectlyToPureMultiple demonstrates multiple calls passing q to pure function.
+// Pure function does NOT pollute, so q can be passed multiple times.
+func passQDirectlyToPureMultiple(db *gorm.DB) {
+	q := db.Where("base")
+	pureReturnsDB(q)
+	pureReturnsDB(q) // OK: pure function doesn't pollute q
+	pureReturnsDB(q) // OK: still not polluted
+	q.Find(nil)      // OK: first actual use of q
+	q.Find(nil)      // want `\*gorm\.DB instance reused after chain method`
+}
+
+// passQDirectlyToMixedFunctions demonstrates passing q to both pure and non-pure functions.
+func passQDirectlyToMixedFunctions(db *gorm.DB) {
+	q := db.Where("base")
+	pureReturnsDB(q) // OK: pure doesn't pollute
+	voidFunc(q)      // Pollutes q
+	q.Find(nil)      // want `\*gorm\.DB instance reused after chain method`
 }

@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"go/token"
 	"testing"
 
 	"golang.org/x/tools/go/ssa"
@@ -28,8 +29,9 @@ func TestNewChecker(t *testing.T) {
 	ignoreMap := make(directive.IgnoreMap)
 	pureFuncs := directive.NewPureFuncSet(nil)
 	immutableReturnFuncs := directive.NewImmutableReturnFuncSet(nil)
+	reported := make(map[token.Pos]bool)
 
-	chk := newChecker(nil, ignoreMap, pureFuncs, immutableReturnFuncs)
+	chk := newChecker(nil, ignoreMap, pureFuncs, immutableReturnFuncs, reported)
 
 	if chk.pass != nil {
 		t.Error("Expected pass to be nil")
