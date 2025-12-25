@@ -217,6 +217,33 @@ func f() {
 			searchCall: "Order",
 			want:       "Order",
 		},
+		{
+			name: "Argument contains function call",
+			code: `package test
+func f() {
+	q.Where(foo.Bar())
+}`,
+			searchCall: "Where",
+			want:       "Where",
+		},
+		{
+			name: "Multiple nested calls in arguments",
+			code: `package test
+func f() {
+	q.Where(helper1(helper2(x)))
+}`,
+			searchCall: "Where",
+			want:       "Where",
+		},
+		{
+			name: "Method chain with function call arguments",
+			code: `package test
+func f() {
+	q.Where(foo.Bar()).Order(baz.Qux())
+}`,
+			searchCall: "Where",
+			want:       "Where",
+		},
 	}
 
 	for _, tt := range tests {
