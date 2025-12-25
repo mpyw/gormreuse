@@ -464,7 +464,7 @@ func nestedIfChaosMultipleVars(db *gorm.DB, a, b bool) {
 	q2 := db.Where("base2")
 
 	if a {
-		q1 = q1.Where("q1_a")
+		q1 = q1.Where("q1_a") // TODO: fix generator adds duplicate .Session().Session() here
 		if b {
 			q2 = q2.Where("q2_b")
 		} else {
@@ -483,6 +483,7 @@ func nestedIfChaosMultipleVars(db *gorm.DB, a, b bool) {
 }
 
 // nestedIfChaosReassignmentInBranch demonstrates reassignment in nested branches.
+// TODO: fix generator cannot handle this complex case (fresh instance in one branch, polluted in others)
 func nestedIfChaosReassignmentInBranch(db *gorm.DB, a, b, c bool) {
 	q := db.Where("base")
 
@@ -655,7 +656,7 @@ func chaosPolluteInLoop(db *gorm.DB, items []int, threshold int) {
 
 	for _, item := range items {
 		if item > threshold {
-			q = q.Where("greater", item)
+			q = q.Where("greater", item) // TODO: fix generator adds duplicate .Session().Session() here
 
 			if item%2 == 0 {
 				q.Find(nil)
