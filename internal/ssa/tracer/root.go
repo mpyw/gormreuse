@@ -55,10 +55,8 @@
 package tracer
 
 import (
-	"fmt"
 	"go/token"
 	"go/types"
-	"os"
 
 	"golang.org/x/tools/go/ssa"
 
@@ -411,11 +409,9 @@ func (t *RootTracer) tracePhi(phi *ssa.Phi, visited map[ssa.Value]bool, loopInfo
 
 						if allEdgesAreLoopHeaderPhi {
 							// Loop variable swap - return phi as independent root
-							fmt.Fprintf(os.Stderr, "DEBUG: Found loop variable swap-phi pair: %v and %v\n", phi, otherPhi)
 							return phi
 						}
 						// Simple conditional swap - fall through to regular tracing
-						fmt.Fprintf(os.Stderr, "DEBUG: Found conditional swap-phi pair (not loop vars): %v and %v\n", phi, otherPhi)
 					}
 				}
 			}
