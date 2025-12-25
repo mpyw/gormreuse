@@ -365,12 +365,7 @@ func (g *Generator) countPhiResultUses(phi *ssa.Phi) int {
 	if phi.Referrers() == nil {
 		return 0
 	}
-
-	count := 0
-	for range *phi.Referrers() {
-		count++
-	}
-	return count
+	return len(*phi.Referrers())
 }
 
 // findPhiUsingValue finds a Phi node that uses the given value as an edge,
