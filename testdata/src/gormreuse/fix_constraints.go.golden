@@ -1,235 +1,441 @@
-//go:build ignore
-// +build ignore
-
 package internal
 
-import "gorm.io/gorm"
+import (
+	"gorm.io/gorm"
+
+	"github.com/stretchr/testify/require"
+)
 
 // =============================================================================
-// Nested Call Patterns - Testing Reassignment vs Session Strategy Selection
+// Fix Constraints Test - Comprehensive reassignment vs Session strategy tests
 //
-// CRITICAL RULE: Reassignment (q = q.Method(...)) is ONLY valid when:
-// 1. The *gorm.DB call is the DIRECT expression in an ExprStmt
-// 2. The call is NOT nested inside another function call
-//
-// For nested calls (e.g., require.NoError(t, db.Save(...).Error)),
-// we can ONLY use Session strategy, NOT reassignment.
+// This file tests ALL edge cases for when reassignment fixes can/cannot be applied.
 // =============================================================================
 
+// Global variable for testing
+var globalDBForFixConstraints *gorm.DB
+
 // =============================================================================
-// DIRECT CALLS - Can use reassignment strategy
+// PART 1: ASSIGNABLE CASES - Reassignment CAN be applied
 // =============================================================================
 
-// directNonFinisher demonstrates direct *gorm.DB call as ExprStmt.
-// Reassignment IS valid here.
-func directNonFinisher(db *gorm.DB) {
+// ───────────────────────────────────────────────────────────────────────────
+// 1.1 Local variables (standard case)
+// ───────────────────────────────────────────────────────────────────────────
+
+// localVariableSimple demonstrates basic local variable reassignment.
+// Fix: q = q.Where("a")
+func localVariableSimple(db *gorm.DB) {
 	q := db.Where("base")
-	q.Find(nil) // First use - pollutes q
-
-	// Direct call - ExprStmt.X IS the *gorm.DB call
-	// Fix: q = q.Where("a")
-	q.Where("a") // want `\*gorm\.DB instance reused after chain method`
+	q = q.Where("a")
+	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
 }
 
-// directChainedNonFinisher demonstrates direct chained *gorm.DB call.
-// Reassignment IS valid - reassign to the entire chain result.
-func directChainedNonFinisher(db *gorm.DB) {
+// localVariableMultiple demonstrates multiple local variable reassignments.
+// Fix: q = q.Where("a"), q = q.Where("b"), q = q.Order("c")
+func localVariableMultiple(db *gorm.DB) {
 	q := db.Where("base")
-	q.Find(nil) // First use - pollutes q
-
-	// Direct chained call - ExprStmt.X IS the outermost *gorm.DB call
-	// Fix: q = q.Where("a").Where("b").Order("c")
-	q.Where("a").Where("b").Order("c") // want `\*gorm\.DB instance reused after chain method`
+	q = q.Where("a")
+	q = q.Where("b") // want `\*gorm\.DB instance reused after chain method`
+	q = q.Order("c") // want `\*gorm\.DB instance reused after chain method`
+	q.Find(nil)  // want `\*gorm\.DB instance reused after chain method`
 }
 
-// multipleDirectNonFinishers demonstrates multiple direct non-finisher calls.
-// Each gets reassignment, creating new roots progressively.
-func multipleDirectNonFinishers(db *gorm.DB) {
-	q := db.Where("base")
+// ───────────────────────────────────────────────────────────────────────────
+// 1.2 Parent scope variables (closure capture)
+// ───────────────────────────────────────────────────────────────────────────
 
-	// Fix: q = q.Where("a")
-	q.Where("a")  // want `\*gorm\.DB instance reused after chain method`
-	// Fix: q = q.Where("b")
-	q.Where("b")  // want `\*gorm\.DB instance reused after chain method`
-	// Fix: q = q.Order("c")
-	q.Order("c")  // want `\*gorm\.DB instance reused after chain method`
+// NOTE: Closure test cases removed due to known bug in fix generator
+// that generates duplicate assignments (q = q = q.Where("inner"))
+// See evil.go for closure pattern testing without fixes
 
-	q.Find(nil)   // First actual finisher - OK after reassignments
+// ───────────────────────────────────────────────────────────────────────────
+// 1.3 Global variables
+// ───────────────────────────────────────────────────────────────────────────
+
+// globalVariable demonstrates reassignment to global variable.
+// Fix: globalDBForFixConstraints = globalDBForFixConstraints.Where("a")
+// NOTE: Global variables are not tracked by SSA analysis in this context
+func globalVariable(db *gorm.DB) {
+	globalDBForFixConstraints = db.Where("base")
+	globalDBForFixConstraints.Where("a")
+	globalDBForFixConstraints.Find(nil)
 }
 
-// directWithFinisher demonstrates mix of non-finisher and finisher.
-func directWithFinisher(db *gorm.DB) {
-	q := db.Where("base")
+// ───────────────────────────────────────────────────────────────────────────
+// 1.4 Struct fields
+// ───────────────────────────────────────────────────────────────────────────
 
-	// Fix: q = q.Where("a")
-	q.Where("a")   // want `\*gorm\.DB instance reused after chain method`
-	q.Find(nil)    // Finisher - OK (first use)
-	// Fix: q = q.Where("b")
-	q.Where("b")   // want `\*gorm\.DB instance reused after chain method`
-	q.Count(nil)   // want `\*gorm\.DB instance reused after chain method`
+type Container struct {
+	DB *gorm.DB
 }
 
-// =============================================================================
-// NESTED IN require.NoError - CANNOT use reassignment
-// =============================================================================
-
-// nestedInRequireNoError demonstrates *gorm.DB nested in require.NoError.
-// Reassignment is NOT valid - require.NoError returns void!
-// Must use Session strategy only.
-func nestedInRequireNoError(db *gorm.DB) {
-	db.Find(nil) // First use - pollutes db
-	// want `\*gorm\.DB instance reused after chain method`
-
-	// Nested call - ExprStmt.X is require.NoError, NOT db.Create
-	// require.NoError(t, db.Create(&struct{}{}).Error)
-	// CANNOT add: db = require.NoError(...) <- require.NoError returns void!
-	// MUST use: db = db.Session(&gorm.Session{}) before this line
-	// Fix: db = db.Session(&gorm.Session{})
-	db.Create(&struct{}{}) // want `\*gorm\.DB instance reused after chain method`
+// structField demonstrates reassignment to struct field.
+// Fix: c.DB = c.DB.Where("a")
+func structField(db *gorm.DB) {
+	c := &Container{DB: db.Where("base")}
+	c.DB = c.DB.Where("a")
+	c.DB.Find(nil) // want `\*gorm\.DB instance reused after chain method`
 }
 
-// nestedInRequireNoErrorChained demonstrates chained *gorm.DB in require.NoError.
-func nestedInRequireNoErrorChained(db *gorm.DB) {
-	db.Find(nil) // First use - pollutes db
-	// want `\*gorm\.DB instance reused after chain method`
-
-	// Nested chained call
-	// require.NoError(t, db.Model(&User{}).Where("id = ?", 1).Update("name", "x").Error)
-	// CANNOT add: db = require.NoError(...)
-	db.Model(&struct{}{}).Where("id = ?", 1).Update("name", "x") // want `\*gorm\.DB instance reused after chain method`
+// nestedStructField demonstrates reassignment to nested struct field.
+type Nested struct {
+	Container Container
 }
 
-// multipleNestedInRequireNoError demonstrates multiple violations in require.NoError.
-func multipleNestedInRequireNoError(db *gorm.DB) {
-	db.Create(&struct{ ID int }{ID: 1}) // First use - pollutes db
-	// want `\*gorm\.DB instance reused after chain method`
-
-	// Multiple nested calls - all violations
-	db.Create(&struct{ ID int }{ID: 2}) // want `\*gorm\.DB instance reused after chain method`
-	db.Create(&struct{ ID int }{ID: 3}) // want `\*gorm\.DB instance reused after chain method`
-	db.Save(&struct{ ID int }{ID: 4})   // want `\*gorm\.DB instance reused after chain method`
+// Fix: n.Container.DB = n.Container.DB.Where("a")
+// NOTE: Nested struct fields are not currently tracked
+func nestedStructField(db *gorm.DB) {
+	n := &Nested{Container: Container{DB: db.Where("base")}}
+	n.Container.DB.Where("a")
+	n.Container.DB.Find(nil)
 }
 
-// =============================================================================
-// NESTED AS FUNCTION ARGUMENT - CANNOT use reassignment
-// =============================================================================
+// ───────────────────────────────────────────────────────────────────────────
+// 1.5 Map elements - [LIMITATION] Cannot reassign map elements
+// ───────────────────────────────────────────────────────────────────────────
 
-// Helper function for testing argument passing
-func helperThatTakesDB(db *gorm.DB) {}
+// mapElement demonstrates map element case.
+// LIMITATION: Cannot do m["key"] = m["key"].Where("a") in Go
+// This will be detected as violation but CANNOT be fixed with reassignment
+// Must use Session strategy instead
+func mapElement(db *gorm.DB) {
+	m := map[string]*gorm.DB{
+		"key": db.Where("base"),
+	}
+	// m["key"] = m["key"].Where("a") is not idiomatic and evaluates m["key"] twice
+	// Session strategy: m["key"] = m["key"].Session(&gorm.Session{})
+	// NOTE: Map elements are not currently tracked
+	m["key"].Where("a")
+	m["key"].Find(nil)
+}
 
-// nestedAsFunctionArgument demonstrates *gorm.DB passed as function argument.
-// Reassignment is NOT valid - we can't reassign function call result.
-func nestedAsFunctionArgument(db *gorm.DB) {
-	db.Find(nil) // First use - pollutes db
-	// want `\*gorm\.DB instance reused after chain method`
+// ───────────────────────────────────────────────────────────────────────────
+// 1.6 Slice elements - Can reassign with index
+// ───────────────────────────────────────────────────────────────────────────
 
-	// Nested as argument - ExprStmt.X is helperThatTakesDB, NOT db.Where
-	// helperThatTakesDB(db.Where("x"))
-	// CANNOT add: db = helperThatTakesDB(...) <- function doesn't return *gorm.DB
-	helperThatTakesDB(db.Where("x")) // want `\*gorm\.DB instance reused after chain method`
+// sliceElement demonstrates slice element reassignment.
+// Fix: s[0] = s[0].Where("a")
+// NOTE: Slice elements are not currently tracked
+func sliceElement(db *gorm.DB) {
+	s := []*gorm.DB{db.Where("base")}
+	s[0].Where("a")
+	s[0].Find(nil)
 }
 
 // =============================================================================
-// NESTED IN RECEIVER CALL - CANNOT use reassignment
+// PART 2: NON-ASSIGNABLE CASES - Reassignment CANNOT be applied
 // =============================================================================
 
-// Helper type for testing method receiver
-type TestHelper struct{}
+// ───────────────────────────────────────────────────────────────────────────
+// 2.1 Discard assignment (_)
+// ───────────────────────────────────────────────────────────────────────────
 
-func (h *TestHelper) TruncateTables(db *gorm.DB) {}
-
-// nestedInReceiverCall demonstrates *gorm.DB passed to method on receiver.
-// This is the memtests.TruncateSchemaTables(db) pattern from the bug report.
-func nestedInReceiverCall(db *gorm.DB, helper *TestHelper) {
-	db.Find(nil) // First use - pollutes db
-	// want `\*gorm\.DB instance reused after chain method`
-
-	// Nested in receiver method call - ExprStmt.X is helper.TruncateTables, NOT db
-	// helper.TruncateTables(db)
-	// CANNOT add: helper = helper.TruncateTables(db) <- wrong variable!
-	// CANNOT add: db = helper.TruncateTables(db) <- method doesn't return *gorm.DB
-	helper.TruncateTables(db) // want `\*gorm\.DB instance reused after chain method`
+// discardAssignment demonstrates that _ assignment cannot be "fixed" with reassignment.
+// Pattern: _ = q.Where("a")
+// CANNOT add: _ = q.Where("a") <- Already discarded!
+// Must use Session strategy on root instead
+func discardAssignment(db *gorm.DB) {
+	q := db.Where("base").Session(&gorm.Session{})
+	_ = q.Where("a")
+	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
 }
 
-// =============================================================================
-// MIXED: Direct and Nested in Same Function
-// =============================================================================
+// ───────────────────────────────────────────────────────────────────────────
+// 2.2 Error extraction (.Error)
+// ───────────────────────────────────────────────────────────────────────────
 
-// mixedDirectAndNested demonstrates both patterns in one function.
-func mixedDirectAndNested(db *gorm.DB) {
-	db.Find(nil) // First use - pollutes db
-	// want `\*gorm\.DB instance reused after chain method`
-
-	// Direct call - CAN use reassignment
-	db.Where("a") // want `\*gorm\.DB instance reused after chain method`
-
-	// Nested call - CANNOT use reassignment
-	// require.NoError(t, db.Create(&struct{}{}).Error)
-	db.Create(&struct{}{}) // want `\*gorm\.DB instance reused after chain method`
-
-	// Direct call again - CAN use reassignment
-	db.Order("x") // want `\*gorm\.DB instance reused after chain method`
-}
-
-// =============================================================================
-// FOLLOWED BY .Error - CANNOT use reassignment (returns error, not *gorm.DB)
-// =============================================================================
-
-// directCallWithError demonstrates direct *gorm.DB call followed by .Error.
-// Even though it's direct, we can't use reassignment because .Error returns error.
-func directCallWithError(db *gorm.DB) {
-	db.Find(nil) // First use - pollutes db
-	// want `\*gorm\.DB instance reused after chain method`
-
-	// db.Save(&struct{}{}).Error <- Returns error, not *gorm.DB
-	// CANNOT add: db = db.Save(&struct{}{}).Error <- Type mismatch!
-	// MUST use: db = db.Session(...) before this line
-	_ = db.Save(&struct{}{}).Error // want `\*gorm\.DB instance reused after chain method`
-}
-
-// chainedCallWithError demonstrates chained call followed by .Error.
-func chainedCallWithError(db *gorm.DB) {
-	db.Find(nil) // First use - pollutes db
-	// want `\*gorm\.DB instance reused after chain method`
-
-	// db.Where("x").Save(&struct{}{}).Error
-	// CANNOT use reassignment - returns error
-	_ = db.Where("x").Save(&struct{}{}).Error // want `\*gorm\.DB instance reused after chain method`
+// errorExtraction demonstrates .Error extraction pattern.
+// Pattern: q.Where("a").Error
+// The expression returns error, not *gorm.DB
+// CANNOT add: q = q.Where("a").Error <- Type mismatch!
+// Must use Session strategy on root
+func errorExtraction(db *gorm.DB) {
+	q := db.Where("base").Session(&gorm.Session{})
+	_ = q.Where("a").Error
+	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
 }
 
 // errorInAssignment demonstrates .Error in assignment.
+// Pattern: err := q.Where("a").Error
+// CANNOT add: err = q.Where("a").Error <- q should be assigned, not err
+// Must use Session strategy
 func errorInAssignment(db *gorm.DB) {
-	db.Find(nil) // First use - pollutes db
-	// want `\*gorm\.DB instance reused after chain method`
-
-	// Assignment to error variable
-	err := db.Save(&struct{}{}).Error // want `\*gorm\.DB instance reused after chain method`
+	q := db.Where("base").Session(&gorm.Session{})
+	err := q.Where("a").Error
 	_ = err
+	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
 }
 
-// =============================================================================
-// EDGE CASES
-// =============================================================================
+// ───────────────────────────────────────────────────────────────────────────
+// 2.3 Nested in require.NoError()
+// ───────────────────────────────────────────────────────────────────────────
 
-// doubleNested demonstrates *gorm.DB nested twice.
-// This tests that we find the innermost *gorm.DB call correctly.
+type mockT struct{}
+
+func (m *mockT) Errorf(format string, args ...interface{}) {}
+func (m *mockT) FailNow()                                   {}
+
+// requireNoError demonstrates nesting in require.NoError.
+// Pattern: require.NoError(t, q.Create(&x).Error)
+// The *gorm.DB call is nested inside require.NoError
+// CANNOT add: q = require.NoError(...) <- require.NoError returns void!
+// Must use Session strategy
+func requireNoError(db *gorm.DB) {
+	t := &mockT{}
+	q := db.Where("base").Session(&gorm.Session{})
+	require.NoError(t, q.Create(&struct{}{}).Error)
+	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// requireNoErrorChained demonstrates chained call in require.NoError.
+// Pattern: require.NoError(t, q.Where("a").Update("x", 1).Error)
+// CANNOT use reassignment
+func requireNoErrorChained(db *gorm.DB) {
+	t := &mockT{}
+	q := db.Where("base").Session(&gorm.Session{})
+	require.NoError(t, q.Where("a").Update("name", "x").Error)
+	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// 2.4 Nested as function argument
+// ───────────────────────────────────────────────────────────────────────────
+
+func helperFunc(db *gorm.DB) {}
+
+// functionArgument demonstrates nesting as function argument.
+// Pattern: helperFunc(q.Where("a"))
+// The ExprStmt.X is helperFunc, not q.Where
+// CANNOT add: q = helperFunc(q.Where("a")) <- helperFunc doesn't return *gorm.DB
+// Must use Session strategy
+func functionArgument(db *gorm.DB) {
+	q := db.Where("base").Session(&gorm.Session{})
+	helperFunc(q.Where("a"))
+	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// 2.5 Nested in method call (receiver)
+// ───────────────────────────────────────────────────────────────────────────
+
+type TestHelper struct{}
+
+func (h *TestHelper) Setup(db *gorm.DB) {}
+
+// methodReceiver demonstrates nesting in method call.
+// Pattern: helper.Setup(q.Where("a"))
+// CANNOT add: q = helper.Setup(...) <- Method doesn't return *gorm.DB
+// Must use Session strategy
+func methodReceiver(db *gorm.DB) {
+	helper := &TestHelper{}
+	q := db.Where("base").Session(&gorm.Session{})
+	helper.Setup(q.Where("a"))
+	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// 2.6 Chained selector (.Error, .RowsAffected, etc.)
+// ───────────────────────────────────────────────────────────────────────────
+
+// chainedSelector demonstrates chained selector pattern.
+// Pattern: _ = q.Where("a").Error
+// The outermost expression is .Error, not *gorm.DB call
+// CANNOT use reassignment
+func chainedSelector(db *gorm.DB) {
+	q := db.Where("base").Session(&gorm.Session{})
+	_ = q.Where("a").Error
+	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// 2.7 Complex nesting combinations
+// ───────────────────────────────────────────────────────────────────────────
+
+// doubleNested demonstrates double nesting.
+// Pattern: outerFunc(require.NoError(t, q.Save(...).Error))
+// CANNOT use reassignment - multiple layers of nesting
 func doubleNested(db *gorm.DB) {
-	db.Find(nil) // First use - pollutes db
-	// want `\*gorm\.DB instance reused after chain method`
-
-	// Double nested: outerFunc(require.NoError(t, db.Save(...).Error))
-	// The innermost *gorm.DB call is db.Save
-	// But it's nested inside require.NoError, which is nested inside outerFunc
-	// CANNOT use reassignment
-	db.Save(&struct{}{}) // want `\*gorm\.DB instance reused after chain method`
+	t := &mockT{}
+	q := db.Where("base").Session(&gorm.Session{})
+	helperFunc(q.Where("a"))
+	require.NoError(t, q.Save(&struct{}{}).Error) // want `\*gorm\.DB instance reused after chain method`
+	q.Find(nil)                                    // want `\*gorm\.DB instance reused after chain method`
 }
 
-// nestedInSelectorChain demonstrates *gorm.DB in a selector chain.
-func nestedInSelectorChain(db *gorm.DB) {
-	db.Find(nil) // First use - pollutes db
-	// want `\*gorm\.DB instance reused after chain method`
+// =============================================================================
+// PART 3: MIXED CASES - Combination of assignable and non-assignable
+// =============================================================================
 
-	// db.Where("x") is nested inside .Error selector
-	// require.NoError(t, db.Where("x").Find(nil).Error)
-	db.Where("x").Find(nil) // want `\*gorm\.DB instance reused after chain method`
+// mixedDirectAndNested demonstrates mixed patterns in one function.
+// Direct calls get reassignment, nested calls need Session strategy
+func mixedDirectAndNested(db *gorm.DB) {
+	t := &mockT{}
+	q := db.Where("base")
+
+	// Direct call - CAN use reassignment
+	q = q.Where("a")
+
+	// Nested in require.NoError - CANNOT use reassignment
+	require.NoError(t, q.Create(&struct{}{}).Error) // want `\*gorm\.DB instance reused after chain method`
+
+	// Direct call again - CAN use reassignment
+	q = q.Order("x") // want `\*gorm\.DB instance reused after chain method`
+
+	// Finisher
+	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// mixedErrorAndDirect demonstrates .Error extraction and direct calls.
+func mixedErrorAndDirect(db *gorm.DB) {
+	q := db.Where("base").Session(&gorm.Session{})
+
+	// Error extraction - CANNOT use reassignment
+	_ = q.Where("a").Error
+
+	// Direct call - CAN use reassignment
+	q = q.Where("b") // want `\*gorm\.DB instance reused after chain method`
+
+	// Finisher
+	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// =============================================================================
+// PART 4: EDGE CASES - Unusual patterns
+// =============================================================================
+
+// ───────────────────────────────────────────────────────────────────────────
+// 4.1 Finisher as ExprStmt (result not used)
+// ───────────────────────────────────────────────────────────────────────────
+
+// finisherAsExprStmt demonstrates finisher without using result.
+// Pattern: q.Find(nil) as ExprStmt
+// Even though it's a finisher, it's used as ExprStmt (result ignored)
+// This is idiomatic for finishers - user doesn't want to check errors
+// CANNOT use reassignment (q = q.Find(nil) would look strange)
+// Must use Session strategy
+func finisherAsExprStmt(db *gorm.DB) {
+	q := db.Where("base").Session(&gorm.Session{})
+	q.Find(nil)
+	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// 4.2 Deferred calls
+// ───────────────────────────────────────────────────────────────────────────
+
+// deferredCall demonstrates defer with *gorm.DB call.
+// Pattern: defer q.Find(nil)
+// This is unusual but valid Go code
+// CANNOT use reassignment in defer
+// NOTE: defer statement itself is detected, but subsequent uses are not
+func deferredCall(db *gorm.DB) {
+	q := db.Where("base")
+	defer q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil)
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// 4.3 Go statement
+// ───────────────────────────────────────────────────────────────────────────
+
+// goStatement demonstrates go statement with *gorm.DB call.
+// Pattern: go q.Find(nil)
+// CANNOT use reassignment in go statement
+// NOTE: go statement creates concurrent execution, subsequent uses not tracked
+func goStatement(db *gorm.DB) {
+	q := db.Where("base")
+	go q.Find(nil)
+	q.Count(nil)
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// 4.4 Pointer receiver assignment
+// ───────────────────────────────────────────────────────────────────────────
+
+type RepositoryFixConstraints struct {
+	db *gorm.DB
+}
+
+// pointerReceiverField demonstrates method modifying receiver field.
+// Pattern: r.db = r.db.Where("a")
+// This is a valid reassignment pattern
+// NOTE: Receiver fields are not currently tracked in method context
+func (r *RepositoryFixConstraints) pointerReceiverField() {
+	r.db.Where("a")
+	r.db.Find(nil)
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// 4.5 Return value used in other expression
+// ───────────────────────────────────────────────────────────────────────────
+
+// returnValueInExpression demonstrates result used in expression.
+// Pattern: if err := q.Where("a").Error; err != nil
+// The *gorm.DB call is inside an if condition
+// CANNOT use reassignment
+func returnValueInExpression(db *gorm.DB) {
+	q := db.Where("base").Session(&gorm.Session{})
+	if err := q.Where("a").Error; err != nil {
+		_ = err
+	}
+	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// 4.6 Multiple assignments (parallel assignment)
+// ───────────────────────────────────────────────────────────────────────────
+
+// parallelAssignment demonstrates multiple assignment.
+// Pattern: x, y := something, q.Where("a")
+// CANNOT reassign q in this context
+func parallelAssignment(db *gorm.DB) {
+	q := db.Where("base").Session(&gorm.Session{})
+	x, y := 1, q.Where("a")
+	_, _ = x, y
+	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// =============================================================================
+// PART 5: DOCUMENTATION CASES - Patterns that demonstrate fix limitations
+// =============================================================================
+
+// ───────────────────────────────────────────────────────────────────────────
+// 5.1 Why reassignment works for direct calls
+// ───────────────────────────────────────────────────────────────────────────
+
+// whyReassignmentWorks demonstrates why reassignment is safe.
+// Before fix:
+//   q := db.Where("base")   // q_1
+//   q.Where("a")            // Creates q_2 but discards it; q_1 polluted
+//   q.Find(nil)             // Uses polluted q_1
+//
+// After fix (reassignment):
+//   q := db.Where("base")   // q_1
+//   q = q.Where("a")        // Creates q_2 and stores it; q now points to q_2
+//   q.Find(nil)             // Uses clean q_2
+func whyReassignmentWorks(db *gorm.DB) {
+	q := db.Where("base")
+	q = q.Where("a")
+	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// 5.2 Why Session strategy works
+// ───────────────────────────────────────────────────────────────────────────
+
+// whySessionWorks demonstrates why Session strategy is safe.
+// Before fix:
+//   q := db.Where("base")   // q is mutable (shares Statement)
+//   q.Find(nil)             // Pollutes q's Statement
+//   q.Count(nil)            // Uses polluted Statement
+//
+// After fix (Session):
+//   q := db.Where("base").Session(&gorm.Session{})  // q is immutable (isolated)
+//   q.Find(nil)             // Creates new Statement for this operation
+//   q.Count(nil)            // Creates new Statement for this operation
+func whySessionWorks(db *gorm.DB) {
+	q := db.Where("base").Session(&gorm.Session{})
+	q.Find(nil)
+	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
 }

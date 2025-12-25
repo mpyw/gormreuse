@@ -148,11 +148,13 @@ func (g *Generator) findNonFinisherUses(uses []pollution.UsageInfo) []pollution.
 // expression in the ExprStmt, not nested inside another function call.
 //
 // Valid for reassignment:
-//   q.Where("a")  // ExprStmt with CallExpr at top level
+//
+//	q.Where("a")  // ExprStmt with CallExpr at top level
 //
 // NOT valid for reassignment (nested calls):
-//   require.NoError(t, db.Save(&x).Error)  // *gorm.DB call nested inside require.NoError
-//   memtests.TruncateSchemaTables(db)      // *gorm.DB passed as argument
+//
+//	require.NoError(t, db.Save(&x).Error)  // *gorm.DB call nested inside require.NoError
+//	memtests.TruncateSchemaTables(db)      // *gorm.DB passed as argument
 //
 // For nested cases, we can only use Session strategy, not reassignment.
 func (g *Generator) isNonFinisherExprStmt(pos token.Pos) bool {
@@ -225,9 +227,9 @@ func (g *Generator) isNonFinisherExprStmt(pos token.Pos) bool {
 //
 // Although Create/Save/Update/Delete technically return *gorm.DB,
 // we treat them as finishers because:
-//   1. Users treat them as ending a logical operation
-//   2. Chaining after them is confusing and not idiomatic
-//   3. When used as ExprStmt (result unused), it's intentional
+//  1. Users treat them as ending a logical operation
+//  2. Chaining after them is confusing and not idiomatic
+//  3. When used as ExprStmt (result unused), it's intentional
 //
 // Query execution finishers:
 //   - Find, First, Last, Take: Load data into destination
@@ -574,10 +576,11 @@ func (g *Generator) traceForImmutable(v ssa.Value, visited map[ssa.Value]bool) b
 
 // isDirectOrSelectorOf checks if expr is target or a SelectorExpr chain ending with target.
 // Examples:
-//   expr = target                          -> true (direct match)
-//   expr = target.Error                    -> true (selector of target)
-//   expr = target.Where("x").Error         -> true (selector chain of target)
-//   expr = otherFunc(target)               -> false (target is argument, not direct)
+//
+//	expr = target                          -> true (direct match)
+//	expr = target.Error                    -> true (selector of target)
+//	expr = target.Where("x").Error         -> true (selector chain of target)
+//	expr = otherFunc(target)               -> false (target is argument, not direct)
 func (g *Generator) isDirectOrSelectorOf(expr ast.Expr, target *ast.CallExpr) bool {
 	if expr == target {
 		return true
@@ -597,7 +600,7 @@ func (g *Generator) isDirectOrSelectorOf(expr ast.Expr, target *ast.CallExpr) bo
 // Returns nil if no CallExpr is found.
 func (g *Generator) findInnermostCallExpr(file *ast.File, pos token.Pos) *ast.CallExpr {
 	var bestMatch *ast.CallExpr
-	var bestMatchSize token.Pos = token.Pos(1<<31 - 1) // Max value
+	var bestMatchSize = token.Pos(1<<31 - 1) // Max value
 
 	ast.Inspect(file, func(n ast.Node) bool {
 		if n == nil {
@@ -667,7 +670,7 @@ func (g *Generator) getVariableNameAtPos(pos token.Pos) string {
 	//   - Outer call: require.NoError (wrong!)
 	//   - Inner call: db.Save (correct!)
 	var bestMatch *ast.CallExpr
-	var bestMatchSize token.Pos = token.Pos(1<<31 - 1) // Max value
+	var bestMatchSize = token.Pos(1<<31 - 1) // Max value
 
 	ast.Inspect(file, func(n ast.Node) bool {
 		if n == nil {
@@ -788,7 +791,7 @@ func (g *Generator) getCallExprEndPos(pos token.Pos) token.Pos {
 	// Find the INNERMOST CallExpr that contains this position
 	// Same reasoning as getVariableNameAtPos - need the most specific match
 	var bestMatch *ast.CallExpr
-	var bestMatchSize token.Pos = token.Pos(1<<31 - 1) // Max value
+	var bestMatchSize = token.Pos(1<<31 - 1) // Max value
 
 	ast.Inspect(file, func(n ast.Node) bool {
 		if n == nil {
