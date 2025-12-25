@@ -33,6 +33,7 @@
 package gormreuse
 
 import (
+	"flag"
 	"go/ast"
 	"go/token"
 
@@ -42,6 +43,12 @@ import (
 	"github.com/mpyw/gormreuse/internal"
 	"github.com/mpyw/gormreuse/internal/directive"
 )
+
+var debugFilter string
+
+func init() {
+	Analyzer.Flags.StringVar(&debugFilter, "debug-filter", "", "enable debug output for functions matching regex (e.g., 'TestFunc|Helper')")
+}
 
 // Analyzer is the main analyzer for gormreuse.
 //
@@ -60,6 +67,7 @@ var Analyzer = &analysis.Analyzer{
 	Doc:      "detects unsafe *gorm.DB instance reuse after chain methods",
 	Requires: []*analysis.Analyzer{buildssa.Analyzer},
 	Run:      run,
+	Flags:    flag.FlagSet{},
 }
 
 func run(pass *analysis.Pass) (any, error) {
@@ -94,7 +102,7 @@ func run(pass *analysis.Pass) (any, error) {
 	}
 
 	// Run SSA-based analysis
-	internal.RunSSA(pass, ssaInfo, ignoreMaps, funcIgnores, pureFuncs, immutableReturnFuncs, skipFiles)
+	internal.RunSSA(pass, ssaInfo, ignoreMaps, funcIgnores, pureFuncs, immutableReturnFuncs, skipFiles, debugFilter)
 
 	return nil, nil
 }

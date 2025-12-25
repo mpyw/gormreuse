@@ -36,6 +36,7 @@ package ssa
 import (
 	"golang.org/x/tools/go/ssa"
 
+	"github.com/mpyw/gormreuse/internal/debug"
 	"github.com/mpyw/gormreuse/internal/directive"
 	"github.com/mpyw/gormreuse/internal/ssa/cfg"
 	"github.com/mpyw/gormreuse/internal/ssa/handler"
@@ -96,8 +97,16 @@ func NewAnalyzer(fn *ssa.Function, pureFuncs *directive.PureFuncSet, immutableRe
 //
 // Closures that capture *gorm.DB are processed recursively to detect
 // violations across closure boundaries.
-func (a *Analyzer) Analyze() []Violation {
+//
+// Parameters:
+//   - debugMode: If true, enables debug information collection
+func (a *Analyzer) Analyze(debugMode bool) []Violation {
 	tracker := pollution.New(a.cfgAnalyzer, a.fn)
+
+	// Wrap with debug tracker if debug mode is enabled
+	if debugMode {
+		tracker = debug.NewTracker(tracker)
+	}
 
 	// PHASE 1: TRACKING
 	// Process all instructions and record usages
@@ -122,7 +131,7 @@ func (a *Analyzer) Analyze() []Violation {
 //     - Defers are processed last because they execute at function exit
 //
 // The visited map prevents infinite recursion for mutually recursive closures.
-func (a *Analyzer) processFunction(fn *ssa.Function, tracker *pollution.Tracker, visited map[*ssa.Function]bool) {
+func (a *Analyzer) processFunction(fn *ssa.Function, tracker pollution.Tracker, visited map[*ssa.Function]bool) {
 	if fn == nil || fn.Blocks == nil {
 		return
 	}

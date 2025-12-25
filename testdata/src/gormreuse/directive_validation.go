@@ -264,6 +264,7 @@ func purePollutesConditionally(db *gorm.DB, cond bool) {
 // Both branches return valid states:
 //   - if cond: Session() returns Clean
 //   - else: return db returns Depends(db)
+//
 // Merged state: Depends(db) - valid for pure function
 //
 //gormreuse:pure
@@ -521,8 +522,8 @@ func pureCallsNoGormArgs() int {
 //
 //gormreuse:pure
 func pureCallsWithDependsArg(db *gorm.DB) *gorm.DB {
-	intermediate := pureHelperReturns(db)      // intermediate is Clean
-	return pureHelperReturns(intermediate)     // tests InferValue path with Clean arg
+	intermediate := pureHelperReturns(db)  // intermediate is Clean
+	return pureHelperReturns(intermediate) // tests InferValue path with Clean arg
 }
 
 // PV232: Tests inferCall path where function has no *gorm.DB args
@@ -539,8 +540,8 @@ func pureCallsRegularFunc() int {
 //
 //gormreuse:pure
 func pureCallsWithPollutedArg(db *gorm.DB) *gorm.DB {
-	polluted := db.Where("x")           // want `pure function pollutes \*gorm\.DB argument by calling Where`
-	return pureHelperReturns(polluted)  // OK now - return value purity not checked
+	polluted := db.Where("x")          // want `pure function pollutes \*gorm\.DB argument by calling Where`
+	return pureHelperReturns(polluted) // OK now - return value purity not checked
 }
 
 // =============================================================================

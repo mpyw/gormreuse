@@ -29,7 +29,7 @@ func TestNewChecker(t *testing.T) {
 	pureFuncs := directive.NewPureFuncSet(nil)
 	immutableReturnFuncs := directive.NewImmutableReturnFuncSet(nil)
 
-	chk := newChecker(nil, ignoreMap, pureFuncs, immutableReturnFuncs)
+	chk := newChecker(nil, ignoreMap, pureFuncs, immutableReturnFuncs, nil)
 
 	if chk.pass != nil {
 		t.Error("Expected pass to be nil")
@@ -46,13 +46,16 @@ func TestNewChecker(t *testing.T) {
 	if chk.reported == nil {
 		t.Error("Expected reported to be initialized")
 	}
+	if chk.debugFilterRegex != nil {
+		t.Error("Expected debugFilterRegex to be nil")
+	}
 }
 
 func TestAnalyzer_Analyze_NilFunction(t *testing.T) {
 	analyzer := ssautil.NewAnalyzer(nil, nil, nil)
 
 	// Should not panic with nil function
-	violations := analyzer.Analyze()
+	violations := analyzer.Analyze(false)
 	if len(violations) != 0 {
 		t.Errorf("Expected 0 violations for nil function, got %d", len(violations))
 	}
@@ -62,7 +65,7 @@ func TestAnalyzer_Analyze_EmptyFunction(t *testing.T) {
 	fn := &ssa.Function{}
 	analyzer := ssautil.NewAnalyzer(fn, nil, nil)
 
-	violations := analyzer.Analyze()
+	violations := analyzer.Analyze(false)
 	if len(violations) != 0 {
 		t.Errorf("Expected 0 violations for empty function, got %d", len(violations))
 	}

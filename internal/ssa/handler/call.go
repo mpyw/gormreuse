@@ -51,7 +51,7 @@ import (
 // This struct is created per-function and passed to all handlers during
 // the instruction processing pass.
 type Context struct {
-	Tracker    *pollution.Tracker // Records usage and detects violations
+	Tracker    pollution.Tracker  // Records usage and detects violations
 	RootTracer *tracer.RootTracer // Traces values to mutable roots
 	CFG        *cfg.Analyzer      // Control flow graph analysis
 	LoopInfo   *cfg.LoopInfo      // Loop detection results for current function
@@ -128,6 +128,11 @@ func (h *CallHandler) Handle(call *ssa.Call, ctx *Context) {
 		}
 	}
 
+	// Collect debug info if tracker supports it
+	if collector, ok := ctx.Tracker.(pollution.DebugCollector); ok {
+		collector.CollectDebugInfo(root, call.Pos(), methodName, "method")
+	}
+
 	// Check ALL possible roots for phi nodes
 	allRoots := ctx.RootTracer.FindAllMutableRoots(recv)
 	for _, r := range allRoots {
@@ -171,6 +176,11 @@ func (h *CallHandler) processBoundMethodCall(call *ssa.Call, mc *ssa.MakeClosure
 		if isInLoop && ctx.CFG.IsDefinedOutsideLoop(root, ctx.LoopInfo) {
 			ctx.Tracker.AddViolation(call.Pos())
 		}
+	}
+
+	// Collect debug info if tracker supports it
+	if collector, ok := ctx.Tracker.(pollution.DebugCollector); ok {
+		collector.CollectDebugInfo(root, call.Pos(), methodName, "bound")
 	}
 }
 

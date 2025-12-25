@@ -35,12 +35,16 @@
 package internal
 
 import (
+	"fmt"
 	"go/token"
+	"os"
+	"regexp"
 
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/analysis/passes/buildssa"
 	"golang.org/x/tools/go/ssa"
 
+	"github.com/mpyw/gormreuse/internal/debug"
 	"github.com/mpyw/gormreuse/internal/directive"
 	ssautil "github.com/mpyw/gormreuse/internal/ssa"
 	"github.com/mpyw/gormreuse/internal/ssa/purity"
@@ -70,7 +74,20 @@ func RunSSA(
 	pureFuncs *directive.PureFuncSet,
 	immutableReturnFuncs *directive.ImmutableReturnFuncSet,
 	skipFiles map[string]bool,
+	debugFilter string,
 ) {
+	// Compile debug filter regex if provided
+	var debugFilterRegex *regexp.Regexp
+	if debugFilter != "" {
+		var err error
+		debugFilterRegex, err = regexp.Compile(debugFilter)
+		if err != nil {
+			// Report regex error but continue analysis without debug mode
+			pass.Reportf(token.NoPos, "invalid debug filter regex: %v", err)
+			debugFilterRegex = nil
+		}
+	}
+
 	for _, fn := range ssaInfo.SrcFuncs {
 		pos := fn.Pos()
 		if !pos.IsValid() {
@@ -104,7 +121,7 @@ func RunSSA(
 			}
 		}
 
-		chk := newChecker(pass, ignoreMap, pureFuncs, immutableReturnFuncs)
+		chk := newChecker(pass, ignoreMap, pureFuncs, immutableReturnFuncs, debugFilterRegex)
 		chk.checkFunction(fn)
 	}
 
@@ -135,26 +152,45 @@ type checker struct {
 	pureFuncs            *directive.PureFuncSet            // Pure functions for analysis
 	immutableReturnFuncs *directive.ImmutableReturnFuncSet // Immutable-return functions
 	reported             map[token.Pos]bool                // Deduplication of reports
+	debugFilterRegex     *regexp.Regexp                    // Debug filter regex (nil if disabled)
 }
 
 // newChecker creates a new checker for a specific file.
-func newChecker(pass *analysis.Pass, ignoreMap directive.IgnoreMap, pureFuncs *directive.PureFuncSet, immutableReturnFuncs *directive.ImmutableReturnFuncSet) *checker {
+func newChecker(pass *analysis.Pass, ignoreMap directive.IgnoreMap, pureFuncs *directive.PureFuncSet, immutableReturnFuncs *directive.ImmutableReturnFuncSet, debugFilterRegex *regexp.Regexp) *checker {
 	return &checker{
 		pass:                 pass,
 		ignoreMap:            ignoreMap,
 		pureFuncs:            pureFuncs,
 		immutableReturnFuncs: immutableReturnFuncs,
 		reported:             make(map[token.Pos]bool),
+		debugFilterRegex:     debugFilterRegex,
 	}
 }
 
 // checkFunction runs SSA analysis on a single function and reports violations.
 func (c *checker) checkFunction(fn *ssa.Function) {
+	// Check if debug mode is enabled for this function
+	debugMode := c.debugFilterRegex != nil && c.debugFilterRegex.MatchString(fn.String())
+
 	analyzer := ssautil.NewAnalyzer(fn, c.pureFuncs, c.immutableReturnFuncs)
-	violations := analyzer.Analyze()
+	violations := analyzer.Analyze(debugMode)
+
+	// Output debug info if enabled
+	if debugMode && len(violations) > 0 {
+		fmt.Fprintf(os.Stderr, "\n=== Debug output for %s ===\n", fn.String())
+		for _, v := range violations {
+			// Try to get debug info if this is a debug violation
+			if dv, ok := v.(debug.Violation); ok {
+				if debugInfo := dv.DebugInfo(); debugInfo != nil {
+					debugOutput := debug.FormatViolation(fn.String(), debugInfo, c.pass.Fset)
+					fmt.Fprint(os.Stderr, debugOutput)
+				}
+			}
+		}
+	}
 
 	for _, v := range violations {
-		c.report(v.Pos, v.Message)
+		c.report(v.Pos(), v.Message())
 	}
 }
 

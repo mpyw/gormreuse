@@ -837,8 +837,8 @@ func methodValue(db *gorm.DB) {
 func methodValueSameBlock(db *gorm.DB) {
 	q := db.Where("x = ?", 1)
 	find := q.Find
-	find(nil)  // First use - pollutes q
-	find(nil)  // want `\*gorm\.DB instance reused after chain method`
+	find(nil) // First use - pollutes q
+	find(nil) // want `\*gorm\.DB instance reused after chain method`
 }
 
 // methodValueInLoop demonstrates method value in loop.
@@ -2162,9 +2162,9 @@ func storedClosureChain(db *gorm.DB) {
 	fn := func() *gorm.DB {
 		return q1.Where("from closure", 1)
 	}
-	q2 := fn()         // q2 holds first branch from q1
-	q2.Where("y", 2)   // Continues q2's chain (OK)
-	q1.Where("z", 3)   // want `\*gorm\.DB instance reused after chain method`
+	q2 := fn()       // q2 holds first branch from q1
+	q2.Where("y", 2) // Continues q2's chain (OK)
+	q1.Where("z", 3) // want `\*gorm\.DB instance reused after chain method`
 }
 
 // storedClosureReordered demonstrates order of calls with stored closure.
@@ -2191,8 +2191,8 @@ func iifeStoredResult(db *gorm.DB) {
 	q2 := func() *gorm.DB {
 		return q1.Where("from iife", 1)
 	}()
-	q2.Where("y", 2)   // Continues q2's chain (OK)
-	q1.Where("z", 3)   // want `\*gorm\.DB instance reused after chain method`
+	q2.Where("y", 2) // Continues q2's chain (OK)
+	q1.Where("z", 3) // want `\*gorm\.DB instance reused after chain method`
 }
 
 // =============================================================================
@@ -2692,9 +2692,9 @@ func whereOnlyMultipleBranches(db *gorm.DB) {
 // from README: each separate statement creates a branch from q.
 func chainingWithoutReassignmentViolation(db *gorm.DB) {
 	q := db.Where("base")
-	q.Where("a")     // first branch - OK
-	q.Where("b")     // want `\*gorm\.DB instance reused after chain method`
-	q.Find(nil)      // want `\*gorm\.DB instance reused after chain method`
+	q.Where("a") // first branch - OK
+	q.Where("b") // want `\*gorm\.DB instance reused after chain method`
+	q.Find(nil)  // want `\*gorm\.DB instance reused after chain method`
 }
 
 // chainingWithReassignmentSafe demonstrates the solution: reassign each step.

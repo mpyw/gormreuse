@@ -98,3 +98,34 @@ func IsImmutableReturningBuiltin(name string) bool {
 	_, ok := immutableReturningMethods[name]
 	return ok
 }
+
+// finisherMethods are methods that execute queries and interact with the database.
+// These are "terminal" operations that typically end a method chain.
+var finisherMethods = map[string]struct{}{
+	// Query finishers
+	"Find":  {},
+	"First": {},
+	"Last":  {},
+	"Take":  {},
+	// Aggregate finishers
+	"Count": {},
+	"Pluck": {},
+	"Scan":  {},
+	// Mutation finishers
+	"Create":  {},
+	"Save":    {},
+	"Update":  {},
+	"Updates": {},
+	"Delete":  {},
+	// Raw SQL finishers
+	"Row":  {},
+	"Rows": {},
+	"Exec": {},
+}
+
+// IsFinisherBuiltin returns true if the method is a finisher that executes queries.
+// Finisher methods interact with the database and are typically terminal operations.
+func IsFinisherBuiltin(name string) bool {
+	_, ok := finisherMethods[name]
+	return ok
+}
