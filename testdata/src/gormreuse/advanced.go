@@ -231,3 +231,19 @@ func conditionalExtendBothNoPollution(db *gorm.DB, flag bool) {
 	q.Find(nil)                 // OK: first actual use
 	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
 }
+
+// conditionalExtendThreeBranches demonstrates three-way branch with partial assignment.
+// Phi merges: original + two assignments. All paths have first use, so Find is OK.
+func conditionalExtendThreeBranches(db *gorm.DB, n int) {
+	q := db.Where("x = ?", 1) // Mutable root
+
+	if n == 1 {
+		q = q.Where("y = ?", 2) // Assignment creates new root
+	} else if n == 2 {
+		q = q.Where("z = ?", 3) // Assignment creates new root
+	}
+	// else: q remains unchanged (original mutable root)
+
+	q.Find(nil)  // OK: Phi(q_1, q_2, q_3) - all first use
+	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}
