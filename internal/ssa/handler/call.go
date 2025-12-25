@@ -75,6 +75,31 @@ type Context struct {
 // All uses are recorded, and violations are detected via CFG reachability.
 type CallHandler struct{}
 
+// isAssignment checks if a call result is assigned to create a new root.
+// Returns true if the call is used in an assignment (Phi or Store to Alloc).
+// Example: q = q.Where() creates new root from original q
+func isAssignment(call *ssa.Call) bool {
+	if call.Referrers() == nil {
+		return false
+	}
+
+	for _, user := range *call.Referrers() {
+		// Check for Phi nodes (merging control flow)
+		if _, ok := user.(*ssa.Phi); ok {
+			return true
+		}
+
+		// Check for Store to Alloc (variable assignment)
+		if store, ok := user.(*ssa.Store); ok {
+			if _, ok := store.Addr.(*ssa.Alloc); ok {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
 // Handle processes a Call instruction.
 func (h *CallHandler) Handle(call *ssa.Call, ctx *Context) {
 	isInLoop := ctx.LoopInfo.IsInLoop(call.Block())
@@ -119,12 +144,18 @@ func (h *CallHandler) Handle(call *ssa.Call, ctx *Context) {
 		// Pure methods check for pollution but don't pollute
 		ctx.Tracker.RecordPureUse(root, call.Block(), call.Pos())
 	} else {
-		// Non-pure methods pollute the root
-		ctx.Tracker.ProcessBranch(root, call.Block(), call.Pos())
+		// Non-pure methods: check if this is an assignment or actual use
+		if isAssignment(call) {
+			// Assignment creates new root - record but doesn't pollute
+			ctx.Tracker.RecordAssignment(root, call.Block(), call.Pos())
+		} else {
+			// Actual use - pollutes the root
+			ctx.Tracker.ProcessBranch(root, call.Block(), call.Pos())
 
-		// Loop with external root - immediate violation (only for non-pure methods)
-		if isInLoop && ctx.CFG.IsDefinedOutsideLoop(root, ctx.LoopInfo) {
-			ctx.Tracker.AddViolationWithRoot(call.Pos(), root)
+			// Loop with external root - immediate violation (only for non-pure methods)
+			if isInLoop && ctx.CFG.IsDefinedOutsideLoop(root, ctx.LoopInfo) {
+				ctx.Tracker.AddViolationWithRoot(call.Pos(), root)
+			}
 		}
 	}
 
