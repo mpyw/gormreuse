@@ -190,8 +190,7 @@
  // conditionalExtendPartialWithPollution demonstrates conditional extension with initial pollution.
  // One branch extends polluted q - that extension is a violation.
  func conditionalExtendPartialWithPollution(db *gorm.DB, flag bool) {
--	q := db.Where("x = ?", 1)
-+	q := db.Where("x = ?", 1).Session(&gorm.Session{})
+ 	q := db.Where("x = ?", 1)
  	q.Find(nil) // Pollutes q
  
  	if flag {
@@ -221,10 +220,12 @@
  // conditionalExtendPartialNoPollution demonstrates conditional extension without initial pollution.
  // Assignment in conditional creates new root - first use after is OK.
  func conditionalExtendPartialNoPollution(db *gorm.DB, flag bool) {
- 	q := db.Where("x = ?", 1)
+-	q := db.Where("x = ?", 1)
++	q := db.Where("x = ?", 1).Session(&gorm.Session{})
  
  	if flag {
- 		q = q.Where("y = ?", 2) // Assignment creates new root from original q
+-		q = q.Where("y = ?", 2) // Assignment creates new root from original q
++		q = q.Where("y = ?", 2).Session(&gorm.Session{}) // Assignment creates new root from original q
  	}
  
  	q.Find(nil)                 // OK: first actual use
@@ -237,9 +238,11 @@
  	q := db.Where("x = ?", 1)
  
  	if flag {
- 		q = q.Where("y = ?", 2) // Assignment creates new root
+-		q = q.Where("y = ?", 2) // Assignment creates new root
++		q = q.Where("y = ?", 2).Session(&gorm.Session{}) // Assignment creates new root
  	} else {
- 		q = q.Where("z = ?", 3) // Assignment creates new root
+-		q = q.Where("z = ?", 3) // Assignment creates new root
++		q = q.Where("z = ?", 3).Session(&gorm.Session{}) // Assignment creates new root
  	}
  
  	q.Find(nil)                 // OK: first actual use
@@ -253,9 +256,11 @@
 +	q := db.Where("x = ?", 1).Session(&gorm.Session{}) // Mutable root
  
  	if n == 1 {
- 		q = q.Where("y = ?", 2) // Assignment creates new root
+-		q = q.Where("y = ?", 2) // Assignment creates new root
++		q = q.Where("y = ?", 2).Session(&gorm.Session{}) // Assignment creates new root
  	} else if n == 2 {
- 		q = q.Where("z = ?", 3) // Assignment creates new root
+-		q = q.Where("z = ?", 3) // Assignment creates new root
++		q = q.Where("z = ?", 3).Session(&gorm.Session{}) // Assignment creates new root
  	}
  	// else: q remains unchanged (original mutable root)
  

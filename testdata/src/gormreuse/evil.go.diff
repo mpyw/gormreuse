@@ -2845,7 +2845,8 @@
  	if cond {
  		q = db.Where("branch1", 1).Session(&gorm.Session{}) // Already immutable
  	} else {
- 		q = db.Where("branch2", 2) // Needs Session
+-		q = db.Where("branch2", 2) // Needs Session
++		q = db.Where("branch2", 2).Session(&gorm.Session{}) // Needs Session
  	}
  
  	q.Find(nil)
@@ -2859,7 +2860,8 @@
  	if cond {
  		q = db.Where("branch1", 1).Session(&gorm.Session{}).Where("after") // Immutable (Session in chain)
  	} else {
- 		q = db.Where("branch2", 2) // Needs Session
+-		q = db.Where("branch2", 2) // Needs Session
++		q = db.Where("branch2", 2).Session(&gorm.Session{}) // Needs Session
  	}
  
  	q.Find(nil)
@@ -2871,11 +2873,13 @@
  func phiThreeBranchesMiddleImmutable(db *gorm.DB, mode int) {
  	var q *gorm.DB
  	if mode == 1 {
- 		q = db.Where("branch1", 1) // Needs Session
+-		q = db.Where("branch1", 1) // Needs Session
++		q = db.Where("branch1", 1).Session(&gorm.Session{}) // Needs Session
  	} else if mode == 2 {
  		q = db.Where("branch2", 2).Session(&gorm.Session{}) // Already immutable
  	} else {
- 		q = db.Where("branch3", 3) // Needs Session
+-		q = db.Where("branch3", 3) // Needs Session
++		q = db.Where("branch3", 3).Session(&gorm.Session{}) // Needs Session
  	}
  
  	q.Find(nil)
@@ -2888,13 +2892,16 @@
  	var q *gorm.DB
  	switch mode {
  	case 1:
- 		q = db.Where("case1", 1) // Needs Session
+-		q = db.Where("case1", 1) // Needs Session
++		q = db.Where("case1", 1).Session(&gorm.Session{}) // Needs Session
  	case 2:
  		q = db.Where("case2", 2).Session(&gorm.Session{}) // Already immutable
  	case 3:
- 		q = db.Where("case3", 3) // Needs Session
+-		q = db.Where("case3", 3) // Needs Session
++		q = db.Where("case3", 3).Session(&gorm.Session{}) // Needs Session
  	default:
- 		q = db.Where("default") // Needs Session
+-		q = db.Where("default") // Needs Session
++		q = db.Where("default").Session(&gorm.Session{}) // Needs Session
  	}
  
  	q.Find(nil)
