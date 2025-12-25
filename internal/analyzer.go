@@ -42,7 +42,9 @@ import (
 	"golang.org/x/tools/go/ssa"
 
 	"github.com/mpyw/gormreuse/internal/directive"
+	"github.com/mpyw/gormreuse/internal/fix"
 	ssautil "github.com/mpyw/gormreuse/internal/ssa"
+	"github.com/mpyw/gormreuse/internal/ssa/pollution"
 	"github.com/mpyw/gormreuse/internal/ssa/purity"
 )
 
@@ -154,12 +156,14 @@ func (c *checker) checkFunction(fn *ssa.Function) {
 	violations := analyzer.Analyze()
 
 	for _, v := range violations {
-		c.report(v.Pos, v.Message)
+		c.reportViolation(v)
 	}
 }
 
-// report reports a violation if not ignored or already reported.
-func (c *checker) report(pos token.Pos, message string) {
+// reportViolation reports a violation with SuggestedFix if possible.
+func (c *checker) reportViolation(v pollution.Violation) {
+	pos := v.Pos
+
 	// Deduplicate: same position may be reached multiple times
 	if c.reported[pos] {
 		return
@@ -172,5 +176,14 @@ func (c *checker) report(pos token.Pos, message string) {
 		return // Suppressed by ignore directive
 	}
 
-	c.pass.Reportf(pos, "%s", message)
+	// Generate SuggestedFix if possible
+	fixGen := fix.New(c.pass)
+	suggestedFixes := fixGen.Generate(v)
+
+	// Report with diagnostic
+	c.pass.Report(analysis.Diagnostic{
+		Pos:            pos,
+		Message:        v.Message,
+		SuggestedFixes: suggestedFixes,
+	})
 }

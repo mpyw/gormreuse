@@ -1,0 +1,11 @@
+package internal
+
+import "gorm.io/gorm"
+
+// ===== Test Case 1: Simple reassignment fix =====
+func simpleReassignment(db *gorm.DB) {
+	q := db.Where("base")
+	q.Where("a")
+	q.Where("b")        // want `\*gorm\.DB instance reused`
+	q.Find(nil)         // want `\*gorm\.DB instance reused`
+}

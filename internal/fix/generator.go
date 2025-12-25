@@ -48,15 +48,26 @@ import (
 
 // Generator generates SuggestedFix for a violation.
 type Generator struct {
-	pass *analysis.Pass
-	fset *token.FileSet
+	pass  *analysis.Pass
+	fset  *token.FileSet
+	files map[*token.File]*ast.File // token.File -> ast.File mapping
 }
 
 // New creates a new fix Generator.
 func New(pass *analysis.Pass) *Generator {
+	// Build token.File -> ast.File mapping
+	files := make(map[*token.File]*ast.File)
+	for _, f := range pass.Files {
+		tf := pass.Fset.File(f.Pos())
+		if tf != nil {
+			files[tf] = f
+		}
+	}
+
 	return &Generator{
-		pass: pass,
-		fset: pass.Fset,
+		pass:  pass,
+		fset:  pass.Fset,
+		files: files,
 	}
 }
 
@@ -253,9 +264,93 @@ func (g *Generator) generateSessionEdit(pos token.Pos) *analysis.TextEdit {
 	}
 }
 
-// Helper methods (AST navigation) - placeholders for now
-func (g *Generator) findFileContaining(pos token.Pos) *ast.File           { return nil }
-func (g *Generator) findStmtAtPos(file *ast.File, pos token.Pos) ast.Stmt { return nil }
-func (g *Generator) getCallResultAtPos(pos token.Pos) ssa.Value            { return nil }
-func (g *Generator) getVariableNameAtPos(pos token.Pos) string             { return "" }
-func (g *Generator) getCallExprEndPos(pos token.Pos) token.Pos             { return token.NoPos }
+// =============================================================================
+// AST Helper Methods
+// =============================================================================
+
+// findFileContaining finds the AST file containing the given position.
+func (g *Generator) findFileContaining(pos token.Pos) *ast.File {
+	tf := g.fset.File(pos)
+	if tf == nil {
+		return nil
+	}
+	return g.files[tf]
+}
+
+// findStmtAtPos finds the statement at the given position.
+func (g *Generator) findStmtAtPos(file *ast.File, pos token.Pos) ast.Stmt {
+	var result ast.Stmt
+	ast.Inspect(file, func(n ast.Node) bool {
+		if n == nil {
+			return false
+		}
+		// Check if this node contains the position
+		if n.Pos() <= pos && pos < n.End() {
+			if stmt, ok := n.(ast.Stmt); ok {
+				result = stmt
+			}
+			return true
+		}
+		return n.Pos() <= pos
+	})
+	return result
+}
+
+// getCallResultAtPos gets the SSA Call result at the given position.
+// For simulated reassignments, we return the Call instruction itself as the new root.
+func (g *Generator) getCallResultAtPos(pos token.Pos) ssa.Value {
+	// This is a simplification: we use the Call as a placeholder for the new virtual root.
+	// In reality, we would need to track SSA values more precisely.
+	// For now, we return nil to skip Session insertion on virtual roots.
+	return nil
+}
+
+// getVariableNameAtPos gets the variable name at the given position.
+func (g *Generator) getVariableNameAtPos(pos token.Pos) string {
+	file := g.findFileContaining(pos)
+	if file == nil {
+		return ""
+	}
+
+	stmt := g.findStmtAtPos(file, pos)
+	if stmt == nil {
+		return ""
+	}
+
+	// For ExprStmt, extract the receiver variable name
+	if exprStmt, ok := stmt.(*ast.ExprStmt); ok {
+		if callExpr, ok := exprStmt.X.(*ast.CallExpr); ok {
+			if sel, ok := callExpr.Fun.(*ast.SelectorExpr); ok {
+				if ident, ok := sel.X.(*ast.Ident); ok {
+					return ident.Name
+				}
+			}
+		}
+	}
+
+	return ""
+}
+
+// getCallExprEndPos gets the end position of the CallExpr at the given position.
+func (g *Generator) getCallExprEndPos(pos token.Pos) token.Pos {
+	file := g.findFileContaining(pos)
+	if file == nil {
+		return token.NoPos
+	}
+
+	var callEnd token.Pos
+	ast.Inspect(file, func(n ast.Node) bool {
+		if n == nil {
+			return false
+		}
+		// Find the CallExpr that starts at or contains this position
+		if callExpr, ok := n.(*ast.CallExpr); ok {
+			if callExpr.Pos() <= pos && pos < callExpr.End() {
+				callEnd = callExpr.End()
+				return false
+			}
+		}
+		return n.Pos() <= pos
+	})
+	return callEnd
+}
