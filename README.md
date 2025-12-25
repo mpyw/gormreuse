@@ -224,8 +224,18 @@ func legacyCode(db *gorm.DB) {
 }
 ```
 
+Or suppress for an entire file (place before package declaration):
+
+```go
+//gormreuse:ignore
+
+package mypackage
+
+// All violations in this file are suppressed
+```
+
 > [!WARNING]
-> Unused `//gormreuse:ignore` directives are reported as warnings. This helps keep the codebase clean by identifying stale ignore comments.
+> Unused `//gormreuse:ignore` directives are reported as warnings for line-level and function-level ignores. This helps keep the codebase clean by identifying stale ignore comments. File-level ignores do not trigger unused warnings.
 
 ### `//gormreuse:pure`
 

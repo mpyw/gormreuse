@@ -39,6 +39,8 @@ func TestGenerateDiffFiles(t *testing.T) {
 		"advanced.go",
 		"evil.go",
 		"ignore.go",
+		"file_level_ignore.go",
+		"file_level_ignore_doc.go",
 		"directive_validation.go",
 		"nested_chaos.go",
 	}
@@ -177,6 +179,8 @@ func TestDiffFilesUpToDate(t *testing.T) {
 		"advanced.go",
 		"evil.go",
 		"ignore.go",
+		"file_level_ignore.go",
+		"file_level_ignore_doc.go",
 		"directive_validation.go",
 		"nested_chaos.go",
 	}
