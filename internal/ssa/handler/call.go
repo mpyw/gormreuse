@@ -160,19 +160,16 @@ func (h *CallHandler) Handle(call *ssa.Call, ctx *Context) {
 	if isImmutableReturning {
 		// Pure methods check for pollution but don't pollute
 		ctx.Tracker.RecordPureUse(root, call.Block(), call.Pos())
+	} else if isAssignment(call, ctx) {
+		// Assignment creates new root - record but doesn't pollute
+		ctx.Tracker.RecordAssignment(root, call.Block(), call.Pos())
 	} else {
-		// Non-pure methods: check if this is an assignment or actual use
-		if isAssignment(call, ctx) {
-			// Assignment creates new root - record but doesn't pollute
-			ctx.Tracker.RecordAssignment(root, call.Block(), call.Pos())
-		} else {
-			// Actual use - pollutes the root
-			ctx.Tracker.ProcessBranch(root, call.Block(), call.Pos())
+		// Actual use - pollutes the root
+		ctx.Tracker.ProcessBranch(root, call.Block(), call.Pos())
 
-			// Loop with external root - immediate violation (only for non-pure methods)
-			if isInLoop && ctx.CFG.IsDefinedOutsideLoop(root, ctx.LoopInfo) {
-				ctx.Tracker.AddViolationWithRoot(call.Pos(), root)
-			}
+		// Loop with external root - immediate violation (only for non-pure methods)
+		if isInLoop && ctx.CFG.IsDefinedOutsideLoop(root, ctx.LoopInfo) {
+			ctx.Tracker.AddViolationWithRoot(call.Pos(), root)
 		}
 	}
 
