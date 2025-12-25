@@ -40,6 +40,7 @@ func TestGenerateDiffFiles(t *testing.T) {
 		"evil.go",
 		"ignore.go",
 		"directive_validation.go",
+		"nested_chaos.go",
 	}
 
 	for _, filename := range testFiles {
@@ -177,6 +178,7 @@ func TestDiffFilesUpToDate(t *testing.T) {
 		"evil.go",
 		"ignore.go",
 		"directive_validation.go",
+		"nested_chaos.go",
 	}
 
 	for _, filename := range testFiles {

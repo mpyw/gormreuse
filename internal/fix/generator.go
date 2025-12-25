@@ -112,6 +112,10 @@ func (g *Generator) Generate(v pollution.Violation) []analysis.SuggestedFix {
 		return nil
 	}
 
+	// Deduplicate edits (same position and new text)
+	// This can happen when multiple Phi edges from the same Phi are in rootsNeedingSession
+	edits = g.deduplicateEdits(edits)
+
 	// Sort edits by position (earlier positions first)
 	// This ensures correct application order
 	sort.Slice(edits, func(i, j int) bool {
@@ -319,7 +323,17 @@ func (g *Generator) generateSessionEditsForRoot(pos token.Pos, root ssa.Value) [
 
 // generatePhiEdgeEdits generates Session edits for all edges of a Phi node.
 // Only generates edits for edges that don't already have Session.
+// OPTIMIZATION: Only add Session if the Phi result is used multiple times.
 func (g *Generator) generatePhiEdgeEdits(phi *ssa.Phi) []analysis.TextEdit {
+	// Count how many times the Phi RESULT is used
+	phiUseCount := g.countPhiResultUses(phi)
+
+	// If Phi result is used only once, no Session needed on any edges
+	if phiUseCount <= 1 {
+		return nil
+	}
+
+	// If Phi result is used 2+ times, add Session to all mutable edges
 	var edits []analysis.TextEdit
 	for _, edge := range phi.Edges {
 		// Skip nil constants
@@ -344,6 +358,14 @@ func (g *Generator) generatePhiEdgeEdits(phi *ssa.Phi) []analysis.TextEdit {
 		}
 	}
 	return edits
+}
+
+// countPhiResultUses counts how many times the Phi result is used.
+func (g *Generator) countPhiResultUses(phi *ssa.Phi) int {
+	if phi.Referrers() == nil {
+		return 0
+	}
+	return len(*phi.Referrers())
 }
 
 // findPhiUsingValue finds a Phi node that uses the given value as an edge,
@@ -651,4 +673,32 @@ func (g *Generator) getCallExprEndPos(pos token.Pos) token.Pos {
 		return n.Pos() <= pos
 	})
 	return callEnd
+}
+
+// deduplicateEdits removes duplicate edits (same position and new text).
+// This is necessary because when multiple edges of the same Phi are in rootsNeedingSession,
+// generatePhiEdgeEdits will be called multiple times for the same Phi, generating duplicate edits.
+func (g *Generator) deduplicateEdits(edits []analysis.TextEdit) []analysis.TextEdit {
+	if len(edits) <= 1 {
+		return edits
+	}
+
+	// Use a struct as map key to uniquely identify edits
+	type editKey struct {
+		pos  token.Pos
+		text string
+	}
+
+	seen := make(map[editKey]bool)
+	var result []analysis.TextEdit
+
+	for _, edit := range edits {
+		key := editKey{pos: edit.Pos, text: string(edit.NewText)}
+		if !seen[key] {
+			seen[key] = true
+			result = append(result, edit)
+		}
+	}
+
+	return result
 }

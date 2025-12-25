@@ -69,6 +69,11 @@ type Tracker struct {
 	// These uses CHECK for pollution but don't pollute.
 	pureUses map[ssa.Value][]UsageInfo
 
+	// assignmentUses maps roots to assignment sites where they're used to create new roots.
+	// These uses create new roots and don't count as pollution.
+	// Example: q = q.Where() creates new root from original q
+	assignmentUses map[ssa.Value][]UsageInfo
+
 	// violations tracks detected violations.
 	violations []Violation
 
@@ -87,10 +92,11 @@ type CFGAnalyzer interface {
 // New creates a new Tracker.
 func New(cfgAnalyzer CFGAnalyzer, fn *ssa.Function) *Tracker {
 	return &Tracker{
-		pollutingUses: make(map[ssa.Value][]UsageInfo),
-		pureUses:      make(map[ssa.Value][]UsageInfo),
-		cfgAnalyzer:   cfgAnalyzer,
-		analyzedFn:    fn,
+		pollutingUses:  make(map[ssa.Value][]UsageInfo),
+		pureUses:       make(map[ssa.Value][]UsageInfo),
+		assignmentUses: make(map[ssa.Value][]UsageInfo),
+		cfgAnalyzer:    cfgAnalyzer,
+		analyzedFn:     fn,
 	}
 }
 
@@ -106,6 +112,14 @@ func (t *Tracker) ProcessBranch(root ssa.Value, block *ssa.BasicBlock, pos token
 // Caller must ensure root is not nil.
 func (t *Tracker) RecordPureUse(root ssa.Value, block *ssa.BasicBlock, pos token.Pos) {
 	t.pureUses[root] = append(t.pureUses[root], UsageInfo{Block: block, Pos: pos})
+}
+
+// RecordAssignment records an ASSIGNMENT usage where a root is used to create a new root.
+// This creates a new mutable root and doesn't count as pollution.
+// Example: q = q.Where() creates new root from original q
+// Caller must ensure root is not nil.
+func (t *Tracker) RecordAssignment(root ssa.Value, block *ssa.BasicBlock, pos token.Pos) {
+	t.assignmentUses[root] = append(t.assignmentUses[root], UsageInfo{Block: block, Pos: pos})
 }
 
 // isReachable checks if pollution can reach the target block.
@@ -161,11 +175,12 @@ func (t *Tracker) AddViolationWithRoot(pos token.Pos, root ssa.Value) {
 	t.addViolationWithContext(pos, root, allUses)
 }
 
-// getAllUses returns all uses (pure + polluting) for a root.
+// getAllUses returns all uses (pure + polluting + assignment) for a root.
 func (t *Tracker) getAllUses(root ssa.Value) []UsageInfo {
 	var allUses []UsageInfo
 	allUses = append(allUses, t.pureUses[root]...)
 	allUses = append(allUses, t.pollutingUses[root]...)
+	allUses = append(allUses, t.assignmentUses[root]...)
 	return allUses
 }
 
@@ -241,6 +256,44 @@ func (t *Tracker) DetectViolations() {
 				// Same function: check CFG reachability
 				if t.isReachable(pollutingUse.Block, pureUse.Block) {
 					t.addViolationWithContext(pureUse.Pos, root, allUses)
+					break
+				}
+			}
+		}
+	}
+
+	// Check assignment uses against polluting uses
+	// An assignment use after a polluting use is a violation (using polluted root)
+	for root, assignmentUses := range t.assignmentUses {
+		pollutingUses := t.pollutingUses[root]
+		if len(pollutingUses) == 0 {
+			continue // No polluting uses for this root
+		}
+
+		// Combine all uses for fix generation
+		allUses := append([]UsageInfo{}, pollutingUses...)
+		allUses = append(allUses, assignmentUses...)
+		if pureUses, ok := t.pureUses[root]; ok {
+			allUses = append(allUses, pureUses...)
+		}
+
+		for _, assignmentUse := range assignmentUses {
+			for _, pollutingUse := range pollutingUses {
+				// Only report if polluting is BEFORE assignment (earlier position)
+				if pollutingUse.Pos >= assignmentUse.Pos {
+					continue
+				}
+
+				// Different functions (closure): position order is sufficient
+				if pollutingUse.Block != nil && assignmentUse.Block != nil &&
+					pollutingUse.Block.Parent() != assignmentUse.Block.Parent() {
+					t.addViolationWithContext(assignmentUse.Pos, root, allUses)
+					break
+				}
+
+				// Same function: check CFG reachability
+				if t.isReachable(pollutingUse.Block, assignmentUse.Block) {
+					t.addViolationWithContext(assignmentUse.Pos, root, allUses)
 					break
 				}
 			}

@@ -1,12 +1,105 @@
 --- evil.go	1970-01-01 00:00:00
 +++ evil.go.golden	1970-01-01 00:00:00
-@@ -1,2797 +1,2797 @@
+@@ -1,2883 +1,2883 @@
  package internal
  
  import "gorm.io/gorm"
  
  // DB is a global database connection for testing pure factory functions.
  var DB *gorm.DB
+ 
+ // =============================================================================
+ // SHOULD REPORT - Conditional usage (finisher methods in conditionals)
+ // =============================================================================
+ 
+ // conditionalUsageBothMayExecute demonstrates both Find and Count may execute conditionally.
+ func conditionalUsageBothMayExecute(db *gorm.DB, flag1, flag2 bool) {
+-	q := db.Where("base")
++	q := db.Where("base").Session(&gorm.Session{})
+ 
+ 	if flag1 {
+ 		q.Find(nil)
+ 	}
+ 
+ 	if flag2 {
+ 		q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+ 	}
+ }
+ 
+ // conditionalUsageEitherOr demonstrates either Find or Count executes.
+ // Note: Linter does NOT report this as violation (mutually exclusive branches).
+ func conditionalUsageEitherOr(db *gorm.DB, flag bool) {
+ 	q := db.Where("base")
+ 
+ 	if flag {
+ 		q.Find(nil)
+ 	} else {
+ 		q.Count(nil) // OK: mutually exclusive with Find
+ 	}
+ }
+ 
+ // conditionalUsageOneConditionalOneUnconditional demonstrates one conditional, one unconditional.
+ func conditionalUsageOneConditionalOneUnconditional(db *gorm.DB, flag bool) {
+-	q := db.Where("base")
++	q := db.Where("base").Session(&gorm.Session{})
+ 
+ 	if flag {
+ 		q.Find(nil)
+ 	}
+ 
+ 	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+ }
+ 
+ // conditionalUsageNestedConditions demonstrates nested conditionals with usage.
+ func conditionalUsageNestedConditions(db *gorm.DB, a, b bool) {
+-	q := db.Where("base")
++	q := db.Where("base").Session(&gorm.Session{})
+ 
+ 	if a {
+ 		q.Find(nil)
+ 		if b {
+ 			q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+ 		}
+ 	} else {
+ 		q.First(nil) // OK: mutually exclusive with Find branch
+ 	}
+ }
+ 
+ // =============================================================================
+ // SHOULD REPORT - Loop with assignment only (false positive bug investigation)
+ // =============================================================================
+ 
+ // loopAssignmentOnly demonstrates loop with only assignments, no finisher methods.
+ func loopAssignmentOnly(db *gorm.DB, items []int) {
+-	q := db.Where("base")
++	q := db.Where("base").Session(&gorm.Session{})
+ 
+ 	for _, item := range items {
+-		q = q.Where("item", item)  // Assignment only, no finisher
++		q = q.Where("item", item).Session(&gorm.Session{})  // Assignment only, no finisher
+ 	}
+ 
+ 	q.Find(nil)   // OK: first actual use (loop only had assignments)
+ 	q.Count(nil)  // want `\*gorm\.DB instance reused after chain method`
+ }
+ 
+ // loopConditionalAssignment demonstrates loop with conditional assignment.
+ // Loop has only assignments (no finisher methods), so first use after loop is OK.
+ func loopConditionalAssignment(db *gorm.DB, flags []bool) {
+-	q := db.Where("base")
++	q := db.Where("base").Session(&gorm.Session{})
+ 
+ 	for _, flag := range flags {
+ 		if flag {
+-			q = q.Where("flagged")  // Conditional assignment
++			q = q.Where("flagged").Session(&gorm.Session{})  // Conditional assignment
+ 		}
+ 		// Phi created here
+ 	}
+ 
+ 	q.Find(nil)   // OK: first use after loop with conditional assignments only
+ 	q.Count(nil)  // want `\*gorm\.DB instance reused after chain method`
+ }
  
  // =============================================================================
  // SHOULD REPORT - Closure tracking (via FreeVar tracing)
@@ -2133,11 +2226,9 @@
  func iifeWithPhiNode(db *gorm.DB, cond bool) {
  	var q *gorm.DB
  	if cond {
--		q = db.Where("branch1", 1)
-+		q = db.Where("branch1", 1).Session(&gorm.Session{})
+ 		q = db.Where("branch1", 1)
  	} else {
--		q = db.Where("branch2", 2)
-+		q = db.Where("branch2", 2).Session(&gorm.Session{})
+ 		q = db.Where("branch2", 2)
  	}
  
  	// First branch - IIFE counts as single branch
@@ -2327,13 +2418,11 @@
  // reassignConditionalPartial demonstrates partial reassignment in conditional.
  // Only one branch reassigns - other branch uses polluted value.
  func reassignConditionalPartial(db *gorm.DB, flag bool) {
--	q := db.Where("x = ?", 1)
-+	q := db.Where("x = ?", 1).Session(&gorm.Session{})
+ 	q := db.Where("x = ?", 1)
  	q.Find(nil) // Pollutes q
  
  	if flag {
--		q = db.Where("y = ?", 2) // Reassigns q in this branch only
-+		q = db.Where("y = ?", 2).Session(&gorm.Session{}) // Reassigns q in this branch only
+ 		q = db.Where("y = ?", 2) // Reassigns q in this branch only
  	}
  
  	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
@@ -2509,14 +2598,12 @@
  // reassignPointerDeref demonstrates reassignment through pointer.
  // [LIMITATION] Pointer dereference reassignment tracking not fully supported.
  func reassignPointerDeref(db *gorm.DB) {
--	q := db.Where("x = ?", 1)
-+	q := db.Where("x = ?", 1).Session(&gorm.Session{})
+ 	q := db.Where("x = ?", 1)
  	p := &q
  
  	(*p).Find(nil) // Pollutes through pointer
  
--	*p = db.Where("y = ?", 2) // Reassign through pointer
-+	*p = db.Where("y = ?", 2).Session(&gorm.Session{}) // Reassign through pointer
+ 	*p = db.Where("y = ?", 2) // Reassign through pointer
  
  	// [LIMITATION] FALSE POSITIVE: Pointer reassignment creates new root tracking
  	q.Find(nil)  // want `\*gorm\.DB instance reused after chain method`

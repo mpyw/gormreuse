@@ -1,0 +1,1205 @@
+package internal
+
+import "gorm.io/gorm"
+
+// =============================================================================
+// NESTED CHAOS - Complex Phi patterns with multiple nesting levels
+// These test cases validate Phi result use counting with complex control flow
+// =============================================================================
+
+// =============================================================================
+// Pattern 1: Nested if with single Find() - No Session needed
+// =============================================================================
+
+// nestedIfSingleUse demonstrates nested if with one Find() at the end.
+// Phi result used once - no Session needed.
+func nestedIfSingleUse(db *gorm.DB, a, b bool) {
+	q := db.Where("base")
+	if a {
+		if b {
+			q = q.Where("a_and_b")
+		} else {
+			q = q.Where("a_and_not_b")
+		}
+	} else {
+		q = q.Where("not_a")
+	}
+	q.Find(nil) // OK: Phi result used once
+}
+
+// nestedIfSingleUseDeeper demonstrates 3-level nested if with one Find().
+func nestedIfSingleUseDeeper(db *gorm.DB, a, b, c bool) {
+	q := db.Where("base")
+	if a {
+		if b {
+			if c {
+				q = q.Where("a_b_c")
+			} else {
+				q = q.Where("a_b_not_c")
+			}
+		} else {
+			q = q.Where("a_not_b")
+		}
+	} else {
+		q = q.Where("not_a")
+	}
+	q.Find(nil) // OK: Phi result used once
+}
+
+// =============================================================================
+// Pattern 2: Nested if with double Find() - Session needed
+// =============================================================================
+
+// nestedIfDoubleUse demonstrates nested if with two Find() calls.
+// Phi result used twice - Session needed on all mutable edges.
+func nestedIfDoubleUse(db *gorm.DB, a, b bool) {
+	q := db.Where("base")
+	if a {
+		if b {
+			q = q.Where("a_and_b").Session(&gorm.Session{})
+		} else {
+			q = q.Where("a_and_not_b").Session(&gorm.Session{})
+		}
+	} else {
+		q = q.Where("not_a").Session(&gorm.Session{})
+	}
+	q.Find(nil)
+	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// nestedIfDoubleUseDeeper demonstrates 3-level nested if with two Find() calls.
+func nestedIfDoubleUseDeeper(db *gorm.DB, a, b, c bool) {
+	q := db.Where("base")
+	if a {
+		if b {
+			if c {
+				q = q.Where("a_b_c").Session(&gorm.Session{})
+			} else {
+				q = q.Where("a_b_not_c").Session(&gorm.Session{})
+			}
+		} else {
+			q = q.Where("a_not_b").Session(&gorm.Session{})
+		}
+	} else {
+		q = q.Where("not_a").Session(&gorm.Session{})
+	}
+	q.Find(nil)
+	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// =============================================================================
+// Pattern 3: Nested if with immediate .Where().Find() - Single use
+// =============================================================================
+
+// nestedIfImmediateChainSingle demonstrates nested if with one immediate chain.
+// q is assigned in nested if, then immediately chained - single use.
+func nestedIfImmediateChainSingle(db *gorm.DB, a, b bool) {
+	q := db.Where("base")
+	if a {
+		if b {
+			q = q.Where("a_and_b")
+		} else {
+			q = q.Where("a_and_not_b")
+		}
+	} else {
+		q = q.Where("not_a")
+	}
+	q.Where("extra").Find(nil) // OK: Phi result used once (in this chain)
+}
+
+// nestedIfImmediateChainSingleDeeper demonstrates 3-level nesting with immediate chain.
+func nestedIfImmediateChainSingleDeeper(db *gorm.DB, a, b, c bool) {
+	q := db.Where("base")
+	if a {
+		if b {
+			if c {
+				q = q.Where("a_b_c")
+			} else {
+				q = q.Where("a_b_not_c")
+			}
+		} else {
+			q = q.Where("a_not_b")
+		}
+	} else {
+		q = q.Where("not_a")
+	}
+	q.Where("extra").Find(nil) // OK: Phi result used once
+}
+
+// =============================================================================
+// Pattern 4: Nested if with double .Where().Find() - Multiple uses
+// =============================================================================
+
+// nestedIfImmediateChainDouble demonstrates nested if with two immediate chains.
+// Phi result used twice via chaining - violation on second use.
+func nestedIfImmediateChainDouble(db *gorm.DB, a, b bool) {
+	q := db.Where("base")
+	if a {
+		if b {
+			q = q.Where("a_and_b").Session(&gorm.Session{})
+		} else {
+			q = q.Where("a_and_not_b").Session(&gorm.Session{})
+		}
+	} else {
+		q = q.Where("not_a").Session(&gorm.Session{})
+	}
+	q.Where("extra1").Find(nil)
+	q.Where("extra2").Find(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// nestedIfImmediateChainDoubleDeeper demonstrates 3-level nesting with two chains.
+func nestedIfImmediateChainDoubleDeeper(db *gorm.DB, a, b, c bool) {
+	q := db.Where("base")
+	if a {
+		if b {
+			if c {
+				q = q.Where("a_b_c").Session(&gorm.Session{})
+			} else {
+				q = q.Where("a_b_not_c").Session(&gorm.Session{})
+			}
+		} else {
+			q = q.Where("a_not_b").Session(&gorm.Session{})
+		}
+	} else {
+		q = q.Where("not_a").Session(&gorm.Session{})
+	}
+	q.Where("extra1").Find(nil)
+	q.Where("extra2").Find(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// =============================================================================
+// Pattern 5: Find() then Where() - Polluted value extended
+// =============================================================================
+
+// nestedIfFindThenWhere demonstrates Find() followed by Where().
+// q is polluted by Find, then extended with Where - violation.
+func nestedIfFindThenWhere(db *gorm.DB, a, b bool) {
+	q := db.Where("base")
+	if a {
+		if b {
+			q = q.Where("a_and_b").Session(&gorm.Session{})
+		} else {
+			q = q.Where("a_and_not_b").Session(&gorm.Session{})
+		}
+	} else {
+		q = q.Where("not_a").Session(&gorm.Session{})
+	}
+	q.Find(nil)                    // Pollutes q
+	q.Where("extra").Find(nil)     // want `\*gorm\.DB instance reused after chain method`
+}
+
+// nestedIfFindThenWhereDeeper demonstrates 3-level nesting with Find then Where.
+func nestedIfFindThenWhereDeeper(db *gorm.DB, a, b, c bool) {
+	q := db.Where("base")
+	if a {
+		if b {
+			if c {
+				q = q.Where("a_b_c").Session(&gorm.Session{})
+			} else {
+				q = q.Where("a_b_not_c").Session(&gorm.Session{})
+			}
+		} else {
+			q = q.Where("a_not_b").Session(&gorm.Session{})
+		}
+	} else {
+		q = q.Where("not_a").Session(&gorm.Session{})
+	}
+	q.Find(nil)                // Pollutes q
+	q.Where("extra").Find(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// =============================================================================
+// Pattern 6: Terminating actions at various levels
+// =============================================================================
+
+// nestedIfEarlyReturnLevel1 demonstrates early return in outer if.
+func nestedIfEarlyReturnLevel1(db *gorm.DB, a, b bool) {
+	q := db.Where("base")
+	if a {
+		q.Find(nil)
+		return
+	}
+	if b {
+		q = q.Where("b")
+	}
+	q.Count(nil) // OK: different control flow path
+}
+
+// nestedIfEarlyReturnLevel2 demonstrates early return in inner if.
+func nestedIfEarlyReturnLevel2(db *gorm.DB, a, b bool) {
+	q := db.Where("base")
+	if a {
+		if b {
+			q.Find(nil)
+			return
+		}
+		q = q.Where("a_not_b")
+	}
+	q.Count(nil) // OK: return path doesn't merge
+}
+
+// nestedIfEarlyReturnBothLevels demonstrates returns at multiple levels.
+func nestedIfEarlyReturnBothLevels(db *gorm.DB, a, b, c bool) {
+	q := db.Where("base")
+	if a {
+		if b {
+			q.Find(nil)
+			return
+		}
+		q = q.Where("a_not_b")
+		if c {
+			q.Count(nil)
+			return
+		}
+	}
+	q.First(nil) // OK: other paths returned
+}
+
+// =============================================================================
+// Pattern 7: Mixed immediate and stored chains at different levels
+// =============================================================================
+
+// nestedIfMixedChainLevel1 demonstrates immediate chain at outer level.
+// TODO: fix generator cannot handle this (should add Session to base, but doesn't)
+func nestedIfMixedChainLevel1(db *gorm.DB, a, b bool) {
+	q := db.Where("base")
+	if a {
+		q.Where("immediate_a").Find(nil) // Immediate chain - pollutes q
+	}
+	if b {
+		q = q.Where("stored_b") // want `\*gorm\.DB instance reused after chain method`
+	}
+	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// nestedIfMixedChainLevel2 demonstrates mixed chains at inner level.
+func nestedIfMixedChainLevel2(db *gorm.DB, a, b, c bool) {
+	q := db.Where("base").Session(&gorm.Session{})
+	if a {
+		if b {
+			q.Where("immediate_b").Find(nil) // Immediate chain - pollutes q
+		} else {
+			q = q.Where("stored_not_b") // Stored
+		}
+		q = q.Where("stored_a").Session(&gorm.Session{}) // want `\*gorm\.DB instance reused after chain method`
+	}
+	if c {
+		q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	}
+	q.First(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// =============================================================================
+// Pattern 8: Multiple Phi nodes at different levels
+// =============================================================================
+
+// nestedIfMultiplePhiLevels demonstrates Phi at each nesting level.
+func nestedIfMultiplePhiLevels(db *gorm.DB, a, b, c bool) {
+	q := db.Where("base")
+
+	// Level 1 Phi
+	if a {
+		q = q.Where("level1_a")
+	} else {
+		q = q.Where("level1_not_a")
+	}
+	// q_1 = Phi(q_a, q_not_a)
+
+	// Level 2 Phi
+	if b {
+		q = q.Where("level2_b")
+	} else {
+		q = q.Where("level2_not_b")
+	}
+	// q_2 = Phi(q_1_b, q_1_not_b)
+
+	// Level 3 Phi
+	if c {
+		q = q.Where("level3_c").Session(&gorm.Session{})
+	} else {
+		q = q.Where("level3_not_c").Session(&gorm.Session{})
+	}
+	// q_3 = Phi(q_2_c, q_2_not_c)
+
+	q.Find(nil)
+	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// nestedIfMultiplePhiSingleUse demonstrates multiple Phi but single final use.
+func nestedIfMultiplePhiSingleUse(db *gorm.DB, a, b, c bool) {
+	q := db.Where("base")
+
+	if a {
+		q = q.Where("level1_a")
+	} else {
+		q = q.Where("level1_not_a")
+	}
+
+	if b {
+		q = q.Where("level2_b")
+	} else {
+		q = q.Where("level2_not_b")
+	}
+
+	if c {
+		q = q.Where("level3_c")
+	} else {
+		q = q.Where("level3_not_c")
+	}
+
+	q.Find(nil) // OK: only used once at the end
+}
+
+// =============================================================================
+// Pattern 9: Asymmetric branches - different depths on each side
+// =============================================================================
+
+// nestedIfAsymmetricDepth demonstrates asymmetric nesting.
+func nestedIfAsymmetricDepth(db *gorm.DB, a, b, c bool) {
+	q := db.Where("base")
+
+	if a {
+		// Deep nesting on true branch
+		if b {
+			if c {
+				q = q.Where("a_b_c").Session(&gorm.Session{})
+			} else {
+				q = q.Where("a_b_not_c").Session(&gorm.Session{})
+			}
+		} else {
+			q = q.Where("a_not_b").Session(&gorm.Session{})
+		}
+	} else {
+		// Shallow on false branch
+		q = q.Where("not_a").Session(&gorm.Session{})
+	}
+
+	q.Find(nil)
+	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// nestedIfAsymmetricWithEarlyReturn demonstrates asymmetric with early return.
+func nestedIfAsymmetricWithEarlyReturn(db *gorm.DB, a, b, c bool) {
+	q := db.Where("base")
+
+	if a {
+		if b {
+			if c {
+				q.Find(nil)
+				return
+			}
+			q = q.Where("a_b_not_c")
+		}
+		q = q.Where("a_done")
+	}
+
+	q.Count(nil) // OK: early return path doesn't merge here
+}
+
+// =============================================================================
+// Pattern 10: Chaotic mixed patterns - kitchen sink
+// =============================================================================
+
+// nestedIfChaosKitchenSink demonstrates absolutely chaotic control flow.
+func nestedIfChaosKitchenSink(db *gorm.DB, a, b, c, d bool) {
+	q := db.Where("base").Session(&gorm.Session{})
+
+	// Level 1: Immediate chain on one side
+	if a {
+		q.Where("immediate_a").Find(nil) // Pollutes q
+		if b {
+			// Level 2: Early return after stored chain
+			q = q.Where("stored_b") // want `\*gorm\.DB instance reused after chain method`
+			q.Count(nil)
+			return
+		}
+	} else {
+		// Level 1 else: Stored chain
+		q = q.Where("stored_not_a").Session(&gorm.Session{})
+	}
+
+	// Level 1 Phi: q_1 = Phi(q_stored_not_a, q_a_path)
+
+	// Level 2: Another nested if after Phi
+	if c {
+		if d {
+			// Immediate chain
+			q.Where("immediate_d").First(nil) // want `\*gorm\.DB instance reused after chain method`
+		} else {
+			// Stored chain
+			q = q.Where("stored_not_d") // want `\*gorm\.DB instance reused after chain method`
+		}
+	} else {
+		q = q.Where("stored_not_c") // want `\*gorm\.DB instance reused after chain method`
+	}
+
+	// Level 2 Phi: q_2 = Phi(q_1_c_not_d, q_1_not_c, q_1_c_d)
+
+	q.Find(nil)                    // want `\*gorm\.DB instance reused after chain method`
+	q.Where("final").Count(nil)    // want `\*gorm\.DB instance reused after chain method`
+}
+
+// nestedIfChaosWithLoops demonstrates nested if inside a loop.
+// Loop has only assignments (no finisher methods), so first use after loop is OK.
+func nestedIfChaosWithLoops(db *gorm.DB, flags []bool) {
+	q := db.Where("base").Session(&gorm.Session{})
+
+	for i, flag := range flags {
+		if flag {
+			if i%2 == 0 {
+				q = q.Where("even", i).Session(&gorm.Session{})
+			} else {
+				q = q.Where("odd", i).Session(&gorm.Session{})
+			}
+		}
+		// Loop creates Phi at each iteration
+	}
+
+	q.Find(nil)   // OK: first use after nested conditionals with assignments only
+	q.Count(nil)  // want `\*gorm\.DB instance reused after chain method`
+}
+
+// nestedIfChaosMultipleVars demonstrates multiple variables with nested ifs.
+func nestedIfChaosMultipleVars(db *gorm.DB, a, b bool) {
+	q1 := db.Where("base1")
+	q2 := db.Where("base2")
+
+	if a {
+		q1 = q1.Where("q1_a").Session(&gorm.Session{})
+		if b {
+			q2 = q2.Where("q2_b").Session(&gorm.Session{})
+		} else {
+			q2 = q2.Where("q2_not_b").Session(&gorm.Session{})
+		}
+	} else {
+		q1 = q1.Where("q1_not_a").Session(&gorm.Session{})
+		q2 = q2.Where("q2_not_a").Session(&gorm.Session{})
+	}
+
+	q1.Find(nil)
+	q1.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+
+	q2.Find(nil)
+	q2.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// nestedIfChaosReassignmentInBranch demonstrates reassignment in nested branches.
+// TODO: fix generator cannot handle this complex case (fresh instance in one branch, polluted in others)
+func nestedIfChaosReassignmentInBranch(db *gorm.DB, a, b, c bool) {
+	q := db.Where("base")
+
+	if a {
+		q = q.Where("a")
+		q.Find(nil) // Pollutes q
+		if b {
+			q = db.Where("fresh") // Fresh instance
+			q = q.Where("b")
+		}
+	} else {
+		if c {
+			q = q.Where("not_a_c")
+		}
+	}
+
+	// Complex: q might be polluted or fresh depending on path
+	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// =============================================================================
+// Pattern 11: ULTIMATE CHAOS - Pollution in the middle without early return
+// =============================================================================
+
+// chaosPolluteInNestedIf demonstrates pollution deep in nested if without early return.
+func chaosPolluteInNestedIf(db *gorm.DB, a, b, c bool) {
+	q := db.Where("base")
+
+	if a {
+		q = q.Where("a")
+		if b {
+			q = q.Where("b")
+			q.Find(nil) // Pollute q deep inside
+			if c {
+				q = q.Where("c") // want `\*gorm\.DB instance reused after chain method`
+			}
+		}
+		q = q.Where("after_b") // want `\*gorm\.DB instance reused after chain method`
+	}
+
+	q.Count(nil) // OK: Phi result used once (optimizer limitation - pollution inside nested if not tracked through Phi)
+}
+
+// chaosPolluteMultipleTimes demonstrates multiple pollutions at different levels.
+func chaosPolluteMultipleTimes(db *gorm.DB, a, b, c, d bool) {
+	q := db.Where("base")
+
+	if a {
+		q = q.Where("a").Session(&gorm.Session{})
+		q.Find(nil) // First pollution
+
+		if b {
+			q = q.Where("b").Session(&gorm.Session{}) // want `\*gorm\.DB instance reused after chain method`
+			q.Count(nil)
+
+			if c {
+				q = q.Where("c").Session(&gorm.Session{}) // want `\*gorm\.DB instance reused after chain method`
+				q.First(nil)
+			}
+		}
+
+		if d {
+			q = q.Where("d") // want `\*gorm\.DB instance reused after chain method`
+		}
+	}
+
+	q.Last(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// chaosPolluteThenReassign demonstrates pollution followed by reassignment in nested branches.
+// TODO: fix generator cannot handle this complex case (multiple fresh instances in nested branches)
+func chaosPolluteThenReassign(db *gorm.DB, a, b, c bool) {
+	q := db.Where("base")
+
+	if a {
+		q = q.Where("a")
+		q.Find(nil) // Pollute
+
+		if b {
+			q = db.Where("fresh1") // Fresh start
+			q = q.Where("b")
+			q.Count(nil) // Pollute fresh1
+
+			if c {
+				q = db.Where("fresh2") // Another fresh start
+				q = q.Where("c")
+			}
+		}
+	}
+
+	q.First(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// chaosPollutionPropagation demonstrates how pollution propagates through Phi nodes.
+func chaosPollutionPropagation(db *gorm.DB, a, b, c bool) {
+	q := db.Where("base")
+
+	// Level 1: Pollute in one branch
+	if a {
+		q = q.Where("a").Session(&gorm.Session{})
+		q.Find(nil) // Pollute
+	} else {
+		q = q.Where("not_a").Session(&gorm.Session{}) // Clean path
+	}
+	// Phi1: q1 = Phi(polluted_q, clean_q)
+
+	// Level 2: Extend from Phi result
+	if b {
+		q = q.Where("b") // want `\*gorm\.DB instance reused after chain method`
+	}
+	// Phi2: q2 = Phi(q1, q1.Where("b"))
+
+	// Level 3: Pollute Phi2 result
+	if c {
+		q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	}
+
+	q.First(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// chaosAsymmetricPollution demonstrates pollution on one side of asymmetric branches.
+func chaosAsymmetricPollution(db *gorm.DB, a, b, c bool) {
+	q := db.Where("base")
+
+	if a {
+		// Deep pollution on left side
+		if b {
+			q = q.Where("a_b").Session(&gorm.Session{})
+			q.Find(nil) // Pollute
+
+			if c {
+				q = q.Where("a_b_c") // want `\*gorm\.DB instance reused after chain method`
+			} else {
+				q = q.Where("a_b_not_c") // want `\*gorm\.DB instance reused after chain method`
+			}
+		} else {
+			// Clean path
+			q = q.Where("a_not_b")
+		}
+	} else {
+		// Clean path
+		q = q.Where("not_a")
+	}
+
+	q.Count(nil)
+}
+
+// chaosMixedPollutionAndChaining demonstrates pollution mixed with immediate chaining.
+func chaosMixedPollutionAndChaining(db *gorm.DB, a, b, c bool) {
+	q := db.Where("base")
+
+	if a {
+		q.Where("immediate1").Find(nil) // Immediate chain - pollutes q
+
+		if b {
+			q = q.Where("extend_polluted") // want `\*gorm\.DB instance reused after chain method`
+			q.Where("immediate2").Count(nil)
+
+			if c {
+				q = q.Where("deeper") // want `\*gorm\.DB instance reused after chain method`
+			}
+		}
+	}
+
+	q.First(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// chaosPolluteInLoop demonstrates pollution inside loop with nested ifs.
+func chaosPolluteInLoop(db *gorm.DB, items []int, threshold int) {
+	q := db.Where("base").Session(&gorm.Session{})
+
+	for _, item := range items {
+		if item > threshold {
+			q = q.Where("greater", item).Session(&gorm.Session{})
+
+			if item%2 == 0 {
+				q.Find(nil)
+
+				if item > threshold*2 {
+					q = q.Where("double", item).Session(&gorm.Session{}) // want `\*gorm\.DB instance reused after chain method`
+				}
+			}
+		}
+	}
+
+	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// chaosNestedLoopsWithPollution demonstrates nested loops with pollution.
+func chaosNestedLoopsWithPollution(db *gorm.DB, outer, inner []int) {
+	q := db.Where("base")
+
+	for _, o := range outer {
+		q = q.Where("outer", o).Session(&gorm.Session{})
+
+		for _, i := range inner {
+			if i%2 == 0 {
+				q = q.Where("inner_even", i).Session(&gorm.Session{})
+				q.Find(nil)
+			} else {
+				q = q.Where("inner_odd", i).Session(&gorm.Session{}) // want `\*gorm\.DB instance reused after chain method`
+			}
+		}
+
+		q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	}
+
+	q.First(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// chaosConditionalReassignmentMaze demonstrates a maze of conditional reassignments.
+func chaosConditionalReassignmentMaze(db *gorm.DB, a, b, c, d, e bool) {
+	q := db.Where("base")
+
+	if a {
+		q = q.Where("a").Session(&gorm.Session{})
+		q.Find(nil) // Pollute
+
+		if b {
+			q = db.Where("fresh_b") // Fresh
+			q = q.Where("b")
+
+			if c {
+				q.Count(nil) // Pollute fresh_b
+
+				if d {
+					q = db.Where("fresh_d") // Fresh
+					q = q.Where("d")
+				} else {
+					q = q.Where("not_d") // want `\*gorm\.DB instance reused after chain method`
+				}
+			}
+		} else {
+			q = q.Where("not_b") // want `\*gorm\.DB instance reused after chain method`
+		}
+	} else {
+		if e {
+			q = q.Where("not_a_e")
+		}
+	}
+
+	// Mega-Phi merging multiple complex paths
+	q.First(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// chaosPhiCascade demonstrates cascading Phi nodes with pollution at each level.
+func chaosPhiCascade(db *gorm.DB, a, b, c, d bool) {
+	q := db.Where("base")
+
+	// Level 1
+	if a {
+		q = q.Where("a1").Session(&gorm.Session{})
+		q.Find(nil) // Pollute at level 1
+	} else {
+		q = q.Where("a2").Session(&gorm.Session{})
+	}
+	// Phi1: q1 = Phi(polluted, clean)
+
+	// Level 2
+	if b {
+		q = q.Where("b1").Session(&gorm.Session{}) // want `\*gorm\.DB instance reused after chain method`
+		q.Count(nil)
+	} else {
+		q = q.Where("b2").Session(&gorm.Session{}) // want `\*gorm\.DB instance reused after chain method`
+	}
+	// Phi2: q2 = Phi(Phi1.Where.polluted, Phi1.Where)
+
+	// Level 3
+	if c {
+		q = q.Where("c1") // want `\*gorm\.DB instance reused after chain method`
+	} else {
+		q = q.Where("c2") // want `\*gorm\.DB instance reused after chain method`
+		q.First(nil)
+	}
+	// Phi3: q3 = Phi(Phi2.Where, Phi2.Where.polluted)
+
+	// Level 4
+	if d {
+		q = q.Where("d1") // want `\*gorm\.DB instance reused after chain method`
+	}
+
+	q.Last(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// chaosInterwovenVariables demonstrates multiple variables with interwoven pollution.
+func chaosInterwovenVariables(db *gorm.DB, a, b, c bool) {
+	q1 := db.Where("base1")
+	q2 := db.Where("base2")
+
+	if a {
+		q1 = q1.Where("q1_a")
+		q1.Find(nil) // Pollute q1
+
+		q2 = q2.Where("q2_a")
+		q2.Count(nil) // Pollute q2
+
+		if b {
+			q1 = q1.Where("q1_b") // want `\*gorm\.DB instance reused after chain method`
+			q2 = q2.Where("q2_b") // want `\*gorm\.DB instance reused after chain method`
+
+			if c {
+				q1.Where("q1_c_imm").First(nil) // OK: First use of q1 after reassignment on line 781
+				q2 = q1.Where("q2_from_q1")     // want `\*gorm\.DB instance reused after chain method`
+			}
+		}
+	}
+
+	q1.Last(nil) // want `\*gorm\.DB instance reused after chain method`
+	q2.Last(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// chaosVariableSwap demonstrates variable swapping patterns.
+func chaosVariableSwap(db *gorm.DB, a, b bool) {
+	q1 := db.Where("q1_base").Session(&gorm.Session{})
+	q2 := db.Where("q2_base").Session(&gorm.Session{})
+
+	q1.Find(nil) // Pollute q1
+	q2.Count(nil) // Pollute q2
+
+	// Classic swap using temporary variable (assignments don't trigger violations)
+	q3 := q1
+	q1 = q2
+	q2 = q3
+
+	// After swap: q1 = old q2 (polluted), q2 = old q1 (polluted)
+	q1.First(nil) // want `\*gorm\.DB instance reused after chain method`
+	q2.Last(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// chaosVariableSwapConditional demonstrates conditional swapping.
+func chaosVariableSwapConditional(db *gorm.DB, swap bool) {
+	q1 := db.Where("q1_base")
+	q2 := db.Where("q2_base")
+
+	q1.Find(nil) // Pollute q1
+
+	if swap {
+		// Swap q1 and q2
+		temp := q1
+		q1 = q2
+		q2 = temp
+	}
+
+	// After conditional: q1 might be swapped or not
+	q1.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q2.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// chaosVariableSwapChain demonstrates swapping with chaining.
+func chaosVariableSwapChain(db *gorm.DB) {
+	q1 := db.Where("q1")
+	q2 := db.Where("q2")
+
+	// Swap using chains
+	temp := q1.Where("q1_ext").Session(&gorm.Session{})
+	q1 = q2.Where("q2_ext").Session(&gorm.Session{})
+	q2 = temp
+
+	q1.Find(nil)
+	q1.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+
+	q2.Find(nil)
+	q2.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// chaosVariableSwapLoop demonstrates swapping in loop.
+func chaosVariableSwapLoop(db *gorm.DB, items []int) {
+	q1 := db.Where("q1")
+	q2 := db.Where("q2")
+
+	for _, item := range items {
+		if item%2 == 0 {
+			// Swap on even iterations
+			temp := q1
+			q1 = q2
+			q2 = temp
+		}
+		q1 = q1.Where("item", item)
+	}
+
+	q1.Find(nil) // OK: first use after loop with assignments only
+	q2.Find(nil) // OK: first use (q2 never used in loop)
+}
+
+// chaosMultipleSwaps demonstrates multiple swaps creating complex Phi patterns.
+func chaosMultipleSwaps(db *gorm.DB, a, b, c bool) {
+	q1 := db.Where("q1").Session(&gorm.Session{})
+	q2 := db.Where("q2").Session(&gorm.Session{})
+	q3 := db.Where("q3")
+
+	q1.Find(nil) // Pollute q1
+
+	if a {
+		// First swap: q1 <-> q2
+		temp := q1
+		q1 = q2
+		q2 = temp
+	}
+
+	if b {
+		// Second swap: q2 <-> q3
+		temp := q2
+		q2 = q3
+		q3 = temp
+	}
+
+	if c {
+		// Third swap: q1 <-> q3
+		temp := q1
+		q1 = q3
+		q3 = temp
+	}
+
+	// Complex Phi patterns after multiple conditional swaps
+	q1.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q2.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q3.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// chaosModernSwapSyntax demonstrates modern Go swap syntax (a, b = b, a).
+func chaosModernSwapSyntax(db *gorm.DB, a bool) {
+	q1 := db.Where("q1").Session(&gorm.Session{})
+	q2 := db.Where("q2").Session(&gorm.Session{})
+
+	q1.Find(nil) // Pollute q1
+	q2.Count(nil) // Pollute q2
+
+	// Modern Go swap syntax
+	q1, q2 = q2, q1
+
+	// After swap: q1 = old q2 (polluted), q2 = old q1 (polluted)
+	q1.First(nil) // want `\*gorm\.DB instance reused after chain method`
+	q2.Last(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// chaosModernSwapConditional demonstrates modern swap syntax with conditionals.
+func chaosModernSwapConditional(db *gorm.DB, a, b bool) {
+	q1 := db.Where("q1")
+	q2 := db.Where("q2")
+	q3 := db.Where("q3")
+
+	q1.Find(nil) // Pollute q1
+
+	if a {
+		q1, q2 = q2, q1 // Swap polluted q1 with clean q2
+	}
+
+	if b {
+		q2, q3 = q3, q2 // Swap (possibly polluted) q2 with clean q3
+	}
+
+	// All three may be polluted depending on branches
+	q1.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q2.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q3.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// chaosModernSwapLoop demonstrates modern swap syntax in loops.
+func chaosModernSwapLoop(db *gorm.DB, flags []bool) {
+	q1 := db.Where("q1")
+	q2 := db.Where("q2")
+
+	q1.Find(nil) // Pollute q1
+
+	for _, flag := range flags {
+		if flag {
+			q1, q2 = q2, q1 // Swap back and forth
+		}
+		q1 = q1.Where("extend", flag) // want `\*gorm\.DB instance reused after chain method`
+	}
+
+	q1.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q2.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// chaosUltimateStressTest demonstrates the ultimate stress test with everything mixed.
+func chaosUltimateStressTest(db *gorm.DB, flags []bool) {
+	q := db.Where("base").Session(&gorm.Session{})
+	var temp *gorm.DB
+
+	for i, flag := range flags {
+		if flag {
+			if i%3 == 0 {
+				q = q.Where("mod3", i).Session(&gorm.Session{})
+				q.Find(nil)
+
+				if i > 5 {
+					temp = q.Where("temp_from_q") // want `\*gorm\.DB instance reused after chain method`
+					temp.Count(nil)
+					q = temp.Where("back_to_q").Session(&gorm.Session{}) // want `\*gorm\.DB instance reused after chain method`
+				}
+			} else if i%3 == 1 {
+				q.Where("mod3_1_imm").First(nil) // want `\*gorm\.DB instance reused after chain method`
+
+				if i < 10 {
+					q = db.Where("fresh", i).Session(&gorm.Session{}) // Fresh
+				} else {
+					q = q.Where("mod3_1_ext").Session(&gorm.Session{}) // want `\*gorm\.DB instance reused after chain method`
+				}
+			} else {
+				temp = db.Where("temp_fresh")
+				temp = temp.Where("temp_chain").Session(&gorm.Session{})
+
+				if i%2 == 0 {
+					q = temp // Transfer temp to q
+				} else {
+					temp.Last(nil)
+					q = q.Where("mod3_2").Session(&gorm.Session{}) // want `\*gorm\.DB instance reused after chain method`
+				}
+			}
+		} else {
+			q = q.Where("no_flag", i).Session(&gorm.Session{}) // want `\*gorm\.DB instance reused after chain method`
+		}
+	}
+
+	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+
+	if temp != nil {
+		temp.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	}
+}
+
+// =============================================================================
+// Pattern 12: Violations WITHOUT reassignment - just chaining Where
+// =============================================================================
+
+// chaosWhereChainNoReassignment demonstrates simple Where chaining violations.
+func chaosWhereChainNoReassignment(db *gorm.DB) {
+	q := db.Where("base").Session(&gorm.Session{})
+	q.Where("filter1").Find(nil)
+	q.Where("filter2").Find(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Where("filter3").Find(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// chaosNestedIfWhereNoReassignment demonstrates Where chaining in nested if without reassignment.
+func chaosNestedIfWhereNoReassignment(db *gorm.DB, a, b bool) {
+	q := db.Where("base").Session(&gorm.Session{})
+
+	if a {
+		q.Where("a1").Find(nil)
+
+		if b {
+			q.Where("b1").Count(nil) // want `\*gorm\.DB instance reused after chain method`
+			q.Where("b2").First(nil) // want `\*gorm\.DB instance reused after chain method`
+		}
+
+		q.Where("a2").Last(nil) // want `\*gorm\.DB instance reused after chain method`
+	}
+
+	q.Where("final").Find(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// chaosWhereChainAfterPollution demonstrates Where chaining after pollution.
+func chaosWhereChainAfterPollution(db *gorm.DB, a bool) {
+	q := db.Where("base").Session(&gorm.Session{})
+	q.Find(nil) // Pollute
+
+	q.Where("after1").Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Where("after2").First(nil) // want `\*gorm\.DB instance reused after chain method`
+
+	if a {
+		q.Where("if_a").Last(nil) // want `\*gorm\.DB instance reused after chain method`
+	}
+
+	q.Where("final").Find(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// chaosWhereChainInLoop demonstrates Where chaining in loop without reassignment.
+func chaosWhereChainInLoop(db *gorm.DB, items []string) {
+	q := db.Where("base")
+
+	for _, item := range items {
+		q.Where("item", item).Find(nil) // want `\*gorm\.DB instance reused after chain method`
+	}
+
+	q.Where("after_loop").Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// chaosWhereChainMixedWithReassignment demonstrates mixing Where chains and reassignment.
+func chaosWhereChainMixedWithReassignment(db *gorm.DB, a, b bool) {
+	q := db.Where("base").Session(&gorm.Session{})
+
+	// First use: Where chain
+	q.Where("use1").Find(nil)
+
+	if a {
+		// Second use: Where chain (violation)
+		q.Where("use2").Count(nil) // want `\*gorm\.DB instance reused after chain method`
+
+		// Reassignment - extends polluted q
+		q = q.Where("reassign").Session(&gorm.Session{}) // want `\*gorm\.DB instance reused after chain method`
+	}
+
+	// Third use: Where chain on Phi(polluted_q, reassigned_q)
+	q.Where("use3").First(nil) // want `\*gorm\.DB instance reused after chain method`
+
+	if b {
+		// Fourth use: Where chain
+		q.Where("use4").Last(nil) // want `\*gorm\.DB instance reused after chain method`
+	}
+}
+
+// chaosWhereChainDeepNesting demonstrates deeply nested Where chains.
+func chaosWhereChainDeepNesting(db *gorm.DB, a, b, c, d bool) {
+	q := db.Where("base").Session(&gorm.Session{})
+
+	if a {
+		q.Where("a").Find(nil)
+
+		if b {
+			q.Where("b").Count(nil) // want `\*gorm\.DB instance reused after chain method`
+
+			if c {
+				q.Where("c").First(nil) // want `\*gorm\.DB instance reused after chain method`
+
+				if d {
+					q.Where("d").Last(nil) // want `\*gorm\.DB instance reused after chain method`
+				}
+
+				q.Where("after_d").Find(nil) // want `\*gorm\.DB instance reused after chain method`
+			}
+
+			q.Where("after_c").Count(nil) // want `\*gorm\.DB instance reused after chain method`
+		}
+
+		q.Where("after_b").First(nil) // want `\*gorm\.DB instance reused after chain method`
+	}
+
+	q.Where("after_a").Last(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// chaosWhereChainWithImmediateAndStored demonstrates immediate vs stored Where chains.
+func chaosWhereChainWithImmediateAndStored(db *gorm.DB, a bool) {
+	q := db.Where("base").Session(&gorm.Session{})
+
+	// Immediate chain - pollutes q
+	q.Where("imm1").Find(nil)
+
+	// Stored chain - violation
+	filtered := q.Where("stored1") // want `\*gorm\.DB instance reused after chain method`
+	filtered.Count(nil)
+
+	// Another immediate chain - violation
+	q.Where("imm2").First(nil) // want `\*gorm\.DB instance reused after chain method`
+
+	if a {
+		// Yet another violation
+		q.Where("imm3").Last(nil) // want `\*gorm\.DB instance reused after chain method`
+	}
+}
+
+// chaosWhereChainAsymmetric demonstrates asymmetric Where chains.
+func chaosWhereChainAsymmetric(db *gorm.DB, a, b bool) {
+	q := db.Where("base").Session(&gorm.Session{})
+
+	if a {
+		// Deep Where chaining on one side
+		if b {
+			q.Where("a_b_1").Find(nil)
+			q.Where("a_b_2").Count(nil) // want `\*gorm\.DB instance reused after chain method`
+			q.Where("a_b_3").First(nil) // want `\*gorm\.DB instance reused after chain method`
+		} else {
+			q.Where("a_not_b").Last(nil)
+		}
+	} else {
+		// Single Where chain on other side
+		q.Where("not_a").Find(nil)
+	}
+
+	// After Phi - violation on all paths
+	q.Where("after_phi").Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// chaosWhereChainInterwovenPollution demonstrates Where chains with interwoven pollution.
+func chaosWhereChainInterwovenPollution(db *gorm.DB, a, b, c bool) {
+	q := db.Where("base").Session(&gorm.Session{})
+
+	// Use 1
+	q.Where("use1").Find(nil)
+
+	if a {
+		// Use 2 - violation
+		q.Where("use2").Count(nil) // want `\*gorm\.DB instance reused after chain method`
+
+		if b {
+			// Use 3 - violation
+			q.Where("use3").First(nil) // want `\*gorm\.DB instance reused after chain method`
+
+			if c {
+				// Use 4 - violation
+				q.Where("use4").Last(nil) // want `\*gorm\.DB instance reused after chain method`
+			}
+
+			// Use 5 - violation
+			q.Where("use5").Find(nil) // want `\*gorm\.DB instance reused after chain method`
+		}
+
+		// Use 6 - violation
+		q.Where("use6").Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	}
+
+	// Use 7 - violation
+	q.Where("use7").First(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// chaosWhereChainLoopAccumulation demonstrates Where chains accumulating in loop.
+func chaosWhereChainLoopAccumulation(db *gorm.DB, filters []string) {
+	q := db.Where("base").Session(&gorm.Session{})
+	q.Find(nil) // Initial use
+
+	for _, filter := range filters {
+		// Each iteration is a violation - reusing polluted q
+		q.Where("filter", filter).Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	}
+
+	// After loop - still violation
+	q.Where("final").First(nil) // want `\*gorm\.DB instance reused after chain method`
+}

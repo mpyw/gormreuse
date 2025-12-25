@@ -80,12 +80,20 @@ func New() *Analyzer {
 // Used to detect when a mutable root defined outside a loop is used
 // inside the loop, which is always a violation (reused on each iteration).
 type LoopInfo struct {
-	loopBlocks map[*ssa.BasicBlock]bool // Blocks that are part of any loop
+	loopBlocks  map[*ssa.BasicBlock]bool // Blocks that are part of any loop
+	loopHeaders map[*ssa.BasicBlock]bool // Blocks that are loop headers
 }
 
 // IsInLoop returns true if the block is inside a loop.
 func (l *LoopInfo) IsInLoop(block *ssa.BasicBlock) bool {
 	return l.loopBlocks[block]
+}
+
+// IsLoopHeader returns true if the block is a loop header.
+// Loop headers are entry points to loops where Phi nodes merge
+// values from outside the loop and from loop back-edges.
+func (l *LoopInfo) IsLoopHeader(block *ssa.BasicBlock) bool {
+	return l.loopHeaders[block]
 }
 
 // CanReach checks if srcBlock can reach dstBlock in the CFG using BFS.
@@ -133,12 +141,17 @@ func (a *Analyzer) CanReach(src, dst *ssa.BasicBlock) bool {
 //  2. Find back-edges: edges where succ.index <= src.index
 //  3. For each back-edge, verify it's a real loop (succ can reach src)
 //  4. Mark all blocks between loop header and tail as loop blocks
+//  5. Mark loop headers for special handling of Phi nodes
 //
 // This handles for, for-range, and while-style loops.
 func (a *Analyzer) DetectLoops(fn *ssa.Function) *LoopInfo {
 	loopBlocks := make(map[*ssa.BasicBlock]bool)
+	loopHeaders := make(map[*ssa.BasicBlock]bool)
 	if fn.Blocks == nil {
-		return &LoopInfo{loopBlocks: loopBlocks}
+		return &LoopInfo{
+			loopBlocks:  loopBlocks,
+			loopHeaders: loopHeaders,
+		}
 	}
 
 	// Build block index map (for back-edge detection)
@@ -155,12 +168,16 @@ func (a *Analyzer) DetectLoops(fn *ssa.Function) *LoopInfo {
 				// Potential back-edge: verify it creates a cycle
 				if a.CanReach(succ, block) {
 					a.markLoopBlocks(fn, succ, block, loopBlocks, blockIndex)
+					loopHeaders[succ] = true // succ is the loop header
 				}
 			}
 		}
 	}
 
-	return &LoopInfo{loopBlocks: loopBlocks}
+	return &LoopInfo{
+		loopBlocks:  loopBlocks,
+		loopHeaders: loopHeaders,
+	}
 }
 
 // markLoopBlocks marks blocks that are part of a loop.
