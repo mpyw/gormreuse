@@ -9,21 +9,21 @@ import "gorm.io/gorm"
 // derivedVariables demonstrates unsafe derived variables.
 func derivedVariables(db *gorm.DB) {
 	queryDB := db.Model(&User{}).Where("name = ?", "jinzhu").Session(&gorm.Session{})
-	q := queryDB.Where("age > ?", 10) // Derived without Session - mutable
+	q := queryDB.Where("age > ?", 10).Session(&gorm.Session{}) // Derived without Session - mutable
 	q.Find(&[]User{})
 	q.Count(new(int64)) // want `\*gorm\.DB instance reused after chain method`
 }
 
 // storedChainResultReuse demonstrates reuse of stored chain result.
 func storedChainResultReuse(db *gorm.DB) {
-	q := db.Where("active = ?", true)
+	q := db.Where("active = ?", true).Session(&gorm.Session{})
 	q.Find(nil)
 	q.Where("name = ?", "x").Find(nil) // want `\*gorm\.DB instance reused after chain method`
 }
 
 // storedChainResultMultipleDerivations demonstrates multiple derivations from same base.
 func storedChainResultMultipleDerivations(db *gorm.DB) {
-	base := db.Where("tenant_id = ?", 1)
+	base := db.Where("tenant_id = ?", 1).Session(&gorm.Session{})
 	base.Where("type = ?", "A").Find(nil)
 	base.Where("type = ?", "B").Find(nil) // want `\*gorm\.DB instance reused after chain method`
 }
@@ -32,7 +32,7 @@ func storedChainResultMultipleDerivations(db *gorm.DB) {
 func derivedFromSessionUnsafe(db *gorm.DB) {
 	base := db.Where("tenant_id = ?", 1)
 	safe := base.Session(&gorm.Session{})
-	derived := safe.Where("active = ?", true) // Mutable!
+	derived := safe.Where("active = ?", true).Session(&gorm.Session{}) // Mutable!
 
 	derived.Find(nil)
 	derived.Count(nil) // want `\*gorm\.DB instance reused after chain method`
@@ -42,7 +42,7 @@ func derivedFromSessionUnsafe(db *gorm.DB) {
 func multiLevelUnsafeDerivation(db *gorm.DB) {
 	level1 := db.Where("a")
 	level2 := level1.Where("b")
-	level3 := level2.Where("c")
+	level3 := level2.Where("c").Session(&gorm.Session{})
 
 	level3.Find(nil)
 	level3.Count(nil) // want `\*gorm\.DB instance reused after chain method`
@@ -97,7 +97,7 @@ func helperWhere(db *gorm.DB, name string) *gorm.DB {
 
 // functionReturnValue demonstrates unsafe reuse of function return.
 func functionReturnValue(db *gorm.DB) {
-	q := helperWhere(db, "jinzhu")
+	q := helperWhere(db, "jinzhu").Session(&gorm.Session{})
 	q.Find(&[]User{})
 	q.Count(new(int64)) // want `\*gorm\.DB instance reused after chain method`
 }
@@ -119,21 +119,21 @@ func functionReturnWithSession(db *gorm.DB) {
 
 // sessionAfterPolluted demonstrates that Session() after pollution doesn't help.
 func sessionAfterPolluted(db *gorm.DB) {
-	q := db.Model(&User{}).Where("active = ?", true)
+	q := db.Model(&User{}).Where("active = ?", true).Session(&gorm.Session{})
 	q.Count(new(int64))                        // q is polluted
 	q.Session(&gorm.Session{}).Find(&[]User{}) // want `\*gorm\.DB instance reused after chain method`
 }
 
 // sessionOnPollutedValue demonstrates Session on already-polluted value.
 func sessionOnPollutedValue(db *gorm.DB) {
-	q := db.Where("x = ?", 1)
+	q := db.Where("x = ?", 1).Session(&gorm.Session{})
 	q.Find(nil)
 	q.Session(&gorm.Session{}).Count(nil) // want `\*gorm\.DB instance reused after chain method`
 }
 
 // multipleDirectUsesWithoutSession demonstrates multiple uses without Session.
 func multipleDirectUsesWithoutSession(db *gorm.DB) {
-	q := db.Where("x = ?", 1)
+	q := db.Where("x = ?", 1).Session(&gorm.Session{})
 	q.Find(nil)
 	q.Count(nil)                          // want `\*gorm\.DB instance reused after chain method`
 	q.Session(&gorm.Session{}).First(nil) // want `\*gorm\.DB instance reused after chain method`
@@ -195,11 +195,11 @@ func reassignNewInstance(db *gorm.DB) {
 // conditionalExtendPartialWithPollution demonstrates conditional extension with initial pollution.
 // One branch extends polluted q - that extension is a violation.
 func conditionalExtendPartialWithPollution(db *gorm.DB, flag bool) {
-	q := db.Where("x = ?", 1)
+	q := db.Where("x = ?", 1).Session(&gorm.Session{})
 	q.Find(nil) // Pollutes q
 
 	if flag {
-		q = q.Where("y = ?", 2) // want `\*gorm\.DB instance reused after chain method`
+		q = q.Where("y = ?", 2).Session(&gorm.Session{}) // want `\*gorm\.DB instance reused after chain method`
 	}
 
 	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
@@ -208,7 +208,7 @@ func conditionalExtendPartialWithPollution(db *gorm.DB, flag bool) {
 // conditionalExtendBothWithPollution demonstrates conditional extension in both branches with initial pollution.
 // Both branches extend polluted q - both are violations.
 func conditionalExtendBothWithPollution(db *gorm.DB, flag bool) {
-	q := db.Where("x = ?", 1)
+	q := db.Where("x = ?", 1).Session(&gorm.Session{})
 	q.Find(nil) // Pollutes q
 
 	if flag {
@@ -223,10 +223,10 @@ func conditionalExtendBothWithPollution(db *gorm.DB, flag bool) {
 // conditionalExtendPartialNoPollution demonstrates conditional extension without initial pollution.
 // Extending q in one branch creates a branch from original q.
 func conditionalExtendPartialNoPollution(db *gorm.DB, flag bool) {
-	q := db.Where("x = ?", 1)
+	q := db.Where("x = ?", 1).Session(&gorm.Session{})
 
 	if flag {
-		q = q.Where("y = ?", 2) // First branch from original q
+		q = q.Where("y = ?", 2).Session(&gorm.Session{}) // First branch from original q
 	}
 
 	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
@@ -239,9 +239,9 @@ func conditionalExtendBothNoPollution(db *gorm.DB, flag bool) {
 	q := db.Where("x = ?", 1)
 
 	if flag {
-		q = q.Where("y = ?", 2) // Creates new root
+		q = q.Where("y = ?", 2).Session(&gorm.Session{}) // Creates new root
 	} else {
-		q = q.Where("z = ?", 3) // Creates new root
+		q = q.Where("z = ?", 3).Session(&gorm.Session{}) // Creates new root
 	}
 
 	q.Find(nil)

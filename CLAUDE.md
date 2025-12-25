@@ -115,7 +115,9 @@ gormreuse/
 │   │   └── directive_validation.go  # Directive tests (pure, immutable-return)
 │   └── gorm.io/gorm/           # GORM stub for testing
 │
-└── e2e/internal/               # SQL behavior verification (separate module)
+└── testdata/
+    ├── cmd/gengolden/          # Golden file generator
+    └── e2e/                    # SQL behavior verification (separate module)
 ```
 
 ### Analysis Pipeline
@@ -252,7 +254,10 @@ go build -o bin/gormreuse ./cmd/gormreuse
 go vet -vettool=./bin/gormreuse ./...
 
 # Run E2E tests (SQL behavior verification)
-cd e2e/internal && go test -v ./...
+cd testdata/e2e && go test -v
+
+# Generate golden files for suggested fixes
+go run ./testdata/cmd/gengolden/main.go
 ```
 
 ## Testing Strategy
@@ -275,7 +280,7 @@ testdata/src/gormreuse/
 
 ### E2E Tests
 
-The `e2e/internal/` directory contains tests that verify actual GORM SQL behavior using sqlmock. This is a separate Go module to avoid dependency conflicts. These tests document GORM's clone/pollution behavior.
+The `testdata/e2e/` directory contains tests that verify actual GORM SQL behavior using sqlmock. This is a separate Go module to avoid dependency conflicts. These tests document GORM's clone/pollution behavior.
 
 ## Code Style
 

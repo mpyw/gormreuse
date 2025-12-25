@@ -43,6 +43,14 @@ import (
 type Violation struct {
 	Pos     token.Pos
 	Message string
+	Root    ssa.Value   // mutable root that caused the violation (for fix generation)
+	AllUses []UsageInfo // all uses of this root (for fix generation)
+}
+
+// UsageInfo tracks a single usage of a root (exported for fix generation).
+type UsageInfo struct {
+	Block *ssa.BasicBlock
+	Pos   token.Pos
 }
 
 // Tracker tracks pollution state of mutable *gorm.DB roots.
@@ -55,11 +63,11 @@ type Violation struct {
 type Tracker struct {
 	// pollutingUses maps roots to non-pure method usage sites.
 	// These uses "consume" the root and prevent further reuse.
-	pollutingUses map[ssa.Value][]usageInfo
+	pollutingUses map[ssa.Value][]UsageInfo
 
 	// pureUses maps roots to pure method usage sites.
 	// These uses CHECK for pollution but don't pollute.
-	pureUses map[ssa.Value][]usageInfo
+	pureUses map[ssa.Value][]UsageInfo
 
 	// violations tracks detected violations.
 	violations []Violation
@@ -71,12 +79,6 @@ type Tracker struct {
 	analyzedFn *ssa.Function
 }
 
-// usageInfo tracks a single usage of a root.
-type usageInfo struct {
-	block *ssa.BasicBlock
-	pos   token.Pos
-}
-
 // CFGAnalyzer interface for control flow analysis.
 type CFGAnalyzer interface {
 	CanReach(src, dst *ssa.BasicBlock) bool
@@ -85,8 +87,8 @@ type CFGAnalyzer interface {
 // New creates a new Tracker.
 func New(cfgAnalyzer CFGAnalyzer, fn *ssa.Function) *Tracker {
 	return &Tracker{
-		pollutingUses: make(map[ssa.Value][]usageInfo),
-		pureUses:      make(map[ssa.Value][]usageInfo),
+		pollutingUses: make(map[ssa.Value][]UsageInfo),
+		pureUses:      make(map[ssa.Value][]UsageInfo),
 		cfgAnalyzer:   cfgAnalyzer,
 		analyzedFn:    fn,
 	}
@@ -96,14 +98,14 @@ func New(cfgAnalyzer CFGAnalyzer, fn *ssa.Function) *Tracker {
 // Non-pure method calls that consume the root.
 // Caller must ensure root is not nil.
 func (t *Tracker) ProcessBranch(root ssa.Value, block *ssa.BasicBlock, pos token.Pos) {
-	t.pollutingUses[root] = append(t.pollutingUses[root], usageInfo{block: block, pos: pos})
+	t.pollutingUses[root] = append(t.pollutingUses[root], UsageInfo{Block: block, Pos: pos})
 }
 
 // RecordPureUse records a PURE usage (Session, Debug, etc).
 // These uses check for pollution but don't pollute.
 // Caller must ensure root is not nil.
 func (t *Tracker) RecordPureUse(root ssa.Value, block *ssa.BasicBlock, pos token.Pos) {
-	t.pureUses[root] = append(t.pureUses[root], usageInfo{block: block, pos: pos})
+	t.pureUses[root] = append(t.pureUses[root], UsageInfo{Block: block, Pos: pos})
 }
 
 // isReachable checks if pollution can reach the target block.
@@ -121,11 +123,13 @@ func (t *Tracker) isReachable(pollutedBlock, targetBlock *ssa.BasicBlock) bool {
 	return t.cfgAnalyzer.CanReach(pollutedBlock, targetBlock)
 }
 
-// addViolation records a violation.
-func (t *Tracker) addViolation(pos token.Pos) {
+// addViolationWithContext adds a violation with root and uses information for fix generation.
+func (t *Tracker) addViolationWithContext(pos token.Pos, root ssa.Value, allUses []UsageInfo) {
 	t.violations = append(t.violations, Violation{
 		Pos:     pos,
 		Message: "*gorm.DB instance reused after chain method (use .Session(&gorm.Session{}) to make it safe)",
+		Root:    root,
+		AllUses: allUses,
 	})
 }
 
@@ -138,7 +142,7 @@ func (t *Tracker) IsPolluted(root ssa.Value) bool {
 // IsPollutedAt checks if a root has polluting usage that can reach the target block.
 func (t *Tracker) IsPollutedAt(root ssa.Value, targetBlock *ssa.BasicBlock) bool {
 	for _, use := range t.pollutingUses[root] {
-		if t.isReachable(use.block, targetBlock) {
+		if t.isReachable(use.Block, targetBlock) {
 			return true
 		}
 	}
@@ -148,21 +152,36 @@ func (t *Tracker) IsPollutedAt(root ssa.Value, targetBlock *ssa.BasicBlock) bool
 // MarkPolluted records a polluting usage (for channel send, slice storage, etc).
 // Caller must ensure root is not nil.
 func (t *Tracker) MarkPolluted(root ssa.Value, block *ssa.BasicBlock, pos token.Pos) {
-	t.pollutingUses[root] = append(t.pollutingUses[root], usageInfo{block: block, pos: pos})
+	t.pollutingUses[root] = append(t.pollutingUses[root], UsageInfo{Block: block, Pos: pos})
 }
 
-// AddViolation explicitly adds a violation.
-func (t *Tracker) AddViolation(pos token.Pos) {
-	t.addViolation(pos)
+// AddViolationWithRoot adds a violation with root information for fix generation.
+func (t *Tracker) AddViolationWithRoot(pos token.Pos, root ssa.Value) {
+	allUses := t.getAllUses(root)
+	t.addViolationWithContext(pos, root, allUses)
+}
+
+// getAllUses returns all uses (pure + polluting) for a root.
+func (t *Tracker) getAllUses(root ssa.Value) []UsageInfo {
+	var allUses []UsageInfo
+	allUses = append(allUses, t.pureUses[root]...)
+	allUses = append(allUses, t.pollutingUses[root]...)
+	return allUses
 }
 
 // DetectViolations performs violation detection after all uses are recorded.
 // For each root with multiple uses, check if an earlier use can reach a later one.
 func (t *Tracker) DetectViolations() {
 	// Check violations between polluting uses (non-pure methods)
-	for _, uses := range t.pollutingUses {
+	for root, uses := range t.pollutingUses {
 		if len(uses) <= 1 {
 			continue // Need at least 2 polluting uses for a violation
+		}
+
+		// Combine all uses (polluting + pure) for fix generation
+		allUses := append([]UsageInfo{}, uses...)
+		if pureUses, ok := t.pureUses[root]; ok {
+			allUses = append(allUses, pureUses...)
 		}
 
 		// For each pair of uses, check if the earlier one can reach the later one
@@ -173,20 +192,20 @@ func (t *Tracker) DetectViolations() {
 				}
 
 				// Only report if src is BEFORE target (earlier position)
-				if src.pos >= target.pos {
+				if src.Pos >= target.Pos {
 					continue
 				}
 
 				// Different functions (closure): position order is sufficient
-				if src.block != nil && target.block != nil &&
-					src.block.Parent() != target.block.Parent() {
-					t.addViolation(target.pos)
+				if src.Block != nil && target.Block != nil &&
+					src.Block.Parent() != target.Block.Parent() {
+					t.addViolationWithContext(target.Pos, root, allUses)
 					break
 				}
 
 				// Same function: check CFG reachability
-				if t.isReachable(src.block, target.block) {
-					t.addViolation(target.pos)
+				if t.isReachable(src.Block, target.Block) {
+					t.addViolationWithContext(target.Pos, root, allUses)
 					break
 				}
 			}
@@ -201,23 +220,27 @@ func (t *Tracker) DetectViolations() {
 			continue // No polluting uses for this root
 		}
 
+		// Combine all uses for fix generation
+		allUses := append([]UsageInfo{}, pollutingUses...)
+		allUses = append(allUses, pureUses...)
+
 		for _, pureUse := range pureUses {
 			for _, pollutingUse := range pollutingUses {
 				// Only report if polluting is BEFORE pure (earlier position)
-				if pollutingUse.pos >= pureUse.pos {
+				if pollutingUse.Pos >= pureUse.Pos {
 					continue
 				}
 
 				// Different functions (closure): position order is sufficient
-				if pollutingUse.block != nil && pureUse.block != nil &&
-					pollutingUse.block.Parent() != pureUse.block.Parent() {
-					t.addViolation(pureUse.pos)
+				if pollutingUse.Block != nil && pureUse.Block != nil &&
+					pollutingUse.Block.Parent() != pureUse.Block.Parent() {
+					t.addViolationWithContext(pureUse.Pos, root, allUses)
 					break
 				}
 
 				// Same function: check CFG reachability
-				if t.isReachable(pollutingUse.block, pureUse.block) {
-					t.addViolation(pureUse.pos)
+				if t.isReachable(pollutingUse.Block, pureUse.Block) {
+					t.addViolationWithContext(pureUse.Pos, root, allUses)
 					break
 				}
 			}
