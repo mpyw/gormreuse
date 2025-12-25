@@ -440,6 +440,7 @@ func nestedIfChaosKitchenSink(db *gorm.DB, a, b, c, d bool) {
 }
 
 // nestedIfChaosWithLoops demonstrates nested if inside a loop.
+// Loop has only assignments (no finisher methods), so first use after loop is OK.
 func nestedIfChaosWithLoops(db *gorm.DB, flags []bool) {
 	q := db.Where("base")
 
@@ -454,9 +455,6 @@ func nestedIfChaosWithLoops(db *gorm.DB, flags []bool) {
 		// Loop creates Phi at each iteration
 	}
 
-	// TODO: Bug - loop with conditional assignments inside causes both uses to be flagged
-	// Expected: Only Count should be flagged (Find is first actual use)
-	// Actual: Both are flagged (false positive for Find)
 	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
 	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
 }

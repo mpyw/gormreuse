@@ -76,15 +76,32 @@ type Context struct {
 type CallHandler struct{}
 
 // isAssignment checks if a call result is assigned to create a new root.
-// Returns true if the call is used in an assignment (Phi or Store to Alloc).
-// Example: q = q.Where() creates new root from original q
-func isAssignment(call *ssa.Call) bool {
+// Returns true if the call is used in an assignment (Store to Alloc or Phi).
+//
+// KEY INSIGHT: All Phi nodes (loop-header, loop-internal, and non-loop) represent assignments:
+//   - They merge control flow and create new SSA values
+//   - Assignment does NOT pollute the original root
+//   - Only actual method calls (non-assignment) pollute
+//
+// Example patterns:
+//   q = q.Where("x")  // Assignment - no pollution
+//   q.Find(nil)       // Actual use - pollutes q
+//
+// Loop patterns:
+//   for { q = q.Where() }         // Loop-header Phi - assignment, no pollution
+//   for { if x { q = q.Where() }} // Loop-internal Phi - assignment, no pollution
+//   for { q.Find(nil) }           // Actual use in loop - pollutes q
+//
+// This works recursively for arbitrary nesting depths (for-if-if-if-for-for-if-if etc.)
+// because SSA naturally represents all control flow as Phi nodes.
+func isAssignment(call *ssa.Call, ctx *Context) bool {
 	if call.Referrers() == nil {
 		return false
 	}
 
 	for _, user := range *call.Referrers() {
 		// Check for Phi nodes (merging control flow)
+		// ALL Phi nodes represent assignments, regardless of location
 		if _, ok := user.(*ssa.Phi); ok {
 			return true
 		}
@@ -133,7 +150,7 @@ func (h *CallHandler) Handle(call *ssa.Call, ctx *Context) {
 	recv := call.Call.Args[0]
 
 	// Find mutable root
-	root := ctx.RootTracer.FindMutableRoot(recv)
+	root := ctx.RootTracer.FindMutableRoot(recv, ctx.LoopInfo)
 	if root == nil {
 		return // Immutable source
 	}
@@ -145,7 +162,7 @@ func (h *CallHandler) Handle(call *ssa.Call, ctx *Context) {
 		ctx.Tracker.RecordPureUse(root, call.Block(), call.Pos())
 	} else {
 		// Non-pure methods: check if this is an assignment or actual use
-		if isAssignment(call) {
+		if isAssignment(call, ctx) {
 			// Assignment creates new root - record but doesn't pollute
 			ctx.Tracker.RecordAssignment(root, call.Block(), call.Pos())
 		} else {
@@ -160,7 +177,7 @@ func (h *CallHandler) Handle(call *ssa.Call, ctx *Context) {
 	}
 
 	// Check ALL possible roots for phi nodes
-	allRoots := ctx.RootTracer.FindAllMutableRoots(recv)
+	allRoots := ctx.RootTracer.FindAllMutableRoots(recv, ctx.LoopInfo)
 	for _, r := range allRoots {
 		if r == root {
 			continue
@@ -185,7 +202,7 @@ func (h *CallHandler) processBoundMethodCall(call *ssa.Call, mc *ssa.MakeClosure
 	methodName := strings.TrimSuffix(mc.Fn.Name(), "$bound")
 	isImmutableReturning := typeutil.IsImmutableReturningBuiltin(methodName)
 
-	root := ctx.RootTracer.FindMutableRoot(recv)
+	root := ctx.RootTracer.FindMutableRoot(recv, ctx.LoopInfo)
 	if root == nil {
 		return
 	}
@@ -225,7 +242,7 @@ func (h *CallHandler) checkFunctionCallPollution(call *ssa.Call, ctx *Context) {
 			continue
 		}
 
-		root := ctx.RootTracer.FindMutableRoot(arg)
+		root := ctx.RootTracer.FindMutableRoot(arg, ctx.LoopInfo)
 		if root == nil {
 			continue
 		}
@@ -274,7 +291,7 @@ func (h *SendHandler) Handle(send *ssa.Send, ctx *Context) {
 		return
 	}
 
-	root := ctx.RootTracer.FindMutableRoot(send.X)
+	root := ctx.RootTracer.FindMutableRoot(send.X, ctx.LoopInfo)
 	if root == nil {
 		return
 	}
@@ -296,7 +313,7 @@ func (h *StoreHandler) Handle(store *ssa.Store, ctx *Context) {
 		return
 	}
 
-	root := ctx.RootTracer.FindMutableRoot(store.Val)
+	root := ctx.RootTracer.FindMutableRoot(store.Val, ctx.LoopInfo)
 	if root == nil {
 		return
 	}
@@ -313,7 +330,7 @@ func (h *MapUpdateHandler) Handle(mapUpdate *ssa.MapUpdate, ctx *Context) {
 		return
 	}
 
-	root := ctx.RootTracer.FindMutableRoot(mapUpdate.Value)
+	root := ctx.RootTracer.FindMutableRoot(mapUpdate.Value, ctx.LoopInfo)
 	if root == nil {
 		return
 	}
@@ -330,7 +347,7 @@ func (h *MakeInterfaceHandler) Handle(mi *ssa.MakeInterface, ctx *Context) {
 		return
 	}
 
-	root := ctx.RootTracer.FindMutableRoot(mi.X)
+	root := ctx.RootTracer.FindMutableRoot(mi.X, ctx.LoopInfo)
 	if root == nil {
 		return
 	}
@@ -354,7 +371,7 @@ func processGormDBCallCommon(callCommon *ssa.CallCommon, pos token.Pos, block *s
 		}
 		recv := callCommon.Args[0]
 
-		root := ctx.RootTracer.FindMutableRoot(recv)
+		root := ctx.RootTracer.FindMutableRoot(recv, ctx.LoopInfo)
 		if root == nil {
 			return
 		}
@@ -371,7 +388,7 @@ func processGormDBCallCommon(callCommon *ssa.CallCommon, pos token.Pos, block *s
 			continue
 		}
 
-		root := ctx.RootTracer.FindMutableRoot(arg)
+		root := ctx.RootTracer.FindMutableRoot(arg, ctx.LoopInfo)
 		if root == nil {
 			continue
 		}
@@ -398,7 +415,7 @@ func processGormDBCallCommonDefer(callCommon *ssa.CallCommon, pos token.Pos, ctx
 		}
 		recv := callCommon.Args[0]
 
-		root := ctx.RootTracer.FindMutableRoot(recv)
+		root := ctx.RootTracer.FindMutableRoot(recv, ctx.LoopInfo)
 		if root == nil {
 			return
 		}
@@ -416,7 +433,7 @@ func processGormDBCallCommonDefer(callCommon *ssa.CallCommon, pos token.Pos, ctx
 			continue
 		}
 
-		root := ctx.RootTracer.FindMutableRoot(arg)
+		root := ctx.RootTracer.FindMutableRoot(arg, ctx.LoopInfo)
 		if root == nil {
 			continue
 		}

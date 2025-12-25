@@ -1,6 +1,6 @@
 --- nested_chaos.go	1970-01-01 00:00:00
 +++ nested_chaos.go.golden	1970-01-01 00:00:00
-@@ -1,1207 +1,1207 @@
+@@ -1,1205 +1,1205 @@
  package internal
  
  import "gorm.io/gorm"
@@ -474,23 +474,24 @@
  }
  
  // nestedIfChaosWithLoops demonstrates nested if inside a loop.
+ // Loop has only assignments (no finisher methods), so first use after loop is OK.
  func nestedIfChaosWithLoops(db *gorm.DB, flags []bool) {
- 	q := db.Where("base")
+-	q := db.Where("base")
++	q := db.Where("base").Session(&gorm.Session{})
  
  	for i, flag := range flags {
  		if flag {
  			if i%2 == 0 {
- 				q = q.Where("even", i)
+-				q = q.Where("even", i)
++				q = q.Where("even", i).Session(&gorm.Session{})
  			} else {
- 				q = q.Where("odd", i)
+-				q = q.Where("odd", i)
++				q = q.Where("odd", i).Session(&gorm.Session{})
  			}
  		}
  		// Loop creates Phi at each iteration
  	}
  
- 	// TODO: Bug - loop with conditional assignments inside causes both uses to be flagged
- 	// Expected: Only Count should be flagged (Find is first actual use)
- 	// Actual: Both are flagged (false positive for Find)
  	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
  	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
  }
@@ -725,18 +726,20 @@
  
  // chaosNestedLoopsWithPollution demonstrates nested loops with pollution.
  func chaosNestedLoopsWithPollution(db *gorm.DB, outer, inner []int) {
--	q := db.Where("base")
-+	q := db.Where("base").Session(&gorm.Session{})
+ 	q := db.Where("base")
  
  	for _, o := range outer {
- 		q = q.Where("outer", o)
+-		q = q.Where("outer", o)
++		q = q.Where("outer", o).Session(&gorm.Session{})
  
  		for _, i := range inner {
  			if i%2 == 0 {
- 				q = q.Where("inner_even", i)
+-				q = q.Where("inner_even", i)
++				q = q.Where("inner_even", i).Session(&gorm.Session{})
  				q.Find(nil)
  			} else {
- 				q = q.Where("inner_odd", i) // want `\*gorm\.DB instance reused after chain method`
+-				q = q.Where("inner_odd", i) // want `\*gorm\.DB instance reused after chain method`
++				q = q.Where("inner_odd", i).Session(&gorm.Session{}) // want `\*gorm\.DB instance reused after chain method`
  			}
  		}
  
@@ -912,7 +915,8 @@
  
  // chaosVariableSwapLoop demonstrates swapping in loop.
  func chaosVariableSwapLoop(db *gorm.DB, items []int) {
- 	q1 := db.Where("q1")
+-	q1 := db.Where("q1")
++	q1 := db.Where("q1").Session(&gorm.Session{})
  	q2 := db.Where("q2")
  
  	for _, item := range items {
@@ -922,7 +926,8 @@
  			q1 = q2
  			q2 = temp
  		}
- 		q1 = q1.Where("item", item)
+-		q1 = q1.Where("item", item)
++		q1 = q1.Where("item", item).Session(&gorm.Session{})
  	}
  
  	q1.Find(nil) // want `\*gorm\.DB instance reused after chain method`
@@ -1008,8 +1013,7 @@
  
  // chaosModernSwapLoop demonstrates modern swap syntax in loops.
  func chaosModernSwapLoop(db *gorm.DB, flags []bool) {
--	q1 := db.Where("q1")
-+	q1 := db.Where("q1").Session(&gorm.Session{})
+ 	q1 := db.Where("q1")
  	q2 := db.Where("q2")
  
  	q1.Find(nil) // Pollute q1
@@ -1018,8 +1022,7 @@
  		if flag {
  			q1, q2 = q2, q1 // Swap back and forth
  		}
--		q1 = q1.Where("extend", flag) // want `\*gorm\.DB instance reused after chain method`
-+		q1 = q1.Where("extend", flag).Session(&gorm.Session{}) // want `\*gorm\.DB instance reused after chain method`
+ 		q1 = q1.Where("extend", flag) // want `\*gorm\.DB instance reused after chain method`
  	}
  
  	q1.Count(nil) // want `\*gorm\.DB instance reused after chain method`
@@ -1028,41 +1031,49 @@
  
  // chaosUltimateStressTest demonstrates the ultimate stress test with everything mixed.
  func chaosUltimateStressTest(db *gorm.DB, flags []bool) {
- 	q := db.Where("base")
+-	q := db.Where("base")
++	q := db.Where("base").Session(&gorm.Session{})
  	var temp *gorm.DB
  
  	for i, flag := range flags {
  		if flag {
  			if i%3 == 0 {
- 				q = q.Where("mod3", i)
+-				q = q.Where("mod3", i)
++				q = q.Where("mod3", i).Session(&gorm.Session{})
  				q.Find(nil)
  
  				if i > 5 {
  					temp = q.Where("temp_from_q") // want `\*gorm\.DB instance reused after chain method`
  					temp.Count(nil)
- 					q = temp.Where("back_to_q") // want `\*gorm\.DB instance reused after chain method`
+-					q = temp.Where("back_to_q") // want `\*gorm\.DB instance reused after chain method`
++					q = temp.Where("back_to_q").Session(&gorm.Session{}) // want `\*gorm\.DB instance reused after chain method`
  				}
  			} else if i%3 == 1 {
  				q.Where("mod3_1_imm").First(nil) // want `\*gorm\.DB instance reused after chain method`
  
  				if i < 10 {
- 					q = db.Where("fresh", i) // Fresh
+-					q = db.Where("fresh", i) // Fresh
++					q = db.Where("fresh", i).Session(&gorm.Session{}) // Fresh
  				} else {
- 					q = q.Where("mod3_1_ext") // want `\*gorm\.DB instance reused after chain method`
+-					q = q.Where("mod3_1_ext") // want `\*gorm\.DB instance reused after chain method`
++					q = q.Where("mod3_1_ext").Session(&gorm.Session{}) // want `\*gorm\.DB instance reused after chain method`
  				}
  			} else {
  				temp = db.Where("temp_fresh")
- 				temp = temp.Where("temp_chain")
+-				temp = temp.Where("temp_chain")
++				temp = temp.Where("temp_chain").Session(&gorm.Session{})
  
  				if i%2 == 0 {
  					q = temp // Transfer temp to q
  				} else {
  					temp.Last(nil)
- 					q = q.Where("mod3_2") // want `\*gorm\.DB instance reused after chain method`
+-					q = q.Where("mod3_2") // want `\*gorm\.DB instance reused after chain method`
++					q = q.Where("mod3_2").Session(&gorm.Session{}) // want `\*gorm\.DB instance reused after chain method`
  				}
  			}
  		} else {
- 			q = q.Where("no_flag", i) // want `\*gorm\.DB instance reused after chain method`
+-			q = q.Where("no_flag", i) // want `\*gorm\.DB instance reused after chain method`
++			q = q.Where("no_flag", i).Session(&gorm.Session{}) // want `\*gorm\.DB instance reused after chain method`
  		}
  	}
  

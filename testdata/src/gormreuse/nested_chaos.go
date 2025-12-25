@@ -440,6 +440,7 @@ func nestedIfChaosKitchenSink(db *gorm.DB, a, b, c, d bool) {
 }
 
 // nestedIfChaosWithLoops demonstrates nested if inside a loop.
+// Loop has only assignments (no finisher methods), so first use after loop is OK.
 func nestedIfChaosWithLoops(db *gorm.DB, flags []bool) {
 	q := db.Where("base")
 
@@ -454,11 +455,8 @@ func nestedIfChaosWithLoops(db *gorm.DB, flags []bool) {
 		// Loop creates Phi at each iteration
 	}
 
-	// TODO: Bug - loop with conditional assignments inside causes both uses to be flagged
-	// Expected: Only Count should be flagged (Find is first actual use)
-	// Actual: Both are flagged (false positive for Find)
-	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Find(nil)   // OK: first use after nested conditionals with assignments only
+	q.Count(nil)  // want `\*gorm\.DB instance reused after chain method`
 }
 
 // nestedIfChaosMultipleVars demonstrates multiple variables with nested ifs.
@@ -691,7 +689,7 @@ func chaosNestedLoopsWithPollution(db *gorm.DB, outer, inner []int) {
 			}
 		}
 
-		q.Count(nil) // OK: Phi result from nested loop used once per outer iteration
+		q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
 	}
 
 	q.First(nil) // want `\*gorm\.DB instance reused after chain method`
@@ -867,8 +865,8 @@ func chaosVariableSwapLoop(db *gorm.DB, items []int) {
 		q1 = q1.Where("item", item)
 	}
 
-	q1.Find(nil) // want `\*gorm\.DB instance reused after chain method`
-	q2.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+	q1.Find(nil) // OK: first use after loop with assignments only
+	q2.Find(nil) // OK: first use (q2 never used in loop)
 }
 
 // chaosMultipleSwaps demonstrates multiple swaps creating complex Phi patterns.

@@ -76,7 +76,7 @@ func loopAssignmentOnly(db *gorm.DB, items []int) {
 }
 
 // loopConditionalAssignment demonstrates loop with conditional assignment.
-// This is the minimal reproduction of the nestedIfChaosWithLoops false positive.
+// Loop has only assignments (no finisher methods), so first use after loop is OK.
 func loopConditionalAssignment(db *gorm.DB, flags []bool) {
 	q := db.Where("base")
 
@@ -87,8 +87,8 @@ func loopConditionalAssignment(db *gorm.DB, flags []bool) {
 		// Phi created here
 	}
 
-	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Find(nil)   // OK: first use after loop with conditional assignments only
+	q.Count(nil)  // want `\*gorm\.DB instance reused after chain method`
 }
 
 // =============================================================================

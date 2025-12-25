@@ -61,6 +61,7 @@ import (
 	"golang.org/x/tools/go/ssa"
 
 	"github.com/mpyw/gormreuse/internal/directive"
+	"github.com/mpyw/gormreuse/internal/ssa/cfg"
 	"github.com/mpyw/gormreuse/internal/typeutil"
 )
 
@@ -121,8 +122,8 @@ func New(pureFuncs *directive.PureFuncSet, immutableReturnFuncs *directive.Immut
 //
 //	q := db.Where("x")        // q is root
 //	q.Find(nil)               // receiver=q → trace → root=q's defining call
-func (t *RootTracer) FindMutableRoot(recv ssa.Value) ssa.Value {
-	return t.trace(recv, make(map[ssa.Value]bool))
+func (t *RootTracer) FindMutableRoot(recv ssa.Value, loopInfo *cfg.LoopInfo) ssa.Value {
+	return t.trace(recv, make(map[ssa.Value]bool), loopInfo)
 }
 
 // FindAllMutableRoots finds ALL possible mutable roots (for Phi nodes).
@@ -138,8 +139,8 @@ func (t *RootTracer) FindMutableRoot(recv ssa.Value) ssa.Value {
 //	    q = db.Where("b")     // root #2
 //	}
 //	q.Find(nil)               // Phi node: needs to check BOTH roots
-func (t *RootTracer) FindAllMutableRoots(v ssa.Value) []ssa.Value {
-	return t.traceAll(v, make(map[ssa.Value]bool))
+func (t *RootTracer) FindAllMutableRoots(v ssa.Value, loopInfo *cfg.LoopInfo) []ssa.Value {
+	return t.traceAll(v, make(map[ssa.Value]bool), loopInfo)
 }
 
 // IsPureFunction checks if a function is marked as pure (doesn't pollute arguments).
@@ -198,7 +199,7 @@ func (t *RootTracer) IsImmutableReturningBuiltin(fn *ssa.Function) bool {
 //	│  traceNonCall()  │
 //	│ (Phi/UnOp/etc.)  │
 //	└──────────────────┘
-func (t *RootTracer) trace(v ssa.Value, visited map[ssa.Value]bool) ssa.Value {
+func (t *RootTracer) trace(v ssa.Value, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) ssa.Value {
 	if v == nil || visited[v] {
 		return nil
 	}
@@ -211,11 +212,11 @@ func (t *RootTracer) trace(v ssa.Value, visited map[ssa.Value]bool) ssa.Value {
 
 	// Handle gorm method calls
 	if call, ok := v.(*ssa.Call); ok {
-		return t.traceCall(call, visited)
+		return t.traceCall(call, visited, loopInfo)
 	}
 
 	// Handle non-call values
-	return t.traceNonCall(v, visited)
+	return t.traceNonCall(v, visited, loopInfo)
 }
 
 // traceCall handles *ssa.Call values during tracing.
@@ -231,11 +232,11 @@ func (t *RootTracer) trace(v ssa.Value, visited map[ssa.Value]bool) ssa.Value {
 //	      │                        │
 //	      │                        └─── Inner call is traced
 //	      └─── Outer IIFE call triggers traceIIFEReturns
-func (t *RootTracer) traceCall(call *ssa.Call, visited map[ssa.Value]bool) ssa.Value {
+func (t *RootTracer) traceCall(call *ssa.Call, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) ssa.Value {
 	// Handle closures (IIFE)
 	if mc, ok := call.Call.Value.(*ssa.MakeClosure); ok {
 		if closureFn, ok := mc.Fn.(*ssa.Function); ok {
-			if root := t.traceIIFEReturns(closureFn, visited); root != nil {
+			if root := t.traceIIFEReturns(closureFn, visited, loopInfo); root != nil {
 				return root
 			}
 		}
@@ -273,67 +274,116 @@ func (t *RootTracer) traceCall(call *ssa.Call, visited map[ssa.Value]bool) ssa.V
 
 // traceNonCall handles non-call SSA values during tracing.
 // Routes to specialized handlers based on the value type.
-func (t *RootTracer) traceNonCall(v ssa.Value, visited map[ssa.Value]bool) ssa.Value {
+func (t *RootTracer) traceNonCall(v ssa.Value, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) ssa.Value {
 	switch val := v.(type) {
 	case *ssa.Phi:
 		// Phi: merge point from conditional branches (if/switch)
-		return t.tracePhi(val, visited)
+		return t.tracePhi(val, visited, loopInfo)
 
 	case *ssa.UnOp:
 		// UnOp: unary operations including pointer dereference (*ptr)
-		return t.traceUnOp(val, visited)
+		return t.traceUnOp(val, visited, loopInfo)
 
 	case *ssa.ChangeType:
 		// ChangeType: type conversion (same underlying type)
-		return t.trace(val.X, visited)
+		return t.trace(val.X, visited, loopInfo)
 
 	case *ssa.Extract:
 		// Extract: extract element from tuple (multi-return)
-		return t.trace(val.Tuple, visited)
+		return t.trace(val.Tuple, visited, loopInfo)
 
 	case *ssa.FreeVar:
 		// FreeVar: captured variable in a closure
-		return t.traceFreeVar(val, visited)
+		return t.traceFreeVar(val, visited, loopInfo)
 
 	case *ssa.Alloc:
 		// Alloc: local variable allocation
-		return t.traceAlloc(val, visited)
+		return t.traceAlloc(val, visited, loopInfo)
 
 	default:
 		return nil
 	}
 }
 
-func (t *RootTracer) tracePhi(phi *ssa.Phi, visited map[ssa.Value]bool) ssa.Value {
+func (t *RootTracer) tracePhi(phi *ssa.Phi, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) ssa.Value {
+	// For loop-header Phi nodes, prioritize back-edges over initial edges
+	// This ensures we return the loop-internal assignment result, not the pre-loop initial value
+	if loopInfo != nil && loopInfo.IsLoopHeader(phi.Block()) {
+		phiBlock := phi.Block()
+		phiBlockIndex := -1
+		for i, block := range phi.Parent().Blocks {
+			if block == phiBlock {
+				phiBlockIndex = i
+				break
+			}
+		}
+
+		// First pass: try back-edges (predecessors with higher indices)
+		if phiBlockIndex >= 0 {
+			for i, edge := range phi.Edges {
+				if isNilConst(edge) || visited[edge] {
+					continue
+				}
+				// Check if this is a back-edge (predecessor comes after phi block)
+				pred := phiBlock.Preds[i]
+				predIndex := -1
+				for j, block := range phi.Parent().Blocks {
+					if block == pred {
+						predIndex = j
+						break
+					}
+				}
+				// Back-edge: predecessor comes after phi block (loops back)
+				if predIndex > phiBlockIndex {
+					if root := t.trace(edge, visited, loopInfo); root != nil {
+						return root
+					}
+				}
+			}
+
+			// Second pass: try forward-edges if no back-edge root found
+			for _, edge := range phi.Edges {
+				if isNilConst(edge) || visited[edge] {
+					continue
+				}
+				if root := t.trace(edge, visited, loopInfo); root != nil {
+					return root
+				}
+			}
+		}
+		return nil
+	}
+
+	// For non-loop-header Phi (regular conditional merge), use first non-nil root
 	for _, edge := range phi.Edges {
 		if isNilConst(edge) || visited[edge] {
 			continue
 		}
-		if root := t.trace(edge, visited); root != nil {
+		if root := t.trace(edge, visited, loopInfo); root != nil {
 			return root
 		}
 	}
 	return nil
 }
 
-func (t *RootTracer) traceUnOp(unop *ssa.UnOp, visited map[ssa.Value]bool) ssa.Value {
+func (t *RootTracer) traceUnOp(unop *ssa.UnOp, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) ssa.Value {
 	if unop.Op == token.MUL {
 		// Pointer dereference - trace through the pointer
-		return t.tracePointerLoad(unop.X, visited)
+		return t.tracePointerLoad(unop.X, visited, loopInfo)
 	}
-	return t.trace(unop.X, visited)
+	return t.trace(unop.X, visited, loopInfo)
 }
 
-func (t *RootTracer) tracePointerLoad(ptr ssa.Value, visited map[ssa.Value]bool) ssa.Value {
+func (t *RootTracer) tracePointerLoad(ptr ssa.Value, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) ssa.Value {
 	switch p := ptr.(type) {
 	case *ssa.FreeVar:
-		return t.traceFreeVar(p, visited)
+		return t.traceFreeVar(p, visited, loopInfo)
 	case *ssa.Alloc:
-		return t.traceAlloc(p, visited)
+		return t.traceAlloc(p, visited, loopInfo)
 	case *ssa.FieldAddr:
-		return t.traceFieldStore(p, visited)
+		return t.traceFieldStore(p, visited, loopInfo)
 	default:
-		return t.trace(ptr, visited)
+		return t.trace(ptr, visited, loopInfo)
 	}
 }
 
@@ -350,7 +400,7 @@ func (t *RootTracer) tracePointerLoad(ptr ssa.Value, visited map[ssa.Value]bool)
 //	    t2 = FreeVar [0]           // References Bindings[0] from parent
 //
 // This function finds the MakeClosure in the parent and traces the binding.
-func (t *RootTracer) traceFreeVar(fv *ssa.FreeVar, visited map[ssa.Value]bool) ssa.Value {
+func (t *RootTracer) traceFreeVar(fv *ssa.FreeVar, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) ssa.Value {
 	fn := fv.Parent()
 	if fn == nil {
 		return nil
@@ -386,7 +436,7 @@ func (t *RootTracer) traceFreeVar(fv *ssa.FreeVar, visited map[ssa.Value]bool) s
 			}
 			// Found the MakeClosure - trace the corresponding binding
 			if idx < len(mc.Bindings) {
-				return t.trace(mc.Bindings[idx], visited)
+				return t.trace(mc.Bindings[idx], visited, loopInfo)
 			}
 		}
 	}
@@ -402,7 +452,7 @@ func (t *RootTracer) traceFreeVar(fv *ssa.FreeVar, visited map[ssa.Value]bool) s
 //	t2 = UnOp * t1              // Load value from q (dereference)
 //
 // This function finds the Store instruction that writes to the Alloc.
-func (t *RootTracer) traceAlloc(alloc *ssa.Alloc, visited map[ssa.Value]bool) ssa.Value {
+func (t *RootTracer) traceAlloc(alloc *ssa.Alloc, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) ssa.Value {
 	fn := alloc.Parent()
 	if fn == nil {
 		return nil
@@ -415,7 +465,7 @@ func (t *RootTracer) traceAlloc(alloc *ssa.Alloc, visited map[ssa.Value]bool) ss
 			if !ok || store.Addr != alloc {
 				continue
 			}
-			return t.trace(store.Val, visited)
+			return t.trace(store.Val, visited, loopInfo)
 		}
 	}
 	return nil
@@ -435,7 +485,7 @@ func (t *RootTracer) traceAlloc(alloc *ssa.Alloc, visited map[ssa.Value]bool) ss
 //	                           // (traced here to find the Store)
 //
 // This function finds the Store that wrote to the same field.
-func (t *RootTracer) traceFieldStore(fa *ssa.FieldAddr, visited map[ssa.Value]bool) ssa.Value {
+func (t *RootTracer) traceFieldStore(fa *ssa.FieldAddr, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) ssa.Value {
 	fn := fa.Parent()
 	if fn == nil {
 		return nil
@@ -452,7 +502,7 @@ func (t *RootTracer) traceFieldStore(fa *ssa.FieldAddr, visited map[ssa.Value]bo
 			if !ok || storeFA.X != fa.X || storeFA.Field != fa.Field {
 				continue
 			}
-			return t.trace(store.Val, visited)
+			return t.trace(store.Val, visited, loopInfo)
 		}
 	}
 	return nil
@@ -470,7 +520,7 @@ func (t *RootTracer) traceFieldStore(fa *ssa.FieldAddr, visited map[ssa.Value]bo
 // rather than two separate branches (IIFE internal + Find external).
 //
 // We clone the visited map to avoid polluting the parent's tracking state.
-func (t *RootTracer) traceIIFEReturns(fn *ssa.Function, visited map[ssa.Value]bool) ssa.Value {
+func (t *RootTracer) traceIIFEReturns(fn *ssa.Function, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) ssa.Value {
 	if fn.Signature == nil {
 		return nil
 	}
@@ -488,7 +538,7 @@ func (t *RootTracer) traceIIFEReturns(fn *ssa.Function, visited map[ssa.Value]bo
 			}
 			// Clone visited map to isolate closure's tracing state
 			retVisited := cloneVisited(visited)
-			if root := t.trace(ret.Results[0], retVisited); root != nil {
+			if root := t.trace(ret.Results[0], retVisited, loopInfo); root != nil {
 				return root
 			}
 		}
@@ -509,7 +559,7 @@ func (t *RootTracer) traceIIFEReturns(fn *ssa.Function, visited map[ssa.Value]bo
 //	}
 //	q.Find(nil)            // Phi has edges from both branches
 //	                       // Need to check pollution of BOTH roots
-func (t *RootTracer) traceAll(v ssa.Value, visited map[ssa.Value]bool) []ssa.Value {
+func (t *RootTracer) traceAll(v ssa.Value, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) []ssa.Value {
 	if v == nil || visited[v] {
 		return nil
 	}
@@ -523,49 +573,49 @@ func (t *RootTracer) traceAll(v ssa.Value, visited map[ssa.Value]bool) []ssa.Val
 			if isNilConst(edge) || visited[edge] {
 				continue
 			}
-			roots = append(roots, t.traceAll(edge, visited)...)
+			roots = append(roots, t.traceAll(edge, visited, loopInfo)...)
 		}
 		return roots
 
 	case *ssa.UnOp:
 		if val.Op == token.MUL {
-			return t.traceAllPointerLoads(val.X, visited)
+			return t.traceAllPointerLoads(val.X, visited, loopInfo)
 		}
-		return t.traceAll(val.X, visited)
+		return t.traceAll(val.X, visited, loopInfo)
 
 	case *ssa.Alloc:
-		return t.traceAllAllocStores(val, visited)
+		return t.traceAllAllocStores(val, visited, loopInfo)
 
 	default:
 		// For non-special cases, delegate to single-root trace
 		freshVisited := cloneVisited(visited)
 		delete(freshVisited, v)
-		if root := t.trace(v, freshVisited); root != nil {
+		if root := t.trace(v, freshVisited, loopInfo); root != nil {
 			return []ssa.Value{root}
 		}
 		return nil
 	}
 }
 
-func (t *RootTracer) traceAllPointerLoads(ptr ssa.Value, visited map[ssa.Value]bool) []ssa.Value {
+func (t *RootTracer) traceAllPointerLoads(ptr ssa.Value, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) []ssa.Value {
 	switch p := ptr.(type) {
 	case *ssa.Alloc:
-		return t.traceAllAllocStores(p, visited)
+		return t.traceAllAllocStores(p, visited, loopInfo)
 	case *ssa.Phi:
 		var roots []ssa.Value
 		for _, edge := range p.Edges {
 			if isNilConst(edge) || visited[edge] {
 				continue
 			}
-			roots = append(roots, t.traceAll(edge, visited)...)
+			roots = append(roots, t.traceAll(edge, visited, loopInfo)...)
 		}
 		return roots
 	default:
-		return t.traceAll(ptr, visited)
+		return t.traceAll(ptr, visited, loopInfo)
 	}
 }
 
-func (t *RootTracer) traceAllAllocStores(alloc *ssa.Alloc, visited map[ssa.Value]bool) []ssa.Value {
+func (t *RootTracer) traceAllAllocStores(alloc *ssa.Alloc, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) []ssa.Value {
 	fn := alloc.Parent()
 	if fn == nil {
 		return nil
@@ -578,7 +628,7 @@ func (t *RootTracer) traceAllAllocStores(alloc *ssa.Alloc, visited map[ssa.Value
 			if !ok || store.Addr != alloc {
 				continue
 			}
-			roots = append(roots, t.traceAll(store.Val, visited)...)
+			roots = append(roots, t.traceAll(store.Val, visited, loopInfo)...)
 		}
 	}
 	return roots
