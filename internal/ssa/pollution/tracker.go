@@ -223,16 +223,9 @@ func (t *Tracker) DetectViolations() {
 		t.checkViolationsBetween(uses, uses, root, allUses)
 	}
 
-	// Check pure uses against polluting uses
-	// A pure use after a polluting use is a violation
-	for root, pureUses := range t.pureUses {
-		pollutingUses := t.pollutingUses[root]
-		if len(pollutingUses) == 0 {
-			continue
-		}
-		allUses := t.getAllUses(root)
-		t.checkViolationsBetween(pureUses, pollutingUses, root, allUses)
-	}
+	// NOTE: We intentionally do NOT check pure uses (Session, Debug, WithContext)
+	// against polluting uses. Pure/immutable-returning methods are safe to call
+	// on any value regardless of pollution state - they create fresh clones.
 
 	// Check assignment uses against polluting uses
 	// An assignment use after a polluting use is a violation (using polluted root)

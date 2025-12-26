@@ -1,6 +1,6 @@
 --- advanced.go	1970-01-01 00:00:00
 +++ advanced.go.golden	1970-01-01 00:00:00
-@@ -1,1209 +1,1209 @@
+@@ -1,1211 +1,1211 @@
  package internal
  
  import (
@@ -127,23 +127,23 @@
  }
  
  // =============================================================================
- // SHOULD REPORT - Session on polluted value
+ // SHOULD NOT REPORT - Session on polluted value creates fresh copy
  // =============================================================================
  
- // sessionAfterPolluted demonstrates that Session() after pollution doesn't help.
+ // sessionAfterPolluted demonstrates that Session() on polluted value is safe.
+ // Session() creates a fresh clone with new Statement, so the result is clean
+ // regardless of the receiver's pollution state.
  func sessionAfterPolluted(db *gorm.DB) {
--	q := db.Model(&User{}).Where("active = ?", true)
-+	q := db.Model(&User{}).Where("active = ?", true).Session(&gorm.Session{})
+ 	q := db.Model(&User{}).Where("active = ?", true)
  	q.Count(new(int64))                        // q is polluted
- 	q.Session(&gorm.Session{}).Find(&[]User{}) // want `\*gorm\.DB instance reused after chain method`
+ 	q.Session(&gorm.Session{}).Find(&[]User{}) // OK: Session creates fresh copy
  }
  
- // sessionOnPollutedValue demonstrates Session on already-polluted value.
+ // sessionOnPollutedValue demonstrates Session on already-polluted value is safe.
  func sessionOnPollutedValue(db *gorm.DB) {
--	q := db.Where("x = ?", 1)
-+	q := db.Where("x = ?", 1).Session(&gorm.Session{})
+ 	q := db.Where("x = ?", 1)
  	q.Find(nil)
- 	q.Session(&gorm.Session{}).Count(nil) // want `\*gorm\.DB instance reused after chain method`
+ 	q.Session(&gorm.Session{}).Count(nil) // OK: Session creates fresh copy
  }
  
  // multipleDirectUsesWithoutSession demonstrates multiple uses without Session.
@@ -152,7 +152,7 @@
 +	q := db.Where("x = ?", 1).Session(&gorm.Session{})
  	q.Find(nil)
  	q.Count(nil)                          // want `\*gorm\.DB instance reused after chain method`
- 	q.Session(&gorm.Session{}).First(nil) // want `\*gorm\.DB instance reused after chain method`
+ 	q.Session(&gorm.Session{}).First(nil) // OK: Session creates fresh copy
  }
  
  // =============================================================================
