@@ -76,16 +76,29 @@ type Context struct {
 type CallHandler struct{}
 
 // isAssignment checks if a call result is assigned to create a new root.
-// Returns true if the call result flows into a Phi node or Store to Alloc.
+// Returns true if the call result flows into a Phi node, Store to Alloc,
+// or is part of a chain where the final result is assigned.
 //
 // Assignment patterns (don't pollute):
 //   - q = q.Where("x")  → Phi node or Store to Alloc
 //   - for { q = q.Where() } → loop-header Phi
+//   - q = q.Where("x").Where("y") → chain where final result is assigned
 //
 // Non-assignment patterns (pollute):
-//   - q.Find(nil) → direct use
-//   - q.Where("x").Find(nil) → chained use
+//   - q.Find(nil) → direct use (finisher)
+//   - q.Where("x").Find(nil) → chained use where final result is NOT assigned
 func isAssignment(call *ssa.Call, ctx *Context) bool {
+	return isAssignmentRecursive(call, make(map[*ssa.Call]bool))
+}
+
+// isAssignmentRecursive checks if a call result eventually flows into an assignment.
+// Uses visited map to avoid infinite recursion in case of cycles.
+func isAssignmentRecursive(call *ssa.Call, visited map[*ssa.Call]bool) bool {
+	if visited[call] {
+		return false
+	}
+	visited[call] = true
+
 	if call.Referrers() == nil {
 		return false
 	}
@@ -102,9 +115,46 @@ func isAssignment(call *ssa.Call, ctx *Context) bool {
 				return true
 			}
 		}
+
+		// Chain intermediate: check if the next call in chain eventually becomes assignment
+		// Example: q.Where("x").Where("y") - Where("x") is assignment only if Where("y") is
+		if nextCall, ok := user.(*ssa.Call); ok {
+			if isChainedGormMethodCall(call, nextCall) {
+				// Recursively check if the next call is assignment
+				if isAssignmentRecursive(nextCall, visited) {
+					return true
+				}
+			}
+		}
 	}
 
 	return false
+}
+
+// isChainedGormMethodCall checks if nextCall is a gorm method call that uses
+// call's result as receiver (i.e., they form a method chain).
+func isChainedGormMethodCall(call *ssa.Call, nextCall *ssa.Call) bool {
+	// Check if nextCall is a gorm method call
+	callee := nextCall.Call.StaticCallee()
+	if callee == nil {
+		return false
+	}
+
+	sig := callee.Signature
+	if sig == nil || sig.Recv() == nil {
+		return false
+	}
+
+	if !typeutil.IsGormDB(sig.Recv().Type()) {
+		return false
+	}
+
+	// Check if call's result is nextCall's receiver (first argument)
+	if len(nextCall.Call.Args) == 0 {
+		return false
+	}
+
+	return nextCall.Call.Args[0] == call
 }
 
 // Handle processes a Call instruction and tracks *gorm.DB pollution.
