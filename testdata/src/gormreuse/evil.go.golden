@@ -921,7 +921,7 @@ func methodValue(db *gorm.DB) {
 // methodValueSameBlock demonstrates same-block pollution with method value.
 // Tests line 423: same-block pollution detection for bound methods.
 func methodValueSameBlock(db *gorm.DB) {
-	q := db.Where("x = ?", 1).Session(&gorm.Session{})
+	q := db.Where("x = ?", 1)
 	find := q.Find
 	find(nil)  // First use - pollutes q
 	find(nil)  // want `\*gorm\.DB instance reused after chain method`
@@ -2922,4 +2922,244 @@ func callbackNestedWrappers(db *gorm.DB) {
 			q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
 		})
 	})
+}
+
+// =============================================================================
+// SHOULD REPORT - Conditional Struct Field Assignment (traceAllFieldStores test)
+// =============================================================================
+//
+// These tests verify that FindAllMutableRoots correctly finds all possible roots
+// when a struct field is conditionally assigned from different sources.
+
+// conditionalFieldAssignHolderForTest is a helper struct for field assignment tests.
+type conditionalFieldAssignHolderForTest struct {
+	db *gorm.DB
+}
+
+// conditionalFieldAssignOnePolluted demonstrates conditional field assignment
+// where one branch assigns a polluted value.
+// The linter should detect this because q1 (polluted) may be used via h.db.
+func conditionalFieldAssignOnePolluted(db *gorm.DB, cond bool) {
+	q1 := db.Where("a").Session(&gorm.Session{})
+	q2 := db.Where("b")
+	q1.Find(nil) // Pollute q1
+
+	h := &conditionalFieldAssignHolderForTest{}
+	if cond {
+		h.db = q1 // Branch 1: assigns polluted q1
+	} else {
+		h.db = q2 // Branch 2: assigns clean q2
+	}
+	// h.db may be q1 (polluted) or q2 (clean)
+	// Should detect pollution from q1
+	h.db.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// conditionalFieldAssignOnePollutedReverse demonstrates the same pattern
+// but with branches in reverse order. This may expose ordering issues in
+// traceFieldStore which returns the first Store found.
+// [BUG DETECTOR] If this test passes but conditionalFieldAssignOnePolluted fails,
+// or vice versa, there's an ordering bug in traceFieldStore.
+func conditionalFieldAssignOnePollutedReverse(db *gorm.DB, cond bool) {
+	q1 := db.Where("a")
+	q2 := db.Where("b")
+	q2.Find(nil) // Pollute q2 (reversed from above)
+
+	h := &conditionalFieldAssignHolderForTest{}
+	if cond {
+		h.db = q1 // Branch 1: assigns clean q1
+	} else {
+		h.db = q2 // Branch 2: assigns polluted q2
+	}
+	// h.db may be q1 (clean) or q2 (polluted)
+	// Should detect pollution from q2
+	h.db.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// conditionalFieldAssignBothPolluted demonstrates conditional field assignment
+// where both branches assign polluted values.
+func conditionalFieldAssignBothPolluted(db *gorm.DB, cond bool) {
+	q1 := db.Where("a")
+	q2 := db.Where("b")
+	q1.Find(nil) // Pollute q1
+	q2.Find(nil) // Pollute q2
+
+	h := &conditionalFieldAssignHolderForTest{}
+	if cond {
+		h.db = q1 // Branch 1: polluted
+	} else {
+		h.db = q2 // Branch 2: also polluted
+	}
+	// h.db may be q1 or q2, both are polluted
+	h.db.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// conditionalFieldAssignThenUseInBothBranches demonstrates field assignment
+// and use happening in both branches independently.
+func conditionalFieldAssignThenUseInBothBranches(db *gorm.DB, cond bool) {
+	h := &conditionalFieldAssignHolderForTest{}
+	if cond {
+		h.db = db.Where("a").Session(&gorm.Session{})
+	} else {
+		h.db = db.Where("b")
+	}
+	h.db.Find(nil) // First use - OK
+	h.db.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// =============================================================================
+// SHOULD REPORT - Closure captures Phi (traceAllFreeVar test)
+// =============================================================================
+//
+// These tests verify that when a closure captures a Phi value (from conditional
+// assignment), FindAllMutableRoots correctly finds all possible roots.
+
+// closureCapturesPhi demonstrates a closure capturing a Phi value.
+// The closure's FreeVar should trace through to ALL branches of the Phi.
+func closureCapturesPhi(db *gorm.DB, cond bool) {
+	var q *gorm.DB
+	if cond {
+		q = db.Where("a")
+	} else {
+		q = db.Where("b")
+	}
+	q.Find(nil) // Pollute (both branches get polluted because Phi merges them)
+
+	fn := func() {
+		q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	}
+	fn()
+}
+
+// closureCaputresPhiOnePolluted demonstrates closure with Phi where only one branch is polluted.
+// [BUG DETECTOR] This test exposes if traceAll for FreeVar only returns one root.
+func closureCaputresPhiOnePolluted(db *gorm.DB, cond bool) {
+	q1 := db.Where("a")
+	q2 := db.Where("b")
+	q1.Find(nil) // Pollute q1 only
+
+	var q *gorm.DB
+	if cond {
+		q = q1 // Branch 1: polluted
+	} else {
+		q = q2 // Branch 2: clean
+	}
+	// q is now a Phi of [q1, q2]
+
+	fn := func() {
+		// FreeVar captures the Phi
+		// Should detect pollution from q1
+		q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	}
+	fn()
+}
+
+// closureCaputresPhiOnePollutedReverse demonstrates the reverse ordering.
+func closureCaputresPhiOnePollutedReverse(db *gorm.DB, cond bool) {
+	q1 := db.Where("a")
+	q2 := db.Where("b")
+	q2.Find(nil) // Pollute q2 only (reversed)
+
+	var q *gorm.DB
+	if cond {
+		q = q1 // Branch 1: clean
+	} else {
+		q = q2 // Branch 2: polluted
+	}
+	// q is now a Phi of [q1, q2]
+
+	fn := func() {
+		// FreeVar captures the Phi
+		// Should detect pollution from q2
+		q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	}
+	fn()
+}
+
+// =============================================================================
+// Bound Method / Go / Defer with Phi receiver - FindAllMutableRoots coverage
+// =============================================================================
+
+// boundMethodWithPhiOnePolluted tests bound method call where one branch of Phi is polluted.
+// This should detect that q2 branch is already polluted when using bound method on merged Phi.
+func boundMethodWithPhiOnePolluted(db *gorm.DB, flag bool) {
+	var q *gorm.DB
+	if flag {
+		q = db.Where("a")
+		q.Find(nil) // pollutes q from this branch
+	} else {
+		q = db.Where("b")
+	}
+	// q is Phi(q_polluted, q_clean)
+	find := q.Find // Bound method
+	find(nil)      // want `\*gorm\.DB instance reused after chain method`
+}
+
+// [LIMITATION] boundMethodWithPhiOnePollutedReverse tests bound method with reversed branch order.
+// SSA block ordering may differ from source order. When pollution occurs in
+// a later-numbered block (else branch) that executes before a bound method call
+// in an earlier-numbered block (merge block), detection may fail.
+func boundMethodWithPhiOnePollutedReverse(db *gorm.DB, flag bool) {
+	var q *gorm.DB
+	if flag {
+		q = db.Where("a")
+	} else {
+		q = db.Where("b")
+		q.Find(nil) // pollutes q from this branch
+	}
+	// q is Phi(q_clean, q_polluted)
+	find := q.Find // Bound method
+	find(nil)      // SHOULD want violation, but SSA block order prevents detection
+}
+
+// goStatementWithPhiOnePolluted tests go statement where one branch of Phi is polluted.
+func goStatementWithPhiOnePolluted(db *gorm.DB, flag bool) {
+	var q *gorm.DB
+	if flag {
+		q = db.Where("a")
+		q.Find(nil) // pollutes q from this branch
+	} else {
+		q = db.Where("b")
+	}
+	// q is Phi(q_polluted, q_clean)
+	go q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// goStatementWithPhiOnePollutedReverse tests go with reversed branch order.
+func goStatementWithPhiOnePollutedReverse(db *gorm.DB, flag bool) {
+	var q *gorm.DB
+	if flag {
+		q = db.Where("a")
+	} else {
+		q = db.Where("b")
+		q.Find(nil) // pollutes q from this branch
+	}
+	// q is Phi(q_clean, q_polluted)
+	go q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// deferStatementWithPhiOnePolluted tests defer where one branch of Phi is polluted.
+func deferStatementWithPhiOnePolluted(db *gorm.DB, flag bool) {
+	var q *gorm.DB
+	if flag {
+		q = db.Where("a")
+		q.Find(nil) // pollutes q from this branch
+	} else {
+		q = db.Where("b")
+	}
+	// q is Phi(q_polluted, q_clean)
+	defer q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// deferStatementWithPhiOnePollutedReverse tests defer with reversed branch order.
+func deferStatementWithPhiOnePollutedReverse(db *gorm.DB, flag bool) {
+	var q *gorm.DB
+	if flag {
+		q = db.Where("a")
+	} else {
+		q = db.Where("b")
+		q.Find(nil) // pollutes q from this branch
+	}
+	// q is Phi(q_clean, q_polluted)
+	defer q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
 }

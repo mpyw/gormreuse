@@ -1097,6 +1097,9 @@ func (t *RootTracer) traceAll(v ssa.Value, visited map[ssa.Value]bool, loopInfo 
 	case *ssa.Alloc:
 		return t.traceAllAllocStores(val, visited, loopInfo)
 
+	case *ssa.FreeVar:
+		return t.traceAllFreeVar(val, visited, loopInfo)
+
 	default:
 		// For non-special cases, delegate to single-root trace
 		freshVisited := cloneVisited(visited)
@@ -1112,6 +1115,8 @@ func (t *RootTracer) traceAllPointerLoads(ptr ssa.Value, visited map[ssa.Value]b
 	switch p := ptr.(type) {
 	case *ssa.Alloc:
 		return t.traceAllAllocStores(p, visited, loopInfo)
+	case *ssa.FieldAddr:
+		return t.traceAllFieldStores(p, visited, loopInfo)
 	case *ssa.Phi:
 		// Check for loop variable swap pattern
 		if loopHeaderPhis := isLoopVariableSwap(p, loopInfo); loopHeaderPhis != nil {
@@ -1149,6 +1154,98 @@ func (t *RootTracer) traceAllAllocStores(alloc *ssa.Alloc, visited map[ssa.Value
 		}
 	}
 	return roots
+}
+
+// traceAllFieldStores finds ALL possible roots from stores to a struct field.
+//
+// Unlike traceFieldStore which returns the first Store found, this collects
+// all roots from ALL Store instructions writing to the same field. This is
+// needed for conditional code where different branches may store different values:
+//
+//	if cond {
+//	    h.db = q1  // Store #1
+//	} else {
+//	    h.db = q2  // Store #2
+//	}
+//	h.db.Find(nil)  // Need to check BOTH q1 and q2
+func (t *RootTracer) traceAllFieldStores(fa *ssa.FieldAddr, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) []ssa.Value {
+	fn := fa.Parent()
+	if fn == nil {
+		return nil
+	}
+
+	var roots []ssa.Value
+	for _, block := range fn.Blocks {
+		for _, instr := range block.Instrs {
+			store, ok := instr.(*ssa.Store)
+			if !ok {
+				continue
+			}
+			storeFA, ok := store.Addr.(*ssa.FieldAddr)
+			if !ok || storeFA.X != fa.X || storeFA.Field != fa.Field {
+				continue
+			}
+			roots = append(roots, t.traceAll(store.Val, visited, loopInfo)...)
+		}
+	}
+	return roots
+}
+
+// traceAllFreeVar finds ALL possible roots from a captured closure variable.
+//
+// Unlike traceFreeVar which calls single-root trace on the binding, this calls
+// traceAll to get all possible roots. This is needed when the binding is a Phi
+// (from conditional code):
+//
+//	var q *gorm.DB
+//	if cond {
+//	    q = q1  // Branch 1
+//	} else {
+//	    q = q2  // Branch 2
+//	}
+//	fn := func() { q.Find(nil) }  // FreeVar captures Phi of [q1, q2]
+//	fn()  // Need to check BOTH q1 and q2
+func (t *RootTracer) traceAllFreeVar(fv *ssa.FreeVar, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) []ssa.Value {
+	fn := fv.Parent()
+	if fn == nil {
+		return nil
+	}
+
+	// Find the index of this FreeVar in the function's FreeVars list
+	idx := -1
+	for i, v := range fn.FreeVars {
+		if v == fv {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return nil
+	}
+
+	// Find the MakeClosure instruction in the parent function
+	parent := fn.Parent()
+	if parent == nil {
+		return nil
+	}
+
+	for _, block := range parent.Blocks {
+		for _, instr := range block.Instrs {
+			mc, ok := instr.(*ssa.MakeClosure)
+			if !ok {
+				continue
+			}
+			closureFn, ok := mc.Fn.(*ssa.Function)
+			if !ok || closureFn != fn {
+				continue
+			}
+			// Found the MakeClosure - trace ALL roots from the corresponding binding
+			if idx < len(mc.Bindings) {
+				return t.traceAll(mc.Bindings[idx], visited, loopInfo)
+			}
+		}
+	}
+	return nil
 }
 
 // isImmutableSource checks if a value is an immutable source (no mutable root).
