@@ -1,0 +1,345 @@
+package internal
+
+import "gorm.io/gorm"
+
+// =============================================================================
+// INTERFACE CONVERSION PATTERNS
+// Tests for MakeInterface handling
+//
+// KEY CONCEPT: Interface conversion (MakeInterface) is just type conversion.
+// It does NOT pollute the source *gorm.DB - it's ownership transfer, like assignment.
+// Pollution happens when:
+// - *gorm.DB is passed to non-pure functions (handled by checkFunctionCallPollution)
+// - *gorm.DB is stored in slice/map (handled by StoreHandler/MapUpdateHandler)
+// - *gorm.DB is sent to channel (handled by SendHandler)
+// =============================================================================
+
+// =============================================================================
+// INTERFACE CONVERSION - DOES NOT POLLUTE
+// =============================================================================
+
+// directInterfaceConversion: Direct conversion to interface{}
+// Interface conversion is just type wrapping - doesn't pollute source
+func directInterfaceConversion(db *gorm.DB) {
+	q := db.Where("x")
+
+	// Direct interface conversion - does NOT pollute q
+	_ = interface{}(q)
+
+	// First use of q - should NOT report (no prior pollution)
+	q.Find(nil)
+}
+
+// anyTypeConversion: Conversion to 'any' (alias for interface{})
+func anyTypeConversion(db *gorm.DB) {
+	q := db.Where("x")
+
+	// 'any' is alias for interface{} - doesn't pollute
+	var a any = q
+	_ = a
+
+	// First use of q - should NOT report
+	q.Find(nil)
+}
+
+// multipleInterfaceConversions: Multiple interface conversions
+func multipleInterfaceConversions(db *gorm.DB) {
+	q := db.Where("x")
+
+	// Multiple conversions - none pollute q
+	_ = interface{}(q)
+	_ = interface{}(q)
+	var a any = q
+	_ = a
+
+	// First use of q - should NOT report
+	q.Find(nil)
+}
+
+// =============================================================================
+// FUNCTION CALLS WITH INTERFACE ARGS - DOES POLLUTE
+// =============================================================================
+
+// variadicInterfaceArgs: Passing to variadic interface{} function
+// Passing to non-pure function DOES pollute (handled by checkFunctionCallPollution)
+func variadicInterfaceArgs(db *gorm.DB) {
+	q := db.Where("x")
+
+	// Passing to non-pure function - marks q as polluted
+	acceptVariadic(q)
+
+	q.Find(nil) // want "\\*gorm\\.DB instance reused"
+}
+
+// variadicInterfaceArgsMultiple: Multiple args to variadic
+func variadicInterfaceArgsMultiple(db *gorm.DB) {
+	q1 := db.Where("x")
+	q2 := db.Where("y")
+
+	// Both passed to non-pure function - both polluted
+	acceptVariadic(q1, q2)
+
+	q1.Find(nil) // want "\\*gorm\\.DB instance reused"
+	q2.Find(nil) // want "\\*gorm\\.DB instance reused"
+}
+
+// variadicInterfaceArgsOnlyOne: Only one of multiple is passed
+func variadicInterfaceArgsOnlyOne(db *gorm.DB) {
+	q1 := db.Where("x")
+	q2 := db.Where("y")
+
+	// Only q1 is passed to function
+	acceptVariadic(q1)
+
+	q1.Find(nil) // want "\\*gorm\\.DB instance reused"
+	q2.Find(nil) // q2 is fresh - should NOT report
+}
+
+func acceptVariadic(args ...interface{}) {}
+
+// =============================================================================
+// GORM METHODS WITH INTERFACE ARGUMENTS
+// =============================================================================
+
+// gormOrMethodReceiver: GORM's Or method - receiver pollution
+// Calling Or on base pollutes base (receiver usage)
+func gormOrMethodReceiver(db *gorm.DB) {
+	base := db.Where("base")
+
+	// Or takes interface{} - base is polluted by method call
+	base.Or("x = ?", 1)
+
+	base.Find(nil) // want "\\*gorm\\.DB instance reused"
+}
+
+// gormOrMethodArg: GORM's Or method - argument pollution
+// Passing *gorm.DB to Or's interface{} arg pollutes it
+func gormOrMethodArg(db *gorm.DB) {
+	base := db.Session(&gorm.Session{}) // immutable base
+	q := db.Where("x")
+
+	// q is passed to Or as interface{} - pollutes q
+	base.Or(q)
+
+	q.Find(nil) // want "\\*gorm\\.DB instance reused"
+}
+
+// gormOrMethodChain: Chain passed to Or
+// q.Where("y") pollutes q, and the chain result is passed to Or
+func gormOrMethodChain(db *gorm.DB) {
+	base := db.Session(&gorm.Session{}) // immutable base
+	q := db.Where("x")
+
+	// q is polluted by .Where("y") chain call
+	base.Or(q.Where("y"))
+
+	q.Find(nil) // want "\\*gorm\\.DB instance reused"
+}
+
+// gormOrMethodFresh: Fresh query passed to Or (no reuse)
+func gormOrMethodFresh(db *gorm.DB) {
+	base := db.Where("base")
+
+	// Fresh query passed to Or - no reuse issue for the fresh query
+	base.Or(db.Where("x"))
+
+	base.Find(nil) // want "\\*gorm\\.DB instance reused"
+}
+
+// =============================================================================
+// INTERFACE SLICE PATTERNS - DOES POLLUTE (storage)
+// =============================================================================
+
+// interfaceSliceLiteral: *gorm.DB in []interface{} literal
+// Storing in slice DOES pollute (handled by general slice storage)
+func interfaceSliceLiteral(db *gorm.DB) {
+	q := db.Where("x")
+
+	// Slice literal - storage pollutes
+	_ = []interface{}{q}
+
+	q.Find(nil) // want "\\*gorm\\.DB instance reused"
+}
+
+// interfaceSliceMultiple: Multiple *gorm.DB in slice
+func interfaceSliceMultiple(db *gorm.DB) {
+	q1 := db.Where("x")
+	q2 := db.Where("y")
+
+	_ = []interface{}{q1, q2}
+
+	q1.Find(nil) // want "\\*gorm\\.DB instance reused"
+	q2.Find(nil) // want "\\*gorm\\.DB instance reused"
+}
+
+// =============================================================================
+// INTERFACE MAP PATTERNS - DOES POLLUTE (storage)
+// =============================================================================
+
+// interfaceMapLiteral: *gorm.DB as map[string]interface{} value
+func interfaceMapLiteral(db *gorm.DB) {
+	q := db.Where("x")
+
+	_ = map[string]interface{}{"query": q}
+
+	q.Find(nil) // want "\\*gorm\\.DB instance reused"
+}
+
+// =============================================================================
+// CLOSURE WITH INTERFACE PATTERNS
+// =============================================================================
+
+// closureReturnsInterface: Closure returning interface{}
+// The closure captures q and returns it as interface{}
+// Calling the closure doesn't pollute q (just returns it)
+func closureReturnsInterface(db *gorm.DB) {
+	q := db.Where("x")
+
+	getQuery := func() interface{} {
+		return q // Just returns q wrapped in interface{}
+	}
+
+	_ = getQuery()
+
+	// q was just returned from closure, not used
+	q.Find(nil) // Should NOT report - q wasn't polluted
+}
+
+// closureAcceptsInterface: Closure accepting interface{} parameter
+// Passing to closure that takes interface{} - treated like function call
+func closureAcceptsInterface(db *gorm.DB) {
+	q := db.Where("x")
+
+	process := func(v interface{}) {
+		_ = v
+	}
+
+	// Passing to non-pure closure - pollutes q
+	process(q)
+
+	q.Find(nil) // want "\\*gorm\\.DB instance reused"
+}
+
+// =============================================================================
+// LOOP WITH INTERFACE PATTERNS
+// =============================================================================
+
+// loopWithInterfaceSlice: Loop building []interface{} with queries
+func loopWithInterfaceSlice(db *gorm.DB, items []int) {
+	var queries []interface{}
+
+	for _, item := range items {
+		// Each iteration creates a fresh query
+		q := db.Session(&gorm.Session{}).Where("x = ?", item)
+		queries = append(queries, q)
+	}
+
+	// Use the collected queries
+	_ = queries
+}
+
+// loopWithClosureAndInterface: Closure in loop passing to interface
+func loopWithClosureAndInterface(db *gorm.DB, items []int) {
+	getQuery := func() *gorm.DB {
+		return db.Session(&gorm.Session{}).Where("fresh")
+	}
+
+	condition := db.Session(&gorm.Session{})
+
+	for range items {
+		q := getQuery()
+		// q.Where("x") flows to condition.Or via MakeInterface
+		// Each call should be independent (closure result treated as stored)
+		condition = condition.Or(q.Where("x"))
+	}
+
+	condition.Find(nil)
+}
+
+// loopWithClosureAndInterfaceMultiReturn: Multi-return closure with interface
+func loopWithClosureAndInterfaceMultiReturn(db *gorm.DB, items []int) {
+	getQuery := func() (*gorm.DB, error) {
+		return db.Session(&gorm.Session{}).Where("fresh"), nil
+	}
+
+	condition := db.Session(&gorm.Session{})
+
+	for range items {
+		q, _ := getQuery()
+		// Each call is independent (via Extract)
+		condition = condition.Or(q.Where("x"))
+	}
+
+	condition.Find(nil)
+}
+
+// =============================================================================
+// CHANNEL WITH INTERFACE - DOES POLLUTE
+// =============================================================================
+
+// channelSendInterface: Send *gorm.DB to chan interface{}
+func channelSendInterface(db *gorm.DB) {
+	q := db.Where("x")
+
+	ch := make(chan interface{}, 1)
+	ch <- q // Channel send pollutes
+
+	q.Find(nil) // want "\\*gorm\\.DB instance reused"
+}
+
+// =============================================================================
+// SHOULD NOT REPORT - FRESH QUERIES
+// =============================================================================
+
+// freshQueryToInterface: Fresh query passed to interface - no prior use
+func freshQueryToInterface(db *gorm.DB) {
+	// Fresh query directly to interface - no reuse
+	acceptVariadic(db.Where("x"))
+}
+
+// freshQueryChainToInterface: Fresh query chain to interface
+func freshQueryChainToInterface(db *gorm.DB) {
+	// Fresh chain directly to interface
+	acceptVariadic(db.Session(&gorm.Session{}).Where("x").Where("y"))
+}
+
+// immutableToInterface: Immutable source to interface
+func immutableToInterface(db *gorm.DB) {
+	// Immutable (Session) result to interface - no issue
+	q := db.Session(&gorm.Session{})
+	acceptVariadic(q)
+	q.Find(nil) // Immutable can be reused
+}
+
+// =============================================================================
+// INTERFACE CONVERSION THEN USE - ORDER MATTERS
+// =============================================================================
+
+// interfaceConversionThenGormUse: Interface conversion then gorm use
+// Interface conversion doesn't pollute, so subsequent gorm use is first use
+func interfaceConversionThenGormUse(db *gorm.DB) {
+	q := db.Where("x")
+
+	_ = interface{}(q) // Just conversion, doesn't pollute
+
+	q.Find(nil) // First use - should NOT report
+}
+
+// gormUseThenInterfaceConversion: Gorm use then interface conversion
+func gormUseThenInterfaceConversion(db *gorm.DB) {
+	q := db.Where("x")
+
+	q.Find(nil) // First use - pollutes q
+
+	_ = interface{}(q) // Just conversion, but q was already polluted
+	// No second gorm method call, so no violation
+}
+
+// gormUseThenInterfaceConversionThenGormUse: Use, convert, use again
+func gormUseThenInterfaceConversionThenGormUse(db *gorm.DB) {
+	q := db.Where("x")
+
+	q.Find(nil)        // First use - pollutes q
+	_ = interface{}(q) // Just conversion
+	q.Count(nil)       // want "\\*gorm\\.DB instance reused"
+}

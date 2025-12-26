@@ -832,17 +832,18 @@ func doublePointer(db *gorm.DB) {
 }
 
 // =============================================================================
-// SHOULD REPORT - Type Assertions
+// SHOULD NOT REPORT - Interface Conversion (Ownership Transfer)
 // =============================================================================
 
-// typeAssertionPollution demonstrates pollution through interface conversion.
-// Converting *gorm.DB to interface{} is assumed to pollute it.
-func typeAssertionPollution(db *gorm.DB) {
+// interfaceConversionOwnershipTransfer demonstrates that interface conversion
+// does NOT pollute the source. It's just type wrapping (ownership transfer).
+// Pollution only happens when the interface value is actually used.
+func interfaceConversionOwnershipTransfer(db *gorm.DB) {
 	q := db.Where("x = ?", 1)
-	var i interface{} = q // Converting to interface{} marks q as polluted
+	var i interface{} = q // Just ownership transfer, does NOT pollute q
 	_ = i
 
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // First use of q - should NOT report
 }
 
 // =============================================================================

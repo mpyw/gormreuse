@@ -78,6 +78,10 @@ func RunSSA(
 	// may be detected from both the parent function and the closure.
 	globalReported := make(map[token.Pos]bool)
 
+	// Share a single suggestedEdits map to avoid duplicate fix edits
+	// across different violations that suggest the same edit.
+	globalSuggestedEdits := make(map[editKey]bool)
+
 	for _, fn := range ssaInfo.SrcFuncs {
 		pos := fn.Pos()
 		if !pos.IsValid() {
@@ -111,7 +115,7 @@ func RunSSA(
 			}
 		}
 
-		chk := newChecker(pass, ignoreMap, pureFuncs, immutableReturnFuncs, globalReported)
+		chk := newChecker(pass, ignoreMap, pureFuncs, immutableReturnFuncs, globalReported, globalSuggestedEdits)
 		chk.checkFunction(fn)
 	}
 
@@ -142,18 +146,28 @@ type checker struct {
 	pureFuncs            *directive.DirectiveFuncSet // Pure functions for analysis
 	immutableReturnFuncs *directive.DirectiveFuncSet // Immutable-return functions
 	reported             map[token.Pos]bool          // Deduplication of reports
+	suggestedEdits       map[editKey]bool            // Global deduplication of suggested fixes
+}
+
+// editKey uniquely identifies an edit to avoid duplicates across violations.
+type editKey struct {
+	pos  token.Pos
+	end  token.Pos
+	text string
 }
 
 // newChecker creates a new checker for a specific file.
 // The reported map is shared across all functions to deduplicate violations
 // across parent functions and their closures.
-func newChecker(pass *analysis.Pass, ignoreMap directive.IgnoreMap, pureFuncs, immutableReturnFuncs *directive.DirectiveFuncSet, reported map[token.Pos]bool) *checker {
+// The suggestedEdits map is shared to avoid duplicate fix edits.
+func newChecker(pass *analysis.Pass, ignoreMap directive.IgnoreMap, pureFuncs, immutableReturnFuncs *directive.DirectiveFuncSet, reported map[token.Pos]bool, suggestedEdits map[editKey]bool) *checker {
 	return &checker{
 		pass:                 pass,
 		ignoreMap:            ignoreMap,
 		pureFuncs:            pureFuncs,
 		immutableReturnFuncs: immutableReturnFuncs,
 		reported:             reported,
+		suggestedEdits:       suggestedEdits,
 	}
 }
 
@@ -202,12 +216,47 @@ func (c *checker) reportViolation(v pollution.Violation) {
 	fixGen := fix.New(c.pass)
 	suggestedFixes := fixGen.Generate(v)
 
+	// Deduplicate suggested fix edits globally
+	// This prevents the same edit from being applied multiple times
+	// when different violations suggest the same fix (e.g., for shared Phi edges)
+	suggestedFixes = c.deduplicateFixes(suggestedFixes)
+
 	// Report with diagnostic
 	c.pass.Report(analysis.Diagnostic{
 		Pos:            pos,
 		Message:        v.Message,
 		SuggestedFixes: suggestedFixes,
 	})
+}
+
+// deduplicateFixes removes edits that have already been suggested by previous violations.
+func (c *checker) deduplicateFixes(fixes []analysis.SuggestedFix) []analysis.SuggestedFix {
+	if len(fixes) == 0 {
+		return fixes
+	}
+
+	var result []analysis.SuggestedFix
+	for _, fix := range fixes {
+		var dedupedEdits []analysis.TextEdit
+		for _, edit := range fix.TextEdits {
+			key := editKey{
+				pos:  edit.Pos,
+				end:  edit.End,
+				text: string(edit.NewText),
+			}
+			if !c.suggestedEdits[key] {
+				c.suggestedEdits[key] = true
+				dedupedEdits = append(dedupedEdits, edit)
+			}
+		}
+		if len(dedupedEdits) > 0 {
+			result = append(result, analysis.SuggestedFix{
+				Message:   fix.Message,
+				TextEdits: dedupedEdits,
+			})
+		}
+	}
+	return result
 }
 
 // reportViolationWithoutFix reports a violation without generating fixes.

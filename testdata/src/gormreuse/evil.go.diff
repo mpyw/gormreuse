@@ -1,6 +1,6 @@
 --- evil.go	1970-01-01 00:00:00
 +++ evil.go.golden	1970-01-01 00:00:00
-@@ -1,3165 +1,3165 @@
+@@ -1,3166 +1,3166 @@
  package internal
  
  import "gorm.io/gorm"
@@ -235,7 +235,8 @@
  // loopReuse demonstrates reuse in a loop.
  // Loop detection: terminal call in loop with root defined outside = violation.
  func loopReuse(db *gorm.DB, items []string) {
- 	q := db.Where("base = ?", 1)
+-	q := db.Where("base = ?", 1)
++	q := db.Where("base = ?", 1).Session(&gorm.Session{})
  
  	for _, item := range items {
  		// Second iteration reuses polluted q
@@ -245,7 +246,8 @@
  
  // forLoopReuse demonstrates reuse in a for loop.
  func forLoopReuse(db *gorm.DB) {
- 	q := db.Where("x = ?", 1)
+-	q := db.Where("x = ?", 1)
++	q := db.Where("x = ?", 1).Session(&gorm.Session{})
  
  	for i := 0; i < 3; i++ {
  		// Second iteration reuses polluted q
@@ -281,7 +283,8 @@
  
  // deferReuse demonstrates reuse with defer.
  func deferReuse(db *gorm.DB) {
- 	q := db.Where("x = ?", 1)
+-	q := db.Where("x = ?", 1)
++	q := db.Where("x = ?", 1).Session(&gorm.Session{})
  
  	// Defer is processed in second pass, after q.Find pollutes q
  	defer q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
@@ -292,7 +295,8 @@
  // deferFunctionCallWithDB demonstrates defer with function call passing *gorm.DB.
  // Tests lines 669-678: defer with *gorm.DB argument to function.
  func deferFunctionCallWithDB(db *gorm.DB) {
- 	q := db.Where("x = ?", 1)
+-	q := db.Where("x = ?", 1)
++	q := db.Where("x = ?", 1).Session(&gorm.Session{})
  	q.Find(nil) // First use - pollutes q
  
  	defer helperPollute(q) // want `\*gorm\.DB instance reused after chain method`
@@ -438,7 +442,8 @@
  // goroutineDirectMethodCall demonstrates direct method call in goroutine.
  // This tests the processCallCommonForGo path for method calls.
  func goroutineDirectMethodCall(db *gorm.DB) {
- 	q := db.Where("x = ?", 1)
+-	q := db.Where("x = ?", 1)
++	q := db.Where("x = ?", 1).Session(&gorm.Session{})
  	q.Find(nil) // First use - pollutes q
  
  	go q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
@@ -447,7 +452,8 @@
  // goroutineFunctionCallWithDB demonstrates passing *gorm.DB to function in goroutine.
  // This tests the processCallCommonForGo path for function calls with *gorm.DB argument.
  func goroutineFunctionCallWithDB(db *gorm.DB) {
- 	q := db.Where("x = ?", 1)
+-	q := db.Where("x = ?", 1)
++	q := db.Where("x = ?", 1).Session(&gorm.Session{})
  	q.Find(nil) // First use - pollutes q
  
  	go helperPollute(q) // want `\*gorm\.DB instance reused after chain method`
@@ -457,7 +463,8 @@
  // Tests line 487: isPollutedAt cross-function pollution check.
  // Pollution happens in closure, then goroutine checks isPollutedAt.
  func goroutineCrossFunctionPollution(db *gorm.DB) {
- 	q := db.Where("x = ?", 1)
+-	q := db.Where("x = ?", 1)
++	q := db.Where("x = ?", 1).Session(&gorm.Session{})
  
  	// Pollute q inside a closure (IIFE)
  	func() {
@@ -691,7 +698,8 @@
  
  // multipleDefers demonstrates multiple defers using same q.
  func multipleDefers(db *gorm.DB) {
- 	q := db.Where("x = ?", 1)
+-	q := db.Where("x = ?", 1)
++	q := db.Where("x = ?", 1).Session(&gorm.Session{})
  
  	defer q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
  	defer q.First(nil) // want `\*gorm\.DB instance reused after chain method`
@@ -869,18 +877,18 @@
  }
  
  // =============================================================================
- // SHOULD REPORT - Type Assertions
+ // SHOULD NOT REPORT - Interface Conversion (Ownership Transfer)
  // =============================================================================
  
- // typeAssertionPollution demonstrates pollution through interface conversion.
- // Converting *gorm.DB to interface{} is assumed to pollute it.
- func typeAssertionPollution(db *gorm.DB) {
--	q := db.Where("x = ?", 1)
-+	q := db.Where("x = ?", 1).Session(&gorm.Session{})
- 	var i interface{} = q // Converting to interface{} marks q as polluted
+ // interfaceConversionOwnershipTransfer demonstrates that interface conversion
+ // does NOT pollute the source. It's just type wrapping (ownership transfer).
+ // Pollution only happens when the interface value is actually used.
+ func interfaceConversionOwnershipTransfer(db *gorm.DB) {
+ 	q := db.Where("x = ?", 1)
+ 	var i interface{} = q // Just ownership transfer, does NOT pollute q
  	_ = i
  
- 	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+ 	q.Count(nil) // First use of q - should NOT report
  }
  
  // =============================================================================
@@ -1273,7 +1281,8 @@
  
  // ifInsideFor demonstrates if inside for loop.
  func ifInsideFor(db *gorm.DB, items []string) {
- 	q := db.Where("x = ?", 1)
+-	q := db.Where("x = ?", 1)
++	q := db.Where("x = ?", 1).Session(&gorm.Session{})
  
  	for _, item := range items {
  		if item != "" {
@@ -1284,7 +1293,8 @@
  
  // ifElseInsideFor demonstrates if-else inside for loop.
  func ifElseInsideFor(db *gorm.DB, items []int) {
- 	q := db.Where("x = ?", 1)
+-	q := db.Where("x = ?", 1)
++	q := db.Where("x = ?", 1).Session(&gorm.Session{})
  
  	for _, item := range items {
  		if item > 0 {
@@ -1297,7 +1307,8 @@
  
  // nestedIfInsideFor demonstrates nested if inside for.
  func nestedIfInsideFor(db *gorm.DB, items []int, flag bool) {
- 	q := db.Where("x = ?", 1)
+-	q := db.Where("x = ?", 1)
++	q := db.Where("x = ?", 1).Session(&gorm.Session{})
  
  	for _, item := range items {
  		if item > 0 {
@@ -1350,7 +1361,8 @@
  
  // nestedFor demonstrates nested for loops.
  func nestedFor(db *gorm.DB, outer, inner []string) {
- 	q := db.Where("x = ?", 1)
+-	q := db.Where("x = ?", 1)
++	q := db.Where("x = ?", 1).Session(&gorm.Session{})
  
  	for _, o := range outer {
  		for _, i := range inner {
@@ -1361,7 +1373,8 @@
  
  // tripleNestedFor demonstrates 3-level nested for.
  func tripleNestedFor(db *gorm.DB) {
- 	q := db.Where("x = ?", 1)
+-	q := db.Where("x = ?", 1)
++	q := db.Where("x = ?", 1).Session(&gorm.Session{})
  
  	for i := 0; i < 3; i++ {
  		for j := 0; j < 3; j++ {
@@ -1374,7 +1387,8 @@
  
  // forWithBreakContinue demonstrates for with break and continue.
  func forWithBreakContinue(db *gorm.DB, items []int) {
- 	q := db.Where("x = ?", 1)
+-	q := db.Where("x = ?", 1)
++	q := db.Where("x = ?", 1).Session(&gorm.Session{})
  
  	for _, item := range items {
  		if item < 0 {
@@ -1395,7 +1409,8 @@
  
  // deferInsideIf demonstrates defer inside if.
  func deferInsideIf(db *gorm.DB, flag bool) {
- 	q := db.Where("x = ?", 1)
+-	q := db.Where("x = ?", 1)
++	q := db.Where("x = ?", 1).Session(&gorm.Session{})
  
  	if flag {
  		defer q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
@@ -1407,7 +1422,8 @@
  // deferInsideIfElse demonstrates defer inside if-else.
  // Find executes FIRST, then defers execute at function exit.
  func deferInsideIfElse(db *gorm.DB, flag bool) {
- 	q := db.Where("x = ?", 1)
+-	q := db.Where("x = ?", 1)
++	q := db.Where("x = ?", 1).Session(&gorm.Session{})
  
  	if flag {
  		defer q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
@@ -1421,7 +1437,8 @@
  // deferInsideNestedIf demonstrates defer inside nested if.
  // Find executes FIRST, then defer executes at function exit.
  func deferInsideNestedIf(db *gorm.DB, a, b bool) {
- 	q := db.Where("x = ?", 1)
+-	q := db.Where("x = ?", 1)
++	q := db.Where("x = ?", 1).Session(&gorm.Session{})
  
  	if a {
  		if b {
@@ -1434,7 +1451,8 @@
  
  // multipleDeferInsideIf demonstrates multiple defers inside if.
  func multipleDeferInsideIf(db *gorm.DB, flag bool) {
- 	q := db.Where("x = ?", 1)
+-	q := db.Where("x = ?", 1)
++	q := db.Where("x = ?", 1).Session(&gorm.Session{})
  
  	if flag {
  		defer q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
@@ -1451,7 +1469,8 @@
  // deferInsideFor demonstrates defer inside for loop.
  // Note: Each iteration adds a defer, all execute at function return.
  func deferInsideFor(db *gorm.DB, items []string) {
- 	q := db.Where("x = ?", 1)
+-	q := db.Where("x = ?", 1)
++	q := db.Where("x = ?", 1).Session(&gorm.Session{})
  
  	for range items {
  		defer q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
@@ -1462,7 +1481,8 @@
  
  // deferInsideForWithCondition demonstrates defer inside for with condition.
  func deferInsideForWithCondition(db *gorm.DB, items []int) {
- 	q := db.Where("x = ?", 1)
+-	q := db.Where("x = ?", 1)
++	q := db.Where("x = ?", 1).Session(&gorm.Session{})
  
  	for _, item := range items {
  		if item > 0 {
@@ -1476,7 +1496,8 @@
  
  // deferInsideNestedFor demonstrates defer inside nested for.
  func deferInsideNestedFor(db *gorm.DB) {
- 	q := db.Where("x = ?", 1)
+-	q := db.Where("x = ?", 1)
++	q := db.Where("x = ?", 1).Session(&gorm.Session{})
  
  	for i := 0; i < 2; i++ {
  		for j := 0; j < 2; j++ {
@@ -1580,7 +1601,8 @@
  
  // ifForDefer demonstrates if containing for containing defer.
  func ifForDefer(db *gorm.DB, flag bool, items []string) {
- 	q := db.Where("x = ?", 1)
+-	q := db.Where("x = ?", 1)
++	q := db.Where("x = ?", 1).Session(&gorm.Session{})
  
  	if flag {
  		for range items {
@@ -1593,7 +1615,8 @@
  
  // forIfDefer demonstrates for containing if containing defer.
  func forIfDefer(db *gorm.DB, items []int) {
- 	q := db.Where("x = ?", 1)
+-	q := db.Where("x = ?", 1)
++	q := db.Where("x = ?", 1).Session(&gorm.Session{})
  
  	for _, item := range items {
  		if item > 0 {
@@ -1659,7 +1682,8 @@
  // tripleNestingForIfDefer demonstrates 3-level nesting: for -> if -> defer.
  // [LIMITATION] Same as tripleNestingIfForDefer - defer execution order not tracked.
  func tripleNestingForIfDefer(db *gorm.DB, items []int) {
- 	q := db.Where("x = ?", 1)
+-	q := db.Where("x = ?", 1)
++	q := db.Where("x = ?", 1).Session(&gorm.Session{})
  
  	for _, item := range items {
  		if item > 0 {
@@ -1710,7 +1734,8 @@
  
  // quadNestingIfForIfDefer demonstrates 4-level: if -> for -> if -> defer.
  func quadNestingIfForIfDefer(db *gorm.DB, a bool, items []int) {
- 	q := db.Where("x = ?", 1)
+-	q := db.Where("x = ?", 1)
++	q := db.Where("x = ?", 1).Session(&gorm.Session{})
  
  	if a {
  		for _, item := range items {
@@ -1725,7 +1750,8 @@
  
  // quadNestingForIfForDefer demonstrates 4-level: for -> if -> for -> defer.
  func quadNestingForIfForDefer(db *gorm.DB, outer []bool, inner []int) {
- 	q := db.Where("x = ?", 1)
+-	q := db.Where("x = ?", 1)
++	q := db.Where("x = ?", 1).Session(&gorm.Session{})
  
  	for _, flag := range outer {
  		if flag {
@@ -1780,7 +1806,8 @@
  
  // multipleDefersInDifferentBranches demonstrates multiple defers in different if branches.
  func multipleDefersInDifferentBranches(db *gorm.DB, level int) {
- 	q := db.Where("x = ?", 1)
+-	q := db.Where("x = ?", 1)
++	q := db.Where("x = ?", 1).Session(&gorm.Session{})
  
  	if level == 0 {
  		defer q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
@@ -1795,7 +1822,8 @@
  
  // multipleDefersInLoopBranches demonstrates multiple defers in loop branches.
  func multipleDefersInLoopBranches(db *gorm.DB, items []int) {
- 	q := db.Where("x = ?", 1)
+-	q := db.Where("x = ?", 1)
++	q := db.Where("x = ?", 1).Session(&gorm.Session{})
  
  	for _, item := range items {
  		if item > 0 {
@@ -1831,7 +1859,8 @@
  
  // earlyReturnInLoopWithDefer demonstrates early return in loop with defer.
  func earlyReturnInLoopWithDefer(db *gorm.DB, items []int) {
- 	q := db.Where("x = ?", 1)
+-	q := db.Where("x = ?", 1)
++	q := db.Where("x = ?", 1).Session(&gorm.Session{})
  
  	defer q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
  
@@ -1850,7 +1879,8 @@
  
  // labeledBreakWithDefer demonstrates labeled break with defer.
  func labeledBreakWithDefer(db *gorm.DB) {
- 	q := db.Where("x = ?", 1)
+-	q := db.Where("x = ?", 1)
++	q := db.Where("x = ?", 1).Session(&gorm.Session{})
  
  	defer q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
  
@@ -1868,7 +1898,8 @@
  
  // labeledContinueWithDefer demonstrates labeled continue with defer.
  func labeledContinueWithDefer(db *gorm.DB) {
- 	q := db.Where("x = ?", 1)
+-	q := db.Where("x = ?", 1)
++	q := db.Where("x = ?", 1).Session(&gorm.Session{})
  
  	defer q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
  
@@ -2001,7 +2032,8 @@
  
  // rangeOverChannelWithDefer demonstrates range over channel with defer.
  func rangeOverChannelWithDefer(db *gorm.DB, ch chan int) {
- 	q := db.Where("x = ?", 1)
+-	q := db.Where("x = ?", 1)
++	q := db.Where("x = ?", 1).Session(&gorm.Session{})
  
  	defer q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
  
@@ -2034,7 +2066,8 @@
  
  // typeSwitchInsideFor demonstrates type switch inside for.
  func typeSwitchInsideFor(db *gorm.DB, items []interface{}) {
- 	q := db.Where("x = ?", 1)
+-	q := db.Where("x = ?", 1)
++	q := db.Where("x = ?", 1).Session(&gorm.Session{})
  
  	for _, item := range items {
  		switch item.(type) {
@@ -2585,7 +2618,8 @@
  // reassignDeferredUse demonstrates reassignment with deferred use.
  // The defer evaluates q immediately - Count pollutes, then defer uses polluted q.
  func reassignDeferredUse(db *gorm.DB) {
- 	q := db.Where("x = ?", 1)
+-	q := db.Where("x = ?", 1)
++	q := db.Where("x = ?", 1).Session(&gorm.Session{})
  
  	defer q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
  
@@ -2745,7 +2779,8 @@
  
  // whereOnlyDefer demonstrates defer with Where-only.
  func whereOnlyDefer(db *gorm.DB) {
- 	q := db.Where("x = ?", 1)
+-	q := db.Where("x = ?", 1)
++	q := db.Where("x = ?", 1).Session(&gorm.Session{})
  
  	defer q.Where("deferred") // want `\*gorm\.DB instance reused after chain method`
  
@@ -3101,7 +3136,8 @@
  // or vice versa, there's an ordering bug in traceFieldStore.
  func conditionalFieldAssignOnePollutedReverse(db *gorm.DB, cond bool) {
  	q1 := db.Where("a")
- 	q2 := db.Where("b")
+-	q2 := db.Where("b")
++	q2 := db.Where("b").Session(&gorm.Session{})
  	q2.Find(nil) // Pollute q2 (reversed from above)
  
  	h := &conditionalFieldAssignHolderForTest{}
@@ -3119,7 +3155,8 @@
  // where both branches assign polluted values.
  func conditionalFieldAssignBothPolluted(db *gorm.DB, cond bool) {
  	q1 := db.Where("a")
- 	q2 := db.Where("b")
+-	q2 := db.Where("b")
++	q2 := db.Where("b").Session(&gorm.Session{})
  	q1.Find(nil) // Pollute q1
  	q2.Find(nil) // Pollute q2
  
