@@ -67,7 +67,7 @@ Directives can be combined with commas: `//gormreuse:pure,immutable-return`
 
 Trailing comments use `//`: `//gormreuse:ignore // reason here`
 
-> **Important**: All user-defined functions/methods that accept or return `*gorm.DB` are treated as polluting by default. Use `//gormreuse:pure` to mark functions that don't pollute arguments, and `//gormreuse:immutable-return` to mark functions whose return value can be safely reused (like DB connection helpers).
+> **Important**: User-defined functions that accept `*gorm.DB` are treated as polluting **unless** the function returns `*gorm.DB` and the result is assigned (e.g., `q = helper(q)`). In that case, it's treated like a gorm method assignment. Use `//gormreuse:pure` to mark functions that don't pollute arguments even when result is discarded, and `//gormreuse:immutable-return` to mark functions whose return value can be safely reused (like DB connection helpers).
 
 ## Architecture
 
@@ -191,7 +191,7 @@ The linter marks `*gorm.DB` as polluted in these scenarios:
 - **Slice/Array storage**: `[]*gorm.DB{db}` marks db as polluted
 - **Map storage**: `map[string]*gorm.DB{"k": db}` marks db as polluted
 - **Interface conversion**: `interface{}(db)` marks db as polluted (type assertion may extract)
-- **Function arguments**: Non-pure functions receiving `*gorm.DB` assumed to pollute
+- **Function arguments**: Non-pure functions receiving `*gorm.DB` pollute if result is discarded (not assigned)
 - **Struct field access**: `h.field.Find(nil)` traces back to the original value stored in field
 
 Note: Simple struct literal storage (`_ = &S{db: q}`) without actual field usage does NOT pollute.
@@ -236,6 +236,18 @@ Reassignment Behavior:
   q.Find(nil)          <- First branch from q_2 - OK (no relation to q_1)
 
   Each assignment creates a new SSA value, so reassignment = new mutable root.
+
+User-Defined Function Reassignment:
+  q := db.Where("x")
+  q = buildQuery(q, "y")   <- Result assigned: treated like gorm method assignment
+  q = buildQuery(q, "z")   <- Result assigned: new mutable root (NO false positive)
+  q.Find(nil)              <- First branch from latest q - OK
+
+  buildQuery(q, "w")       <- Result discarded: q is polluted
+  q.Find(nil)              <- VIOLATION (q was polluted by discarded call)
+
+  When user-defined function returns *gorm.DB and result is assigned,
+  it uses RecordAssignment (like gorm methods) instead of MarkPolluted.
 ```
 
 ## Development Commands
