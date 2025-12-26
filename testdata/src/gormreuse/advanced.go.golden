@@ -745,3 +745,465 @@ func exactUserPatternImmutableReturn(r *repoImmutable, keyword string, status *i
 
 	q.Find(nil) // First actual use - OK
 }
+
+// ===== CONSECUTIVE USER-DEFINED HELPER FUNCTION CALLS =====
+
+// buildQuery is a user-defined helper that receives *gorm.DB and returns *gorm.DB.
+// NOT marked as pure - so it pollutes the argument.
+func buildQuery(db *gorm.DB, filter string) *gorm.DB {
+	return db.Where(filter)
+}
+
+// consecutiveHelperCalls reproduces user's pattern:
+// - Mutable q from chain method
+// - Consecutive if blocks calling user-defined helpers with q as argument
+// - Each helper receives q, pollutes it, and result is reassigned to q
+// SHOULD NOT REPORT: Each reassignment creates a new mutable root
+func consecutiveHelperCalls(db *gorm.DB, a, b bool) {
+	q := db.Where("base")
+
+	if a {
+		q = buildQuery(q, "a") // q passed as arg, reassigned - NEW mutable root
+	}
+
+	if b {
+		q = buildQuery(q, "b") // q passed as arg, reassigned - NEW mutable root (NO FP!)
+	}
+
+	q.Find(nil) // First actual use - OK
+}
+
+// consecutiveHelperCallsWithChainMethod mixes chain methods and helper calls.
+func consecutiveHelperCallsWithChainMethod(db *gorm.DB, a, b bool) {
+	q := db.Where("base")
+
+	if a {
+		q = q.Where("a") // Chain method, reassigned
+	}
+
+	if b {
+		q = buildQuery(q, "b") // Helper call, reassigned - NEW mutable root (NO FP!)
+	}
+
+	q = q.Order("c") // Chain method, reassigned
+
+	q.Find(nil) // First actual use - OK
+}
+
+// consecutiveHelperCallsMultiple tests multiple consecutive helper calls.
+func consecutiveHelperCallsMultiple(db *gorm.DB, a, b, c bool) {
+	q := db.Where("base")
+
+	if a {
+		q = buildQuery(q, "a")
+	}
+
+	if b {
+		q = buildQuery(q, "b")
+	}
+
+	if c {
+		q = buildQuery(q, "c")
+	}
+
+	q.Find(nil) // First actual use - OK
+}
+
+// consecutiveHelperCallsNoReassign tests calling helper without reassigning result.
+// SHOULD REPORT: q is passed to buildQuery without reassignment, then reused
+func consecutiveHelperCallsNoReassign(db *gorm.DB, a, b bool) {
+	q := db.Where("base").Session(&gorm.Session{})
+
+	if a {
+		buildQuery(q, "a") // q passed but result discarded - q is polluted
+	}
+
+	if b {
+		buildQuery(q, "b") // want `\*gorm\.DB instance reused after chain method`
+	}
+
+	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// consecutiveHelperCallsWithFind tests when Find breaks the chain.
+// SHOULD REPORT after Find: once Find is called, q is consumed
+func consecutiveHelperCallsWithFind(db *gorm.DB, a, b bool) {
+	q := db.Where("base").Session(&gorm.Session{})
+
+	if a {
+		q = buildQuery(q, "a").Session(&gorm.Session{})
+	}
+
+	q.Find(nil) // First use - OK, but now q is polluted
+
+	if b {
+		q = buildQuery(q, "b") // want `\*gorm\.DB instance reused after chain method`
+	}
+
+	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// consecutiveHelperCallsWithFindReassign tests when Find result is used in reassignment pattern.
+// Find on chain, then reassign to q - should this be OK?
+func consecutiveHelperCallsWithFindReassign(db *gorm.DB, a, b bool) {
+	q := db.Where("base").Session(&gorm.Session{})
+
+	if a {
+		q = buildQuery(q, "a").Session(&gorm.Session{})
+	}
+
+	q.Find(nil) // First use - pollutes q
+
+	if b {
+		q = db.Where("new") // NEW mutable root - q is now fresh
+	}
+
+	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// ===== USER-DEFINED HELPER FUNCTION DIRECTIVE PATTERNS =====
+
+// noPureHelper is a user-defined helper WITHOUT any directive.
+// It receives *gorm.DB and returns *gorm.DB.
+// NOT marked as pure - so it may pollute the argument.
+func noPureHelper(db *gorm.DB) *gorm.DB {
+	return db.Where("filter")
+}
+
+//gormreuse:pure
+func pureOnlyHelper(db *gorm.DB) *gorm.DB {
+	// Pure: doesn't pollute the argument, but return value is mutable
+	return db.Session(&gorm.Session{}).Where("filter")
+}
+
+//gormreuse:immutable-return
+func immutableReturnOnlyHelper(db *gorm.DB) *gorm.DB {
+	// Immutable-return: return value is immutable (safe to reuse)
+	// Session at the END makes the return value immutable
+	return db.Where("filter").Session(&gorm.Session{})
+}
+
+//gormreuse:pure,immutable-return
+func pureAndImmutableReturnHelper(db *gorm.DB) *gorm.DB {
+	// Both: doesn't pollute AND return value is immutable
+	// Session at START: doesn't pollute db (pure)
+	// Session at END: return value is immutable (immutable-return)
+	return db.Session(&gorm.Session{}).Where("filter").Session(&gorm.Session{})
+}
+
+// testNoPureHelperReassign tests helper WITHOUT directive, result reassigned.
+// SHOULD NOT REPORT: assignment creates new mutable root
+func testNoPureHelperReassign(db *gorm.DB, a, b bool) {
+	q := db.Where("base")
+
+	if a {
+		q = noPureHelper(q) // Assignment - new mutable root
+	}
+
+	if b {
+		q = noPureHelper(q) // Assignment - new mutable root (NO FP!)
+	}
+
+	q.Find(nil) // First actual use - OK
+}
+
+// testNoPureHelperNoReassign tests helper WITHOUT directive, result NOT reassigned.
+// SHOULD REPORT: q is polluted by first call, reused in second
+func testNoPureHelperNoReassign(db *gorm.DB, a, b bool) {
+	q := db.Where("base").Session(&gorm.Session{})
+
+	if a {
+		noPureHelper(q) // Pollutes q (result discarded)
+	}
+
+	if b {
+		noPureHelper(q) // want `\*gorm\.DB instance reused after chain method`
+	}
+
+	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// testPureOnlyHelperReassign tests helper with pure directive, result reassigned.
+// SHOULD NOT REPORT: pure function doesn't pollute, assignment creates new root
+func testPureOnlyHelperReassign(db *gorm.DB, a, b bool) {
+	q := db.Where("base")
+
+	if a {
+		q = pureOnlyHelper(q) // Pure - doesn't pollute, assignment creates new root
+	}
+
+	if b {
+		q = pureOnlyHelper(q) // Pure - doesn't pollute, assignment creates new root
+	}
+
+	q.Find(nil) // First actual use - OK
+}
+
+// testPureOnlyHelperNoReassign tests helper with pure directive, result NOT reassigned.
+// SHOULD NOT REPORT: pure function doesn't pollute
+func testPureOnlyHelperNoReassign(db *gorm.DB, a, b bool) {
+	q := db.Where("base")
+
+	if a {
+		pureOnlyHelper(q) // Pure - doesn't pollute
+	}
+
+	if b {
+		pureOnlyHelper(q) // Pure - doesn't pollute
+	}
+
+	q.Find(nil) // First actual use - OK
+}
+
+// testImmutableReturnOnlyHelperReassign tests helper with immutable-return directive.
+// Return value is immutable, but function itself may pollute the argument.
+// Path-insensitive: if neither a nor b is true, q is still original mutable
+func testImmutableReturnOnlyHelperReassign(db *gorm.DB, a, b bool) {
+	q := db.Where("base").Session(&gorm.Session{})
+
+	if a {
+		q = immutableReturnOnlyHelper(q).Session(&gorm.Session{}) // Assignment - q is now immutable
+	}
+
+	if b {
+		q = immutableReturnOnlyHelper(q) // Assignment - q is now immutable
+	}
+
+	q.Find(nil)  // First use - OK
+	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// testImmutableReturnOnlyHelperReassignGuaranteed tests helper with immutable-return directive.
+// All paths go through immutable-return helper, so q is always immutable
+func testImmutableReturnOnlyHelperReassignGuaranteed(db *gorm.DB, a bool) {
+	q := db.Where("base")
+
+	if a {
+		q = immutableReturnOnlyHelper(q) // Assignment - q is now immutable
+	} else {
+		q = immutableReturnOnlyHelper(q) // Assignment - q is now immutable
+	}
+
+	// q is guaranteed to be immutable (both branches assign from immutable-return)
+	q.Find(nil)  // OK
+	q.Count(nil) // OK - q is immutable
+}
+
+// testImmutableReturnOnlyHelperNoReassign tests helper with immutable-return directive.
+// SHOULD REPORT: without reassignment, function may pollute the argument
+func testImmutableReturnOnlyHelperNoReassign(db *gorm.DB, a, b bool) {
+	q := db.Where("base").Session(&gorm.Session{})
+
+	if a {
+		immutableReturnOnlyHelper(q) // May pollute q (result discarded)
+	}
+
+	if b {
+		immutableReturnOnlyHelper(q) // want `\*gorm\.DB instance reused after chain method`
+	}
+
+	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// testPureAndImmutableReturnHelperReassign tests helper with both directives.
+// Path-insensitive: if neither a nor b is true, q is still original mutable
+func testPureAndImmutableReturnHelperReassign(db *gorm.DB, a, b bool) {
+	q := db.Where("base").Session(&gorm.Session{})
+
+	if a {
+		q = pureAndImmutableReturnHelper(q).Session(&gorm.Session{}) // Pure + immutable
+	}
+
+	if b {
+		q = pureAndImmutableReturnHelper(q) // Pure + immutable
+	}
+
+	q.Find(nil)  // First use - OK
+	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// testPureAndImmutableReturnHelperReassignGuaranteed tests helper with both directives.
+// All paths go through immutable-return helper, so q is always immutable
+func testPureAndImmutableReturnHelperReassignGuaranteed(db *gorm.DB, a bool) {
+	q := db.Where("base")
+
+	if a {
+		q = pureAndImmutableReturnHelper(q) // Pure + immutable
+	} else {
+		q = pureAndImmutableReturnHelper(q) // Pure + immutable
+	}
+
+	// q is guaranteed to be immutable (both branches assign from immutable-return)
+	q.Find(nil)  // OK
+	q.Count(nil) // OK - q is immutable
+}
+
+// testPureAndImmutableReturnHelperNoReassign tests helper with both directives.
+// SHOULD NOT REPORT: pure function doesn't pollute even without reassignment
+func testPureAndImmutableReturnHelperNoReassign(db *gorm.DB, a, b bool) {
+	q := db.Where("base")
+
+	if a {
+		pureAndImmutableReturnHelper(q) // Pure - doesn't pollute
+	}
+
+	if b {
+		pureAndImmutableReturnHelper(q) // Pure - doesn't pollute
+	}
+
+	q.Find(nil) // First actual use - OK
+}
+
+// ===== IMMUTABLE INITIAL Q WITH HELPER FUNCTIONS =====
+
+// testImmutableInitialWithNoPureHelper tests immutable initial q with no-directive helper.
+// Initial q is immutable, so passing to non-pure function is OK (immutable can be reused)
+func testImmutableInitialWithNoPureHelper(db *gorm.DB, a, b bool) {
+	q := db.Where("base").Session(&gorm.Session{}) // Session at END makes q immutable
+
+	if a {
+		q = noPureHelper(q) // q (immutable) passed to non-pure - OK, result is new mutable root
+	}
+
+	if b {
+		q = noPureHelper(q) // Phi(immutable, mutable) - need to check mutable path
+	}
+
+	q.Find(nil)  // First use - OK
+	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// testImmutableInitialWithNoPureHelperGuaranteed tests immutable initial q, guaranteed reassign.
+func testImmutableInitialWithNoPureHelperGuaranteed(db *gorm.DB, a bool) {
+	q := db.Where("base").Session(&gorm.Session{}) // Session at END makes q immutable
+
+	if a {
+		q = noPureHelper(q) // Result is mutable
+	} else {
+		q = noPureHelper(q) // Result is mutable
+	}
+
+	// q is now mutable (from noPureHelper), but it's first use
+	q.Find(nil)  // First use - OK
+	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// testImmutableInitialWithImmutableReturnHelper tests immutable initial q with immutable-return helper.
+// Both initial and helper return are immutable
+func testImmutableInitialWithImmutableReturnHelper(db *gorm.DB, a, b bool) {
+	q := db.Where("base").Session(&gorm.Session{}) // Session at END makes q immutable
+
+	if a {
+		q = immutableReturnOnlyHelper(q) // Result is immutable
+	}
+
+	if b {
+		q = immutableReturnOnlyHelper(q) // Result is immutable
+	}
+
+	// All paths lead to immutable q
+	q.Find(nil)  // OK
+	q.Count(nil) // OK - all sources are immutable
+}
+
+// testImmutableInitialNoReassign tests immutable initial q without reassignment.
+// Immutable q can be passed to non-pure functions multiple times without issue
+func testImmutableInitialNoReassign(db *gorm.DB, a, b bool) {
+	q := db.Where("base").Session(&gorm.Session{}) // Session at END makes q immutable
+
+	if a {
+		noPureHelper(q) // Passes immutable q - OK (immutable can be reused)
+	}
+
+	if b {
+		noPureHelper(q) // Passes immutable q again - OK
+	}
+
+	q.Find(nil)  // OK - q is still immutable
+	q.Count(nil) // OK - q is still immutable
+}
+
+// ===== MIXED HELPER TYPES =====
+
+// testMixedHelperTypes tests mixing different helper types in same function.
+func testMixedHelperTypes(db *gorm.DB, a, b, c bool) {
+	q := db.Where("base").Session(&gorm.Session{})
+
+	if a {
+		q = noPureHelper(q).Session(&gorm.Session{}) // No directive - new mutable root
+	}
+
+	if b {
+		q = pureOnlyHelper(q) // Pure - new mutable root
+	}
+
+	if c {
+		q = immutableReturnOnlyHelper(q) // Immutable-return - new immutable root
+	}
+
+	// Path-insensitive: q could be original mutable, or any of the helper results
+	q.Find(nil)  // First use - OK
+	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// testMixedHelperTypesAllImmutablePaths tests mixing helpers where all paths lead to immutable.
+func testMixedHelperTypesAllImmutablePaths(db *gorm.DB, a bool) {
+	q := db.Where("base")
+
+	if a {
+		q = immutableReturnOnlyHelper(q) // Immutable-return
+	} else {
+		q = pureAndImmutableReturnHelper(q) // Pure + immutable-return
+	}
+
+	// All paths lead to immutable q
+	q.Find(nil)  // OK
+	q.Count(nil) // OK
+}
+
+// testMixedHelperTypesMutableAndImmutable tests one path mutable, one immutable.
+func testMixedHelperTypesMutableAndImmutable(db *gorm.DB, a bool) {
+	q := db.Where("base")
+
+	if a {
+		q = noPureHelper(q).Session(&gorm.Session{}) // No directive - mutable result
+	} else {
+		q = immutableReturnOnlyHelper(q).Session(&gorm.Session{}) // Immutable-return - immutable result
+	}
+
+	// Phi(mutable, immutable) - need to be conservative
+	q.Find(nil)  // First use - OK
+	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// ===== NO DIRECTIVE GUARANTEED PATTERN =====
+
+// testNoPureHelperReassignGuaranteed tests no-directive helper with guaranteed reassignment.
+func testNoPureHelperReassignGuaranteed(db *gorm.DB, a bool) {
+	q := db.Where("base")
+
+	if a {
+		q = noPureHelper(q).Session(&gorm.Session{}) // New mutable root
+	} else {
+		q = noPureHelper(q).Session(&gorm.Session{}) // New mutable root
+	}
+
+	// Both paths create new mutable root, so first use is OK
+	q.Find(nil)  // First use - OK
+	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// testPureOnlyHelperReassignGuaranteed tests pure helper with guaranteed reassignment.
+func testPureOnlyHelperReassignGuaranteed(db *gorm.DB, a bool) {
+	q := db.Where("base")
+
+	if a {
+		q = pureOnlyHelper(q).Session(&gorm.Session{}) // Pure - new mutable root
+	} else {
+		q = pureOnlyHelper(q).Session(&gorm.Session{}) // Pure - new mutable root
+	}
+
+	// Both paths create new mutable root
+	q.Find(nil)  // First use - OK
+	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}

@@ -317,6 +317,12 @@ func (h *CallHandler) checkFunctionCallPollution(call *ssa.Call, ctx *Context) {
 		}
 	}
 
+	// If the function returns *gorm.DB and result is assigned, treat like gorm method assignment.
+	// The assignment creates a new mutable root, so we shouldn't ADD pollution to args.
+	// However, we still need to CHECK if args are already polluted (to detect reuse).
+	// This enables patterns like: q = buildQuery(q, "filter")
+	isReassignment := typeutil.IsGormDB(call.Type()) && isAssignment(call, ctx)
+
 	for _, arg := range call.Call.Args {
 		if !typeutil.IsGormDB(arg.Type()) {
 			continue
@@ -327,8 +333,14 @@ func (h *CallHandler) checkFunctionCallPollution(call *ssa.Call, ctx *Context) {
 			continue
 		}
 
-		// Mark polluted (function may use the value)
-		ctx.Tracker.MarkPolluted(root, call.Block(), call.Pos())
+		if isReassignment {
+			// For reassignment pattern: check if already polluted, but don't add pollution.
+			// This is similar to how gorm methods handle RecordAssignment.
+			ctx.Tracker.RecordAssignment(root, call.Block(), call.Pos())
+		} else {
+			// Mark polluted (function may use the value)
+			ctx.Tracker.MarkPolluted(root, call.Block(), call.Pos())
+		}
 	}
 }
 
