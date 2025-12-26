@@ -1,6 +1,6 @@
 --- evil.go	1970-01-01 00:00:00
 +++ evil.go.golden	1970-01-01 00:00:00
-@@ -1,2883 +1,2883 @@
+@@ -1,2925 +1,2925 @@
  package internal
  
  import "gorm.io/gorm"
@@ -3016,4 +3016,49 @@
  
  	q.Find(nil)
  	q.Count(nil) // OK: all branches immutable
+ }
+ 
+ // =============================================================================
+ // FIX GENERATOR EDGE CASE - Callback wrapper functions
+ // These test cases verify that Session is NOT added to wrapper function calls
+ // =============================================================================
+ 
+ // wrapperFunc is a helper that takes a callback (like t.Run or Transaction).
+ func wrapperFunc(fn func()) bool {
+ 	fn()
+ 	return true
+ }
+ 
+ // callbackViolationInWrapper demonstrates violation inside callback.
+ // Session should be added to `db.Where("x")` call, NOT to wrapperFunc call.
+ func callbackViolationInWrapper(db *gorm.DB) {
+ 	wrapperFunc(func() {
+-		q := db.Where("x")
++		q := db.Where("x").Session(&gorm.Session{})
+ 		q.Find(nil)
+ 		q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+ 	})
+ }
+ 
+ // callbackMultipleViolationsInWrapper demonstrates multiple violations.
+ func callbackMultipleViolationsInWrapper(db *gorm.DB) {
+ 	wrapperFunc(func() {
+-		q := db.Where("base")
++		q := db.Where("base").Session(&gorm.Session{})
+ 		q.Find(nil)
+ 		q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+ 		q.First(nil) // want `\*gorm\.DB instance reused after chain method`
+ 	})
+ }
+ 
+ // callbackNestedWrappers demonstrates nested wrapper functions.
+ func callbackNestedWrappers(db *gorm.DB) {
+ 	wrapperFunc(func() {
+ 		wrapperFunc(func() {
+-			q := db.Where("nested")
++			q := db.Where("nested").Session(&gorm.Session{})
+ 			q.Find(nil)
+ 			q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+ 		})
+ 	})
  }

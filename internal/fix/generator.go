@@ -41,6 +41,7 @@ import (
 	"sort"
 
 	"golang.org/x/tools/go/analysis"
+	"golang.org/x/tools/go/ast/astutil"
 	"golang.org/x/tools/go/ssa"
 
 	"github.com/mpyw/gormreuse/internal/ssa/pollution"
@@ -95,6 +96,9 @@ func (g *Generator) Generate(v pollution.Violation) []analysis.SuggestedFix {
 	// Generate TextEdits
 	var edits []analysis.TextEdit
 
+	// Track files that need gorm import (files where Session is added)
+	filesNeedingImport := make(map[*ast.File]bool)
+
 	// PHASE 1: Add reassignments for non-finisher uses (Rule 1)
 	for _, use := range nonFinisherUses {
 		if edit := g.generateReassignmentEdit(use.Pos); edit != nil {
@@ -106,11 +110,24 @@ func (g *Generator) Generate(v pollution.Violation) []analysis.SuggestedFix {
 	// Special handling for Phi nodes: add Session to each edge
 	for _, pos := range rootsNeedingSession {
 		sessionEdits := g.generateSessionEditsForRoot(pos, root)
-		edits = append(edits, sessionEdits...)
+		if len(sessionEdits) > 0 {
+			edits = append(edits, sessionEdits...)
+			// Mark file as needing gorm import
+			if file := g.findFileContaining(pos); file != nil {
+				filesNeedingImport[file] = true
+			}
+		}
 	}
 
 	if len(edits) == 0 {
 		return nil
+	}
+
+	// PHASE 3: Add gorm import if needed
+	for file := range filesNeedingImport {
+		if importEdit := g.generateGormImportEdit(file); importEdit != nil {
+			edits = append(edits, *importEdit)
+		}
 	}
 
 	// Deduplicate edits (same position and new text)
@@ -689,21 +706,40 @@ func (g *Generator) getCallExprEndPos(pos token.Pos) token.Pos {
 		return token.NoPos
 	}
 
-	var callEnd token.Pos
+	if call := findInnermostCallExpr(file, pos); call != nil {
+		return call.End()
+	}
+	return token.NoPos
+}
+
+// findInnermostCallExpr finds the innermost (narrowest) CallExpr containing the given position.
+// This is important for nested calls like t.Run(func() { db.Where(...) }) where we want
+// to find db.Where(...), not the outer t.Run(...) call.
+func findInnermostCallExpr(file *ast.File, pos token.Pos) *ast.CallExpr {
+	var best *ast.CallExpr
 	ast.Inspect(file, func(n ast.Node) bool {
 		if n == nil {
 			return false
 		}
-		// Find the CallExpr that starts at or contains this position
-		if callExpr, ok := n.(*ast.CallExpr); ok {
-			if callExpr.Pos() <= pos && pos < callExpr.End() {
-				callEnd = callExpr.End()
-				return false
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			// Continue into children if this node might contain pos
+			return n.Pos() <= pos && pos < n.End()
+		}
+		if call.Pos() <= pos && pos < call.End() {
+			// Found a CallExpr containing pos; keep the narrowest one
+			if best == nil || nodeWidth(call) < nodeWidth(best) {
+				best = call
 			}
 		}
-		return n.Pos() <= pos
+		return n.Pos() <= pos && pos < n.End()
 	})
-	return callEnd
+	return best
+}
+
+// nodeWidth returns the width (end - start) of a node's position range.
+func nodeWidth(n ast.Node) token.Pos {
+	return n.End() - n.Pos()
 }
 
 // deduplicateEdits removes duplicate edits (same position and new text).
@@ -732,4 +768,47 @@ func (g *Generator) deduplicateEdits(edits []analysis.TextEdit) []analysis.TextE
 	}
 
 	return result
+}
+
+const gormImportPath = "gorm.io/gorm"
+
+// generateGormImportEdit generates a TextEdit to add gorm import if not already present.
+// Returns nil if gorm is already imported.
+func (g *Generator) generateGormImportEdit(file *ast.File) *analysis.TextEdit {
+	if astutil.UsesImport(file, gormImportPath) {
+		return nil
+	}
+
+	// Find existing import declaration
+	for _, decl := range file.Decls {
+		genDecl, ok := decl.(*ast.GenDecl)
+		if !ok || genDecl.Tok != token.IMPORT || len(genDecl.Specs) == 0 {
+			continue
+		}
+
+		// Check if it's a grouped import: import ( ... )
+		if genDecl.Lparen.IsValid() {
+			// Grouped import - append after last spec
+			lastSpec := genDecl.Specs[len(genDecl.Specs)-1]
+			return &analysis.TextEdit{
+				Pos:     lastSpec.End(),
+				End:     lastSpec.End(),
+				NewText: []byte("\n\t\"" + gormImportPath + "\""),
+			}
+		}
+
+		// Single import - add new import line after this declaration
+		return &analysis.TextEdit{
+			Pos:     genDecl.End(),
+			End:     genDecl.End(),
+			NewText: []byte("\nimport \"" + gormImportPath + "\""),
+		}
+	}
+
+	// No import declaration found - insert after package clause
+	return &analysis.TextEdit{
+		Pos:     file.Name.End(),
+		End:     file.Name.End(),
+		NewText: []byte("\n\nimport \"" + gormImportPath + "\""),
+	}
 }
