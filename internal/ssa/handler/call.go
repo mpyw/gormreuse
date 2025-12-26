@@ -261,6 +261,16 @@ func (h *CallHandler) processBoundMethodCall(call *ssa.Call, mc *ssa.MakeClosure
 		return
 	}
 
+	// Get ALL possible roots BEFORE recording usage (needed for pollution check)
+	allRoots := ctx.RootTracer.FindAllMutableRoots(recv, ctx.LoopInfo)
+
+	// Check if ANY root was already polluted BEFORE this call
+	for _, r := range allRoots {
+		if ctx.Tracker.IsPollutedAt(r, call.Block()) {
+			ctx.Tracker.AddViolationWithRoot(call.Pos(), r)
+		}
+	}
+
 	// Record usage (violations detected later)
 	if isImmutableReturning {
 		// Pure methods check for pollution but don't pollute
@@ -458,6 +468,17 @@ func processGormDBCallCommonWith(callCommon *ssa.CallCommon, pos token.Pos, ctx 
 		if isPolluted(root) {
 			ctx.Tracker.AddViolationWithRoot(pos, root)
 		}
+
+		// Check ALL possible roots for phi nodes
+		allRoots := ctx.RootTracer.FindAllMutableRoots(recv, ctx.LoopInfo)
+		for _, r := range allRoots {
+			if r == root {
+				continue
+			}
+			if isPolluted(r) {
+				ctx.Tracker.AddViolationWithRoot(pos, r)
+			}
+		}
 		return
 	}
 
@@ -474,6 +495,17 @@ func processGormDBCallCommonWith(callCommon *ssa.CallCommon, pos token.Pos, ctx 
 
 		if isPolluted(root) {
 			ctx.Tracker.AddViolationWithRoot(pos, root)
+		}
+
+		// Check ALL possible roots for phi nodes
+		allRoots := ctx.RootTracer.FindAllMutableRoots(arg, ctx.LoopInfo)
+		for _, r := range allRoots {
+			if r == root {
+				continue
+			}
+			if isPolluted(r) {
+				ctx.Tracker.AddViolationWithRoot(pos, r)
+			}
 		}
 	}
 }
@@ -520,4 +552,24 @@ func Dispatch(instr ssa.Instruction, ctx *Context) {
 //	// function exits → defer q.Find(nil) → VIOLATION!
 func DispatchDefer(d *ssa.Defer, ctx *Context) {
 	(&DeferHandler{}).Handle(d, ctx)
+}
+
+// DispatchGo handles go instructions separately from regular Dispatch.
+//
+// Go statements are processed in a second pass to ensure all pollution
+// is recorded first. SSA block order may differ from source order, and
+// go statements need to see pollution from all paths before checking.
+//
+// Example:
+//
+//	var q *gorm.DB
+//	if flag {
+//	    q = db.Where("a")
+//	} else {
+//	    q = db.Where("b")
+//	    q.Find(nil)  // pollutes q in this branch
+//	}
+//	go q.Count(nil)  // needs to see pollution from else branch
+func DispatchGo(g *ssa.Go, ctx *Context) {
+	(&GoHandler{}).Handle(g, ctx)
 }

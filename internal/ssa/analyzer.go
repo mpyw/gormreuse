@@ -143,10 +143,12 @@ func (a *Analyzer) processFunction(fn *ssa.Function, tracker *pollution.Tracker,
 		CurrentFn:  fn,
 	}
 
-	// Collect defers for second pass (they execute at function exit)
+	// Collect defers and go statements for second pass
+	// (they need all pollution recorded first before checking for violations)
 	var defers []*ssa.Defer
+	var goStmts []*ssa.Go
 
-	// First pass: process regular instructions
+	// First pass: process regular instructions (record pollution)
 	for _, block := range fn.Blocks {
 		for _, instr := range block.Instrs {
 			// Recursively process closures that capture *gorm.DB
@@ -165,12 +167,26 @@ func (a *Analyzer) processFunction(fn *ssa.Function, tracker *pollution.Tracker,
 				continue
 			}
 
+			// Collect go statements for second pass
+			// (SSA block order may differ from source order, so we need
+			// all pollution recorded before checking go statements)
+			if g, ok := instr.(*ssa.Go); ok {
+				goStmts = append(goStmts, g)
+				continue
+			}
+
 			// Dispatch to appropriate handler (Call, Send, Store, etc.)
 			handler.Dispatch(instr, ctx)
 		}
 	}
 
-	// Second pass: process defer statements
+	// Second pass: process go statements
+	// (all pollution is now recorded, so we can check for violations)
+	for _, g := range goStmts {
+		handler.DispatchGo(g, ctx)
+	}
+
+	// Third pass: process defer statements
 	// Defers use IsPollutedAnywhere since they execute at function exit
 	for _, d := range defers {
 		handler.DispatchDefer(d, ctx)
