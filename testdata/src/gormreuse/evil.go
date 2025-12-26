@@ -2881,3 +2881,45 @@ func phiSwitchAllImmutable(db *gorm.DB, mode int) {
 	q.Find(nil)
 	q.Count(nil) // OK: all branches immutable
 }
+
+// =============================================================================
+// FIX GENERATOR EDGE CASE - Callback wrapper functions
+// These test cases verify that Session is NOT added to wrapper function calls
+// =============================================================================
+
+// wrapperFunc is a helper that takes a callback (like t.Run or Transaction).
+func wrapperFunc(fn func()) bool {
+	fn()
+	return true
+}
+
+// callbackViolationInWrapper demonstrates violation inside callback.
+// Session should be added to `db.Where("x")` call, NOT to wrapperFunc call.
+func callbackViolationInWrapper(db *gorm.DB) {
+	wrapperFunc(func() {
+		q := db.Where("x")
+		q.Find(nil)
+		q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	})
+}
+
+// callbackMultipleViolationsInWrapper demonstrates multiple violations.
+func callbackMultipleViolationsInWrapper(db *gorm.DB) {
+	wrapperFunc(func() {
+		q := db.Where("base")
+		q.Find(nil)
+		q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+		q.First(nil) // want `\*gorm\.DB instance reused after chain method`
+	})
+}
+
+// callbackNestedWrappers demonstrates nested wrapper functions.
+func callbackNestedWrappers(db *gorm.DB) {
+	wrapperFunc(func() {
+		wrapperFunc(func() {
+			q := db.Where("nested")
+			q.Find(nil)
+			q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+		})
+	})
+}

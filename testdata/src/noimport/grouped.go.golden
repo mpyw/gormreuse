@@ -1,0 +1,18 @@
+// Package noimport tests fix generation when gorm is not directly imported.
+package noimport
+
+import (
+	"fmt"
+
+	internal "gormreuse"
+	"gorm.io/gorm"
+)
+
+// violationWithGroupedImport demonstrates a violation with grouped imports.
+// The fix should append gorm to the existing import group.
+func violationWithGroupedImport() {
+	fmt.Println("test")
+	q := internal.GetDB().Session(&gorm.Session{})
+	q.Find(nil)
+	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}

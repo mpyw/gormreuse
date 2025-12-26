@@ -30,6 +30,11 @@ func TestSuggestedFixes(t *testing.T) {
 	analysistest.RunWithSuggestedFixes(t, testdata, gormreuse.Analyzer, "gormreuse")
 }
 
+func TestSuggestedFixesWithImport(t *testing.T) {
+	testdata := analysistest.TestData()
+	analysistest.RunWithSuggestedFixes(t, testdata, gormreuse.Analyzer, "noimport")
+}
+
 func TestGenerateDiffFiles(t *testing.T) {
 	testdata := analysistest.TestData()
 	srcDir := filepath.Join(testdata, "src", "gormreuse")
