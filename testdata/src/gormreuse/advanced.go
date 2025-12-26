@@ -544,3 +544,204 @@ func passQDirectlyToMixedFunctions(db *gorm.DB) {
 	voidFunc(q)      // Pollutes q
 	q.Find(nil)      // want `\*gorm\.DB instance reused after chain method`
 }
+
+// =============================================================================
+// FALSE POSITIVE TESTS - Consecutive conditional reassignment
+// =============================================================================
+
+// consecutiveIfReassignment demonstrates consecutive if statements with reassignment.
+// The q = q.Order(...) line should NOT report diagnostic since all prior uses are assignments.
+// However, q.Count(nil) IS a violation (second use after Find), so fix is generated on Order line.
+func consecutiveIfReassignment(db *gorm.DB, a, b bool) {
+	q := db.Where("base")
+
+	if a {
+		q = q.Where("a") // Assignment, not consumption
+	}
+
+	if b {
+		q = q.Where("b") // Assignment, not consumption
+	}
+
+	q = q.Order("c") // Assignment - no diagnostic here (fix added for Count violation below)
+
+	q.Find(nil)      // First actual use - OK
+	q.Count(nil)     // want `\*gorm\.DB instance reused after chain method`
+}
+
+// consecutiveIfSwitchReassignment demonstrates consecutive if and switch with reassignment.
+// No diagnostic on Order line; fix is generated for Count violation.
+func consecutiveIfSwitchReassignment(db *gorm.DB, keyword string, status *int) {
+	q := db.Where("base")
+
+	if keyword != "" {
+		q = q.Where("keyword = ?", keyword) // Assignment
+	}
+
+	if status != nil {
+		switch *status {
+		case 1:
+			q = q.Where("status = ?", 1) // Assignment
+		case 2:
+			q = q.Where("status = ?", 2) // Assignment
+		}
+	}
+
+	q = q.Order("created_at") // Assignment - no diagnostic (fix for Count below)
+
+	q.Find(nil)      // First actual use - OK
+	q.Count(nil)     // want `\*gorm\.DB instance reused after chain method`
+}
+
+// helperFunctionReassignment tests reassignment with helper function return value.
+// r.query(ctx) style helper that returns *gorm.DB.
+// No diagnostic on Order line; fix is generated for Count violation.
+func helperFunctionReassignment(db *gorm.DB, a, b bool) {
+	helper := func() *gorm.DB { return db.Where("base") }
+	q := helper()
+
+	if a {
+		q = q.Where("a") // Assignment
+	}
+
+	if b {
+		q = q.Where("b") // Assignment
+	}
+
+	q = q.Order("c") // Assignment - no diagnostic (fix for Count below)
+
+	q.Find(nil)      // First actual use - OK
+	q.Count(nil)     // want `\*gorm\.DB instance reused after chain method`
+}
+
+type repo struct {
+	db *gorm.DB
+}
+
+func (r *repo) query() *gorm.DB {
+	return r.db.Where("base")
+}
+
+// methodReceiverReassignment tests reassignment with method receiver helper.
+// No diagnostic on Order line; fix is generated for Count violation.
+func methodReceiverReassignment(r *repo, a, b bool) {
+	q := r.query()
+
+	if a {
+		q = q.Where("a") // Assignment
+	}
+
+	if b {
+		q = q.Where("b") // Assignment
+	}
+
+	q = q.Order("c") // Assignment - no diagnostic (fix for Count below)
+
+	q.Find(nil)      // First actual use - OK
+	q.Count(nil)     // want `\*gorm\.DB instance reused after chain method`
+}
+
+type repoImmutable struct {
+	db *gorm.DB
+}
+
+//gormreuse:immutable-return
+func (r *repoImmutable) query() *gorm.DB {
+	return r.db.Session(&gorm.Session{})
+}
+
+// immutableReturnMethodReassignment tests reassignment with immutable-return method.
+// No diagnostic on Order line; fix is generated for Count violation.
+func immutableReturnMethodReassignment(r *repoImmutable, a, b bool) {
+	q := r.query() // q_1 is immutable
+
+	if a {
+		q = q.Where("a") // q_2 is mutable (derived from Where)
+	}
+	// Phi(q_1 immutable, q_2 mutable)
+
+	if b {
+		q = q.Where("b") // Assignment
+	}
+
+	q = q.Order("c") // Assignment - no diagnostic (fix for Count below)
+
+	q.Find(nil)      // First actual use - OK
+	q.Count(nil)     // want `\*gorm\.DB instance reused after chain method`
+}
+
+// switchMultipleCasesReassignment tests switch with multiple cases reassigning q.
+// Each case uses the same q (from Phi before switch) and assigns back.
+// No diagnostic on Order line; fix is generated for Count violation.
+func switchMultipleCasesReassignment(db *gorm.DB, keyword string, status *int) {
+	q := db.Where("base")
+
+	if keyword != "" {
+		q = q.Where("keyword = ?", keyword)
+	}
+
+	if status != nil {
+		switch *status {
+		case 1:
+			q = q.Where("status = ?", 1)
+		case 2:
+			q = q.Where("status = ?", 2)
+		case 3:
+			q = q.Where("status = ?", 3)
+		// No default - some paths don't reassign q
+		}
+	}
+
+	q = q.Order("c") // Assignment - no diagnostic (fix for Count below)
+
+	q.Find(nil)      // First actual use - OK
+	q.Count(nil)     // want `\*gorm\.DB instance reused after chain method`
+}
+
+// switchMultipleCasesChainedReassignment tests switch with chained Where calls.
+// This was the original false positive case - no diagnostic on Order line.
+// Fix is generated for Count violation.
+func switchMultipleCasesChainedReassignment(db *gorm.DB, status *int) {
+	q := db.Where("base")
+
+	if status != nil {
+		switch *status {
+		case 1:
+			q = q.Where("a = ?", 1).Where("b = ?", 2)
+		case 2:
+			q = q.Where("c = ?", 3).Where("d = ?", 4)
+		}
+	}
+
+	q = q.Order("e") // Assignment - no diagnostic (fix for Count below)
+
+	q.Find(nil)      // First actual use - OK
+	q.Count(nil)     // want `\*gorm\.DB instance reused after chain method`
+}
+
+// exactUserPatternImmutableReturn reproduces the exact user pattern:
+// - immutable-return helper function
+// - consecutive if with switch containing chained Where calls
+// - final unconditional Order assignment
+func exactUserPatternImmutableReturn(r *repoImmutable, keyword string, status *int) {
+	q := r.query() // immutable-return
+
+	if keyword != "" {
+		q = q.Where("keyword = ?", keyword)
+	}
+
+	if status != nil {
+		switch *status {
+		case 1:
+			q = q.Where("status = ?", 1).Where("extra = ?", 2)
+		case 2:
+			q = q.Where("status = ?", 3).Where("extra = ?", 4)
+		case 3:
+			q = q.Where("status = ?", 5)
+		}
+	}
+
+	q = q.Order("created_at") // Should NOT report diagnostic here
+
+	q.Find(nil) // First actual use - OK
+}
