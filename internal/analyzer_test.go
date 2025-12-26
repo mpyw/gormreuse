@@ -30,8 +30,9 @@ func TestNewChecker(t *testing.T) {
 	pureFuncs := directive.NewPureFuncSet(nil)
 	immutableReturnFuncs := directive.NewImmutableReturnFuncSet(nil)
 	reported := make(map[token.Pos]bool)
+	suggestedEdits := make(map[editKey]bool)
 
-	chk := newChecker(nil, ignoreMap, pureFuncs, immutableReturnFuncs, reported)
+	chk := newChecker(nil, ignoreMap, pureFuncs, immutableReturnFuncs, reported, suggestedEdits)
 
 	if chk.pass != nil {
 		t.Error("Expected pass to be nil")
@@ -47,6 +48,9 @@ func TestNewChecker(t *testing.T) {
 	}
 	if chk.reported == nil {
 		t.Error("Expected reported to be initialized")
+	}
+	if chk.suggestedEdits == nil {
+		t.Error("Expected suggestedEdits to be initialized")
 	}
 }
 

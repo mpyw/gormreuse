@@ -237,6 +237,12 @@ func (t *RootTracer) traceCall(call *ssa.Call, visited map[ssa.Value]bool, loopI
 	if mc, ok := call.Call.Value.(*ssa.MakeClosure); ok {
 		if closureFn, ok := mc.Fn.(*ssa.Function); ok {
 			if root := t.traceIIFEReturns(closureFn, visited, loopInfo); root != nil {
+				// If closure result is stored in a variable (Extract instruction),
+				// treat each call as independent root.
+				// Only trace through IIFE when result is directly chained.
+				if isClosureResultStored(call) {
+					return call
+				}
 				return root
 			}
 		}
@@ -967,7 +973,8 @@ func (t *RootTracer) traceIIFEReturns(fn *ssa.Function, visited map[ssa.Value]bo
 		return nil
 	}
 
-	// Find Return instructions and trace their results
+	// Collect ALL roots from all return statements
+	var allRoots []ssa.Value
 	for _, block := range fn.Blocks {
 		for _, instr := range block.Instrs {
 			ret, ok := instr.(*ssa.Return)
@@ -977,11 +984,60 @@ func (t *RootTracer) traceIIFEReturns(fn *ssa.Function, visited map[ssa.Value]bo
 			// Clone visited map to isolate closure's tracing state
 			retVisited := cloneVisited(visited)
 			if root := t.trace(ret.Results[0], retVisited, loopInfo); root != nil {
-				return root
+				allRoots = append(allRoots, root)
 			}
 		}
 	}
+
+	if len(allRoots) == 0 {
+		return nil
+	}
+
+	// If all roots are the same, return that root
+	firstRoot := allRoots[0]
+	allSame := true
+	for _, root := range allRoots[1:] {
+		if root != firstRoot {
+			allSame = false
+			break
+		}
+	}
+
+	if allSame {
+		return firstRoot
+	}
+
+	// Multiple different roots - return nil to signal caller should use call itself
+	// This happens with conditional returns like:
+	//   func() *gorm.DB { if cond { return q1 } else { return q2 } }()
 	return nil
+}
+
+
+// traceAllIIFEReturns is the multi-root version of traceIIFEReturns.
+// It collects roots from ALL return statements in the closure.
+func (t *RootTracer) traceAllIIFEReturns(fn *ssa.Function, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) []ssa.Value {
+	if fn.Signature == nil {
+		return nil
+	}
+	results := fn.Signature.Results()
+	if results == nil || results.Len() == 0 || !typeutil.IsGormDB(results.At(0).Type()) {
+		return nil
+	}
+
+	var allRoots []ssa.Value
+	for _, block := range fn.Blocks {
+		for _, instr := range block.Instrs {
+			ret, ok := instr.(*ssa.Return)
+			if !ok || len(ret.Results) == 0 {
+				continue
+			}
+			retVisited := cloneVisited(visited)
+			roots := t.traceAll(ret.Results[0], retVisited, loopInfo)
+			allRoots = append(allRoots, roots...)
+		}
+	}
+	return allRoots
 }
 
 // traceAll finds ALL possible mutable roots, handling Phi nodes specially.
@@ -1100,8 +1156,29 @@ func (t *RootTracer) traceAll(v ssa.Value, visited map[ssa.Value]bool, loopInfo 
 	case *ssa.FreeVar:
 		return t.traceAllFreeVar(val, visited, loopInfo)
 
+	case *ssa.Call:
+		// Handle closure calls (IIFE) - collect ALL roots from all returns
+		if mc, ok := val.Call.Value.(*ssa.MakeClosure); ok {
+			if closureFn, ok := mc.Fn.(*ssa.Function); ok {
+				if roots := t.traceAllIIFEReturns(closureFn, visited, loopInfo); len(roots) > 0 {
+					// If closure result is stored, treat call itself as root
+					if isClosureResultStored(val) {
+						return []ssa.Value{val}
+					}
+					return roots
+				}
+			}
+		}
+		// Non-closure call - treat as potential root
+		if typeutil.IsGormDB(val.Type()) {
+			return []ssa.Value{val}
+		}
+		return nil
+
 	default:
-		// For non-special cases, delegate to single-root trace
+		// For non-special cases (ChangeType, Extract, etc.), delegate to single-root trace.
+		// Clone visited and remove v to allow trace() to process it.
+		// This is safe because trace() doesn't call back to traceAll(), so no cycle risk.
 		freshVisited := cloneVisited(visited)
 		delete(freshVisited, v)
 		if root := t.trace(v, freshVisited, loopInfo); root != nil {
@@ -1291,6 +1368,95 @@ func (t *RootTracer) isImmutableSource(v ssa.Value) bool {
 func isNilConst(v ssa.Value) bool {
 	c, ok := v.(*ssa.Const)
 	return ok && c.Value == nil
+}
+
+
+// isClosureResultStored checks if a closure call's result is stored in a variable.
+// This happens when the closure returns multiple values and the result is extracted.
+// Example: `publishedQuery, err := closureFunc()` - result goes through Extract.
+// In contrast, IIFE chains like `closure().Find()` use the result directly.
+// isClosureResultStored checks if a closure call's result is stored rather than
+// directly chained to a method call.
+//
+// Returns true (stored) for patterns like:
+//   - `q, err := closureFunc()` (multi-return with Extract)
+//   - `q := closureFunc()` (single-return assigned to variable)
+//   - Result flows into Phi node
+//
+// Returns false (chained) for IIFE patterns like:
+//   - `closureFunc().Find(nil)` (result directly used as method receiver)
+// isClosureResultStored checks if a closure call's result is stored (assigned to
+// a variable) rather than directly chained in an IIFE pattern.
+//
+// Returns true (stored) for patterns like:
+//   - `q, err := closureFunc()` (flows to Extract → stored)
+//   - `q := closureFunc()` (flows to Store/Alloc → stored)
+//   - `if cond { q = closureFunc() }` (flows to Phi → stored)
+//   - `q := closureFunc().Where("x")` (chain eventually stored → stored)
+//
+// Returns false (chained IIFE) for patterns like:
+//   - `closureFunc().Find(nil)` (chain ends with terminal, never stored)
+func isClosureResultStored(call *ssa.Call) bool {
+	return isClosureResultStoredRecursive(call, make(map[*ssa.Call]bool))
+}
+
+func isClosureResultStoredRecursive(call *ssa.Call, visited map[*ssa.Call]bool) bool {
+	if visited[call] {
+		return false
+	}
+	visited[call] = true
+
+	refs := call.Referrers()
+	if refs == nil {
+		return false
+	}
+
+	for _, ref := range *refs {
+		switch user := ref.(type) {
+		case *ssa.Extract:
+			// Multi-return extraction → stored
+			return true
+
+		case *ssa.Phi:
+			// Flows to Phi → stored (conditional assignment)
+			return true
+
+		case *ssa.Store:
+			// Store to Alloc → stored (variable assignment)
+			if _, ok := user.Addr.(*ssa.Alloc); ok {
+				return true
+			}
+
+		case *ssa.MakeInterface:
+			// Value converted to interface{} (e.g., for variadic args) → stored
+			// This happens when passing *gorm.DB to methods with interface{} args
+			return true
+
+		case *ssa.Call:
+			callee := user.Call.StaticCallee()
+			if callee == nil {
+				continue
+			}
+			sig := callee.Signature
+			if sig == nil || sig.Recv() == nil || !typeutil.IsGormDB(sig.Recv().Type()) {
+				continue
+			}
+
+			// Check if our result is receiver of this gorm method
+			if len(user.Call.Args) > 0 && user.Call.Args[0] == call {
+				// Our result is receiver - check if THAT call is stored
+				if isClosureResultStoredRecursive(user, visited) {
+					return true
+				}
+			} else {
+				// Our result is passed as argument (e.g., condition.Or(ourResult))
+				// This is effectively "stored" - the value is consumed by another call
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 // cloneVisited creates a copy of the visited map.

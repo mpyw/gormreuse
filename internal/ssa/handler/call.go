@@ -58,6 +58,24 @@ type Context struct {
 	CurrentFn  *ssa.Function      // The function being analyzed
 }
 
+// unwrapGormDB extracts the *gorm.DB value from an SSA value that may be
+// wrapped in MakeInterface. Returns the value and true if it's a *gorm.DB,
+// otherwise returns nil and false.
+//
+// This is needed because when storing *gorm.DB to interface{} containers
+// (slice, map, channel), SSA wraps the value in MakeInterface first.
+// For example: []interface{}{q} generates MakeInterface(q) -> Store.
+func unwrapGormDB(v ssa.Value) (ssa.Value, bool) {
+	if typeutil.IsGormDB(v.Type()) {
+		return v, true
+	}
+	// Check if v is MakeInterface wrapping *gorm.DB
+	if mi, ok := v.(*ssa.MakeInterface); ok && typeutil.IsGormDB(mi.X.Type()) {
+		return mi.X, true
+	}
+	return nil, false
+}
+
 // CallHandler handles *ssa.Call instructions.
 //
 // This is the most complex handler, covering:
@@ -306,16 +324,14 @@ func (h *CallHandler) processBoundMethodCall(call *ssa.Call, mc *ssa.MakeClosure
 func (h *CallHandler) checkFunctionCallPollution(call *ssa.Call, ctx *Context) {
 	callee := call.Call.StaticCallee()
 
-	if callee != nil {
-		sig := callee.Signature
-		if sig != nil && sig.Recv() != nil && typeutil.IsGormDB(sig.Recv().Type()) {
-			return // This is a gorm method, not a function call
-		}
-
-		if ctx.RootTracer.IsPureFunction(callee) {
-			return
-		}
+	// Check if this is a pure function - pure functions don't pollute args
+	if callee != nil && ctx.RootTracer.IsPureFunction(callee) {
+		return
 	}
+
+	// Note: We don't skip gorm methods here because we need to pollute
+	// *gorm.DB arguments passed through interface{} (e.g., base.Or(q))
+	// The receiver is already handled by recordMutableReceiver.
 
 	// If the function returns *gorm.DB and result is assigned, treat like gorm method assignment.
 	// The assignment creates a new mutable root, so we shouldn't ADD pollution to args.
@@ -324,11 +340,13 @@ func (h *CallHandler) checkFunctionCallPollution(call *ssa.Call, ctx *Context) {
 	isReassignment := typeutil.IsGormDB(call.Type()) && isAssignment(call, ctx)
 
 	for _, arg := range call.Call.Args {
-		if !typeutil.IsGormDB(arg.Type()) {
+		// Check if arg is *gorm.DB (directly or wrapped in MakeInterface)
+		gormArg, ok := unwrapGormDB(arg)
+		if !ok {
 			continue
 		}
 
-		root := ctx.RootTracer.FindMutableRoot(arg, ctx.LoopInfo)
+		root := ctx.RootTracer.FindMutableRoot(gormArg, ctx.LoopInfo)
 		if root == nil {
 			continue
 		}
@@ -384,12 +402,14 @@ func (h *DeferHandler) Handle(d *ssa.Defer, ctx *Context) {
 type SendHandler struct{}
 
 // Handle marks *gorm.DB sent to channels as polluted.
+// Handles both direct sends and sends through MakeInterface (chan interface{}).
 func (h *SendHandler) Handle(send *ssa.Send, ctx *Context) {
-	if !typeutil.IsGormDB(send.X.Type()) {
+	gormVal, ok := unwrapGormDB(send.X)
+	if !ok {
 		return
 	}
 
-	root := ctx.RootTracer.FindMutableRoot(send.X, ctx.LoopInfo)
+	root := ctx.RootTracer.FindMutableRoot(gormVal, ctx.LoopInfo)
 	if root == nil {
 		return
 	}
@@ -401,8 +421,10 @@ func (h *SendHandler) Handle(send *ssa.Send, ctx *Context) {
 type StoreHandler struct{}
 
 // Handle marks *gorm.DB stored to slice elements as polluted.
+// Handles both direct stores and stores through MakeInterface ([]interface{}).
 func (h *StoreHandler) Handle(store *ssa.Store, ctx *Context) {
-	if !typeutil.IsGormDB(store.Val.Type()) {
+	gormVal, ok := unwrapGormDB(store.Val)
+	if !ok {
 		return
 	}
 
@@ -411,7 +433,7 @@ func (h *StoreHandler) Handle(store *ssa.Store, ctx *Context) {
 		return
 	}
 
-	root := ctx.RootTracer.FindMutableRoot(store.Val, ctx.LoopInfo)
+	root := ctx.RootTracer.FindMutableRoot(gormVal, ctx.LoopInfo)
 	if root == nil {
 		return
 	}
@@ -423,12 +445,14 @@ func (h *StoreHandler) Handle(store *ssa.Store, ctx *Context) {
 type MapUpdateHandler struct{}
 
 // Handle marks *gorm.DB stored in maps as polluted.
+// Handles both direct stores and stores through MakeInterface (map[K]interface{}).
 func (h *MapUpdateHandler) Handle(mapUpdate *ssa.MapUpdate, ctx *Context) {
-	if !typeutil.IsGormDB(mapUpdate.Value.Type()) {
+	gormVal, ok := unwrapGormDB(mapUpdate.Value)
+	if !ok {
 		return
 	}
 
-	root := ctx.RootTracer.FindMutableRoot(mapUpdate.Value, ctx.LoopInfo)
+	root := ctx.RootTracer.FindMutableRoot(gormVal, ctx.LoopInfo)
 	if root == nil {
 		return
 	}
@@ -439,18 +463,16 @@ func (h *MapUpdateHandler) Handle(mapUpdate *ssa.MapUpdate, ctx *Context) {
 // MakeInterfaceHandler handles *ssa.MakeInterface instructions.
 type MakeInterfaceHandler struct{}
 
-// Handle marks *gorm.DB converted to interface as polluted.
+// Handle processes *gorm.DB to interface{} conversion.
+// NOTE: Interface conversion itself does NOT pollute the source.
+// It's just a type conversion (ownership transfer), similar to assignment.
+// The source *gorm.DB is only polluted when actually used via:
+// - Type assertion extraction followed by gorm method calls
+// - Function calls that receive the interface{} value
+// Those are handled by their respective handlers.
 func (h *MakeInterfaceHandler) Handle(mi *ssa.MakeInterface, ctx *Context) {
-	if !typeutil.IsGormDB(mi.X.Type()) {
-		return
-	}
-
-	root := ctx.RootTracer.FindMutableRoot(mi.X, ctx.LoopInfo)
-	if root == nil {
-		return
-	}
-
-	ctx.Tracker.MarkPolluted(root, mi.Block(), mi.Pos())
+	// No-op: interface conversion doesn't pollute the source
+	// The value is just wrapped in interface{}, not used.
 }
 
 // pollutionChecker is a function that checks if a root is polluted.

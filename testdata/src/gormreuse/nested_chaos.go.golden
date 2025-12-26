@@ -754,9 +754,9 @@ func chaosPhiCascade(db *gorm.DB, a, b, c, d bool) {
 
 	// Level 3
 	if c {
-		q = q.Where("c1") // want `\*gorm\.DB instance reused after chain method`
+		q = q.Where("c1").Session(&gorm.Session{}) // want `\*gorm\.DB instance reused after chain method`
 	} else {
-		q = q.Where("c2") // want `\*gorm\.DB instance reused after chain method`
+		q = q.Where("c2").Session(&gorm.Session{}) // want `\*gorm\.DB instance reused after chain method`
 		q.First(nil)
 	}
 	// Phi3: q3 = Phi(Phi2.Where, Phi2.Where.polluted)
@@ -944,7 +944,7 @@ func chaosModernSwapConditional(db *gorm.DB, a, b bool) {
 
 // chaosModernSwapLoop demonstrates modern swap syntax in loops.
 func chaosModernSwapLoop(db *gorm.DB, flags []bool) {
-	q1 := db.Where("q1")
+	q1 := db.Where("q1").Session(&gorm.Session{})
 	q2 := db.Where("q2")
 
 	q1.Find(nil) // Pollute q1
@@ -953,7 +953,7 @@ func chaosModernSwapLoop(db *gorm.DB, flags []bool) {
 		if flag {
 			q1, q2 = q2, q1 // Swap back and forth
 		}
-		q1 = q1.Where("extend", flag) // want `\*gorm\.DB instance reused after chain method`
+		q1 = q1.Where("extend", flag).Session(&gorm.Session{}) // want `\*gorm\.DB instance reused after chain method`
 	}
 
 	q1.Count(nil) // want `\*gorm\.DB instance reused after chain method`
@@ -1054,7 +1054,7 @@ func chaosWhereChainAfterPollution(db *gorm.DB, a bool) {
 
 // chaosWhereChainInLoop demonstrates Where chaining in loop without reassignment.
 func chaosWhereChainInLoop(db *gorm.DB, items []string) {
-	q := db.Where("base")
+	q := db.Where("base").Session(&gorm.Session{})
 
 	for _, item := range items {
 		q.Where("item", item).Find(nil) // want `\*gorm\.DB instance reused after chain method`
