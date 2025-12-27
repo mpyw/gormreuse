@@ -57,6 +57,47 @@ func TestIsGormDB(t *testing.T) {
 	if IsGormDB(ptrToStruct) {
 		t.Error("IsGormDB(*struct{}) should return false")
 	}
+
+	// Create gorm package and DB type programmatically
+	gormPkg := types.NewPackage("gorm.io/gorm", "gorm")
+	dbTypeName := types.NewTypeName(0, gormPkg, "DB", nil)
+	dbStruct := types.NewStruct(nil, nil)
+	dbType := types.NewNamed(dbTypeName, dbStruct, nil)
+	gormPkg.Scope().Insert(dbTypeName)
+
+	// Test with *gorm.DB (most common case)
+	dbPtrType := types.NewPointer(dbType)
+	if !IsGormDB(dbPtrType) {
+		t.Error("IsGormDB(*gorm.DB) should return true")
+	}
+
+	// Test with gorm.DB (non-pointer, still dangerous due to *Statement)
+	if !IsGormDB(dbType) {
+		t.Error("IsGormDB(gorm.DB) should return true - non-pointer is still dangerous")
+	}
+
+	// Test with wrong package path (should return false)
+	fakePkg := types.NewPackage("evil.com/fake-gorm.io/gorm", "gorm")
+	fakeTypeName := types.NewTypeName(0, fakePkg, "DB", nil)
+	fakeDBType := types.NewNamed(fakeTypeName, types.NewStruct(nil, nil), nil)
+	fakePkg.Scope().Insert(fakeTypeName)
+	if IsGormDB(types.NewPointer(fakeDBType)) {
+		t.Error("IsGormDB(*fake/gorm.DB) should return false")
+	}
+
+	// Test with **gorm.DB (double pointer) - should return false
+	// ClosureCapturesGormDB handles this case separately
+	dbDoublePtrType := types.NewPointer(dbPtrType)
+	if IsGormDB(dbDoublePtrType) {
+		t.Error("IsGormDB(**gorm.DB) should return false - use ClosureCapturesGormDB for nested pointers")
+	}
+
+	// Test with interface{} - should return false
+	// containsGormDB in directive package handles this case
+	emptyInterface := types.NewInterfaceType(nil, nil).Complete()
+	if IsGormDB(emptyInterface) {
+		t.Error("IsGormDB(interface{}) should return false - use containsGormDB for interface checks")
+	}
 }
 
 func TestIsGormDBNamed(t *testing.T) {
