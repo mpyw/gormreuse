@@ -77,14 +77,14 @@ type signatureValidator func(*types.Signature) bool
 // directive checking (for external packages via source parsing).
 // It also tracks which directives have invalid signatures to report unused directives.
 type DirectiveFuncSet struct {
-	known             map[FuncKey]struct{}
-	fset              *token.FileSet
-	typesInfo         *types.Info            // Type info for signature validation
-	files             map[string]*ast.File   // Original parsed files (from analysis)
-	cache             map[string]*ast.File   // Cache for external files (re-parsed)
-	isDirective       directiveChecker       // Checks if comment is this directive
-	validateSignature signatureValidator     // Checks if signature is valid for this directive
-	invalidDirectives map[token.Pos]struct{} // Directives on functions with invalid signatures
+	known               map[FuncKey]struct{}
+	fset                *token.FileSet
+	typesInfo           *types.Info            // Type info for signature validation
+	files               map[string]*ast.File   // Original parsed files (from analysis)
+	cache               map[string]*ast.File   // Cache for external files (re-parsed)
+	isDirective         directiveChecker       // Checks if comment is this directive
+	validateSignature   signatureValidator     // Checks if signature is valid for this directive
+	invalidDirectives   map[token.Pos]struct{} // Directives on functions with invalid signatures
 	processedDirectives map[token.Pos]struct{} // All directive positions processed by this set
 
 	// Cache for hasCodeBeforeComment results to avoid O(comments * nodes) complexity
@@ -267,7 +267,6 @@ func (s *DirectiveFuncSet) Add(key FuncKey) {
 		s.known[key] = struct{}{}
 	}
 }
-
 
 // GetUnusedDirectives returns the positions of directives on functions with invalid signatures.
 // A directive is "unused" if:
