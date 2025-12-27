@@ -77,6 +77,9 @@ func containsGormDBWithCache(t types.Type, cache map[types.Type]*cacheEntry) boo
 
 	result := false
 	switch typ := underlying.(type) {
+	case *types.Interface:
+		// Any interface type could potentially hold *gorm.DB at runtime
+		result = true
 	case *types.Struct:
 		for i := 0; i < typ.NumFields(); i++ {
 			if containsGormDBWithCache(typ.Field(i).Type(), cache) {

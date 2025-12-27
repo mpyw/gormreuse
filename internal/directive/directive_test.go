@@ -441,6 +441,16 @@ func TestContainsGormDB(t *testing.T) {
 			typ:      types.NewSlice(types.Typ[types.Int]),
 			expected: false,
 		},
+		{
+			name:     "empty interface (interface{})",
+			typ:      types.NewInterfaceType(nil, nil),
+			expected: true,
+		},
+		{
+			name:     "non-empty interface",
+			typ:      types.NewInterfaceType([]*types.Func{types.NewFunc(0, nil, "Method", types.NewSignatureType(nil, nil, nil, nil, nil, false))}, nil),
+			expected: true,
+		},
 	}
 
 	for _, tt := range tests {

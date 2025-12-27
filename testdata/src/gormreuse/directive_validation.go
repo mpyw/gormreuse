@@ -348,7 +348,7 @@ func pureReturningClosure(db *gorm.DB) func() {
 
 // PV213: TypeAssert - extracting *gorm.DB from interface{}
 //
-//gormreuse:pure // want `unused gormreuse:pure directive`
+//gormreuse:pure
 func pureWithTypeAssert(v interface{}) *gorm.DB {
 	if db, ok := v.(*gorm.DB); ok {
 		return db.Session(&gorm.Session{})
@@ -404,7 +404,7 @@ func pureReturnsMapValue(m map[string]*gorm.DB) *gorm.DB {
 // TypeAssert traces through to underlying value (interface{})
 // Since interface{} is not *gorm.DB, returns Clean
 //
-//gormreuse:pure // want `unused gormreuse:pure directive`
+//gormreuse:pure
 func pureReturnsTypeAssertDirect(v interface{}) *gorm.DB {
 	return v.(*gorm.DB) // OK: traces to v (Clean - interface{} not *gorm.DB)
 }
