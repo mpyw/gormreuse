@@ -3,14 +3,19 @@
 // # Overview
 //
 // This package provides utilities to:
-//   - Check if a type is *gorm.DB
+//   - Check if a type is *gorm.DB or gorm.DB
 //   - Identify immutable-returning (pure) GORM methods
 //
 // # Type Detection
 //
-// The IsGormDB function checks if a type is exactly *gorm.io/gorm.DB.
+// The IsGormDB function checks if a type is exactly *gorm.io/gorm.DB or gorm.io/gorm.DB.
+// Both are dangerous because gorm.DB contains *Statement which is shared on copy.
 // It uses exact package path matching to prevent false positives from
 // malicious packages like "evil.com/fake-gorm.io/gorm".
+//
+// Note: Nested pointers (**gorm.DB) and interfaces are handled separately:
+//   - ClosureCapturesGormDB in tracer package handles **gorm.DB from closure captures
+//   - containsGormDB in directive package handles interfaces conservatively
 //
 // # Pure Method Classification
 //
@@ -44,13 +49,19 @@ const (
 // Type Detection
 // =============================================================================
 
-// IsGormDB checks if the given type is *gorm.DB.
+// IsGormDB checks if the given type is *gorm.DB or gorm.DB.
+// Both are dangerous because gorm.DB contains *Statement which is shared on copy.
+//
+// Note: This function does NOT handle nested pointers (**gorm.DB) or interfaces.
+// For nested pointers in closure captures, see ClosureCapturesGormDB in tracer package.
+// For conservative checks including interfaces, see containsGormDB in directive package.
 func IsGormDB(t types.Type) bool {
-	ptr, ok := t.(*types.Pointer)
-	if !ok {
-		return false
+	// Check for *gorm.DB (most common case)
+	if ptr, ok := t.(*types.Pointer); ok {
+		return isGormDBNamed(ptr.Elem())
 	}
-	return isGormDBNamed(ptr.Elem())
+	// Check for gorm.DB (non-pointer, still dangerous due to *Statement field)
+	return isGormDBNamed(t)
 }
 
 // isGormDBNamed checks if the type is gorm.DB (named type).

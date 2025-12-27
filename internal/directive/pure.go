@@ -67,16 +67,25 @@ type FuncKey struct {
 // directiveChecker is a function that checks if a comment is a specific directive.
 type directiveChecker func(text string) bool
 
+// signatureValidator checks if a function signature is valid for the directive.
+// For pure: returns true if any parameter contains *gorm.DB
+// For immutable-return: returns true if any return value contains *gorm.DB
+type signatureValidator func(*types.Signature) bool
+
 // DirectiveFuncSet is a generic set of functions matching a directive.
 // It supports both pre-built sets (for current package) and on-demand
 // directive checking (for external packages via source parsing).
-// It also tracks which directives are used to report unused directives.
+// It also tracks which directives have invalid signatures to report unused directives.
 type DirectiveFuncSet struct {
-	known       map[FuncKey]struct{}
-	fset        *token.FileSet
-	files       map[string]*ast.File // Original parsed files (from analysis)
-	cache       map[string]*ast.File // Cache for external files (re-parsed)
-	isDirective directiveChecker
+	known               map[FuncKey]struct{}
+	fset                *token.FileSet
+	typesInfo           *types.Info            // Type info for signature validation
+	files               map[string]*ast.File   // Original parsed files (from analysis)
+	cache               map[string]*ast.File   // Cache for external files (re-parsed)
+	isDirective         directiveChecker       // Checks if comment is this directive
+	validateSignature   signatureValidator     // Checks if signature is valid for this directive
+	invalidDirectives   map[token.Pos]struct{} // Directives on functions with invalid signatures
+	processedDirectives map[token.Pos]struct{} // All directive positions processed by this set
 
 	// Cache for hasCodeBeforeComment results to avoid O(comments * nodes) complexity
 	codeBeforeCommentCache map[*ast.File]map[token.Pos]bool
@@ -84,9 +93,6 @@ type DirectiveFuncSet struct {
 	funcLitLinesCache map[*ast.File]map[int]bool
 	// Cache for ast/inspector to avoid repeated traversal setup
 	inspectorCache map[*ast.File]*inspector.Inspector
-	// Tracking for unused directive detection
-	allDirectives  map[token.Pos]struct{} // All directive positions in current package
-	usedDirectives map[token.Pos]struct{} // Directives that were actually used
 }
 
 // Node type filters for inspector
@@ -95,19 +101,21 @@ var (
 	funcLitTypes  = []ast.Node{(*ast.FuncLit)(nil)}
 )
 
-// newDirectiveFuncSet creates a new DirectiveFuncSet with the given directive checker.
-func newDirectiveFuncSet(fset *token.FileSet, isDirective directiveChecker) *DirectiveFuncSet {
+// newDirectiveFuncSet creates a new DirectiveFuncSet with the given directive checker and signature validator.
+func newDirectiveFuncSet(fset *token.FileSet, typesInfo *types.Info, isDirective directiveChecker, validateSignature signatureValidator) *DirectiveFuncSet {
 	return &DirectiveFuncSet{
 		known:                  make(map[FuncKey]struct{}),
 		fset:                   fset,
+		typesInfo:              typesInfo,
 		files:                  make(map[string]*ast.File),
 		cache:                  make(map[string]*ast.File),
 		isDirective:            isDirective,
+		validateSignature:      validateSignature,
+		invalidDirectives:      make(map[token.Pos]struct{}),
+		processedDirectives:    make(map[token.Pos]struct{}),
 		codeBeforeCommentCache: make(map[*ast.File]map[token.Pos]bool),
 		funcLitLinesCache:      make(map[*ast.File]map[int]bool),
 		inspectorCache:         make(map[*ast.File]*inspector.Inspector),
-		allDirectives:          make(map[token.Pos]struct{}),
-		usedDirectives:         make(map[token.Pos]struct{}),
 	}
 }
 
@@ -136,34 +144,121 @@ func (s *DirectiveFuncSet) AddFile(file *ast.File) {
 	s.collectDirectivePositions(file)
 }
 
-// collectDirectivePositions scans a file for all directives and records their positions.
+// collectDirectivePositions scans a file for all directives and validates their signatures.
+// Directives on functions with invalid signatures are added to invalidDirectives.
 func (s *DirectiveFuncSet) collectDirectivePositions(file *ast.File) {
-	if s == nil || s.allDirectives == nil {
+	if s == nil || s.invalidDirectives == nil {
 		return
 	}
 
-	// Scan all comments in the file
-	for _, cg := range file.Comments {
-		for _, c := range cg.List {
-			if s.isDirective(c.Text) {
-				s.allDirectives[c.Pos()] = struct{}{}
-			}
-		}
-	}
-
-	// Also check FuncDecl doc comments (they may not be in file.Comments)
 	insp := s.getInspector(file)
+
+	// Check FuncDecl doc comments and same-line comments
 	insp.Preorder(funcDeclTypes, func(n ast.Node) {
 		fd := n.(*ast.FuncDecl)
-		if fd.Doc == nil {
-			return
+
+		// Check doc comments (next-line pattern)
+		if fd.Doc != nil {
+			for _, c := range fd.Doc.List {
+				if s.isDirective(c.Text) {
+					s.processedDirectives[c.Pos()] = struct{}{}
+					if !s.validateFuncDeclSignature(fd) {
+						s.invalidDirectives[c.Pos()] = struct{}{}
+					}
+				}
+			}
 		}
-		for _, c := range fd.Doc.List {
-			if s.isDirective(c.Text) {
-				s.allDirectives[c.Pos()] = struct{}{}
+
+		// Check same-line pattern (after opening brace)
+		if pos := s.findDirectiveAfterFuncDeclBrace(fd); pos.IsValid() {
+			s.processedDirectives[pos] = struct{}{}
+			if !s.validateFuncDeclSignature(fd) {
+				s.invalidDirectives[pos] = struct{}{}
 			}
 		}
 	})
+
+	// Check FuncLit directives (next-line and same-line patterns)
+	insp.Preorder(funcLitTypes, func(n ast.Node) {
+		fl := n.(*ast.FuncLit)
+		if pos := s.findDirectiveForFuncLit(fl); pos.IsValid() {
+			s.processedDirectives[pos] = struct{}{}
+			if !s.validateFuncLitSignature(fl) {
+				s.invalidDirectives[pos] = struct{}{}
+			}
+		}
+	})
+
+	// Find orphan directives (not associated with any function)
+	// These are always invalid
+	associatedDirectives := make(map[token.Pos]bool)
+
+	// Collect all directive positions that are associated with functions
+	insp.Preorder(funcDeclTypes, func(n ast.Node) {
+		fd := n.(*ast.FuncDecl)
+		if fd.Doc != nil {
+			for _, c := range fd.Doc.List {
+				if s.isDirective(c.Text) {
+					associatedDirectives[c.Pos()] = true
+				}
+			}
+		}
+		if pos := s.findDirectiveAfterFuncDeclBrace(fd); pos.IsValid() {
+			associatedDirectives[pos] = true
+		}
+	})
+	insp.Preorder(funcLitTypes, func(n ast.Node) {
+		fl := n.(*ast.FuncLit)
+		if pos := s.findDirectiveForFuncLit(fl); pos.IsValid() {
+			associatedDirectives[pos] = true
+		}
+	})
+
+	// Mark all non-associated directives as invalid
+	for _, cg := range file.Comments {
+		for _, c := range cg.List {
+			if s.isDirective(c.Text) && !associatedDirectives[c.Pos()] {
+				s.processedDirectives[c.Pos()] = struct{}{}
+				s.invalidDirectives[c.Pos()] = struct{}{}
+			}
+		}
+	}
+}
+
+// validateFuncDeclSignature checks if a FuncDecl has a valid signature for this directive.
+func (s *DirectiveFuncSet) validateFuncDeclSignature(fd *ast.FuncDecl) bool {
+	if s.typesInfo == nil || s.validateSignature == nil {
+		return true // Can't validate without type info, assume valid
+	}
+	obj := s.typesInfo.ObjectOf(fd.Name)
+	if obj == nil {
+		return true
+	}
+	fn, ok := obj.(*types.Func)
+	if !ok {
+		return true
+	}
+	sig, ok := fn.Type().(*types.Signature)
+	if !ok {
+		return true
+	}
+	return s.validateSignature(sig)
+}
+
+// validateFuncLitSignature checks if a FuncLit has a valid signature for this directive.
+func (s *DirectiveFuncSet) validateFuncLitSignature(fl *ast.FuncLit) bool {
+	if s.typesInfo == nil || s.validateSignature == nil {
+		return true // Can't validate without type info, assume valid
+	}
+	tv, ok := s.typesInfo.Types[fl]
+	if !ok {
+		return true
+	}
+	sig, ok := tv.Type.(*types.Signature)
+	if !ok {
+		return true
+	}
+	return s.validateSignature(sig)
 }
 
 // Add adds a function key to the set.
@@ -173,42 +268,40 @@ func (s *DirectiveFuncSet) Add(key FuncKey) {
 	}
 }
 
-// markUsed marks a directive at the given position as used.
-func (s *DirectiveFuncSet) markUsed(pos token.Pos) {
-	if s != nil && s.usedDirectives != nil && pos.IsValid() {
-		s.usedDirectives[pos] = struct{}{}
-	}
-}
-
-// GetUnusedDirectives returns the positions of directives that were not used.
-// This should be called after all SSA analysis is complete.
+// GetUnusedDirectives returns the positions of directives on functions with invalid signatures.
+// A directive is "unused" if:
+//   - For pure: the function has no *gorm.DB in its parameters
+//   - For immutable-return: the function has no *gorm.DB in its return values
 func (s *DirectiveFuncSet) GetUnusedDirectives() []token.Pos {
-	if s == nil || s.allDirectives == nil || s.usedDirectives == nil {
+	if s == nil || s.invalidDirectives == nil {
 		return nil
 	}
 
 	var unused []token.Pos
-	for pos := range s.allDirectives {
-		if _, used := s.usedDirectives[pos]; !used {
-			unused = append(unused, pos)
-		}
+	for pos := range s.invalidDirectives {
+		unused = append(unused, pos)
 	}
 	return unused
 }
 
-// IsUsed returns true if the directive at the given position was used.
+// IsUsed returns true if the directive at the given position has a valid signature.
 // This is used for combined directive handling (e.g., //gormreuse:pure,immutable-return)
-// where if one directive type uses a position, the other shouldn't report it as unused.
+// where if one directive type is valid, the other shouldn't report it as unused.
 func (s *DirectiveFuncSet) IsUsed(pos token.Pos) bool {
-	if s == nil || s.usedDirectives == nil {
+	if s == nil || s.processedDirectives == nil {
 		return false
 	}
-	_, used := s.usedDirectives[pos]
-	return used
+	// First check if this directive was processed by this set
+	// (i.e., it matches our isDirective check)
+	if _, processed := s.processedDirectives[pos]; !processed {
+		return false
+	}
+	// Directive is "used" (valid) if it's NOT in invalidDirectives
+	_, invalid := s.invalidDirectives[pos]
+	return !invalid
 }
 
 // Contains checks if the given SSA function is in the set or has the directive.
-// If found, it marks the directive as used for unused detection.
 func (s *DirectiveFuncSet) Contains(fn *ssa.Function) bool {
 	if fn == nil {
 		return false
@@ -224,8 +317,6 @@ func (s *DirectiveFuncSet) Contains(fn *ssa.Function) bool {
 			key.ReceiverType = formatReceiverType(sig.Recv().Type())
 		}
 		if _, exists := s.known[key]; exists {
-			// Mark the directive as used (find and mark the position)
-			s.markDirectiveUsed(fn)
 			return true
 		}
 	}
@@ -234,37 +325,7 @@ func (s *DirectiveFuncSet) Contains(fn *ssa.Function) bool {
 	return s.hasDirective(fn)
 }
 
-// markDirectiveUsed finds the directive position for a function and marks it as used.
-// This is called when a function from the pre-built set is accessed.
-func (s *DirectiveFuncSet) markDirectiveUsed(fn *ssa.Function) {
-	if fn == nil {
-		return
-	}
-
-	switch syntax := fn.Syntax().(type) {
-	case *ast.FuncDecl:
-		// Check Doc comments first
-		if syntax.Doc != nil {
-			for _, c := range syntax.Doc.List {
-				if s.isDirective(c.Text) {
-					s.markUsed(c.Pos())
-					return
-				}
-			}
-		}
-		// Check same-line pattern
-		if pos := s.findDirectiveAfterFuncDeclBrace(syntax); pos.IsValid() {
-			s.markUsed(pos)
-		}
-	case *ast.FuncLit:
-		if pos := s.findDirectiveForFuncLit(syntax); pos.IsValid() {
-			s.markUsed(pos)
-		}
-	}
-}
-
 // hasDirective checks if an SSA function has the directive.
-// If found, it marks the directive as used.
 func (s *DirectiveFuncSet) hasDirective(fn *ssa.Function) bool {
 	if fn == nil {
 		return false
@@ -277,21 +338,18 @@ func (s *DirectiveFuncSet) hasDirective(fn *ssa.Function) bool {
 		if syntax.Doc != nil {
 			for _, c := range syntax.Doc.List {
 				if s.isDirective(c.Text) {
-					s.markUsed(c.Pos())
 					return true
 				}
 			}
 		}
 		// Check same-line pattern (after opening brace)
 		if pos := s.findDirectiveAfterFuncDeclBrace(syntax); pos.IsValid() {
-			s.markUsed(pos)
 			return true
 		}
 	case *ast.FuncLit:
 		// Closures don't have Doc comments in Go, so we look for comments
 		// immediately before or after the opening brace.
 		if pos := s.findDirectiveForFuncLit(syntax); pos.IsValid() {
-			s.markUsed(pos)
 			return true
 		}
 	}
@@ -858,13 +916,15 @@ func (s *DirectiveFuncSet) hasDirectiveInFile(file *ast.File, funcName, receiver
 }
 
 // NewPureFuncSet creates a DirectiveFuncSet for //gormreuse:pure.
-func NewPureFuncSet(fset *token.FileSet) *DirectiveFuncSet {
-	return newDirectiveFuncSet(fset, IsPureDirective)
+// The typesInfo parameter is used to validate that functions have *gorm.DB parameters.
+func NewPureFuncSet(fset *token.FileSet, typesInfo *types.Info) *DirectiveFuncSet {
+	return newDirectiveFuncSet(fset, typesInfo, IsPureDirective, hasGormDBParameter)
 }
 
 // NewImmutableReturnFuncSet creates a DirectiveFuncSet for //gormreuse:immutable-return.
-func NewImmutableReturnFuncSet(fset *token.FileSet) *DirectiveFuncSet {
-	return newDirectiveFuncSet(fset, IsImmutableReturnDirective)
+// The typesInfo parameter is used to validate that functions return *gorm.DB.
+func NewImmutableReturnFuncSet(fset *token.FileSet, typesInfo *types.Info) *DirectiveFuncSet {
+	return newDirectiveFuncSet(fset, typesInfo, IsImmutableReturnDirective, hasGormDBReturn)
 }
 
 // BuildPureFunctionSet builds a set of functions marked with //gormreuse:pure.

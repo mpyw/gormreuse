@@ -1473,19 +1473,35 @@ func cloneVisited(visited map[ssa.Value]bool) map[ssa.Value]bool {
 // Used to determine if a closure needs recursive analysis. A closure
 // that doesn't capture *gorm.DB can be skipped for efficiency.
 //
-// Checks both direct *gorm.DB and **gorm.DB (pointer to pointer).
+// Recursively checks pointer chains: *gorm.DB, **gorm.DB, ***gorm.DB, etc.
 func ClosureCapturesGormDB(mc *ssa.MakeClosure) bool {
 	for _, binding := range mc.Bindings {
-		t := binding.Type()
-		if typeutil.IsGormDB(t) {
+		if containsGormDBThroughPointers(binding.Type()) {
 			return true
 		}
-		// Check **gorm.DB (pointer to pointer, from captured variables)
-		if ptr, ok := t.(*types.Pointer); ok {
-			if typeutil.IsGormDB(ptr.Elem()) {
-				return true
-			}
-		}
 	}
+	return false
+}
+
+// containsGormDBThroughPointers checks if a type contains *gorm.DB through pointer chain.
+// It recursively unwraps pointers: *gorm.DB, **gorm.DB, ***gorm.DB, etc.
+// Unlike containsGormDB in directive package, this does NOT check:
+//   - interface{} (would cause false positives in SSA analysis)
+//   - struct fields, slices, maps, channels (SSA handles these differently)
+func containsGormDBThroughPointers(t types.Type) bool {
+	if t == nil {
+		return false
+	}
+
+	// Direct *gorm.DB or gorm.DB check
+	if typeutil.IsGormDB(t) {
+		return true
+	}
+
+	// Unwrap pointer and check recursively
+	if ptr, ok := t.(*types.Pointer); ok {
+		return containsGormDBThroughPointers(ptr.Elem())
+	}
+
 	return false
 }

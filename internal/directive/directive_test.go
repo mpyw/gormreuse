@@ -4,6 +4,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"go/types"
 	"testing"
 )
 
@@ -316,5 +317,201 @@ func TestExprToStringUnknown(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+func TestExprToStringGeneric(t *testing.T) {
+	tests := []struct {
+		name     string
+		src      string
+		expected string
+	}{
+		{
+			name:     "single type parameter",
+			src:      `package test; func (r Generic[T]) m() {}`,
+			expected: "Generic",
+		},
+		{
+			name:     "single type parameter pointer",
+			src:      `package test; func (r *Generic[T]) m() {}`,
+			expected: "*Generic",
+		},
+		{
+			name:     "multiple type parameters",
+			src:      `package test; func (r Generic[T, U]) m() {}`,
+			expected: "Generic",
+		},
+		{
+			name:     "multiple type parameters pointer",
+			src:      `package test; func (r *Generic[T, U]) m() {}`,
+			expected: "*Generic",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fset := token.NewFileSet()
+			file, err := parser.ParseFile(fset, "test.go", tt.src, 0)
+			if err != nil {
+				t.Fatalf("Failed to parse: %v", err)
+			}
+
+			for _, decl := range file.Decls {
+				if fn, ok := decl.(*ast.FuncDecl); ok {
+					if fn.Recv != nil && len(fn.Recv.List) > 0 {
+						got := exprToString(fn.Recv.List[0].Type)
+						if got != tt.expected {
+							t.Errorf("exprToString() = %q, want %q", got, tt.expected)
+						}
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestContainsGormDB(t *testing.T) {
+	// Create packages programmatically to avoid gorm.io/gorm dependency
+	// First, create a mock gorm.io/gorm package with DB type
+	gormPkg := types.NewPackage("gorm.io/gorm", "gorm")
+	dbTypeName := types.NewTypeName(0, gormPkg, "DB", nil)
+	dbStruct := types.NewStruct(nil, nil)
+	dbType := types.NewNamed(dbTypeName, dbStruct, nil)
+	gormPkg.Scope().Insert(dbTypeName)
+	dbPtrType := types.NewPointer(dbType)
+
+	// Create test types
+	tests := []struct {
+		name     string
+		typ      types.Type
+		expected bool
+	}{
+		{
+			name:     "direct *gorm.DB",
+			typ:      dbPtrType,
+			expected: true,
+		},
+		{
+			name:     "direct gorm.DB (non-pointer, still dangerous)",
+			typ:      dbType,
+			expected: true,
+		},
+		{
+			name:     "struct with *gorm.DB field",
+			typ:      types.NewStruct([]*types.Var{types.NewField(0, nil, "db", dbPtrType, false)}, nil),
+			expected: true,
+		},
+		{
+			name:     "struct without *gorm.DB field",
+			typ:      types.NewStruct([]*types.Var{types.NewField(0, nil, "name", types.Typ[types.String], false)}, nil),
+			expected: false,
+		},
+		{
+			name:     "slice of *gorm.DB",
+			typ:      types.NewSlice(dbPtrType),
+			expected: true,
+		},
+		{
+			name:     "array of *gorm.DB",
+			typ:      types.NewArray(dbPtrType, 2),
+			expected: true,
+		},
+		{
+			name:     "map with *gorm.DB value",
+			typ:      types.NewMap(types.Typ[types.String], dbPtrType),
+			expected: true,
+		},
+		{
+			name:     "map with *gorm.DB key",
+			typ:      types.NewMap(dbPtrType, types.Typ[types.String]),
+			expected: true,
+		},
+		{
+			name:     "chan of *gorm.DB",
+			typ:      types.NewChan(types.SendRecv, dbPtrType),
+			expected: true,
+		},
+		{
+			name:     "pointer to struct with *gorm.DB",
+			typ:      types.NewPointer(types.NewStruct([]*types.Var{types.NewField(0, nil, "db", dbPtrType, false)}, nil)),
+			expected: true,
+		},
+		{
+			name:     "simple int",
+			typ:      types.Typ[types.Int],
+			expected: false,
+		},
+		{
+			name:     "slice of int",
+			typ:      types.NewSlice(types.Typ[types.Int]),
+			expected: false,
+		},
+		{
+			name:     "empty interface (interface{})",
+			typ:      types.NewInterfaceType(nil, nil),
+			expected: true,
+		},
+		{
+			name:     "non-empty interface",
+			typ:      types.NewInterfaceType([]*types.Func{types.NewFunc(0, nil, "Method", types.NewSignatureType(nil, nil, nil, nil, nil, false))}, nil),
+			expected: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := containsGormDB(tt.typ)
+			if got != tt.expected {
+				t.Errorf("containsGormDB(%s) = %v, want %v", tt.name, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestContainsGormDBDefinedType(t *testing.T) {
+	// Create gorm package
+	gormPkg := types.NewPackage("gorm.io/gorm", "gorm")
+	dbTypeName := types.NewTypeName(0, gormPkg, "DB", nil)
+	dbStruct := types.NewStruct(nil, nil)
+	dbType := types.NewNamed(dbTypeName, dbStruct, nil)
+	gormPkg.Scope().Insert(dbTypeName)
+	dbPtrType := types.NewPointer(dbType)
+
+	// Create a defined type like `type DefinedDB *gorm.DB`
+	testPkg := types.NewPackage("test", "test")
+	definedTypeName := types.NewTypeName(0, testPkg, "DefinedDB", nil)
+	definedType := types.NewNamed(definedTypeName, dbPtrType, nil)
+
+	if !containsGormDB(definedType) {
+		t.Error("containsGormDB(DefinedDB) should return true for type DefinedDB *gorm.DB")
+	}
+}
+
+func TestContainsGormDBNilType(t *testing.T) {
+	// Test nil type
+	if containsGormDB(nil) {
+		t.Error("containsGormDB(nil) should return false")
+	}
+}
+
+func TestContainsGormDBCycleDetection(t *testing.T) {
+	// Test cycle detection with recursive types using programmatic type creation
+	testPkg := types.NewPackage("test", "test")
+
+	// Create a recursive type: type Recursive struct { self *Recursive; name string }
+	recursiveTypeName := types.NewTypeName(0, testPkg, "Recursive", nil)
+	recursiveStruct := types.NewStruct(nil, nil) // placeholder
+	recursiveType := types.NewNamed(recursiveTypeName, recursiveStruct, nil)
+
+	// Now create the actual struct with the pointer to itself
+	selfField := types.NewField(0, testPkg, "self", types.NewPointer(recursiveType), false)
+	nameField := types.NewField(0, testPkg, "name", types.Typ[types.String], false)
+	actualStruct := types.NewStruct([]*types.Var{selfField, nameField}, nil)
+	recursiveType.SetUnderlying(actualStruct)
+
+	// Should not panic and should return false (no *gorm.DB)
+	got := containsGormDB(recursiveType)
+	if got {
+		t.Error("containsGormDB(Recursive) should return false")
 	}
 }

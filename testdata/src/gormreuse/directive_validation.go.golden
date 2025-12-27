@@ -152,7 +152,7 @@ func pureReturnsPureFuncResult(db *gorm.DB) *gorm.DB {
 
 // PV109: Pure function without *gorm.DB argument
 //
-//gormreuse:pure
+//gormreuse:pure // want `unused gormreuse:pure directive`
 func pureNoGormArg(x int) int {
 	return x * 2 // OK: no *gorm.DB involved
 }
@@ -511,7 +511,7 @@ func pureCallsWithDefinedType(db DefinedDB) *gorm.DB {
 // PV230: Tests inferPureUserFuncCall with no gorm.DB args
 // The pure helper is called but returns Clean (no deps)
 //
-//gormreuse:pure
+//gormreuse:pure // want `unused gormreuse:pure directive`
 func pureCallsNoGormArgs() int {
 	return pureNoGormArgHelper(42) // Pure function with no *gorm.DB args
 }
@@ -528,7 +528,7 @@ func pureCallsWithDependsArg(db *gorm.DB) *gorm.DB {
 // PV232: Tests inferCall path where function has no *gorm.DB args
 // This should return Clean in the "no *gorm.DB args" branch
 //
-//gormreuse:pure
+//gormreuse:pure // want `unused gormreuse:pure directive`
 func pureCallsRegularFunc() int {
 	return regularHelper(42) // Non-pure function but no *gorm.DB args
 }
@@ -582,7 +582,7 @@ func tupleReturner(db *gorm.DB) (*gorm.DB, error) {
 
 // pureNoGormArgHelper is a pure function with no *gorm.DB args
 //
-//gormreuse:pure
+//gormreuse:pure // want `unused gormreuse:pure directive`
 func pureNoGormArgHelper(x int) int {
 	return x * 2
 }

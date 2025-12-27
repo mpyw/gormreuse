@@ -354,7 +354,7 @@ func pureFunctionWithReturn(db *gorm.DB) {
 // pureFactoryFunction is a pure function that returns a new *gorm.DB without
 // taking *gorm.DB as argument. This simulates a DB factory/wrapper.
 //
-//gormreuse:pure
+//gormreuse:pure // want `unused gormreuse:pure directive`
 func pureFactoryFunction() *gorm.DB {
 	return DB.WithContext(nil) // Returns immutable
 }
@@ -2555,7 +2555,7 @@ type OrmWrapper struct{}
 
 // GetDB is a pure method that returns a new *gorm.DB.
 //
-//gormreuse:pure
+//gormreuse:pure // want `unused gormreuse:pure directive`
 func (o *OrmWrapper) GetDB() *gorm.DB {
 	return DB.WithContext(nil)
 }
