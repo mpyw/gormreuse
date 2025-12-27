@@ -58,7 +58,6 @@ go run github.com/mpyw/gormreuse/cmd/gormreuse@latest ./...
 
 > [!CAUTION]
 > To prevent supply chain attacks, pin to a specific version tag instead of `@latest` in CI/CD pipelines (e.g., `@v0.13.1`).
-> All versions prior to v0.11.0 and v0.13.0 have been retracted due to critical bugs.
 
 ## Flags
 
