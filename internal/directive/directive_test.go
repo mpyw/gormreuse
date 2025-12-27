@@ -392,6 +392,11 @@ func TestContainsGormDB(t *testing.T) {
 			expected: true,
 		},
 		{
+			name:     "direct gorm.DB (non-pointer, still dangerous)",
+			typ:      dbType,
+			expected: true,
+		},
+		{
 			name:     "struct with *gorm.DB field",
 			typ:      types.NewStruct([]*types.Var{types.NewField(0, nil, "db", dbPtrType, false)}, nil),
 			expected: true,

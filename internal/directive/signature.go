@@ -104,19 +104,30 @@ func containsGormDBWithCache(t types.Type, cache map[types.Type]*cacheEntry) boo
 	return result
 }
 
-// isGormDB checks if a type is exactly *gorm.DB.
+// isGormDB checks if a type is *gorm.DB or gorm.DB.
+// Both are dangerous because gorm.DB contains *Statement which is shared on copy.
 func isGormDB(t types.Type) bool {
-	ptr, ok := t.(*types.Pointer)
-	if !ok {
-		return false
+	// Check for *gorm.DB
+	if ptr, ok := t.(*types.Pointer); ok {
+		if named, ok := ptr.Elem().(*types.Named); ok {
+			obj := named.Obj()
+			if obj != nil && obj.Pkg() != nil {
+				if obj.Name() == "DB" && obj.Pkg().Path() == "gorm.io/gorm" {
+					return true
+				}
+			}
+		}
 	}
-	named, ok := ptr.Elem().(*types.Named)
-	if !ok {
-		return false
+
+	// Check for gorm.DB (non-pointer, but still dangerous due to *Statement field)
+	if named, ok := t.(*types.Named); ok {
+		obj := named.Obj()
+		if obj != nil && obj.Pkg() != nil {
+			if obj.Name() == "DB" && obj.Pkg().Path() == "gorm.io/gorm" {
+				return true
+			}
+		}
 	}
-	obj := named.Obj()
-	if obj == nil || obj.Pkg() == nil {
-		return false
-	}
-	return obj.Name() == "DB" && obj.Pkg().Path() == "gorm.io/gorm"
+
+	return false
 }
