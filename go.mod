@@ -16,3 +16,7 @@ require (
 //   * Same violation reported multiple times when closures access parent scope variables
 //   * Fix generator produced invalid code like "tx = require.NoError(...)" for non-GORM wrappers
 retract [v0.1.0, v0.10.2]
+
+// - v0.13.0: Incorrect unused directive detection logic (#51)
+//   * //gormreuse:pure and //gormreuse:immutable-return incorrectly reported as unused
+retract v0.13.0
