@@ -50,6 +50,7 @@ func TestGenerateDiffFiles(t *testing.T) {
 		"nested_chaos.go",
 		"interface_patterns.go",
 		"closure_loop.go",
+		"closure_directive.go",
 	}
 
 	for _, filename := range testFiles {
@@ -192,6 +193,7 @@ func TestDiffFilesUpToDate(t *testing.T) {
 		"nested_chaos.go",
 		"interface_patterns.go",
 		"closure_loop.go",
+		"closure_directive.go",
 	}
 
 	for _, filename := range testFiles {

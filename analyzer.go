@@ -83,6 +83,10 @@ func run(pass *analysis.Pass) (any, error) {
 		ignoreMaps[filename] = directive.BuildIgnoreMap(pass.Fset, file)
 		funcIgnores[filename] = directive.BuildFunctionIgnoreSet(pass.Fset, file)
 
+		// Add original file to sets (for position-correct directive detection)
+		pureFuncs.AddFile(file)
+		immutableReturnFuncs.AddFile(file)
+
 		// Build pure function set for this file
 		for key := range directive.BuildPureFunctionSet(file, pkgPath) {
 			pureFuncs.Add(key)

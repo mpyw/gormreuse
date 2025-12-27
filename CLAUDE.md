@@ -60,12 +60,29 @@ The linter detects when a mutable `*gorm.DB` branches into multiple code paths:
 ### Directives
 
 - `//gormreuse:ignore` - Suppress warnings for the next line or same line
-- `//gormreuse:pure` - Mark function/method as not polluting its `*gorm.DB` argument
-- `//gormreuse:immutable-return` - Mark function/method as returning immutable `*gorm.DB` (like Session/WithContext)
+- `//gormreuse:pure` - Mark function/method/closure as not polluting its `*gorm.DB` argument
+- `//gormreuse:immutable-return` - Mark function/method/closure as returning immutable `*gorm.DB` (like Session/WithContext)
 
 Directives can be combined with commas: `//gormreuse:pure,immutable-return`
 
 Trailing comments use `//`: `//gormreuse:ignore // reason here`
+
+**Directive placement for closures:**
+
+```go
+// Next-line pattern (before closure):
+//gormreuse:pure
+helper := func(q *gorm.DB) { ... }
+
+// Same-line pattern (after opening brace):
+helper := func(q *gorm.DB) { //gormreuse:pure
+    ...
+}
+
+// Multi-assignment (all direct closures get the directive):
+//gormreuse:pure
+a, b := func(q *gorm.DB) { _ = q }, func(q *gorm.DB) { _ = q }
+```
 
 > **Important**: User-defined functions that accept `*gorm.DB` are treated as polluting **unless** the function returns `*gorm.DB` and the result is assigned (e.g., `q = helper(q)`). In that case, it's treated like a gorm method assignment. Use `//gormreuse:pure` to mark functions that don't pollute arguments even when result is discarded, and `//gormreuse:immutable-return` to mark functions whose return value can be safely reused (like DB connection helpers).
 

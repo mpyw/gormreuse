@@ -1,6 +1,6 @@
 --- directive_validation.go	1970-01-01 00:00:00
 +++ directive_validation.go.golden	1970-01-01 00:00:00
-@@ -1,900 +1,900 @@
+@@ -1,992 +1,992 @@
  package internal
  
  import "gorm.io/gorm"
@@ -896,6 +896,98 @@
  	result.Where("x").Find(nil)
  	result.Where("y").Find(nil) // OK: returns immutable
  	db.Find(nil)                // OK: db not polluted
+ }
+ 
+ // =============================================================================
+ // MULTI-LINE DIRECTIVE COMBINATIONS (FuncDecl)
+ //
+ // Tests for directives on separate lines for named functions.
+ // =============================================================================
+ 
+ // PIR301: pure and immutable-return on separate lines (FuncDecl)
+ //
+ //gormreuse:pure
+ //gormreuse:immutable-return
+ func multiLinePureImmutable(db *gorm.DB) *gorm.DB {
+ 	return db.Session(&gorm.Session{})
+ }
+ 
+ func useMultiLinePureImmutable(db *gorm.DB) {
+ 	result := multiLinePureImmutable(db)
+ 	result.Where("x").Find(nil)
+ 	result.Where("y").Find(nil) // OK: returns immutable
+ 	db.Find(nil)                // OK: db not polluted (pure)
+ }
+ 
+ // PIR302: pure and immutable-return with unrelated comment in between (FuncDecl)
+ //
+ //gormreuse:pure
+ // This is an unrelated comment
+ //gormreuse:immutable-return
+ func multiLinePureImmutableWithComment(db *gorm.DB) *gorm.DB {
+ 	return db.Session(&gorm.Session{})
+ }
+ 
+ func useMultiLinePureImmutableWithComment(db *gorm.DB) {
+ 	result := multiLinePureImmutableWithComment(db)
+ 	result.Where("x").Find(nil)
+ 	result.Where("y").Find(nil) // OK: returns immutable
+ 	db.Find(nil)                // OK: db not polluted (pure)
+ }
+ 
+ // PIR303: directives with trailing comments (FuncDecl)
+ //
+ //gormreuse:pure // marks as pure
+ //gormreuse:immutable-return // marks return as immutable
+ func multiLineWithTrailing(db *gorm.DB) *gorm.DB {
+ 	return db.Session(&gorm.Session{})
+ }
+ 
+ func useMultiLineWithTrailing(db *gorm.DB) {
+ 	result := multiLineWithTrailing(db)
+ 	result.Where("x").Find(nil)
+ 	result.Where("y").Find(nil) // OK: returns immutable
+ 	db.Find(nil)                // OK: db not polluted (pure)
+ }
+ 
+ // =============================================================================
+ // SAME-LINE DIRECTIVE (FuncDecl)
+ //
+ // Tests for directives after opening brace on same line for named functions.
+ // =============================================================================
+ 
+ // PIR401: pure directive after opening brace (FuncDecl)
+ func sameLinePure(db *gorm.DB) { //gormreuse:pure
+ 	_ = db
+ }
+ 
+ func useSameLinePure(db *gorm.DB) {
+ 	q := db.Where("x")
+ 	sameLinePure(q)
+ 	q.Find(nil) // OK: sameLinePure is pure
+ }
+ 
+ // PIR402: immutable-return directive after opening brace (FuncDecl)
+ func sameLineImmutableReturn(db *gorm.DB) *gorm.DB { //gormreuse:immutable-return
+ 	return db.Session(&gorm.Session{})
+ }
+ 
+ func useSameLineImmutableReturn(db *gorm.DB) {
+ 	result := sameLineImmutableReturn(db)
+ 	result.Where("x").Find(nil)
+ 	result.Where("y").Find(nil) // OK: returns immutable
+ }
+ 
+ // PIR403: combined directive after opening brace (FuncDecl)
+ func sameLinePureImmutable(db *gorm.DB) *gorm.DB { //gormreuse:pure,immutable-return
+ 	return db.Session(&gorm.Session{})
+ }
+ 
+ func useSameLinePureImmutable(db *gorm.DB) {
+ 	result := sameLinePureImmutable(db)
+ 	result.Where("x").Find(nil)
+ 	result.Where("y").Find(nil) // OK: returns immutable
+ 	db.Find(nil)                // OK: db not polluted (pure)
  }
  
  // =============================================================================

@@ -1013,7 +1013,6 @@ func (t *RootTracer) traceIIFEReturns(fn *ssa.Function, visited map[ssa.Value]bo
 	return nil
 }
 
-
 // traceAllIIFEReturns is the multi-root version of traceIIFEReturns.
 // It collects roots from ALL return statements in the closure.
 func (t *RootTracer) traceAllIIFEReturns(fn *ssa.Function, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) []ssa.Value {
@@ -1370,7 +1369,6 @@ func isNilConst(v ssa.Value) bool {
 	return ok && c.Value == nil
 }
 
-
 // isClosureResultStored checks if a closure call's result is stored in a variable.
 // This happens when the closure returns multiple values and the result is extracted.
 // Example: `publishedQuery, err := closureFunc()` - result goes through Extract.
@@ -1385,6 +1383,7 @@ func isNilConst(v ssa.Value) bool {
 //
 // Returns false (chained) for IIFE patterns like:
 //   - `closureFunc().Find(nil)` (result directly used as method receiver)
+//
 // isClosureResultStored checks if a closure call's result is stored (assigned to
 // a variable) rather than directly chained in an IIFE pattern.
 //
