@@ -42,6 +42,7 @@ import (
 
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/ast/astutil"
+	"golang.org/x/tools/go/ast/inspector"
 	"golang.org/x/tools/go/ssa"
 
 	"github.com/mpyw/gormreuse/internal/ssa/pollution"
@@ -50,9 +51,10 @@ import (
 
 // Generator generates SuggestedFix for a violation.
 type Generator struct {
-	pass  *analysis.Pass
-	fset  *token.FileSet
-	files map[*token.File]*ast.File // token.File -> ast.File mapping
+	pass       *analysis.Pass
+	fset       *token.FileSet
+	files      map[*token.File]*ast.File          // token.File -> ast.File mapping
+	inspectors map[*ast.File]*inspector.Inspector // cached inspectors per file
 }
 
 // New creates a new fix Generator.
@@ -67,10 +69,21 @@ func New(pass *analysis.Pass) *Generator {
 	}
 
 	return &Generator{
-		pass:  pass,
-		fset:  pass.Fset,
-		files: files,
+		pass:       pass,
+		fset:       pass.Fset,
+		files:      files,
+		inspectors: make(map[*ast.File]*inspector.Inspector),
 	}
+}
+
+// getInspector returns a cached inspector for the given file.
+func (g *Generator) getInspector(file *ast.File) *inspector.Inspector {
+	if insp, ok := g.inspectors[file]; ok {
+		return insp
+	}
+	insp := inspector.New([]*ast.File{file})
+	g.inspectors[file] = insp
+	return insp
 }
 
 // Generate generates SuggestedFix for a violation.
@@ -570,24 +583,49 @@ func (g *Generator) findFileContaining(pos token.Pos) *ast.File {
 	return g.files[tf]
 }
 
-// findStmtAtPos finds the statement at the given position.
+// stmtNodeTypes contains all AST statement types for inspector filtering.
+var stmtNodeTypes = []ast.Node{
+	(*ast.AssignStmt)(nil),
+	(*ast.BlockStmt)(nil),
+	(*ast.BranchStmt)(nil),
+	(*ast.CaseClause)(nil),
+	(*ast.CommClause)(nil),
+	(*ast.DeclStmt)(nil),
+	(*ast.DeferStmt)(nil),
+	(*ast.EmptyStmt)(nil),
+	(*ast.ExprStmt)(nil),
+	(*ast.ForStmt)(nil),
+	(*ast.GoStmt)(nil),
+	(*ast.IfStmt)(nil),
+	(*ast.IncDecStmt)(nil),
+	(*ast.LabeledStmt)(nil),
+	(*ast.RangeStmt)(nil),
+	(*ast.ReturnStmt)(nil),
+	(*ast.SelectStmt)(nil),
+	(*ast.SendStmt)(nil),
+	(*ast.SwitchStmt)(nil),
+	(*ast.TypeSwitchStmt)(nil),
+}
+
+// findStmtAtPos finds the innermost statement at the given position.
 func (g *Generator) findStmtAtPos(file *ast.File, pos token.Pos) ast.Stmt {
 	var result ast.Stmt
-	ast.Inspect(file, func(n ast.Node) bool {
-		if n == nil {
-			return false
-		}
-		// Check if this node contains the position
-		if n.Pos() <= pos && pos < n.End() {
-			if stmt, ok := n.(ast.Stmt); ok {
+	insp := g.getInspector(file)
+	insp.Preorder(stmtNodeTypes, func(n ast.Node) {
+		stmt := n.(ast.Stmt)
+		// Check if this statement contains the position
+		if stmt.Pos() <= pos && pos < stmt.End() {
+			// Keep the innermost (narrowest) statement
+			if result == nil || nodeWidth(stmt) < nodeWidth(result) {
 				result = stmt
 			}
-			return true
 		}
-		return n.Pos() <= pos
 	})
 	return result
 }
+
+// callExprNodeTypes contains CallExpr for inspector filtering.
+var callExprNodeTypes = []ast.Node{(*ast.CallExpr)(nil)}
 
 // getVariableNameAtPos gets the assignable left-hand side expression at the given position.
 // Returns the full expression that can be assigned to (e.g., "q", "obj.field").
@@ -598,29 +636,31 @@ func (g *Generator) getVariableNameAtPos(pos token.Pos) string {
 		return ""
 	}
 
-	// Find the CallExpr that contains or starts at this position
-	var lhs string
-	ast.Inspect(file, func(n ast.Node) bool {
-		if n == nil {
-			return false
-		}
-
-		// Look for CallExpr that matches the position
-		if callExpr, ok := n.(*ast.CallExpr); ok {
-			// Check if this is the call at the target position
-			if callExpr.Pos() <= pos && pos <= callExpr.End() {
-				// Extract receiver from selector (e.g., q.Where -> q)
-				if sel, ok := callExpr.Fun.(*ast.SelectorExpr); ok {
-					lhs = g.extractAssignableLHS(sel.X)
-					return false // Found it, stop searching
+	// Find the outermost method call (CallExpr with SelectorExpr) that contains this position.
+	// We need outermost because for `base.Or(q.Where("y"))`, we want `base`, not `q`.
+	// We must check for SelectorExpr because FuncLit calls like `func(){}()` are also CallExpr.
+	var result *ast.CallExpr
+	insp := g.getInspector(file)
+	insp.Preorder(callExprNodeTypes, func(n ast.Node) {
+		callExpr := n.(*ast.CallExpr)
+		if callExpr.Pos() <= pos && pos <= callExpr.End() {
+			// Only consider method calls (SelectorExpr), not FuncLit calls
+			if _, ok := callExpr.Fun.(*ast.SelectorExpr); ok {
+				// Keep the outermost (widest) call - first match in preorder is outermost
+				if result == nil {
+					result = callExpr
 				}
 			}
 		}
-
-		return n.Pos() <= pos
 	})
 
-	return lhs
+	if result == nil {
+		return ""
+	}
+
+	// Extract receiver from selector (e.g., q.Where -> q)
+	sel := result.Fun.(*ast.SelectorExpr)
+	return g.extractAssignableLHS(sel.X)
 }
 
 // extractAssignableLHS extracts the assignable left-hand side from an expression.
@@ -706,7 +746,7 @@ func (g *Generator) getCallExprEndPos(pos token.Pos) token.Pos {
 		return token.NoPos
 	}
 
-	if call := findInnermostCallExpr(file, pos); call != nil {
+	if call := g.findInnermostCallExpr(file, pos); call != nil {
 		return call.End()
 	}
 	return token.NoPos
@@ -715,24 +755,17 @@ func (g *Generator) getCallExprEndPos(pos token.Pos) token.Pos {
 // findInnermostCallExpr finds the innermost (narrowest) CallExpr containing the given position.
 // This is important for nested calls like t.Run(func() { db.Where(...) }) where we want
 // to find db.Where(...), not the outer t.Run(...) call.
-func findInnermostCallExpr(file *ast.File, pos token.Pos) *ast.CallExpr {
+func (g *Generator) findInnermostCallExpr(file *ast.File, pos token.Pos) *ast.CallExpr {
 	var best *ast.CallExpr
-	ast.Inspect(file, func(n ast.Node) bool {
-		if n == nil {
-			return false
-		}
-		call, ok := n.(*ast.CallExpr)
-		if !ok {
-			// Continue into children if this node might contain pos
-			return n.Pos() <= pos && pos < n.End()
-		}
+	insp := g.getInspector(file)
+	insp.Preorder(callExprNodeTypes, func(n ast.Node) {
+		call := n.(*ast.CallExpr)
 		if call.Pos() <= pos && pos < call.End() {
 			// Found a CallExpr containing pos; keep the narrowest one
 			if best == nil || nodeWidth(call) < nodeWidth(best) {
 				best = call
 			}
 		}
-		return n.Pos() <= pos && pos < n.End()
 	})
 	return best
 }

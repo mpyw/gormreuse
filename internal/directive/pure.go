@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"golang.org/x/tools/go/ast/astutil"
+	"golang.org/x/tools/go/ast/inspector"
 	"golang.org/x/tools/go/ssa"
 )
 
@@ -81,10 +82,18 @@ type DirectiveFuncSet struct {
 	codeBeforeCommentCache map[*ast.File]map[token.Pos]bool
 	// Cache for FuncLit line numbers per file to avoid O(nodes) lookup per line check
 	funcLitLinesCache map[*ast.File]map[int]bool
+	// Cache for ast/inspector to avoid repeated traversal setup
+	inspectorCache map[*ast.File]*inspector.Inspector
 	// Tracking for unused directive detection
 	allDirectives  map[token.Pos]struct{} // All directive positions in current package
 	usedDirectives map[token.Pos]struct{} // Directives that were actually used
 }
+
+// Node type filters for inspector
+var (
+	funcDeclTypes = []ast.Node{(*ast.FuncDecl)(nil)}
+	funcLitTypes  = []ast.Node{(*ast.FuncLit)(nil)}
+)
 
 // newDirectiveFuncSet creates a new DirectiveFuncSet with the given directive checker.
 func newDirectiveFuncSet(fset *token.FileSet, isDirective directiveChecker) *DirectiveFuncSet {
@@ -96,9 +105,20 @@ func newDirectiveFuncSet(fset *token.FileSet, isDirective directiveChecker) *Dir
 		isDirective:            isDirective,
 		codeBeforeCommentCache: make(map[*ast.File]map[token.Pos]bool),
 		funcLitLinesCache:      make(map[*ast.File]map[int]bool),
+		inspectorCache:         make(map[*ast.File]*inspector.Inspector),
 		allDirectives:          make(map[token.Pos]struct{}),
 		usedDirectives:         make(map[token.Pos]struct{}),
 	}
+}
+
+// getInspector returns a cached inspector for the given file.
+func (s *DirectiveFuncSet) getInspector(file *ast.File) *inspector.Inspector {
+	if insp, ok := s.inspectorCache[file]; ok {
+		return insp
+	}
+	insp := inspector.New([]*ast.File{file})
+	s.inspectorCache[file] = insp
+	return insp
 }
 
 // AddFile adds an original parsed file to the set and collects all directive positions.
@@ -132,15 +152,17 @@ func (s *DirectiveFuncSet) collectDirectivePositions(file *ast.File) {
 	}
 
 	// Also check FuncDecl doc comments (they may not be in file.Comments)
-	ast.Inspect(file, func(n ast.Node) bool {
-		if fd, ok := n.(*ast.FuncDecl); ok && fd.Doc != nil {
-			for _, c := range fd.Doc.List {
-				if s.isDirective(c.Text) {
-					s.allDirectives[c.Pos()] = struct{}{}
-				}
+	insp := s.getInspector(file)
+	insp.Preorder(funcDeclTypes, func(n ast.Node) {
+		fd := n.(*ast.FuncDecl)
+		if fd.Doc == nil {
+			return
+		}
+		for _, c := range fd.Doc.List {
+			if s.isDirective(c.Text) {
+				s.allDirectives[c.Pos()] = struct{}{}
 			}
 		}
-		return true
 	})
 }
 
@@ -699,11 +721,10 @@ func (s *DirectiveFuncSet) hasFuncLitOnLine(file *ast.File, line int) bool {
 // buildFuncLitLinesCache pre-computes all FuncLit line numbers for a file.
 func (s *DirectiveFuncSet) buildFuncLitLinesCache(file *ast.File) {
 	lines := make(map[int]bool)
-	ast.Inspect(file, func(n ast.Node) bool {
-		if fl, ok := n.(*ast.FuncLit); ok {
-			lines[s.fset.Position(fl.Pos()).Line] = true
-		}
-		return true
+	insp := s.getInspector(file)
+	insp.Preorder(funcLitTypes, func(n ast.Node) {
+		fl := n.(*ast.FuncLit)
+		lines[s.fset.Position(fl.Pos()).Line] = true
 	})
 	s.funcLitLinesCache[file] = lines
 }

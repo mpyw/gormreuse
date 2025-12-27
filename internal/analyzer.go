@@ -82,6 +82,10 @@ func RunSSA(
 	// across different violations that suggest the same edit.
 	globalSuggestedEdits := make(map[editKey]bool)
 
+	// Share a single fix generator to avoid recreating it for each violation.
+	// The generator caches AST inspectors internally, so sharing it improves performance.
+	fixGen := fix.New(pass)
+
 	for _, fn := range ssaInfo.SrcFuncs {
 		pos := fn.Pos()
 		if !pos.IsValid() {
@@ -115,7 +119,7 @@ func RunSSA(
 			}
 		}
 
-		chk := newChecker(pass, ignoreMap, pureFuncs, immutableReturnFuncs, globalReported, globalSuggestedEdits)
+		chk := newChecker(pass, ignoreMap, pureFuncs, immutableReturnFuncs, globalReported, globalSuggestedEdits, fixGen)
 		chk.checkFunction(fn)
 	}
 
@@ -171,6 +175,7 @@ type checker struct {
 	immutableReturnFuncs *directive.DirectiveFuncSet // Immutable-return functions
 	reported             map[token.Pos]bool          // Deduplication of reports
 	suggestedEdits       map[editKey]bool            // Global deduplication of suggested fixes
+	fixGen               *fix.Generator              // Cached fix generator for all violations
 }
 
 // editKey uniquely identifies an edit to avoid duplicates across violations.
@@ -184,7 +189,8 @@ type editKey struct {
 // The reported map is shared across all functions to deduplicate violations
 // across parent functions and their closures.
 // The suggestedEdits map is shared to avoid duplicate fix edits.
-func newChecker(pass *analysis.Pass, ignoreMap directive.IgnoreMap, pureFuncs, immutableReturnFuncs *directive.DirectiveFuncSet, reported map[token.Pos]bool, suggestedEdits map[editKey]bool) *checker {
+// The fixGen is shared to avoid recreating the generator for each violation.
+func newChecker(pass *analysis.Pass, ignoreMap directive.IgnoreMap, pureFuncs, immutableReturnFuncs *directive.DirectiveFuncSet, reported map[token.Pos]bool, suggestedEdits map[editKey]bool, fixGen *fix.Generator) *checker {
 	return &checker{
 		pass:                 pass,
 		ignoreMap:            ignoreMap,
@@ -192,6 +198,7 @@ func newChecker(pass *analysis.Pass, ignoreMap directive.IgnoreMap, pureFuncs, i
 		immutableReturnFuncs: immutableReturnFuncs,
 		reported:             reported,
 		suggestedEdits:       suggestedEdits,
+		fixGen:               fixGen,
 	}
 }
 
@@ -237,8 +244,7 @@ func (c *checker) reportViolation(v pollution.Violation) {
 	}
 
 	// Generate SuggestedFix if possible
-	fixGen := fix.New(c.pass)
-	suggestedFixes := fixGen.Generate(v)
+	suggestedFixes := c.fixGen.Generate(v)
 
 	// Deduplicate suggested fix edits globally
 	// This prevents the same edit from being applied multiple times

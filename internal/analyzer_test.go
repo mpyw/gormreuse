@@ -32,7 +32,7 @@ func TestNewChecker(t *testing.T) {
 	reported := make(map[token.Pos]bool)
 	suggestedEdits := make(map[editKey]bool)
 
-	chk := newChecker(nil, ignoreMap, pureFuncs, immutableReturnFuncs, reported, suggestedEdits)
+	chk := newChecker(nil, ignoreMap, pureFuncs, immutableReturnFuncs, reported, suggestedEdits, nil)
 
 	if chk.pass != nil {
 		t.Error("Expected pass to be nil")
@@ -51,6 +51,9 @@ func TestNewChecker(t *testing.T) {
 	}
 	if chk.suggestedEdits == nil {
 		t.Error("Expected suggestedEdits to be initialized")
+	}
+	if chk.fixGen != nil {
+		t.Error("Expected fixGen to be nil (passed as nil)")
 	}
 }
 

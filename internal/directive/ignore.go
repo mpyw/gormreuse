@@ -3,6 +3,8 @@ package directive
 import (
 	"go/ast"
 	"go/token"
+
+	"golang.org/x/tools/go/ast/inspector"
 )
 
 // =============================================================================
@@ -138,11 +140,11 @@ type FunctionIgnoreEntry struct {
 func BuildFunctionIgnoreSet(fset *token.FileSet, file *ast.File) map[token.Pos]FunctionIgnoreEntry {
 	result := make(map[token.Pos]FunctionIgnoreEntry)
 
-	ast.Inspect(file, func(n ast.Node) bool {
-		// Only handle FuncDecl - FuncLit (function literals) don't have doc comments in Go
-		fd, ok := n.(*ast.FuncDecl)
-		if !ok || fd.Doc == nil {
-			return true
+	insp := inspector.New([]*ast.File{file})
+	insp.Preorder(funcDeclTypes, func(n ast.Node) {
+		fd := n.(*ast.FuncDecl)
+		if fd.Doc == nil {
+			return
 		}
 		for _, c := range fd.Doc.List {
 			if IsIgnoreDirective(c.Text) {
@@ -153,7 +155,6 @@ func BuildFunctionIgnoreSet(fset *token.FileSet, file *ast.File) map[token.Pos]F
 				break
 			}
 		}
-		return true
 	})
 
 	return result
