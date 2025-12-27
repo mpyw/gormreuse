@@ -393,6 +393,9 @@ func useIt(db *gorm.DB) {
 }
 ```
 
+> [!WARNING]
+> Unused `//gormreuse:pure` and `//gormreuse:immutable-return` directives are reported as warnings. This helps identify misplaced or stale directives. For combined directives like `//gormreuse:pure,immutable-return`, if either part is used, no unused warning is reported.
+
 ## Documentation
 
 - [CLAUDE.md](./CLAUDE.md) - AI assistant guidance for development

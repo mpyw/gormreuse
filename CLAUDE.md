@@ -86,6 +86,12 @@ a, b := func(q *gorm.DB) { _ = q }, func(q *gorm.DB) { _ = q }
 
 > **Important**: User-defined functions that accept `*gorm.DB` are treated as polluting **unless** the function returns `*gorm.DB` and the result is assigned (e.g., `q = helper(q)`). In that case, it's treated like a gorm method assignment. Use `//gormreuse:pure` to mark functions that don't pollute arguments even when result is discarded, and `//gormreuse:immutable-return` to mark functions whose return value can be safely reused (like DB connection helpers).
 
+> **Note**: Unused directives are reported as warnings:
+> - Unused `//gormreuse:ignore` - line/function-level ignores that suppress no violations
+> - Unused `//gormreuse:pure` - directives that don't match any function
+> - Unused `//gormreuse:immutable-return` - directives that don't match any function
+> - For combined directives (`//gormreuse:pure,immutable-return`), if either part is used, no unused warning is reported
+
 ## Architecture
 
 ```

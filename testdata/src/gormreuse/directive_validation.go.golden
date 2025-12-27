@@ -986,6 +986,47 @@ func useSameLinePureImmutable(db *gorm.DB) {
 }
 
 // =============================================================================
+// UNUSED DIRECTIVE DETECTION
+// =============================================================================
+// Note: Pure/immutable-return directives on FuncDecls are always "used" because
+// the function is analyzed during SSA processing. The only way to have an
+// "unused" directive is when it doesn't match any function (e.g., wrong placement
+// like after a closing brace). See closure_directive.go for such cases.
+//
+// Combined directives are never reported as unused if either part is used.
+// This section tests that combined directives work correctly.
+
+// combinedPureNotUsedButImmutableReturnUsed: Combined directive
+// When only immutable-return is used, pure is NOT reported as unused (combined)
+//
+//gormreuse:pure,immutable-return
+func combinedPureNotUsedButImmutableReturnUsed() *gorm.DB {
+	return globalDB.Session(&gorm.Session{})
+}
+
+func useCombinedOnlyImmutableReturn(db *gorm.DB) {
+	q := combinedPureNotUsedButImmutableReturnUsed()
+	q.Find(nil)
+	q.Count(nil) // OK - q is immutable (immutable-return used)
+	// Note: pure is NOT reported as unused because it shares position with immutable-return
+}
+
+// combinedImmutableReturnNotUsedButPureUsed: Combined directive
+// When only pure is used, immutable-return is NOT reported as unused (combined)
+//
+//gormreuse:pure,immutable-return
+func combinedImmutableReturnNotUsedButPureUsed(q *gorm.DB) *gorm.DB {
+	return q.Session(&gorm.Session{}) // pure: doesn't pollute q
+}
+
+func useCombinedOnlyPure(db *gorm.DB) {
+	q := db.Where("base")
+	_ = combinedImmutableReturnNotUsedButPureUsed(q)
+	q.Find(nil) // OK - q not polluted (pure used)
+	// Note: immutable-return NOT reported as unused because it shares position with pure
+}
+
+// =============================================================================
 // HELPER - Global DB for testing
 // =============================================================================
 
