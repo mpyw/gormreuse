@@ -152,7 +152,7 @@ func pureReturnsPureFuncResult(db *gorm.DB) *gorm.DB {
 
 // PV109: Pure function without *gorm.DB argument
 //
-//gormreuse:pure
+//gormreuse:pure // want `unused gormreuse:pure directive`
 func pureNoGormArg(x int) int {
 	return x * 2 // OK: no *gorm.DB involved
 }
@@ -348,7 +348,7 @@ func pureReturningClosure(db *gorm.DB) func() {
 
 // PV213: TypeAssert - extracting *gorm.DB from interface{}
 //
-//gormreuse:pure
+//gormreuse:pure // want `unused gormreuse:pure directive`
 func pureWithTypeAssert(v interface{}) *gorm.DB {
 	if db, ok := v.(*gorm.DB); ok {
 		return db.Session(&gorm.Session{})
@@ -404,7 +404,7 @@ func pureReturnsMapValue(m map[string]*gorm.DB) *gorm.DB {
 // TypeAssert traces through to underlying value (interface{})
 // Since interface{} is not *gorm.DB, returns Clean
 //
-//gormreuse:pure
+//gormreuse:pure // want `unused gormreuse:pure directive`
 func pureReturnsTypeAssertDirect(v interface{}) *gorm.DB {
 	return v.(*gorm.DB) // OK: traces to v (Clean - interface{} not *gorm.DB)
 }
@@ -511,7 +511,7 @@ func pureCallsWithDefinedType(db DefinedDB) *gorm.DB {
 // PV230: Tests inferPureUserFuncCall with no gorm.DB args
 // The pure helper is called but returns Clean (no deps)
 //
-//gormreuse:pure
+//gormreuse:pure // want `unused gormreuse:pure directive`
 func pureCallsNoGormArgs() int {
 	return pureNoGormArgHelper(42) // Pure function with no *gorm.DB args
 }
@@ -528,7 +528,7 @@ func pureCallsWithDependsArg(db *gorm.DB) *gorm.DB {
 // PV232: Tests inferCall path where function has no *gorm.DB args
 // This should return Clean in the "no *gorm.DB args" branch
 //
-//gormreuse:pure
+//gormreuse:pure // want `unused gormreuse:pure directive`
 func pureCallsRegularFunc() int {
 	return regularHelper(42) // Non-pure function but no *gorm.DB args
 }
@@ -582,7 +582,7 @@ func tupleReturner(db *gorm.DB) (*gorm.DB, error) {
 
 // pureNoGormArgHelper is a pure function with no *gorm.DB args
 //
-//gormreuse:pure
+//gormreuse:pure // want `unused gormreuse:pure directive`
 func pureNoGormArgHelper(x int) int {
 	return x * 2
 }

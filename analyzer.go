@@ -71,8 +71,8 @@ func run(pass *analysis.Pass) (any, error) {
 	// Build ignore maps for each file (excluding skipped files)
 	ignoreMaps := make(map[string]directive.IgnoreMap)
 	funcIgnores := make(map[string]map[token.Pos]directive.FunctionIgnoreEntry)
-	pureFuncs := directive.NewPureFuncSet(pass.Fset)
-	immutableReturnFuncs := directive.NewImmutableReturnFuncSet(pass.Fset)
+	pureFuncs := directive.NewPureFuncSet(pass.Fset, pass.TypesInfo)
+	immutableReturnFuncs := directive.NewImmutableReturnFuncSet(pass.Fset, pass.TypesInfo)
 
 	pkgPath := pass.Pkg.Path()
 	for _, file := range pass.Files {

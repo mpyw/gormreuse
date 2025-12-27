@@ -187,7 +187,7 @@
  func nestedClosureInnerImmutableReturn(db *gorm.DB) {
  	//gormreuse:pure
  	outer := func(q *gorm.DB) *gorm.DB {
- 		//gormreuse:immutable-return // want `unused gormreuse:immutable-return directive`
+ 		//gormreuse:immutable-return
  		inner := func(q2 *gorm.DB) *gorm.DB {
  			return q2.Session(&gorm.Session{})
  		}

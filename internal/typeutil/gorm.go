@@ -98,3 +98,4 @@ func IsImmutableReturningBuiltin(name string) bool {
 	_, ok := immutableReturningMethods[name]
 	return ok
 }
+

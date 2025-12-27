@@ -15,9 +15,9 @@ import (
 // =============================================================================
 
 func TestNewAnalyzer(t *testing.T) {
-	pureFuncs := directive.NewPureFuncSet(nil)
+	pureFuncs := directive.NewPureFuncSet(nil, nil)
 	pureFuncs.Add(directive.FuncKey{PkgPath: "test", FuncName: "Pure"})
-	immutableReturnFuncs := directive.NewImmutableReturnFuncSet(nil)
+	immutableReturnFuncs := directive.NewImmutableReturnFuncSet(nil, nil)
 	analyzer := ssautil.NewAnalyzer(nil, pureFuncs, immutableReturnFuncs)
 
 	if analyzer == nil {
@@ -27,8 +27,8 @@ func TestNewAnalyzer(t *testing.T) {
 
 func TestNewChecker(t *testing.T) {
 	ignoreMap := make(directive.IgnoreMap)
-	pureFuncs := directive.NewPureFuncSet(nil)
-	immutableReturnFuncs := directive.NewImmutableReturnFuncSet(nil)
+	pureFuncs := directive.NewPureFuncSet(nil, nil)
+	immutableReturnFuncs := directive.NewImmutableReturnFuncSet(nil, nil)
 	reported := make(map[token.Pos]bool)
 	suggestedEdits := make(map[editKey]bool)
 
