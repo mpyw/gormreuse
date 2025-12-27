@@ -75,16 +75,23 @@ type DirectiveFuncSet struct {
 	files       map[string]*ast.File // Original parsed files (from analysis)
 	cache       map[string]*ast.File // Cache for external files (re-parsed)
 	isDirective directiveChecker
+
+	// Cache for hasCodeBeforeComment results to avoid O(comments * nodes) complexity
+	codeBeforeCommentCache map[*ast.File]map[token.Pos]bool
+	// Cache for FuncLit line numbers per file to avoid O(nodes) lookup per line check
+	funcLitLinesCache map[*ast.File]map[int]bool
 }
 
 // newDirectiveFuncSet creates a new DirectiveFuncSet with the given directive checker.
 func newDirectiveFuncSet(fset *token.FileSet, isDirective directiveChecker) *DirectiveFuncSet {
 	return &DirectiveFuncSet{
-		known:       make(map[FuncKey]struct{}),
-		fset:        fset,
-		files:       make(map[string]*ast.File),
-		cache:       make(map[string]*ast.File),
-		isDirective: isDirective,
+		known:                  make(map[FuncKey]struct{}),
+		fset:                   fset,
+		files:                  make(map[string]*ast.File),
+		cache:                  make(map[string]*ast.File),
+		isDirective:            isDirective,
+		codeBeforeCommentCache: make(map[*ast.File]map[token.Pos]bool),
+		funcLitLinesCache:      make(map[*ast.File]map[int]bool),
 	}
 }
 
@@ -559,26 +566,51 @@ func (s *DirectiveFuncSet) isDirectExprOrUnaryByPos(expr ast.Expr, targetPos, ta
 }
 
 // hasFuncLitOnLine checks if there's any FuncLit that starts on the given line.
+// Results are cached per file to avoid O(nodes) traversal per line check.
 func (s *DirectiveFuncSet) hasFuncLitOnLine(file *ast.File, line int) bool {
-	found := false
+	// Build cache if not exists
+	if _, ok := s.funcLitLinesCache[file]; !ok {
+		s.buildFuncLitLinesCache(file)
+	}
+	return s.funcLitLinesCache[file][line]
+}
+
+// buildFuncLitLinesCache pre-computes all FuncLit line numbers for a file.
+func (s *DirectiveFuncSet) buildFuncLitLinesCache(file *ast.File) {
+	lines := make(map[int]bool)
 	ast.Inspect(file, func(n ast.Node) bool {
-		if found {
-			return false
-		}
 		if fl, ok := n.(*ast.FuncLit); ok {
-			if s.fset.Position(fl.Pos()).Line == line {
-				found = true
-				return false
-			}
+			lines[s.fset.Position(fl.Pos()).Line] = true
 		}
 		return true
 	})
-	return found
+	s.funcLitLinesCache[file] = lines
 }
 
 // hasCodeBeforeComment checks if there's any code (non-whitespace) before the comment on the same line.
 // This is used to determine if a directive is "alone" on its line or follows other code like "}, //gormreuse:pure".
+// Results are cached per file to avoid O(comments * nodes) complexity.
 func (s *DirectiveFuncSet) hasCodeBeforeComment(file *ast.File, cg *ast.CommentGroup) bool {
+	// Check cache first
+	if fileCache, ok := s.codeBeforeCommentCache[file]; ok {
+		if result, ok := fileCache[cg.Pos()]; ok {
+			return result
+		}
+	}
+
+	// Initialize cache for this file if not exists
+	if s.codeBeforeCommentCache[file] == nil {
+		s.codeBeforeCommentCache[file] = make(map[token.Pos]bool)
+	}
+
+	// Compute result
+	result := s.computeCodeBeforeComment(file, cg)
+	s.codeBeforeCommentCache[file][cg.Pos()] = result
+	return result
+}
+
+// computeCodeBeforeComment does the actual computation for hasCodeBeforeComment.
+func (s *DirectiveFuncSet) computeCodeBeforeComment(file *ast.File, cg *ast.CommentGroup) bool {
 	cgPos := s.fset.Position(cg.Pos())
 	cgLine := cgPos.Line
 	cgColumn := cgPos.Column
@@ -592,15 +624,25 @@ func (s *DirectiveFuncSet) hasCodeBeforeComment(file *ast.File, cg *ast.CommentG
 		if n == nil || n == cg {
 			return true
 		}
-		// Skip comment groups
-		if _, ok := n.(*ast.CommentGroup); ok {
-			return true
-		}
-		if _, ok := n.(*ast.Comment); ok {
+		// Skip comment groups and comments
+		switch n.(type) {
+		case *ast.CommentGroup, *ast.Comment:
 			return true
 		}
 
+		// Early termination optimization: skip nodes that can't be on the target line
+		nodeStart := s.fset.Position(n.Pos())
 		nodeEnd := s.fset.Position(n.End())
+
+		// If node ends before the comment's line, skip it and its children
+		if nodeEnd.Line < cgLine {
+			return false
+		}
+		// If node starts after the comment's line, skip it
+		if nodeStart.Line > cgLine {
+			return false
+		}
+
 		// Node ends on the same line, before the comment
 		if nodeEnd.Line == cgLine && nodeEnd.Column < cgColumn {
 			hasCode = true
