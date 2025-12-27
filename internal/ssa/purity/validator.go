@@ -1,3 +1,15 @@
+// Package purity validates that functions marked with //gormreuse:pure
+// satisfy the pure function contract: they must not pollute their *gorm.DB
+// arguments by passing them to non-pure functions or methods.
+//
+// A pure function can:
+//   - Call immutable-returning methods (Session, WithContext, Debug)
+//   - Return a *gorm.DB derived from its parameter
+//   - Pass *gorm.DB to other pure functions
+//
+// A pure function must NOT:
+//   - Call chain methods (Where, Find, etc.) that pollute the argument
+//   - Pass *gorm.DB to non-pure functions
 package purity
 
 import (

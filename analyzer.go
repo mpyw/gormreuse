@@ -8,14 +8,16 @@
 // the branches interfere with each other:
 //
 //	q := db.Where("x")
-//	q.Where("a").Find(&r1)  // Branch 1: WHERE x AND a
-//	q.Where("b").Find(&r2)  // Branch 2: WHERE x AND a AND b ← Bug! "a" leaked
+//	q.Where("a").Find(&r1)  // First branch - OK
+//	q.Where("b").Find(&r2)  // Second branch - Bug! Conditions accumulate
 //
 // # Solution
 //
-// Use Session() to create an immutable instance before branching:
+// Use Session() to create an immutable instance. Place it at the point where
+// you want to "freeze" the query - subsequent chain methods will create new
+// independent chains:
 //
-//	q := db.Session(&gorm.Session{}).Where("x")
+//	q := db.Where("x").Session(&gorm.Session{})
 //	q.Where("a").Find(&r1)  // Branch 1: WHERE x AND a
 //	q.Where("b").Find(&r2)  // Branch 2: WHERE x AND b ← Correct!
 //
@@ -28,8 +30,9 @@
 //
 // Suppress false positives with:
 //
-//	//gormreuse:ignore - Suppress for next line or same line
-//	//gormreuse:pure   - Mark function as not polluting *gorm.DB
+//	//gormreuse:ignore           - Suppress for next line or same line
+//	//gormreuse:pure             - Mark function as not polluting *gorm.DB args
+//	//gormreuse:immutable-return - Mark function as returning immutable *gorm.DB
 package gormreuse
 
 import (
