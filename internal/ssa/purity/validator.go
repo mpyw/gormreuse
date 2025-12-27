@@ -1,15 +1,24 @@
 // Package purity validates that functions marked with //gormreuse:pure
-// satisfy the pure function contract: they must not pollute their *gorm.DB
-// arguments by passing them to non-pure functions or methods.
+// satisfy the pure function contract via SSA-based analysis.
 //
-// A pure function can:
+// # Pure Contract
+//
+// A pure function must not pollute its *gorm.DB arguments. This means:
+//   - No chain method calls (Where, Find, etc.) on parameter-derived values
+//   - No passing parameter-derived values to non-pure functions
+//
+// # Analysis Strategy
+//
+// The validator uses derivation tracking to follow *gorm.DB values:
+//  1. Mark all *gorm.DB parameters as "parameter-derived"
+//  2. Track derivation through Phi nodes, Extract, and Call results
+//  3. Report violations when parameter-derived values are polluted
+//
+// # What Pure Functions CAN Do
+//
 //   - Call immutable-returning methods (Session, WithContext, Debug)
-//   - Return a *gorm.DB derived from its parameter
+//   - Return a *gorm.DB derived from parameter (may be mutable)
 //   - Pass *gorm.DB to other pure functions
-//
-// A pure function must NOT:
-//   - Call chain methods (Where, Find, etc.) that pollute the argument
-//   - Pass *gorm.DB to non-pure functions
 package purity
 
 import (
