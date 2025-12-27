@@ -312,12 +312,20 @@ package mypackage
 
 ### `//gormreuse:pure`
 
-Mark a function as not polluting its [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) argument:
+Mark a function or closure as not polluting its [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) argument:
 
 ```go
 //gormreuse:pure
 func withTenant(db *gorm.DB, tenantID int) *gorm.DB {
     return db.Session(&gorm.Session{}).Where("tenant_id = ?", tenantID)
+}
+
+// Also works on closures (next-line or same-line pattern):
+//gormreuse:pure
+helper := func(q *gorm.DB) { _ = q }
+
+helper2 := func(q *gorm.DB) { //gormreuse:pure
+    _ = q
 }
 ```
 

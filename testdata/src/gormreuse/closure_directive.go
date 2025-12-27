@@ -1,0 +1,541 @@
+package internal
+
+import "gorm.io/gorm"
+
+// =============================================================================
+// CLOSURE DIRECTIVE PATTERNS
+// Tests for //gormreuse:pure and //gormreuse:immutable-return on closures
+// =============================================================================
+
+// =============================================================================
+// PATTERN 1: Directive on line before closure
+// =============================================================================
+
+// closurePureBefore: Pure directive before closure declaration
+func closurePureBefore(db *gorm.DB) {
+	//gormreuse:pure
+	pureHelper := func(q *gorm.DB) {
+		_ = q // Just reads, doesn't modify
+	}
+
+	q := db.Where("base")
+	pureHelper(q) // pure - doesn't pollute q
+	q.Find(nil)   // OK - q is clean
+}
+
+// closureImmutableReturnBefore: immutable-return directive before closure
+func closureImmutableReturnBefore(db *gorm.DB) {
+	//gormreuse:immutable-return
+	getDB := func() *gorm.DB {
+		return db.Session(&gorm.Session{}).Where("setup")
+	}
+
+	q := getDB()
+	q.Find(nil)
+	q.Count(nil) // OK - q is from immutable-return closure
+}
+
+// =============================================================================
+// PATTERN 2: Directive after opening brace (inline)
+// =============================================================================
+
+// closurePureInline: Pure directive after opening brace
+func closurePureInline(db *gorm.DB) {
+	pureHelper := func(q *gorm.DB) { //gormreuse:pure
+		_ = q
+	}
+
+	q := db.Where("base")
+	pureHelper(q)
+	q.Find(nil) // OK - q is clean
+}
+
+// closureImmutableReturnInline: immutable-return directive after opening brace
+func closureImmutableReturnInline(db *gorm.DB) {
+	getDB := func() *gorm.DB { //gormreuse:immutable-return
+		return db.Session(&gorm.Session{}).Where("setup")
+	}
+
+	q := getDB()
+	q.Find(nil)
+	q.Count(nil) // OK - q is from immutable-return closure
+}
+
+// =============================================================================
+// NO DIRECTIVE - SHOULD REPORT
+// =============================================================================
+
+// closureNoPure: No directive - closure pollutes argument
+func closureNoPure(db *gorm.DB) {
+	impureHelper := func(q *gorm.DB) {
+		_ = q
+	}
+
+	q := db.Where("base")
+	impureHelper(q)
+	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// closureNoImmutableReturn: No directive - closure result is mutable
+func closureNoImmutableReturn(db *gorm.DB) {
+	getDB := func() *gorm.DB {
+		return db.Session(&gorm.Session{}).Where("setup")
+	}
+
+	q := getDB()
+	q.Find(nil)
+	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// =============================================================================
+// COMBINED DIRECTIVES
+// =============================================================================
+
+// closurePureAndImmutableReturn: Both directives on closure
+func closurePureAndImmutableReturn(db *gorm.DB) {
+	//gormreuse:pure,immutable-return
+	helper := func(q *gorm.DB) *gorm.DB {
+		return q.Session(&gorm.Session{})
+	}
+
+	base := db.Where("x")
+	q := helper(base) // pure - doesn't pollute base, immutable-return - q is immutable
+	base.Find(nil)    // OK - base is clean (helper is pure)
+	q.Find(nil)
+	q.Count(nil) // OK - q is immutable
+}
+
+// =============================================================================
+// NESTED CLOSURES - Directive applies to immediate closure only
+// =============================================================================
+
+// nestedClosureOuterPure: Directive on outer closure (before pattern)
+// Inner closure doesn't take *gorm.DB to avoid purity validation complexity
+func nestedClosureOuterPure(db *gorm.DB) {
+	//gormreuse:pure
+	outer := func(q *gorm.DB) {
+		inner := func() {
+			// do something
+		}
+		inner()
+		_ = q
+	}
+
+	q := db.Where("base")
+	outer(q)    // outer is pure
+	q.Find(nil) // OK - q is clean
+}
+
+// nestedClosureOuterPureViolation: Outer is pure but passes *gorm.DB to non-pure inner
+// This should trigger a purity validation error
+func nestedClosureOuterPureViolation(db *gorm.DB) {
+	//gormreuse:pure
+	outer := func(q *gorm.DB) {
+		inner := func(q2 *gorm.DB) {
+			_ = q2
+		}
+		inner(q) // want `pure function passes \*gorm\.DB argument to non-pure function`
+	}
+
+	q := db.Where("base")
+	outer(q)    // outer is pure (but has internal violation)
+	q.Find(nil) // OK - q is clean (outer is still treated as pure for caller)
+}
+
+// nestedClosureOuterPureInnerPure: Both outer and inner are pure
+func nestedClosureOuterPureInnerPure(db *gorm.DB) {
+	//gormreuse:pure
+	outer := func(q *gorm.DB) {
+		//gormreuse:pure
+		inner := func(q2 *gorm.DB) {
+			_ = q2
+		}
+		inner(q) // OK - inner is also pure
+	}
+
+	q := db.Where("base")
+	outer(q)    // outer is pure
+	q.Find(nil) // OK - q is clean
+}
+
+// nestedClosureTripleNested: Three levels of nesting
+// Only outer is pure, so only outer's call to middle triggers violation
+func nestedClosureTripleNested(db *gorm.DB) {
+	//gormreuse:pure
+	outer := func(q *gorm.DB) {
+		middle := func(q2 *gorm.DB) {
+			inner := func(q3 *gorm.DB) {
+				_ = q3
+			}
+			inner(q2) // middle is not pure, so no violation here
+		}
+		middle(q) // want `pure function passes \*gorm\.DB argument to non-pure function`
+	}
+
+	q := db.Where("base")
+	outer(q)
+	q.Find(nil) // OK
+}
+
+// nestedClosureInnerImmutableReturn: Inner returns immutable but is not pure
+// Outer is pure but passes *gorm.DB to non-pure inner (immutable-return != pure)
+func nestedClosureInnerImmutableReturn(db *gorm.DB) {
+	//gormreuse:pure
+	outer := func(q *gorm.DB) *gorm.DB {
+		//gormreuse:immutable-return
+		inner := func(q2 *gorm.DB) *gorm.DB {
+			return q2.Session(&gorm.Session{})
+		}
+		return inner(q) // want `pure function passes \*gorm\.DB argument to non-pure function`
+	}
+
+	q := db.Where("base")
+	result := outer(q)
+	q.Find(nil)      // OK - outer is pure
+	result.Find(nil) // outer's return is NOT immutable-return
+	result.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// nestedClosurePureImmutableReturnBoth: Outer has both directives
+func nestedClosurePureImmutableReturnBoth(db *gorm.DB) {
+	//gormreuse:pure,immutable-return
+	outer := func(q *gorm.DB) *gorm.DB {
+		inner := func(q2 *gorm.DB) *gorm.DB {
+			return q2.Session(&gorm.Session{})
+		}
+		return inner(q) // want `pure function passes \*gorm\.DB argument to non-pure function`
+	}
+
+	q := db.Where("base")
+	result := outer(q)
+	q.Find(nil)       // OK - outer is pure
+	result.Find(nil)
+	result.Count(nil) // OK - outer is immutable-return
+}
+
+// nestedClosureSameLineBeforePattern: Only outer has directive, inner closure is on same line
+// The directive should apply to outer, not inner (Pattern 1: before line)
+func nestedClosureSameLineBeforePattern(db *gorm.DB) {
+	//gormreuse:pure
+	outer := func(q *gorm.DB) { inner := func() {}; inner(); _ = q }
+
+	q := db.Where("base")
+	outer(q)    // outer is pure (directive is before outer)
+	q.Find(nil) // OK - q is clean
+}
+
+// nestedClosureSameLineInnerPure: Same line, directive AFTER inner's {
+// The directive applies to inner only (innermost), outer is NOT pure
+func nestedClosureSameLineInnerPure(db *gorm.DB) {
+	outer := func(q *gorm.DB) { inner := func(q2 *gorm.DB) { //gormreuse:pure
+		_ = q2
+	}; inner(q); _ = q }
+
+	q := db.Where("base")
+	outer(q)    // outer is NOT pure (directive is for inner)
+	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// nestedClosureSameLineOuterPure: Same line, directive AFTER outer's { but BEFORE inner's {
+// The directive applies to outer only
+func nestedClosureSameLineOuterPure(db *gorm.DB) {
+	outer := func(q *gorm.DB) { //gormreuse:pure
+		inner := func() {}; inner(); _ = q }
+
+	q := db.Where("base")
+	outer(q)    // outer is pure
+	q.Find(nil) // OK - q is clean
+}
+
+// =============================================================================
+// COMPLEX DIRECTIVE COMBINATIONS - Multiple directives on closures
+// =============================================================================
+
+// complexDirective01: pure and immutable-return on separate lines
+func complexDirective01(db *gorm.DB) {
+	//gormreuse:pure
+	//gormreuse:immutable-return
+	helper := func(q *gorm.DB) *gorm.DB {
+		return q.Session(&gorm.Session{})
+	}
+
+	base := db.Where("x")
+	result := helper(base)
+	base.Find(nil) // OK - base is clean (helper is pure)
+	result.Find(nil)
+	result.Count(nil) // OK - result is immutable
+}
+
+// complexDirective02: pure and immutable-return with unrelated comment in between
+func complexDirective02(db *gorm.DB) {
+	//gormreuse:pure
+	//foo - this is just a regular comment
+	//gormreuse:immutable-return
+	helper := func(q *gorm.DB) *gorm.DB {
+		return q.Session(&gorm.Session{})
+	}
+
+	base := db.Where("x")
+	result := helper(base)
+	base.Find(nil) // OK - base is clean (helper is pure)
+	result.Find(nil)
+	result.Count(nil) // OK - result is immutable
+}
+
+// complexDirective03: pure,immutable-return combined in single directive
+func complexDirective03(db *gorm.DB) {
+	//gormreuse:pure,immutable-return
+	helper := func(q *gorm.DB) *gorm.DB {
+		return q.Session(&gorm.Session{})
+	}
+
+	base := db.Where("x")
+	result := helper(base)
+	base.Find(nil) // OK - helper is pure
+	result.Find(nil)
+	result.Count(nil) // OK - result is immutable
+}
+
+// complexDirective04: inline pattern with combined directive
+func complexDirective04(db *gorm.DB) {
+	helper := func(q *gorm.DB) *gorm.DB { //gormreuse:pure,immutable-return
+		return q.Session(&gorm.Session{})
+	}
+
+	base := db.Where("x")
+	result := helper(base)
+	base.Find(nil) // OK - helper is pure
+	result.Find(nil)
+	result.Count(nil) // OK - result is immutable
+}
+
+// complexDirective05: pure only - result should be mutable
+func complexDirective05(db *gorm.DB) {
+	//gormreuse:pure
+	helper := func(q *gorm.DB) *gorm.DB {
+		return q.Session(&gorm.Session{})
+	}
+
+	base := db.Where("x")
+	result := helper(base)
+	base.Find(nil) // OK - helper is pure
+	result.Find(nil)
+	result.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// complexDirective06: immutable-return only - argument should be polluted
+func complexDirective06(db *gorm.DB) {
+	//gormreuse:immutable-return
+	helper := func(q *gorm.DB) *gorm.DB {
+		return q.Session(&gorm.Session{})
+	}
+
+	base := db.Where("x")
+	result := helper(base)
+	base.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+	result.Find(nil)
+	result.Count(nil) // OK - result is immutable
+}
+
+// complexDirective07: multiple comments with trailing // comments
+func complexDirective07(db *gorm.DB) {
+	//gormreuse:pure // marks as pure
+	//gormreuse:immutable-return // marks return as immutable
+	helper := func(q *gorm.DB) *gorm.DB {
+		return q.Session(&gorm.Session{})
+	}
+
+	base := db.Where("x")
+	result := helper(base)
+	base.Find(nil) // OK - helper is pure
+	result.Find(nil)
+	result.Count(nil) // OK - result is immutable
+}
+
+// complexDirective08: combined directive with trailing comment
+func complexDirective08(db *gorm.DB) {
+	//gormreuse:pure,immutable-return // both in one
+	helper := func(q *gorm.DB) *gorm.DB {
+		return q.Session(&gorm.Session{})
+	}
+
+	base := db.Where("x")
+	result := helper(base)
+	base.Find(nil) // OK - helper is pure
+	result.Find(nil)
+	result.Count(nil) // OK - result is immutable
+}
+
+// =============================================================================
+// MULTI-ASSIGNMENT PATTERNS
+// Directive on line before multi-assignment covers all direct FuncLits
+// =============================================================================
+
+// structWithFuncField is used to test field assignment patterns
+type structWithFuncField struct {
+	Fn func(q *gorm.DB)
+}
+
+// multiAssign01: Both closures in same assignment get the directive
+func multiAssign01(db *gorm.DB) {
+	//gormreuse:pure
+	a, b := func(q *gorm.DB) { _ = q }, func(q *gorm.DB) { _ = q }
+
+	q := db.Where("base")
+	a(q)
+	q.Find(nil) // OK - a is pure
+
+	q2 := db.Where("base2")
+	b(q2)
+	q2.Find(nil) // OK - b is also pure (same statement)
+}
+
+// multiAssign02: Both variables get directive (direct assignment)
+func multiAssign02(db *gorm.DB) {
+	var a, c func(q *gorm.DB)
+
+	//gormreuse:pure
+	a, c = func(q *gorm.DB) { _ = q }, func(q *gorm.DB) { _ = q }
+
+	q := db.Where("base")
+	a(q)
+	q.Find(nil) // OK - a is pure
+
+	q2 := db.Where("base2")
+	c(q2)
+	q2.Find(nil) // OK - c is also pure (same statement)
+}
+
+// multiAssign03: Only first closure gets directive (second is inside struct literal)
+func multiAssign03(db *gorm.DB) {
+	//gormreuse:pure
+	a, b := func(q *gorm.DB) { _ = q }, &structWithFuncField{Fn: func(q *gorm.DB) { _ = q }}
+
+	q := db.Where("base")
+	a(q)
+	q.Find(nil) // OK - a is pure
+
+	q2 := db.Where("base2")
+	b.Fn(q2)
+	q2.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// multiAssign04: Three closures - first two direct, third in composite literal
+func multiAssign04(db *gorm.DB) {
+	//gormreuse:pure
+	a, b, c := func(q *gorm.DB) { _ = q }, func(q *gorm.DB) { _ = q }, []func(*gorm.DB){func(q *gorm.DB) { _ = q }}[0]
+
+	q := db.Where("base")
+	a(q)
+	q.Find(nil) // OK - a is pure
+
+	q2 := db.Where("base2")
+	b(q2)
+	q2.Find(nil) // OK - b is pure
+
+	q3 := db.Where("base3")
+	c(q3)
+	q3.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// multiAssign05: Separated statements - only first gets directive
+func multiAssign05(db *gorm.DB) {
+	//gormreuse:pure
+	a := func(q *gorm.DB) { _ = q }
+	b := func(q *gorm.DB) { _ = q } // Different statement, no directive
+
+	q := db.Where("base")
+	a(q)
+	q.Find(nil) // OK - a is pure
+
+	q2 := db.Where("base2")
+	b(q2)
+	q2.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// multiAssign06: Semicolon-separated on same line - only first statement gets directive
+func multiAssign06(db *gorm.DB) {
+	//gormreuse:pure
+	a := func(q *gorm.DB) { _ = q }; b := func(q *gorm.DB) { _ = q }
+
+	q := db.Where("base")
+	a(q)
+	q.Find(nil) // OK - a is pure
+
+	q2 := db.Where("base2")
+	b(q2)
+	q2.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// multiAssign07: Multi-line assignment - all closures in same statement get directive
+func multiAssign07(db *gorm.DB) {
+	//gormreuse:pure
+	a, b, c := func(q *gorm.DB) { _ = q },
+		func(q *gorm.DB) { _ = q },
+		func(q *gorm.DB) { _ = q }
+
+	q1 := db.Where("base1")
+	a(q1)
+	q1.Find(nil) // OK - a is pure
+
+	q2 := db.Where("base2")
+	b(q2)
+	q2.Find(nil) // OK - b is pure (same statement, different line)
+
+	q3 := db.Where("base3")
+	c(q3)
+	q3.Find(nil) // OK - c is pure (same statement, different line)
+}
+
+
+// multiAssign08: Multi-line assignment with comments between closures
+func multiAssign08(db *gorm.DB) {
+	a, b, c := func(q *gorm.DB) { //gormreuse:pure
+		_ = q
+	},
+		//gormreuse:pure
+		func(q *gorm.DB) {
+			_ = q
+		},
+		func(q *gorm.DB) { //gormreuse:pure
+			_ = q
+		}
+
+	q1 := db.Where("base1")
+	a(q1)
+	q1.Find(nil) // OK - a is pure
+
+	q2 := db.Where("base2")
+	b(q2)
+	q2.Find(nil) // OK - b is pure
+
+	q3 := db.Where("base3")
+	c(q3)
+	q3.Find(nil) // OK - c is pure
+}
+
+
+// multiAssign09: Directive after closing brace does NOT apply to next line
+// }, //gormreuse:pure should not apply to the FuncLit on the next line
+func multiAssign09(db *gorm.DB) {
+	a, b, c := func(q *gorm.DB) { //gormreuse:pure
+		_ = q
+	}, //gormreuse:pure
+		func(q *gorm.DB) {
+			_ = q
+		}, func(q *gorm.DB) { //gormreuse:pure
+		_ = q
+	}
+
+	q1 := db.Where("base1")
+	a(q1)
+	q1.Find(nil) // OK - a is pure
+
+	q2 := db.Where("base2")
+	b(q2)
+	q2.Find(nil) // want "reused"
+
+	q3 := db.Where("base3")
+	c(q3)
+	q3.Find(nil) // OK - c is pure
+}
