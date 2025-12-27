@@ -30,7 +30,7 @@
 //
 //   - Orchestrate SSA analysis for all source functions
 //   - Handle function-level and line-level ignore directives
-//   - Report unused ignore directives
+//   - Report unused directives (ignore, pure, immutable-return)
 //   - Validate pure function contracts
 package internal
 
@@ -126,6 +126,30 @@ func RunSSA(
 		}
 		for _, pos := range ignoreMap.GetUnusedIgnores() {
 			pass.Reportf(pos, "unused gormreuse:ignore directive")
+		}
+	}
+
+	// Report unused pure directives
+	// For combined directives (e.g., //gormreuse:pure,immutable-return),
+	// if either part is used, don't report the other as unused
+	if pureFuncs != nil {
+		for _, pos := range pureFuncs.GetUnusedDirectives() {
+			// Skip if used by immutable-return (combined directive)
+			if immutableReturnFuncs != nil && immutableReturnFuncs.IsUsed(pos) {
+				continue
+			}
+			pass.Reportf(pos, "unused gormreuse:pure directive")
+		}
+	}
+
+	// Report unused immutable-return directives
+	if immutableReturnFuncs != nil {
+		for _, pos := range immutableReturnFuncs.GetUnusedDirectives() {
+			// Skip if used by pure (combined directive)
+			if pureFuncs != nil && pureFuncs.IsUsed(pos) {
+				continue
+			}
+			pass.Reportf(pos, "unused gormreuse:immutable-return directive")
 		}
 	}
 }

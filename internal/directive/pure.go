@@ -69,6 +69,7 @@ type directiveChecker func(text string) bool
 // DirectiveFuncSet is a generic set of functions matching a directive.
 // It supports both pre-built sets (for current package) and on-demand
 // directive checking (for external packages via source parsing).
+// It also tracks which directives are used to report unused directives.
 type DirectiveFuncSet struct {
 	known       map[FuncKey]struct{}
 	fset        *token.FileSet
@@ -80,6 +81,9 @@ type DirectiveFuncSet struct {
 	codeBeforeCommentCache map[*ast.File]map[token.Pos]bool
 	// Cache for FuncLit line numbers per file to avoid O(nodes) lookup per line check
 	funcLitLinesCache map[*ast.File]map[int]bool
+	// Tracking for unused directive detection
+	allDirectives  map[token.Pos]struct{} // All directive positions in current package
+	usedDirectives map[token.Pos]struct{} // Directives that were actually used
 }
 
 // newDirectiveFuncSet creates a new DirectiveFuncSet with the given directive checker.
@@ -92,10 +96,12 @@ func newDirectiveFuncSet(fset *token.FileSet, isDirective directiveChecker) *Dir
 		isDirective:            isDirective,
 		codeBeforeCommentCache: make(map[*ast.File]map[token.Pos]bool),
 		funcLitLinesCache:      make(map[*ast.File]map[int]bool),
+		allDirectives:          make(map[token.Pos]struct{}),
+		usedDirectives:         make(map[token.Pos]struct{}),
 	}
 }
 
-// AddFile adds an original parsed file to the set.
+// AddFile adds an original parsed file to the set and collects all directive positions.
 // This should be called for all files in the current package to avoid re-parsing.
 func (s *DirectiveFuncSet) AddFile(file *ast.File) {
 	if s == nil || s.fset == nil || file == nil {
@@ -105,6 +111,37 @@ func (s *DirectiveFuncSet) AddFile(file *ast.File) {
 	if filename != "" {
 		s.files[filename] = file
 	}
+
+	// Collect all directive positions in this file for unused detection
+	s.collectDirectivePositions(file)
+}
+
+// collectDirectivePositions scans a file for all directives and records their positions.
+func (s *DirectiveFuncSet) collectDirectivePositions(file *ast.File) {
+	if s == nil || s.allDirectives == nil {
+		return
+	}
+
+	// Scan all comments in the file
+	for _, cg := range file.Comments {
+		for _, c := range cg.List {
+			if s.isDirective(c.Text) {
+				s.allDirectives[c.Pos()] = struct{}{}
+			}
+		}
+	}
+
+	// Also check FuncDecl doc comments (they may not be in file.Comments)
+	ast.Inspect(file, func(n ast.Node) bool {
+		if fd, ok := n.(*ast.FuncDecl); ok && fd.Doc != nil {
+			for _, c := range fd.Doc.List {
+				if s.isDirective(c.Text) {
+					s.allDirectives[c.Pos()] = struct{}{}
+				}
+			}
+		}
+		return true
+	})
 }
 
 // Add adds a function key to the set.
@@ -114,7 +151,42 @@ func (s *DirectiveFuncSet) Add(key FuncKey) {
 	}
 }
 
+// markUsed marks a directive at the given position as used.
+func (s *DirectiveFuncSet) markUsed(pos token.Pos) {
+	if s != nil && s.usedDirectives != nil && pos.IsValid() {
+		s.usedDirectives[pos] = struct{}{}
+	}
+}
+
+// GetUnusedDirectives returns the positions of directives that were not used.
+// This should be called after all SSA analysis is complete.
+func (s *DirectiveFuncSet) GetUnusedDirectives() []token.Pos {
+	if s == nil || s.allDirectives == nil || s.usedDirectives == nil {
+		return nil
+	}
+
+	var unused []token.Pos
+	for pos := range s.allDirectives {
+		if _, used := s.usedDirectives[pos]; !used {
+			unused = append(unused, pos)
+		}
+	}
+	return unused
+}
+
+// IsUsed returns true if the directive at the given position was used.
+// This is used for combined directive handling (e.g., //gormreuse:pure,immutable-return)
+// where if one directive type uses a position, the other shouldn't report it as unused.
+func (s *DirectiveFuncSet) IsUsed(pos token.Pos) bool {
+	if s == nil || s.usedDirectives == nil {
+		return false
+	}
+	_, used := s.usedDirectives[pos]
+	return used
+}
+
 // Contains checks if the given SSA function is in the set or has the directive.
+// If found, it marks the directive as used for unused detection.
 func (s *DirectiveFuncSet) Contains(fn *ssa.Function) bool {
 	if fn == nil {
 		return false
@@ -130,6 +202,8 @@ func (s *DirectiveFuncSet) Contains(fn *ssa.Function) bool {
 			key.ReceiverType = formatReceiverType(sig.Recv().Type())
 		}
 		if _, exists := s.known[key]; exists {
+			// Mark the directive as used (find and mark the position)
+			s.markDirectiveUsed(fn)
 			return true
 		}
 	}
@@ -138,7 +212,37 @@ func (s *DirectiveFuncSet) Contains(fn *ssa.Function) bool {
 	return s.hasDirective(fn)
 }
 
+// markDirectiveUsed finds the directive position for a function and marks it as used.
+// This is called when a function from the pre-built set is accessed.
+func (s *DirectiveFuncSet) markDirectiveUsed(fn *ssa.Function) {
+	if fn == nil {
+		return
+	}
+
+	switch syntax := fn.Syntax().(type) {
+	case *ast.FuncDecl:
+		// Check Doc comments first
+		if syntax.Doc != nil {
+			for _, c := range syntax.Doc.List {
+				if s.isDirective(c.Text) {
+					s.markUsed(c.Pos())
+					return
+				}
+			}
+		}
+		// Check same-line pattern
+		if pos := s.findDirectiveAfterFuncDeclBrace(syntax); pos.IsValid() {
+			s.markUsed(pos)
+		}
+	case *ast.FuncLit:
+		if pos := s.findDirectiveForFuncLit(syntax); pos.IsValid() {
+			s.markUsed(pos)
+		}
+	}
+}
+
 // hasDirective checks if an SSA function has the directive.
+// If found, it marks the directive as used.
 func (s *DirectiveFuncSet) hasDirective(fn *ssa.Function) bool {
 	if fn == nil {
 		return false
@@ -151,18 +255,21 @@ func (s *DirectiveFuncSet) hasDirective(fn *ssa.Function) bool {
 		if syntax.Doc != nil {
 			for _, c := range syntax.Doc.List {
 				if s.isDirective(c.Text) {
+					s.markUsed(c.Pos())
 					return true
 				}
 			}
 		}
 		// Check same-line pattern (after opening brace)
-		if s.hasDirectiveAfterFuncDeclBrace(syntax) {
+		if pos := s.findDirectiveAfterFuncDeclBrace(syntax); pos.IsValid() {
+			s.markUsed(pos)
 			return true
 		}
 	case *ast.FuncLit:
 		// Closures don't have Doc comments in Go, so we look for comments
 		// immediately before or after the opening brace.
-		if s.hasDirectiveForFuncLit(syntax) {
+		if pos := s.findDirectiveForFuncLit(syntax); pos.IsValid() {
+			s.markUsed(pos)
 			return true
 		}
 	}
@@ -204,17 +311,25 @@ func (s *DirectiveFuncSet) hasDirective(fn *ssa.Function) bool {
 //  3. For each comment that has the directive, applies the predicate
 //
 // The predicate receives the file (for nested AST inspection) and the comment group.
-func (s *DirectiveFuncSet) hasMatchingDirective(node ast.Node, predicate func(file *ast.File, cg *ast.CommentGroup) bool) bool {
+//
+// findMatchingDirective finds a directive comment matching the predicate and returns its position.
+// Returns token.NoPos if no matching directive is found.
+func (s *DirectiveFuncSet) findMatchingDirective(node ast.Node, predicate func(file *ast.File, cg *ast.CommentGroup) bool) token.Pos {
 	file := s.getFileForNode(node)
 	if file == nil {
-		return false
+		return token.NoPos
 	}
 	for _, cg := range file.Comments {
 		if s.commentGroupHasDirective(cg) && predicate(file, cg) {
-			return true
+			// Return the position of the first directive comment in the group
+			for _, c := range cg.List {
+				if s.isDirective(c.Text) {
+					return c.Pos()
+				}
+			}
 		}
 	}
-	return false
+	return token.NoPos
 }
 
 // hasDirectiveAfterFuncDeclBrace checks if a FuncDecl has a directive comment
@@ -231,12 +346,15 @@ func (s *DirectiveFuncSet) hasMatchingDirective(node ast.Node, predicate func(fi
 //
 // Edge case handled:
 // - External function bodies (funcDecl.Body == nil) return false
-func (s *DirectiveFuncSet) hasDirectiveAfterFuncDeclBrace(funcDecl *ast.FuncDecl) bool {
+//
+// findDirectiveAfterFuncDeclBrace finds a directive comment after the opening brace.
+// Returns the position of the directive, or token.NoPos if not found.
+func (s *DirectiveFuncSet) findDirectiveAfterFuncDeclBrace(funcDecl *ast.FuncDecl) token.Pos {
 	if s == nil || s.fset == nil || funcDecl.Body == nil {
-		return false
+		return token.NoPos
 	}
 	bracePos := s.fset.Position(funcDecl.Body.Lbrace)
-	return s.hasMatchingDirective(funcDecl, func(_ *ast.File, cg *ast.CommentGroup) bool {
+	return s.findMatchingDirective(funcDecl, func(_ *ast.File, cg *ast.CommentGroup) bool {
 		return s.isCommentAfterBrace(cg, bracePos)
 	})
 }
@@ -295,11 +413,14 @@ func (s *DirectiveFuncSet) isCommentAfterBrace(cg *ast.CommentGroup, bracePos to
 //	}}
 //
 // This "innermost" rule prevents ambiguity when closures are on the same line.
-func (s *DirectiveFuncSet) hasDirectiveForFuncLit(funcLit *ast.FuncLit) bool {
+//
+// findDirectiveForFuncLit finds a directive comment for a FuncLit and returns its position.
+// Returns token.NoPos if no directive is found.
+func (s *DirectiveFuncSet) findDirectiveForFuncLit(funcLit *ast.FuncLit) token.Pos {
 	if s == nil || s.fset == nil {
-		return false
+		return token.NoPos
 	}
-	return s.hasMatchingDirective(funcLit, func(file *ast.File, cg *ast.CommentGroup) bool {
+	return s.findMatchingDirective(funcLit, func(file *ast.File, cg *ast.CommentGroup) bool {
 		return s.matchesSameLineDirective(file, funcLit, cg) || s.matchesNextLineDirective(file, funcLit, cg)
 	})
 }
