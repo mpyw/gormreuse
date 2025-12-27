@@ -15,22 +15,26 @@ import (
 )
 
 func TestAnalyzer(t *testing.T) {
+	t.Parallel()
 	testdata := analysistest.TestData()
 	analysistest.Run(t, testdata, gormreuse.Analyzer, "gormreuse")
 }
 
 func TestFileFilter(t *testing.T) {
+	t.Parallel()
 	testdata := analysistest.TestData()
 	// Tests that generated files are skipped
 	analysistest.Run(t, testdata, gormreuse.Analyzer, "filefilter")
 }
 
 func TestSuggestedFixes(t *testing.T) {
+	t.Parallel()
 	testdata := analysistest.TestData()
 	analysistest.RunWithSuggestedFixes(t, testdata, gormreuse.Analyzer, "gormreuse")
 }
 
 func TestSuggestedFixesWithImport(t *testing.T) {
+	t.Parallel()
 	testdata := analysistest.TestData()
 	analysistest.RunWithSuggestedFixes(t, testdata, gormreuse.Analyzer, "noimport")
 }
@@ -54,7 +58,9 @@ func TestGenerateDiffFiles(t *testing.T) {
 	}
 
 	for _, filename := range testFiles {
+		filename := filename // capture range variable
 		t.Run(filename, func(t *testing.T) {
+			t.Parallel()
 			srcPath := filepath.Join(srcDir, filename)
 			diffPath := srcPath + ".diff"
 
