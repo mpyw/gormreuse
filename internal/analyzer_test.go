@@ -1,4 +1,4 @@
-package internal
+package internal_test
 
 import (
 	"go/token"
@@ -6,6 +6,7 @@ import (
 
 	"golang.org/x/tools/go/ssa"
 
+	"github.com/mpyw/gormreuse/internal"
 	"github.com/mpyw/gormreuse/internal/directive"
 	ssautil "github.com/mpyw/gormreuse/internal/ssa"
 )
@@ -15,6 +16,8 @@ import (
 // =============================================================================
 
 func TestNewAnalyzer(t *testing.T) {
+	t.Parallel()
+
 	pureFuncs := directive.NewPureFuncSet(nil, nil)
 	pureFuncs.Add(directive.FuncKey{PkgPath: "test", FuncName: "Pure"})
 	immutableReturnFuncs := directive.NewImmutableReturnFuncSet(nil, nil)
@@ -26,38 +29,24 @@ func TestNewAnalyzer(t *testing.T) {
 }
 
 func TestNewChecker(t *testing.T) {
+	t.Parallel()
+
 	ignoreMap := make(directive.IgnoreMap)
 	pureFuncs := directive.NewPureFuncSet(nil, nil)
 	immutableReturnFuncs := directive.NewImmutableReturnFuncSet(nil, nil)
 	reported := make(map[token.Pos]bool)
-	suggestedEdits := make(map[editKey]bool)
+	suggestedEdits := make(map[internal.EditKey]bool)
 
-	chk := newChecker(nil, ignoreMap, pureFuncs, immutableReturnFuncs, reported, suggestedEdits, nil)
+	chk := internal.NewChecker(nil, ignoreMap, pureFuncs, immutableReturnFuncs, reported, suggestedEdits, nil)
 
-	if chk.pass != nil {
-		t.Error("Expected pass to be nil")
-	}
-	if chk.ignoreMap == nil {
-		t.Error("Expected ignoreMap to be set")
-	}
-	if chk.pureFuncs == nil {
-		t.Error("Expected pureFuncs to be set")
-	}
-	if chk.immutableReturnFuncs == nil {
-		t.Error("Expected immutableReturnFuncs to be set")
-	}
-	if chk.reported == nil {
-		t.Error("Expected reported to be initialized")
-	}
-	if chk.suggestedEdits == nil {
-		t.Error("Expected suggestedEdits to be initialized")
-	}
-	if chk.fixGen != nil {
-		t.Error("Expected fixGen to be nil (passed as nil)")
+	if chk == nil {
+		t.Error("Expected checker to be initialized")
 	}
 }
 
 func TestAnalyzer_Analyze_NilFunction(t *testing.T) {
+	t.Parallel()
+
 	analyzer := ssautil.NewAnalyzer(nil, nil, nil)
 
 	// Should not panic with nil function
@@ -68,6 +57,8 @@ func TestAnalyzer_Analyze_NilFunction(t *testing.T) {
 }
 
 func TestAnalyzer_Analyze_EmptyFunction(t *testing.T) {
+	t.Parallel()
+
 	fn := &ssa.Function{}
 	analyzer := ssautil.NewAnalyzer(fn, nil, nil)
 

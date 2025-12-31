@@ -1,4 +1,4 @@
-package directive
+package directive_test
 
 import (
 	"go/ast"
@@ -6,9 +6,13 @@ import (
 	"go/token"
 	"go/types"
 	"testing"
+
+	"github.com/mpyw/gormreuse/internal/directive"
 )
 
 func TestIsIgnoreDirective(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name     string
 		text     string
@@ -25,7 +29,9 @@ func TestIsIgnoreDirective(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := IsIgnoreDirective(tt.text); got != tt.expected {
+			t.Parallel()
+
+			if got := directive.IsIgnoreDirective(tt.text); got != tt.expected {
 				t.Errorf("IsIgnoreDirective(%q) = %v, want %v", tt.text, got, tt.expected)
 			}
 		})
@@ -33,6 +39,8 @@ func TestIsIgnoreDirective(t *testing.T) {
 }
 
 func TestIsPureDirective(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name     string
 		text     string
@@ -47,7 +55,9 @@ func TestIsPureDirective(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := IsPureDirective(tt.text); got != tt.expected {
+			t.Parallel()
+
+			if got := directive.IsPureDirective(tt.text); got != tt.expected {
 				t.Errorf("IsPureDirective(%q) = %v, want %v", tt.text, got, tt.expected)
 			}
 		})
@@ -55,50 +65,63 @@ func TestIsPureDirective(t *testing.T) {
 }
 
 func TestIgnoreMapShouldIgnore(t *testing.T) {
-	m := make(IgnoreMap)
-	m[10] = &ignoreEntry{pos: token.Pos(100), used: false}
-	m[20] = &ignoreEntry{pos: token.Pos(200), used: false}
+	t.Parallel()
 
-	// Test same line
-	if !m.ShouldIgnore(10) {
-		t.Error("ShouldIgnore(10) should return true (same line)")
-	}
-	if !m[10].used {
-		t.Error("Entry at line 10 should be marked as used")
-	}
+	t.Run("same line", func(t *testing.T) {
+		t.Parallel()
 
-	// Test next line
-	if !m.ShouldIgnore(21) {
-		t.Error("ShouldIgnore(21) should return true (previous line has ignore)")
-	}
-	if !m[20].used {
-		t.Error("Entry at line 20 should be marked as used")
-	}
+		m := make(directive.IgnoreMap)
+		m.Add(10, token.Pos(100))
 
-	// Test non-ignored line
-	if m.ShouldIgnore(5) {
-		t.Error("ShouldIgnore(5) should return false")
-	}
+		if !m.ShouldIgnore(10) {
+			t.Error("ShouldIgnore(10) should return true (same line)")
+		}
+	})
+
+	t.Run("next line", func(t *testing.T) {
+		t.Parallel()
+
+		m := make(directive.IgnoreMap)
+		m.Add(20, token.Pos(200))
+
+		if !m.ShouldIgnore(21) {
+			t.Error("ShouldIgnore(21) should return true (previous line has ignore)")
+		}
+	})
+
+	t.Run("non-ignored line", func(t *testing.T) {
+		t.Parallel()
+
+		m := make(directive.IgnoreMap)
+		m.Add(10, token.Pos(100))
+
+		if m.ShouldIgnore(5) {
+			t.Error("ShouldIgnore(5) should return false")
+		}
+	})
 }
 
 func TestIgnoreMapFileLevel(t *testing.T) {
-	m := make(IgnoreMap)
-	m[-1] = &ignoreEntry{pos: token.Pos(1), used: false}
+	t.Parallel()
+
+	m := make(directive.IgnoreMap)
+	m.Add(-1, token.Pos(1))
 
 	// File-level ignore should affect all lines
 	if !m.ShouldIgnore(100) {
 		t.Error("ShouldIgnore(100) should return true with file-level ignore")
 	}
-	if !m[-1].used {
-		t.Error("File-level entry should be marked as used")
-	}
 }
 
 func TestIgnoreMapGetUnusedIgnores(t *testing.T) {
-	m := make(IgnoreMap)
-	m[10] = &ignoreEntry{pos: token.Pos(100), used: false}
-	m[20] = &ignoreEntry{pos: token.Pos(200), used: true}
-	m[-1] = &ignoreEntry{pos: token.Pos(1), used: false} // File-level should be skipped
+	t.Parallel()
+
+	m := make(directive.IgnoreMap)
+	m.Add(10, token.Pos(100))
+	m.Add(20, token.Pos(200))
+
+	// Mark line 20 as used by calling ShouldIgnore
+	m.ShouldIgnore(20)
 
 	unused := m.GetUnusedIgnores()
 	if len(unused) != 1 {
@@ -109,20 +132,51 @@ func TestIgnoreMapGetUnusedIgnores(t *testing.T) {
 	}
 }
 
-func TestIgnoreMapMarkUsed(t *testing.T) {
-	m := make(IgnoreMap)
-	m[10] = &ignoreEntry{pos: token.Pos(100), used: false}
+func TestIgnoreMapGetUnusedIgnoresWithFileLevel(t *testing.T) {
+	t.Parallel()
 
-	m.MarkUsed(10)
-	if !m[10].used {
-		t.Error("Entry at line 10 should be marked as used")
+	m := make(directive.IgnoreMap)
+	m.Add(10, token.Pos(100))
+	m.Add(-1, token.Pos(1)) // File-level ignore
+
+	// When file-level ignore is present, line-level ignores are not used
+	// because file-level takes precedence
+	unused := m.GetUnusedIgnores()
+	if len(unused) != 1 {
+		t.Errorf("Expected 1 unused ignore, got %d", len(unused))
 	}
+	if len(unused) > 0 && unused[0] != token.Pos(100) {
+		t.Errorf("Expected pos 100, got %v", unused[0])
+	}
+}
 
-	// MarkUsed on non-existent line should not panic
-	m.MarkUsed(999)
+func TestIgnoreMapMarkUsed(t *testing.T) {
+	t.Parallel()
+
+	t.Run("mark existing entry", func(t *testing.T) {
+		t.Parallel()
+
+		m := make(directive.IgnoreMap)
+		m.Add(10, token.Pos(100))
+
+		m.MarkUsed(10)
+		unused := m.GetUnusedIgnores()
+		if len(unused) != 0 {
+			t.Error("Entry at line 10 should be marked as used")
+		}
+	})
+
+	t.Run("mark non-existent line should not panic", func(t *testing.T) {
+		t.Parallel()
+
+		m := make(directive.IgnoreMap)
+		m.MarkUsed(999)
+	})
 }
 
 func TestBuildIgnoreMap(t *testing.T) {
+	t.Parallel()
+
 	src := `// gormreuse:ignore
 package test
 
@@ -135,13 +189,15 @@ func foo() {}
 		t.Fatalf("Failed to parse: %v", err)
 	}
 
-	m := BuildIgnoreMap(fset, file)
+	m := directive.BuildIgnoreMap(fset, file)
 	if len(m) == 0 {
 		t.Error("Expected non-empty ignore map")
 	}
 }
 
 func TestBuildIgnoreMapWithDocComment(t *testing.T) {
+	t.Parallel()
+
 	src := `// gormreuse:ignore
 // Package test is a test package.
 package test
@@ -154,15 +210,15 @@ func foo() {}
 		t.Fatalf("Failed to parse: %v", err)
 	}
 
-	m := BuildIgnoreMap(fset, file)
+	m := directive.BuildIgnoreMap(fset, file)
 
 	// Check that file has doc and it contains ignore
 	if file.Doc != nil {
 		for _, c := range file.Doc.List {
-			if IsIgnoreDirective(c.Text) {
+			if directive.IsIgnoreDirective(c.Text) {
 				// File-level ignore should be present
-				if _, ok := m[-1]; !ok {
-					t.Error("Expected file-level ignore (-1) in map")
+				if !m.ShouldIgnore(1) {
+					t.Error("Expected file-level ignore to affect line 1")
 				}
 			}
 		}
@@ -170,6 +226,8 @@ func foo() {}
 }
 
 func TestBuildFunctionIgnoreSet(t *testing.T) {
+	t.Parallel()
+
 	src := `package test
 
 // gormreuse:ignore
@@ -183,13 +241,15 @@ func notIgnored() {}
 		t.Fatalf("Failed to parse: %v", err)
 	}
 
-	set := BuildFunctionIgnoreSet(fset, file)
+	set := directive.BuildFunctionIgnoreSet(fset, file)
 	if len(set) != 1 {
 		t.Errorf("Expected 1 ignored function, got %d", len(set))
 	}
 }
 
 func TestBuildPureFunctionSet(t *testing.T) {
+	t.Parallel()
+
 	src := `package test
 
 type Receiver struct{}
@@ -227,25 +287,27 @@ func notPure() {}
 		t.Fatalf("Failed to parse: %v", err)
 	}
 
-	set := BuildPureFunctionSet(file, "test/pkg")
+	set := directive.BuildPureFunctionSet(file, "test/pkg")
 	if len(set) != 6 {
 		t.Errorf("Expected 6 pure functions, got %d", len(set))
 	}
 
 	tests := []struct {
 		name string
-		key  FuncKey
+		key  directive.FuncKey
 	}{
-		{"regular function", FuncKey{PkgPath: "test/pkg", FuncName: "pureFunc"}},
-		{"value receiver method", FuncKey{PkgPath: "test/pkg", ReceiverType: "Receiver", FuncName: "pureValueMethod"}},
-		{"pointer receiver method", FuncKey{PkgPath: "test/pkg", ReceiverType: "Receiver", FuncName: "purePointerMethod"}},
-		{"generic function", FuncKey{PkgPath: "test/pkg", FuncName: "pureGenericFunc"}},
-		{"generic value receiver method", FuncKey{PkgPath: "test/pkg", ReceiverType: "GenericReceiver", FuncName: "pureGenericValueMethod"}},
-		{"generic pointer receiver method", FuncKey{PkgPath: "test/pkg", ReceiverType: "GenericReceiver", FuncName: "pureGenericPointerMethod"}},
+		{"regular function", directive.FuncKey{PkgPath: "test/pkg", FuncName: "pureFunc"}},
+		{"value receiver method", directive.FuncKey{PkgPath: "test/pkg", ReceiverType: "Receiver", FuncName: "pureValueMethod"}},
+		{"pointer receiver method", directive.FuncKey{PkgPath: "test/pkg", ReceiverType: "Receiver", FuncName: "purePointerMethod"}},
+		{"generic function", directive.FuncKey{PkgPath: "test/pkg", FuncName: "pureGenericFunc"}},
+		{"generic value receiver method", directive.FuncKey{PkgPath: "test/pkg", ReceiverType: "GenericReceiver", FuncName: "pureGenericValueMethod"}},
+		{"generic pointer receiver method", directive.FuncKey{PkgPath: "test/pkg", ReceiverType: "GenericReceiver", FuncName: "pureGenericPointerMethod"}},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			if _, ok := set[tt.key]; !ok {
 				t.Errorf("Expected %s in set (key: %+v)", tt.name, tt.key)
 			}
@@ -254,6 +316,8 @@ func notPure() {}
 }
 
 func TestExprToString(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name     string
 		src      string
@@ -278,6 +342,8 @@ func TestExprToString(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			fset := token.NewFileSet()
 			file, err := parser.ParseFile(fset, "test.go", tt.src, 0)
 			if err != nil {
@@ -287,9 +353,9 @@ func TestExprToString(t *testing.T) {
 			for _, decl := range file.Decls {
 				if fn, ok := decl.(*ast.FuncDecl); ok {
 					if fn.Recv != nil && len(fn.Recv.List) > 0 {
-						got := exprToString(fn.Recv.List[0].Type)
+						got := directive.ExprToString(fn.Recv.List[0].Type)
 						if got != tt.expected {
-							t.Errorf("exprToString() = %q, want %q", got, tt.expected)
+							t.Errorf("ExprToString() = %q, want %q", got, tt.expected)
 						}
 					}
 				}
@@ -299,6 +365,8 @@ func TestExprToString(t *testing.T) {
 }
 
 func TestExprToStringUnknown(t *testing.T) {
+	t.Parallel()
+
 	// Test with an expression type that returns empty string
 	// ArrayType is not handled by exprToString
 	src := `package test; func (r [2]int) m() {}`
@@ -311,9 +379,9 @@ func TestExprToStringUnknown(t *testing.T) {
 	for _, decl := range file.Decls {
 		if fn, ok := decl.(*ast.FuncDecl); ok {
 			if fn.Recv != nil && len(fn.Recv.List) > 0 {
-				got := exprToString(fn.Recv.List[0].Type)
+				got := directive.ExprToString(fn.Recv.List[0].Type)
 				if got != "" {
-					t.Errorf("exprToString(ArrayType) = %q, want empty string", got)
+					t.Errorf("ExprToString(ArrayType) = %q, want empty string", got)
 				}
 			}
 		}
@@ -321,6 +389,8 @@ func TestExprToStringUnknown(t *testing.T) {
 }
 
 func TestExprToStringGeneric(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name     string
 		src      string
@@ -350,6 +420,8 @@ func TestExprToStringGeneric(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			fset := token.NewFileSet()
 			file, err := parser.ParseFile(fset, "test.go", tt.src, 0)
 			if err != nil {
@@ -359,9 +431,9 @@ func TestExprToStringGeneric(t *testing.T) {
 			for _, decl := range file.Decls {
 				if fn, ok := decl.(*ast.FuncDecl); ok {
 					if fn.Recv != nil && len(fn.Recv.List) > 0 {
-						got := exprToString(fn.Recv.List[0].Type)
+						got := directive.ExprToString(fn.Recv.List[0].Type)
 						if got != tt.expected {
-							t.Errorf("exprToString() = %q, want %q", got, tt.expected)
+							t.Errorf("ExprToString() = %q, want %q", got, tt.expected)
 						}
 					}
 				}
@@ -371,6 +443,8 @@ func TestExprToStringGeneric(t *testing.T) {
 }
 
 func TestContainsGormDB(t *testing.T) {
+	t.Parallel()
+
 	// Create packages programmatically to avoid gorm.io/gorm dependency
 	// First, create a mock gorm.io/gorm package with DB type
 	gormPkg := types.NewPackage("gorm.io/gorm", "gorm")
@@ -460,15 +534,19 @@ func TestContainsGormDB(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := containsGormDB(tt.typ)
+			t.Parallel()
+
+			got := directive.ContainsGormDB(tt.typ)
 			if got != tt.expected {
-				t.Errorf("containsGormDB(%s) = %v, want %v", tt.name, got, tt.expected)
+				t.Errorf("ContainsGormDB(%s) = %v, want %v", tt.name, got, tt.expected)
 			}
 		})
 	}
 }
 
 func TestContainsGormDBDefinedType(t *testing.T) {
+	t.Parallel()
+
 	// Create gorm package
 	gormPkg := types.NewPackage("gorm.io/gorm", "gorm")
 	dbTypeName := types.NewTypeName(0, gormPkg, "DB", nil)
@@ -482,19 +560,23 @@ func TestContainsGormDBDefinedType(t *testing.T) {
 	definedTypeName := types.NewTypeName(0, testPkg, "DefinedDB", nil)
 	definedType := types.NewNamed(definedTypeName, dbPtrType, nil)
 
-	if !containsGormDB(definedType) {
-		t.Error("containsGormDB(DefinedDB) should return true for type DefinedDB *gorm.DB")
+	if !directive.ContainsGormDB(definedType) {
+		t.Error("ContainsGormDB(DefinedDB) should return true for type DefinedDB *gorm.DB")
 	}
 }
 
 func TestContainsGormDBNilType(t *testing.T) {
+	t.Parallel()
+
 	// Test nil type
-	if containsGormDB(nil) {
-		t.Error("containsGormDB(nil) should return false")
+	if directive.ContainsGormDB(nil) {
+		t.Error("ContainsGormDB(nil) should return false")
 	}
 }
 
 func TestContainsGormDBCycleDetection(t *testing.T) {
+	t.Parallel()
+
 	// Test cycle detection with recursive types using programmatic type creation
 	testPkg := types.NewPackage("test", "test")
 
@@ -510,8 +592,8 @@ func TestContainsGormDBCycleDetection(t *testing.T) {
 	recursiveType.SetUnderlying(actualStruct)
 
 	// Should not panic and should return false (no *gorm.DB)
-	got := containsGormDB(recursiveType)
+	got := directive.ContainsGormDB(recursiveType)
 	if got {
-		t.Error("containsGormDB(Recursive) should return false")
+		t.Error("ContainsGormDB(Recursive) should return false")
 	}
 }
