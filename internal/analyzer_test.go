@@ -1,4 +1,4 @@
-package internal_test
+package internal
 
 import (
 	"go/token"
@@ -6,7 +6,6 @@ import (
 
 	"golang.org/x/tools/go/ssa"
 
-	"github.com/mpyw/gormreuse/internal"
 	"github.com/mpyw/gormreuse/internal/directive"
 	ssautil "github.com/mpyw/gormreuse/internal/ssa"
 )
@@ -35,9 +34,9 @@ func TestNewChecker(t *testing.T) {
 	pureFuncs := directive.NewPureFuncSet(nil, nil)
 	immutableReturnFuncs := directive.NewImmutableReturnFuncSet(nil, nil)
 	reported := make(map[token.Pos]bool)
-	suggestedEdits := make(map[internal.EditKey]bool)
+	suggestedEdits := make(map[editKey]bool)
 
-	chk := internal.NewChecker(nil, ignoreMap, pureFuncs, immutableReturnFuncs, reported, suggestedEdits, nil)
+	chk := newChecker(nil, ignoreMap, pureFuncs, immutableReturnFuncs, reported, suggestedEdits, nil)
 
 	if chk == nil {
 		t.Error("Expected checker to be initialized")
