@@ -1,8 +1,9 @@
 # gormreuse
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/mpyw/gormreuse.svg)](https://pkg.go.dev/github.com/mpyw/gormreuse)
-[![Go Report Card](https://goreportcard.com/badge/github.com/mpyw/gormreuse)](https://goreportcard.com/report/github.com/mpyw/gormreuse)
+[![CI](https://github.com/mpyw/gormreuse/actions/workflows/ci.yml/badge.svg)](https://github.com/mpyw/gormreuse/actions/workflows/ci.yml)
 [![Codecov](https://codecov.io/gh/mpyw/gormreuse/graph/badge.svg)](https://codecov.io/gh/mpyw/gormreuse)
+[![Go Report Card](https://goreportcard.com/badge/github.com/mpyw/gormreuse)](https://goreportcard.com/report/github.com/mpyw/gormreuse)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 > [!NOTE]
