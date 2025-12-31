@@ -1,11 +1,15 @@
-package typeutil
+package typeutil_test
 
 import (
 	"go/types"
 	"testing"
+
+	"github.com/mpyw/gormreuse/internal/typeutil"
 )
 
 func TestIsImmutableReturningBuiltin(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name     string
 		method   string
@@ -26,7 +30,9 @@ func TestIsImmutableReturningBuiltin(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := IsImmutableReturningBuiltin(tt.method); got != tt.expected {
+			t.Parallel()
+
+			if got := typeutil.IsImmutableReturningBuiltin(tt.method); got != tt.expected {
 				t.Errorf("IsImmutableReturningBuiltin(%q) = %v, want %v", tt.method, got, tt.expected)
 			}
 		})
@@ -34,95 +40,152 @@ func TestIsImmutableReturningBuiltin(t *testing.T) {
 }
 
 func TestIsGormDB(t *testing.T) {
-	// Test with nil
-	if IsGormDB(nil) {
-		t.Error("IsGormDB(nil) should return false")
-	}
+	t.Parallel()
 
-	// Test with non-pointer type
-	basicType := types.Typ[types.Int]
-	if IsGormDB(basicType) {
-		t.Error("IsGormDB(int) should return false")
-	}
+	t.Run("nil type", func(t *testing.T) {
+		t.Parallel()
 
-	// Test with pointer to basic type
-	ptrToInt := types.NewPointer(types.Typ[types.Int])
-	if IsGormDB(ptrToInt) {
-		t.Error("IsGormDB(*int) should return false")
-	}
+		if typeutil.IsGormDB(nil) {
+			t.Error("IsGormDB(nil) should return false")
+		}
+	})
 
-	// Test with pointer to unnamed struct
-	structType := types.NewStruct(nil, nil)
-	ptrToStruct := types.NewPointer(structType)
-	if IsGormDB(ptrToStruct) {
-		t.Error("IsGormDB(*struct{}) should return false")
-	}
+	t.Run("non-pointer type", func(t *testing.T) {
+		t.Parallel()
 
-	// Create gorm package and DB type programmatically
-	gormPkg := types.NewPackage("gorm.io/gorm", "gorm")
-	dbTypeName := types.NewTypeName(0, gormPkg, "DB", nil)
-	dbStruct := types.NewStruct(nil, nil)
-	dbType := types.NewNamed(dbTypeName, dbStruct, nil)
-	gormPkg.Scope().Insert(dbTypeName)
+		basicType := types.Typ[types.Int]
+		if typeutil.IsGormDB(basicType) {
+			t.Error("IsGormDB(int) should return false")
+		}
+	})
 
-	// Test with *gorm.DB (most common case)
-	dbPtrType := types.NewPointer(dbType)
-	if !IsGormDB(dbPtrType) {
-		t.Error("IsGormDB(*gorm.DB) should return true")
-	}
+	t.Run("pointer to basic type", func(t *testing.T) {
+		t.Parallel()
 
-	// Test with gorm.DB (non-pointer, still dangerous due to *Statement)
-	if !IsGormDB(dbType) {
-		t.Error("IsGormDB(gorm.DB) should return true - non-pointer is still dangerous")
-	}
+		ptrToInt := types.NewPointer(types.Typ[types.Int])
+		if typeutil.IsGormDB(ptrToInt) {
+			t.Error("IsGormDB(*int) should return false")
+		}
+	})
 
-	// Test with wrong package path (should return false)
-	fakePkg := types.NewPackage("evil.com/fake-gorm.io/gorm", "gorm")
-	fakeTypeName := types.NewTypeName(0, fakePkg, "DB", nil)
-	fakeDBType := types.NewNamed(fakeTypeName, types.NewStruct(nil, nil), nil)
-	fakePkg.Scope().Insert(fakeTypeName)
-	if IsGormDB(types.NewPointer(fakeDBType)) {
-		t.Error("IsGormDB(*fake/gorm.DB) should return false")
-	}
+	t.Run("pointer to unnamed struct", func(t *testing.T) {
+		t.Parallel()
 
-	// Test with **gorm.DB (double pointer) - should return false
-	// ClosureCapturesGormDB handles this case separately
-	dbDoublePtrType := types.NewPointer(dbPtrType)
-	if IsGormDB(dbDoublePtrType) {
-		t.Error("IsGormDB(**gorm.DB) should return false - use ClosureCapturesGormDB for nested pointers")
-	}
+		structType := types.NewStruct(nil, nil)
+		ptrToStruct := types.NewPointer(structType)
+		if typeutil.IsGormDB(ptrToStruct) {
+			t.Error("IsGormDB(*struct{}) should return false")
+		}
+	})
 
-	// Test with interface{} - should return false
-	// containsGormDB in directive package handles this case
-	emptyInterface := types.NewInterfaceType(nil, nil).Complete()
-	if IsGormDB(emptyInterface) {
-		t.Error("IsGormDB(interface{}) should return false - use containsGormDB for interface checks")
-	}
+	t.Run("*gorm.DB", func(t *testing.T) {
+		t.Parallel()
+
+		// Create gorm package and DB type programmatically
+		gormPkg := types.NewPackage("gorm.io/gorm", "gorm")
+		dbTypeName := types.NewTypeName(0, gormPkg, "DB", nil)
+		dbStruct := types.NewStruct(nil, nil)
+		dbType := types.NewNamed(dbTypeName, dbStruct, nil)
+		gormPkg.Scope().Insert(dbTypeName)
+
+		dbPtrType := types.NewPointer(dbType)
+		if !typeutil.IsGormDB(dbPtrType) {
+			t.Error("IsGormDB(*gorm.DB) should return true")
+		}
+	})
+
+	t.Run("gorm.DB (non-pointer)", func(t *testing.T) {
+		t.Parallel()
+
+		gormPkg := types.NewPackage("gorm.io/gorm", "gorm")
+		dbTypeName := types.NewTypeName(0, gormPkg, "DB", nil)
+		dbStruct := types.NewStruct(nil, nil)
+		dbType := types.NewNamed(dbTypeName, dbStruct, nil)
+		gormPkg.Scope().Insert(dbTypeName)
+
+		if !typeutil.IsGormDB(dbType) {
+			t.Error("IsGormDB(gorm.DB) should return true - non-pointer is still dangerous")
+		}
+	})
+
+	t.Run("wrong package path", func(t *testing.T) {
+		t.Parallel()
+
+		fakePkg := types.NewPackage("evil.com/fake-gorm.io/gorm", "gorm")
+		fakeTypeName := types.NewTypeName(0, fakePkg, "DB", nil)
+		fakeDBType := types.NewNamed(fakeTypeName, types.NewStruct(nil, nil), nil)
+		fakePkg.Scope().Insert(fakeTypeName)
+
+		if typeutil.IsGormDB(types.NewPointer(fakeDBType)) {
+			t.Error("IsGormDB(*fake/gorm.DB) should return false")
+		}
+	})
+
+	t.Run("**gorm.DB (double pointer)", func(t *testing.T) {
+		t.Parallel()
+
+		gormPkg := types.NewPackage("gorm.io/gorm", "gorm")
+		dbTypeName := types.NewTypeName(0, gormPkg, "DB", nil)
+		dbStruct := types.NewStruct(nil, nil)
+		dbType := types.NewNamed(dbTypeName, dbStruct, nil)
+		gormPkg.Scope().Insert(dbTypeName)
+
+		dbPtrType := types.NewPointer(dbType)
+		dbDoublePtrType := types.NewPointer(dbPtrType)
+		if typeutil.IsGormDB(dbDoublePtrType) {
+			t.Error("IsGormDB(**gorm.DB) should return false - use ClosureCapturesGormDB for nested pointers")
+		}
+	})
+
+	t.Run("interface{}", func(t *testing.T) {
+		t.Parallel()
+
+		emptyInterface := types.NewInterfaceType(nil, nil).Complete()
+		if typeutil.IsGormDB(emptyInterface) {
+			t.Error("IsGormDB(interface{}) should return false - use containsGormDB for interface checks")
+		}
+	})
 }
 
 func TestIsGormDBNamed(t *testing.T) {
-	// Test with nil
-	if isGormDBNamed(nil) {
-		t.Error("isGormDBNamed(nil) should return false")
-	}
+	t.Parallel()
 
-	// Test with basic type
-	if isGormDBNamed(types.Typ[types.Int]) {
-		t.Error("isGormDBNamed(int) should return false")
-	}
+	t.Run("nil type", func(t *testing.T) {
+		t.Parallel()
 
-	// Test with named type from wrong package
-	pkg := types.NewPackage("other/package", "other")
-	obj := types.NewTypeName(0, pkg, "DB", nil)
-	named := types.NewNamed(obj, types.NewStruct(nil, nil), nil)
-	if isGormDBNamed(named) {
-		t.Error("isGormDBNamed(other.DB) should return false")
-	}
+		if typeutil.IsGormDBNamed(nil) {
+			t.Error("IsGormDBNamed(nil) should return false")
+		}
+	})
 
-	// Test with named type with nil pkg
-	objNilPkg := types.NewTypeName(0, nil, "DB", nil)
-	namedNilPkg := types.NewNamed(objNilPkg, types.NewStruct(nil, nil), nil)
-	if isGormDBNamed(namedNilPkg) {
-		t.Error("isGormDBNamed with nil pkg should return false")
-	}
+	t.Run("basic type", func(t *testing.T) {
+		t.Parallel()
+
+		if typeutil.IsGormDBNamed(types.Typ[types.Int]) {
+			t.Error("IsGormDBNamed(int) should return false")
+		}
+	})
+
+	t.Run("named type from wrong package", func(t *testing.T) {
+		t.Parallel()
+
+		pkg := types.NewPackage("other/package", "other")
+		obj := types.NewTypeName(0, pkg, "DB", nil)
+		named := types.NewNamed(obj, types.NewStruct(nil, nil), nil)
+
+		if typeutil.IsGormDBNamed(named) {
+			t.Error("IsGormDBNamed(other.DB) should return false")
+		}
+	})
+
+	t.Run("named type with nil pkg", func(t *testing.T) {
+		t.Parallel()
+
+		objNilPkg := types.NewTypeName(0, nil, "DB", nil)
+		namedNilPkg := types.NewNamed(objNilPkg, types.NewStruct(nil, nil), nil)
+
+		if typeutil.IsGormDBNamed(namedNilPkg) {
+			t.Error("IsGormDBNamed with nil pkg should return false")
+		}
+	})
 }
