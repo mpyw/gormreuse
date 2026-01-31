@@ -185,6 +185,14 @@ func (db *DB) Rollback() *DB { return db }
 // Transaction executes in transaction.
 func (db *DB) Transaction(fc func(tx *DB) error, opts ...interface{}) error { return nil }
 
+// Connection gets a connection from the pool and executes the callback.
+func (db *DB) Connection(fc func(tx *DB) error) error { return nil }
+
+// FindInBatches finds records in batches.
+func (db *DB) FindInBatches(dest interface{}, batchSize int, fc func(tx *DB, batch int) error) *DB {
+	return db
+}
+
 // SavePoint creates save point.
 func (db *DB) SavePoint(name string) *DB { return db }
 

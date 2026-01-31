@@ -96,3 +96,36 @@ func IsPureDirective(text string) bool { return hasDirective(text, "pure") }
 // IsImmutableReturnDirective checks if a comment contains the immutable-return directive.
 // Functions with this directive return immutable *gorm.DB (like Session, WithContext).
 func IsImmutableReturnDirective(text string) bool { return hasDirective(text, "immutable-return") }
+
+// ExtractImmutableInputParams extracts parameter names from immutable-input(name) directives.
+// Returns a list of parameter names that should receive immutable *gorm.DB.
+// Example: "//gormreuse:immutable-input(fc)" returns ["fc"]
+// Example: "//gormreuse:immutable-input(cb1),immutable-input(cb2)" returns ["cb1", "cb2"]
+func ExtractImmutableInputParams(text string) []string {
+	text = strings.TrimPrefix(text, "//")
+	text = strings.TrimSpace(text)
+	if !strings.HasPrefix(text, directivePrefix) {
+		return nil
+	}
+	text = strings.TrimPrefix(text, directivePrefix)
+
+	// Split off trailing comment (// ...)
+	if idx := strings.Index(text, "//"); idx != -1 {
+		text = text[:idx]
+	}
+	text = strings.TrimSpace(text)
+
+	var params []string
+	for _, part := range strings.Split(text, ",") {
+		part = strings.TrimSpace(part)
+		if strings.HasPrefix(part, "immutable-input(") && strings.HasSuffix(part, ")") {
+			name := strings.TrimPrefix(part, "immutable-input(")
+			name = strings.TrimSuffix(name, ")")
+			name = strings.TrimSpace(name)
+			if name != "" {
+				params = append(params, name)
+			}
+		}
+	}
+	return params
+}

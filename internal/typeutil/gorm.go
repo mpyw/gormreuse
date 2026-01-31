@@ -109,3 +109,35 @@ func IsImmutableReturningBuiltin(name string) bool {
 	_, ok := immutableReturningMethods[name]
 	return ok
 }
+
+// =============================================================================
+// Immutable Input Methods
+// =============================================================================
+
+// immutableInputMethods are methods that pass immutable *gorm.DB to their callbacks.
+// The value is the parameter name that receives immutable input.
+//
+// These callbacks can safely reuse their *gorm.DB parameter because it's created
+// fresh by the method (via Begin, Session, or similar).
+var immutableInputMethods = map[string]string{
+	// Transaction: tx is created by Begin (immutable)
+	// func (db *DB) Transaction(fc func(tx *DB) error, opts ...*sql.TxOptions) error
+	"Transaction": "fc",
+
+	// Connection: fresh connection from pool (immutable)
+	// func (db *DB) Connection(fc func(tx *DB) error) error
+	"Connection": "fc",
+
+	// FindInBatches: fresh tx per batch (immutable)
+	// func (db *DB) FindInBatches(dest interface{}, batchSize int, fc func(tx *DB, batch int) error) error
+	"FindInBatches": "fc",
+}
+
+// IsImmutableInputBuiltin returns the callback parameter name if the method passes
+// immutable *gorm.DB to callbacks, empty string otherwise.
+//
+// Methods like Transaction, Connection, and FindInBatches create fresh *gorm.DB
+// for their callbacks, so the callback can safely reuse the parameter.
+func IsImmutableInputBuiltin(name string) string {
+	return immutableInputMethods[name]
+}
