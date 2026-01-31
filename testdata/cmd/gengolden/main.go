@@ -109,6 +109,23 @@ func generateGoldenFile(testdata, srcPath string) error {
 		offsetEdits = append(offsetEdits, offsetEdit{start, end, e.newText})
 	}
 
+	// Deduplicate edits (same position and new text)
+	type editKey struct {
+		start int
+		end   int
+		text  string
+	}
+	seen := make(map[editKey]bool)
+	var dedupedEdits []offsetEdit
+	for _, e := range offsetEdits {
+		key := editKey{e.start, e.end, string(e.newText)}
+		if !seen[key] {
+			seen[key] = true
+			dedupedEdits = append(dedupedEdits, e)
+		}
+	}
+	offsetEdits = dedupedEdits
+
 	// Apply edits (in reverse order to maintain offsets)
 	sort.Slice(offsetEdits, func(i, j int) bool {
 		return offsetEdits[i].start > offsetEdits[j].start

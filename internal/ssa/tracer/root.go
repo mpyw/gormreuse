@@ -282,6 +282,11 @@ func (t *RootTracer) traceCall(call *ssa.Call, visited map[ssa.Value]bool, loopI
 // Routes to specialized handlers based on the value type.
 func (t *RootTracer) traceNonCall(v ssa.Value, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) ssa.Value {
 	switch val := v.(type) {
+	case *ssa.Parameter:
+		// Parameter: function parameter is treated as mutable root
+		// This enables detection of parameter reuse within functions
+		return val
+
 	case *ssa.Phi:
 		// Phi: merge point from conditional branches (if/switch)
 		return t.tracePhi(val, visited, loopInfo)
@@ -1327,19 +1332,17 @@ func (t *RootTracer) traceAllFreeVar(fv *ssa.FreeVar, visited map[ssa.Value]bool
 // isImmutableSource checks if a value is an immutable source (no mutable root).
 //
 // Immutable sources:
-//   - Parameter: function arguments are treated as fresh values
 //   - Const: constant values (especially nil)
 //   - Builtin pure function call: returns immutable *gorm.DB (e.g., Session())
 //   - User-defined immutable-return function: marked with //gormreuse:immutable-return
+//
+// Note: Function parameters are NOT immutable sources - they're treated as mutable
+// to detect reuse within functions. Use Session() to create isolation.
 //
 // Note: User-defined pure functions (without immutable-return) are NOT immutable sources -
 // they may return mutable values.
 func (t *RootTracer) isImmutableSource(v ssa.Value) bool {
 	switch val := v.(type) {
-	case *ssa.Parameter:
-		// Function parameters are immutable sources
-		// (caller's responsibility to ensure safety)
-		return true
 	case *ssa.Const:
 		// Constants (including nil) are immutable
 		return true

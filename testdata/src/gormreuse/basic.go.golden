@@ -68,29 +68,36 @@ func withContextAtEnd(db *gorm.DB) {
 	q.Count(new(int64)) // OK: WithContext at end makes it safe
 }
 
-// separateChains demonstrates independent chains from the same parameter.
+// separateChains demonstrates that parameters are mutable - multiple chains are violations.
 func separateChains(db *gorm.DB) {
 	db.Where("a = ?", 1).Find(&[]User{})
-	db.Where("b = ?", 2).Find(&[]User{}) // OK: separate chains
+	db.Where("b = ?", 2).Find(&[]User{}) // want `\*gorm\.DB instance reused after chain method`
 }
 
-// separateVariables demonstrates no reuse when using different variables.
+// separateVariables demonstrates that creating multiple chains from parameter is a violation.
 func separateVariables(db *gorm.DB) {
 	q1 := db.Where("a = ?", 1)
-	q2 := db.Where("b = ?", 2)
+	q2 := db.Where("b = ?", 2) // want `\*gorm\.DB instance reused after chain method`
 
 	q1.Find(nil)
-	q2.Find(nil) // OK: different chains
+	q2.Find(nil)
 }
 
-// parameterDirectUse demonstrates that parameters are treated as immutable.
+// parameterDirectUse demonstrates that parameters are mutable - multiple uses are violations.
 func parameterDirectUse(db *gorm.DB) {
 	db.Where("a = ?", 1).Find(nil)
-	db.Where("b = ?", 2).Find(nil) // OK: parameter is immutable source
+	db.Where("b = ?", 2).Find(nil) // want `\*gorm\.DB instance reused after chain method`
 }
 
-// parameterMultipleChains demonstrates multiple chains from parameter.
+// parameterMultipleChains demonstrates that multiple chains from parameter are violations.
 func parameterMultipleChains(db *gorm.DB) {
 	db.Where("x").Order("id").Find(nil)
-	db.Where("y").Limit(10).Find(nil) // OK: independent chains
+	db.Where("y").Limit(10).Find(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// parameterWithSession demonstrates safe reuse after Session() on parameter.
+func parameterWithSession(db *gorm.DB) {
+	db = db.Session(&gorm.Session{})
+	db.Where("a = ?", 1).Find(nil)
+	db.Where("b = ?", 2).Find(nil) // OK: Session() at start makes it safe
 }

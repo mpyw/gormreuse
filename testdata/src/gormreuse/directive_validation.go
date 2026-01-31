@@ -835,7 +835,7 @@ func useDBFactory(f *DBFactory) {
 //gormreuse:pure,immutable-return
 func badPureImmutable(db *gorm.DB) *gorm.DB {
 	db.Where("x") // want `pure function pollutes \*gorm\.DB argument by calling Where`
-	return db.Session(&gorm.Session{})
+	return db.Session(&gorm.Session{}) // want `\*gorm\.DB instance reused after chain method`
 }
 
 // PIR102: pure,immutable-return but passes to non-pure function
@@ -843,7 +843,7 @@ func badPureImmutable(db *gorm.DB) *gorm.DB {
 //gormreuse:pure,immutable-return
 func badPureImmutablePassesNonPure(db *gorm.DB) *gorm.DB {
 	nonPureHelper(db) // want `pure function passes \*gorm\.DB argument to non-pure function nonPureHelper`
-	return db.Session(&gorm.Session{})
+	return db.Session(&gorm.Session{}) // want `\*gorm\.DB instance reused after chain method`
 }
 
 // =============================================================================
@@ -857,7 +857,7 @@ func badPureImmutablePassesNonPure(db *gorm.DB) *gorm.DB {
 //gormreuse:immutable-return
 func immutableOnlyPollutes(db *gorm.DB) *gorm.DB {
 	db.Where("pollute") // No error - not marked as pure
-	return db.Session(&gorm.Session{})
+	return db.Session(&gorm.Session{}) // want `\*gorm\.DB instance reused after chain method`
 }
 
 func useImmutableOnlyPollutes(db *gorm.DB) {

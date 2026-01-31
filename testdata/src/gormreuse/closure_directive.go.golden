@@ -378,6 +378,7 @@ type structWithFuncField struct {
 
 // multiAssign01: Both closures in same assignment get the directive
 func multiAssign01(db *gorm.DB) {
+	db = db.Session(&gorm.Session{}) // Make parameter immutable for testing pure directive
 	//gormreuse:pure
 	a, b := func(q *gorm.DB) { _ = q }, func(q *gorm.DB) { _ = q }
 
@@ -392,6 +393,7 @@ func multiAssign01(db *gorm.DB) {
 
 // multiAssign02: Both variables get directive (direct assignment)
 func multiAssign02(db *gorm.DB) {
+	db = db.Session(&gorm.Session{}) // Make parameter immutable for testing pure directive
 	var a, c func(q *gorm.DB)
 
 	//gormreuse:pure
@@ -408,6 +410,7 @@ func multiAssign02(db *gorm.DB) {
 
 // multiAssign03: Only first closure gets directive (second is inside struct literal)
 func multiAssign03(db *gorm.DB) {
+	db = db.Session(&gorm.Session{}) // Make parameter immutable for testing pure directive
 	//gormreuse:pure
 	a, b := func(q *gorm.DB) { _ = q }, &structWithFuncField{Fn: func(q *gorm.DB) { _ = q }}
 
@@ -422,6 +425,7 @@ func multiAssign03(db *gorm.DB) {
 
 // multiAssign04: Three closures - first two direct, third in composite literal
 func multiAssign04(db *gorm.DB) {
+	db = db.Session(&gorm.Session{}) // Make parameter immutable for testing pure directive
 	//gormreuse:pure
 	a, b, c := func(q *gorm.DB) { _ = q }, func(q *gorm.DB) { _ = q }, []func(*gorm.DB){func(q *gorm.DB) { _ = q }}[0]
 
@@ -440,6 +444,7 @@ func multiAssign04(db *gorm.DB) {
 
 // multiAssign05: Separated statements - only first gets directive
 func multiAssign05(db *gorm.DB) {
+	db = db.Session(&gorm.Session{}) // Make parameter immutable for testing pure directive
 	//gormreuse:pure
 	a := func(q *gorm.DB) { _ = q }
 	b := func(q *gorm.DB) { _ = q } // Different statement, no directive
@@ -455,6 +460,7 @@ func multiAssign05(db *gorm.DB) {
 
 // multiAssign06: Semicolon-separated on same line - only first statement gets directive
 func multiAssign06(db *gorm.DB) {
+	db = db.Session(&gorm.Session{}) // Make parameter immutable for testing pure directive
 	//gormreuse:pure
 	a := func(q *gorm.DB) { _ = q }; b := func(q *gorm.DB) { _ = q }
 
@@ -469,6 +475,7 @@ func multiAssign06(db *gorm.DB) {
 
 // multiAssign07: Multi-line assignment - all closures in same statement get directive
 func multiAssign07(db *gorm.DB) {
+	db = db.Session(&gorm.Session{}) // Make parameter immutable for testing pure directive
 	//gormreuse:pure
 	a, b, c := func(q *gorm.DB) { _ = q },
 		func(q *gorm.DB) { _ = q },
@@ -490,6 +497,7 @@ func multiAssign07(db *gorm.DB) {
 
 // multiAssign08: Multi-line assignment with comments between closures
 func multiAssign08(db *gorm.DB) {
+	db = db.Session(&gorm.Session{}) // Make parameter immutable for testing pure directive
 	a, b, c := func(q *gorm.DB) { //gormreuse:pure
 		_ = q
 	},
@@ -518,6 +526,7 @@ func multiAssign08(db *gorm.DB) {
 // multiAssign09: Directive after closing brace does NOT apply to next line
 // }, //gormreuse:pure should not apply to the FuncLit on the next line
 func multiAssign09(db *gorm.DB) {
+	db = db.Session(&gorm.Session{}) // Make parameter immutable for testing pure directive
 	a, b, c := func(q *gorm.DB) { //gormreuse:pure
 		_ = q
 	}, //gormreuse:pure // want `unused gormreuse:pure directive`
@@ -538,4 +547,143 @@ func multiAssign09(db *gorm.DB) {
 	q3 := db.Where("base3")
 	c(q3)
 	q3.Find(nil) // OK - c is pure
+}
+
+// =============================================================================
+// FUNCTION ARGUMENT CLOSURE PATTERNS
+// Tests for closures passed directly as function arguments (not assigned to variable)
+// =============================================================================
+
+// Helper function that takes a closure with *gorm.DB argument and calls it
+func applyToDB(fn func(q *gorm.DB), db *gorm.DB) {
+	fn(db)
+}
+
+// Helper function that takes a closure returning *gorm.DB
+func callReturningDB(fn func() *gorm.DB) *gorm.DB {
+	return fn()
+}
+
+// Helper that takes closure with *gorm.DB arg and returns *gorm.DB
+func callTransform(fn func(q *gorm.DB) *gorm.DB, db *gorm.DB) *gorm.DB {
+	return fn(db)
+}
+
+// =============================================================================
+// PURE DIRECTIVE ON FUNCTION ARGUMENT CLOSURES
+// =============================================================================
+
+// funcArgNoPure: No directive, closure receives mutable q - should report on q.Find
+func funcArgNoPure(db *gorm.DB) {
+	q := db.Where("base").Session(&gorm.Session{})
+	applyToDB(func(x *gorm.DB) {
+		_ = x
+	}, q)
+	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// funcArgPureBeforeLine: Directive on line before closure argument
+// LIMITATION: Marking the closure as pure does NOT help when passed through another function.
+// The analysis only checks if the CALLEE (applyToDB) is pure, not the closure argument.
+// This is because the analysis doesn't track that applyToDB passes its *gorm.DB arg to the closure.
+func funcArgPureBeforeLine(db *gorm.DB) {
+	q := db.Where("base").Session(&gorm.Session{})
+	applyToDB(
+		//gormreuse:pure
+		func(x *gorm.DB) {
+			_ = x
+		},
+		q,
+	)
+	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// funcArgPureInline: Directive after opening brace (inline pattern)
+// BUG: Directive is recognized (no unused warning) but doesn't take effect
+func funcArgPureInline(db *gorm.DB) {
+	q := db.Where("base").Session(&gorm.Session{})
+	applyToDB(func(x *gorm.DB) { //gormreuse:pure
+		_ = x
+	}, q)
+	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// =============================================================================
+// IMMUTABLE-RETURN DIRECTIVE ON FUNCTION ARGUMENT CLOSURES
+// =============================================================================
+
+// funcArgNoImmutableReturn: No directive - should report
+func funcArgNoImmutableReturn(db *gorm.DB) {
+	q := callReturningDB(func() *gorm.DB {
+		return db.Session(&gorm.Session{}).Where("setup")
+	}).Session(&gorm.Session{})
+	q.Find(nil)
+	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// funcArgImmutableReturnBeforeLine: Directive on line before closure argument
+// LIMITATION: The immutable-return directive on the closure is recognized,
+// but the analysis tracks the CALL to callReturningDB, not the closure's return behavior.
+// The result q comes from callReturningDB, which is not marked as immutable-return.
+func funcArgImmutableReturnBeforeLine(db *gorm.DB) {
+	q := callReturningDB(
+		//gormreuse:immutable-return
+		func() *gorm.DB {
+			return db.Session(&gorm.Session{}).Where("setup")
+		},
+	).Session(&gorm.Session{})
+	q.Find(nil)
+	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// funcArgImmutableReturnInline: Directive after opening brace (inline pattern)
+// BUG: Directive is recognized (no unused warning) but doesn't take effect
+func funcArgImmutableReturnInline(db *gorm.DB) {
+	q := callReturningDB(func() *gorm.DB { //gormreuse:immutable-return
+		return db.Session(&gorm.Session{}).Where("setup")
+	}).Session(&gorm.Session{})
+	q.Find(nil)
+	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// =============================================================================
+// COMBINED DIRECTIVE ON FUNCTION ARGUMENT CLOSURES
+// =============================================================================
+
+// funcArgCombinedNoDirective: No directive - both should report
+func funcArgCombinedNoDirective(db *gorm.DB) {
+	base := db.Where("x").Session(&gorm.Session{})
+	result := callTransform(func(q *gorm.DB) *gorm.DB {
+		return q.Session(&gorm.Session{})
+	}, base).Session(&gorm.Session{})
+	base.Find(nil)    // want `\*gorm\.DB instance reused after chain method`
+	result.Find(nil)
+	result.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// funcArgCombinedBeforeLine: Both directives on line before closure
+// LIMITATION: Same as above - directives on the closure don't affect how
+// callTransform is treated. The analysis tracks callTransform, not the closure.
+func funcArgCombinedBeforeLine(db *gorm.DB) {
+	base := db.Where("x").Session(&gorm.Session{})
+	result := callTransform(
+		//gormreuse:pure,immutable-return
+		func(q *gorm.DB) *gorm.DB {
+			return q.Session(&gorm.Session{})
+		}, base).Session(&gorm.Session{})
+	base.Find(nil)    // want `\*gorm\.DB instance reused after chain method`
+	result.Find(nil)
+	result.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// funcArgCombinedInline: Combined directive after opening brace
+// BUG: Directive is recognized (no unused warning) but doesn't take effect
+func funcArgCombinedInline(db *gorm.DB) {
+	base := db.Where("x").Session(&gorm.Session{})
+	result := callTransform(func(q *gorm.DB) *gorm.DB { //gormreuse:pure,immutable-return
+		return q.Session(&gorm.Session{})
+	}, base).Session(&gorm.Session{})
+	base.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+	result.Find(nil)
+	result.Count(nil) // want `\*gorm\.DB instance reused after chain method`
 }

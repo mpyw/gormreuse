@@ -669,19 +669,19 @@ func (s *DirectiveFuncSet) isDirectValueInStatementAfterLine(file *ast.File, fun
 	funcLitLine := s.fset.Position(funcLit.Pos()).Line
 
 	// Case 1: Statement starts on expected line → all direct FuncLits in that statement
-	// Case 2: FuncLit starts on expected line → this specific FuncLit (multi-line assignment)
+	// Case 2: FuncLit starts on expected line → this specific FuncLit (multi-line statement/call)
 	if stmtLine != expectedLine && funcLitLine != expectedLine {
 		return false
 	}
 
-	// For semicolon-separated statements, only the first statement applies
-	// Check based on which line is the expected line
-	checkLine := stmtLine
-	if stmtLine != expectedLine {
-		checkLine = funcLitLine
-	}
-	if !s.isFirstStatementOnLine(file, enclosingStmt, checkLine) {
-		return false
+	// For semicolon-separated statements on the expected line, only the first statement applies.
+	// This check only applies when the statement itself starts on the expected line.
+	// For multi-line statements (e.g., function call with closure argument), we skip this check
+	// because the statement starts on a different line than the directive.
+	if stmtLine == expectedLine {
+		if !s.isFirstStatementOnLine(file, enclosingStmt, stmtLine) {
+			return false
+		}
 	}
 
 	// Check if FuncLit is a direct value (not inside CompositeLit)
@@ -712,24 +712,34 @@ func (s *DirectiveFuncSet) isFirstStatementOnLine(file *ast.File, target ast.Stm
 	return isFirst
 }
 
-// isDirectRHSValue checks if the FuncLit is a direct RHS value in the statement,
+// isDirectRHSValue checks if the FuncLit is a direct value in the statement,
 // not nested inside a composite literal (struct, slice, map, array).
+//
+// Supported statement types:
+//   - AssignStmt: a, b := func(){}, func(){}
+//   - DeclStmt: var a, b = func(){}, func(){}
+//   - ExprStmt: callFunc(func(){}, func(){})  // function call arguments
 //
 // Note: We use position matching because the target FuncLit may be from a different
 // AST parse than stmt (SSA analysis vs our re-parsed file).
 func (s *DirectiveFuncSet) isDirectRHSValue(stmt ast.Stmt, target *ast.FuncLit) bool {
-	var rhsExprs []ast.Expr
+	var exprsToCheck []ast.Expr
 
 	switch st := stmt.(type) {
 	case *ast.AssignStmt:
-		rhsExprs = st.Rhs
+		exprsToCheck = st.Rhs
 	case *ast.DeclStmt:
 		if gd, ok := st.Decl.(*ast.GenDecl); ok {
 			for _, spec := range gd.Specs {
 				if vs, ok := spec.(*ast.ValueSpec); ok {
-					rhsExprs = append(rhsExprs, vs.Values...)
+					exprsToCheck = append(exprsToCheck, vs.Values...)
 				}
 			}
+		}
+	case *ast.ExprStmt:
+		// Function call: callFunc(func(){})
+		if call, ok := st.X.(*ast.CallExpr); ok {
+			exprsToCheck = call.Args
 		}
 	default:
 		return false
@@ -738,9 +748,9 @@ func (s *DirectiveFuncSet) isDirectRHSValue(stmt ast.Stmt, target *ast.FuncLit) 
 	targetPos := target.Pos()
 	targetEnd := target.End()
 
-	// Check if target is one of the direct RHS expressions
-	for _, rhs := range rhsExprs {
-		if s.isDirectExprOrUnaryByPos(rhs, targetPos, targetEnd) {
+	// Check if target is one of the direct expressions
+	for _, expr := range exprsToCheck {
+		if s.isDirectExprOrUnaryByPos(expr, targetPos, targetEnd) {
 			return true
 		}
 	}
@@ -748,7 +758,7 @@ func (s *DirectiveFuncSet) isDirectRHSValue(stmt ast.Stmt, target *ast.FuncLit) 
 }
 
 // isDirectExprOrUnaryByPos checks if expr contains a FuncLit at the given position,
-// and that FuncLit is a direct expression or inside unary/paren (not inside CompositeLit).
+// and that FuncLit is a direct expression or inside unary/paren/call (not inside CompositeLit).
 func (s *DirectiveFuncSet) isDirectExprOrUnaryByPos(expr ast.Expr, targetPos, targetEnd token.Pos) bool {
 	switch e := expr.(type) {
 	case *ast.FuncLit:
@@ -760,8 +770,17 @@ func (s *DirectiveFuncSet) isDirectExprOrUnaryByPos(expr ast.Expr, targetPos, ta
 	case *ast.ParenExpr:
 		// Handle (func(){}) case
 		return s.isDirectExprOrUnaryByPos(e.X, targetPos, targetEnd)
+	case *ast.CallExpr:
+		// Handle callFunc(func(){}) case - traverse into call arguments
+		// This allows directives to apply to FuncLits passed as function arguments
+		for _, arg := range e.Args {
+			if s.isDirectExprOrUnaryByPos(arg, targetPos, targetEnd) {
+				return true
+			}
+		}
+		return false
 	default:
-		// CompositeLit, CallExpr, IndexExpr, etc. - target is nested, not direct
+		// CompositeLit, IndexExpr, etc. - target is nested, not direct
 		return false
 	}
 }

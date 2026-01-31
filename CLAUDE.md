@@ -225,7 +225,28 @@ The linter tracks actual usage through struct fields, not just storage.
 ```
 Pollute Model:
   Immutable: Created by Immutable-returning Methods - can be reused freely
-  Mutable:   Created by Chain Methods - gets polluted on first use (any branch)
+  Mutable:   Created by Chain Methods OR Parameters - gets polluted on first use
+
+Parameter Handling (Phase 1):
+  Function parameters are treated as MUTABLE roots. This enables detection of
+  parameter reuse within functions, including pure function validation:
+
+  func bad(db *gorm.DB) {
+      db.Find(nil)         // First branch from db - OK
+      db.Count(nil)        // VIOLATION - second branch from parameter
+  }
+
+  func good(db *gorm.DB) {
+      db = db.Session(&gorm.Session{})  // Make parameter immutable
+      db.Find(nil)                       // OK - db is now immutable
+      db.Count(nil)                      // OK - can be reused
+  }
+
+  //gormreuse:pure
+  func badPure(db *gorm.DB) *gorm.DB {
+      db.Find(nil)         // VIOLATION - pure function pollutes argument
+      return db.Where("x") // VIOLATION - reuse and pollution
+  }
 
 Branch Detection:
   q := db.Where("x")
@@ -307,10 +328,12 @@ go run ./testdata/cmd/gengolden/main.go
 
 ```
 testdata/src/gormreuse/
-├── basic.go         # Basic reuse patterns, Session at end/middle
-├── advanced.go      # Derived variables, helper functions, conditional reuse
-├── evil.go          # Edge cases: closures, defer, goroutines, struct fields, loops
-└── ignore.go        # //gormreuse:ignore directive tests
+├── basic.go              # Basic reuse patterns, Session at end/middle
+├── advanced.go           # Derived variables, helper functions, conditional reuse
+├── evil.go               # Edge cases: closures, defer, goroutines, struct fields, loops
+├── ignore.go             # //gormreuse:ignore directive tests
+├── directive_validation.go  # //gormreuse:pure and //gormreuse:immutable-return tests
+└── param_mutable_test.go # Phase 1: Parameter as mutable root tests
 ```
 
 ### E2E Tests

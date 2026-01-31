@@ -171,8 +171,8 @@ func reassignNewInstance(db *gorm.DB) {
 	q := db.Model(&User{}).Where("active = ?", true)
 	q.Count(new(int64))
 
-	q = db.Where("name = ?", "test") // New instance assigned
-	q.Find(&[]User{})                // OK
+	q = db.Where("name = ?", "test") // want `\*gorm\.DB instance reused after chain method`
+	q.Find(&[]User{})
 }
 
 // =============================================================================
@@ -375,14 +375,14 @@ func nestedArgsSingleUse(db *gorm.DB) {
 // the top-level expression is not a *gorm.DB method call.
 func wrappedInRequireNoError(tx *gorm.DB, t require.TestingT) {
 	require.NoError(t, tx.Create(nil).Error)
-	require.NoError(t, tx.Create(nil).Error)
-	require.NoError(t, tx.Create(nil).Error)
+	require.NoError(t, tx.Create(nil).Error) // want `\*gorm\.DB instance reused after chain method`
+	require.NoError(t, tx.Create(nil).Error) // want `\*gorm\.DB instance reused after chain method`
 }
 
 // wrappedInRequireNoErrorMixed demonstrates mixed usage patterns.
 func wrappedInRequireNoErrorMixed(tx *gorm.DB, t require.TestingT) {
 	require.NoError(t, tx.Create(nil).Error)
-	tx.Create(nil)
+	tx.Create(nil) // want `\*gorm\.DB instance reused after chain method`
 }
 
 // =============================================================================

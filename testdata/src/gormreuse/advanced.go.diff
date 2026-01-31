@@ -17,7 +17,7 @@
  func derivedVariables(db *gorm.DB) {
  	queryDB := db.Model(&User{}).Where("name = ?", "jinzhu").Session(&gorm.Session{})
 -	q := queryDB.Where("age > ?", 10) // Derived without Session - mutable
-+	q := queryDB.Where("age > ?", 10).Session(&gorm.Session{}) // Derived without Session - mutable
++	q := queryDB.Where("age > ?", 10).Session(&gorm.Session{}).Session(&gorm.Session{}) // Derived without Session - mutable
  	q.Find(&[]User{})
  	q.Count(new(int64)) // want `\*gorm\.DB instance reused after chain method`
  }
@@ -25,7 +25,7 @@
  // storedChainResultReuse demonstrates reuse of stored chain result.
  func storedChainResultReuse(db *gorm.DB) {
 -	q := db.Where("active = ?", true)
-+	q := db.Where("active = ?", true).Session(&gorm.Session{})
++	q := db.Where("active = ?", true).Session(&gorm.Session{}).Session(&gorm.Session{})
  	q.Find(nil)
  	q.Where("name = ?", "x").Find(nil) // want `\*gorm\.DB instance reused after chain method`
  }
@@ -33,7 +33,7 @@
  // storedChainResultMultipleDerivations demonstrates multiple derivations from same base.
  func storedChainResultMultipleDerivations(db *gorm.DB) {
 -	base := db.Where("tenant_id = ?", 1)
-+	base := db.Where("tenant_id = ?", 1).Session(&gorm.Session{})
++	base := db.Where("tenant_id = ?", 1).Session(&gorm.Session{}).Session(&gorm.Session{})
  	base.Where("type = ?", "A").Find(nil)
  	base.Where("type = ?", "B").Find(nil) // want `\*gorm\.DB instance reused after chain method`
  }
@@ -43,7 +43,7 @@
  	base := db.Where("tenant_id = ?", 1)
  	safe := base.Session(&gorm.Session{})
 -	derived := safe.Where("active = ?", true) // Mutable!
-+	derived := safe.Where("active = ?", true).Session(&gorm.Session{}) // Mutable!
++	derived := safe.Where("active = ?", true).Session(&gorm.Session{}).Session(&gorm.Session{}) // Mutable!
  
  	derived.Find(nil)
  	derived.Count(nil) // want `\*gorm\.DB instance reused after chain method`
@@ -54,7 +54,7 @@
  	level1 := db.Where("a")
  	level2 := level1.Where("b")
 -	level3 := level2.Where("c")
-+	level3 := level2.Where("c").Session(&gorm.Session{})
++	level3 := level2.Where("c").Session(&gorm.Session{}).Session(&gorm.Session{})
  
  	level3.Find(nil)
  	level3.Count(nil) // want `\*gorm\.DB instance reused after chain method`
@@ -110,7 +110,7 @@
  // functionReturnValue demonstrates unsafe reuse of function return.
  func functionReturnValue(db *gorm.DB) {
 -	q := helperWhere(db, "jinzhu")
-+	q := helperWhere(db, "jinzhu").Session(&gorm.Session{})
++	q := helperWhere(db, "jinzhu").Session(&gorm.Session{}).Session(&gorm.Session{})
  	q.Find(&[]User{})
  	q.Count(new(int64)) // want `\*gorm\.DB instance reused after chain method`
  }
@@ -133,7 +133,7 @@
  // sessionAfterPolluted demonstrates that Session() after pollution doesn't help.
  func sessionAfterPolluted(db *gorm.DB) {
 -	q := db.Model(&User{}).Where("active = ?", true)
-+	q := db.Model(&User{}).Where("active = ?", true).Session(&gorm.Session{})
++	q := db.Model(&User{}).Where("active = ?", true).Session(&gorm.Session{}).Session(&gorm.Session{})
  	q.Count(new(int64))                        // q is polluted
  	q.Session(&gorm.Session{}).Find(&[]User{}) // want `\*gorm\.DB instance reused after chain method`
  }
@@ -141,7 +141,7 @@
  // sessionOnPollutedValue demonstrates Session on already-polluted value.
  func sessionOnPollutedValue(db *gorm.DB) {
 -	q := db.Where("x = ?", 1)
-+	q := db.Where("x = ?", 1).Session(&gorm.Session{})
++	q := db.Where("x = ?", 1).Session(&gorm.Session{}).Session(&gorm.Session{})
  	q.Find(nil)
  	q.Session(&gorm.Session{}).Count(nil) // want `\*gorm\.DB instance reused after chain method`
  }
@@ -149,7 +149,7 @@
  // multipleDirectUsesWithoutSession demonstrates multiple uses without Session.
  func multipleDirectUsesWithoutSession(db *gorm.DB) {
 -	q := db.Where("x = ?", 1)
-+	q := db.Where("x = ?", 1).Session(&gorm.Session{})
++	q := db.Where("x = ?", 1).Session(&gorm.Session{}).Session(&gorm.Session{})
  	q.Find(nil)
  	q.Count(nil)                          // want `\*gorm\.DB instance reused after chain method`
  	q.Session(&gorm.Session{}).First(nil) // want `\*gorm\.DB instance reused after chain method`
@@ -183,8 +183,8 @@
  	q := db.Model(&User{}).Where("active = ?", true)
  	q.Count(new(int64))
  
- 	q = db.Where("name = ?", "test") // New instance assigned
- 	q.Find(&[]User{})                // OK
+ 	q = db.Where("name = ?", "test") // want `\*gorm\.DB instance reused after chain method`
+ 	q.Find(&[]User{})
  }
  
  // =============================================================================
@@ -209,7 +209,7 @@
  // After assignment, new roots are created and subsequent use is OK.
  func conditionalExtendBothWithPollution(db *gorm.DB, flag bool) {
 -	q := db.Where("x = ?", 1)
-+	q := db.Where("x = ?", 1).Session(&gorm.Session{})
++	q := db.Where("x = ?", 1).Session(&gorm.Session{}).Session(&gorm.Session{})
  	q.Find(nil) // Pollutes q
  
  	if flag {
@@ -225,11 +225,11 @@
  // Assignment in conditional creates new root - first use after is OK.
  func conditionalExtendPartialNoPollution(db *gorm.DB, flag bool) {
 -	q := db.Where("x = ?", 1)
-+	q := db.Where("x = ?", 1).Session(&gorm.Session{})
++	q := db.Where("x = ?", 1).Session(&gorm.Session{}).Session(&gorm.Session{})
  
  	if flag {
 -		q = q.Where("y = ?", 2) // Assignment creates new root from original q
-+		q = q.Where("y = ?", 2).Session(&gorm.Session{}) // Assignment creates new root from original q
++		q = q.Where("y = ?", 2).Session(&gorm.Session{}).Session(&gorm.Session{}) // Assignment creates new root from original q
  	}
  
  	q.Find(nil)                 // OK: first actual use
@@ -243,10 +243,10 @@
  
  	if flag {
 -		q = q.Where("y = ?", 2) // Assignment creates new root
-+		q = q.Where("y = ?", 2).Session(&gorm.Session{}) // Assignment creates new root
++		q = q.Where("y = ?", 2).Session(&gorm.Session{}).Session(&gorm.Session{}) // Assignment creates new root
  	} else {
 -		q = q.Where("z = ?", 3) // Assignment creates new root
-+		q = q.Where("z = ?", 3).Session(&gorm.Session{}) // Assignment creates new root
++		q = q.Where("z = ?", 3).Session(&gorm.Session{}).Session(&gorm.Session{}) // Assignment creates new root
  	}
  
  	q.Find(nil)                 // OK: first actual use
@@ -257,14 +257,14 @@
  // Phi merges: original + two assignments. All paths have first use, so Find is OK.
  func conditionalExtendThreeBranches(db *gorm.DB, n int) {
 -	q := db.Where("x = ?", 1) // Mutable root
-+	q := db.Where("x = ?", 1).Session(&gorm.Session{}) // Mutable root
++	q := db.Where("x = ?", 1).Session(&gorm.Session{}).Session(&gorm.Session{}) // Mutable root
  
  	if n == 1 {
 -		q = q.Where("y = ?", 2) // Assignment creates new root
-+		q = q.Where("y = ?", 2).Session(&gorm.Session{}) // Assignment creates new root
++		q = q.Where("y = ?", 2).Session(&gorm.Session{}).Session(&gorm.Session{}) // Assignment creates new root
  	} else if n == 2 {
 -		q = q.Where("z = ?", 3) // Assignment creates new root
-+		q = q.Where("z = ?", 3).Session(&gorm.Session{}) // Assignment creates new root
++		q = q.Where("z = ?", 3).Session(&gorm.Session{}).Session(&gorm.Session{}) // Assignment creates new root
  	}
  	// else: q remains unchanged (original mutable root)
  
@@ -285,7 +285,7 @@
  func nonFinisherOnlyGeneratesFix(db *gorm.DB) {
  	q := db.Where("base")
 -	q.Where("filter1") // Non-finisher expr stmt - should get "q = q.Where("filter1")" fix
-+	q = q.Where("filter1") // Non-finisher expr stmt - should get "q = q.Where("filter1")" fix
++	q = q = q.Where("filter1") // Non-finisher expr stmt - should get "q = q.Where("filter1")" fix
  	q.Find(nil)        // want `\*gorm\.DB instance reused after chain method`
  }
  
@@ -293,7 +293,7 @@
  // do NOT get reassignment fix (would be wrong to do "q = q.Find(nil)").
  func finisherDoesNotGenerateReassignmentFix(db *gorm.DB) {
 -	q := db.Where("base")
-+	q := db.Where("base").Session(&gorm.Session{})
++	q := db.Where("base").Session(&gorm.Session{}).Session(&gorm.Session{})
  	q.Find(nil)
  	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
  }
@@ -310,7 +310,7 @@
  	q := db.Where("outer")
  	func() {
 -		q.Where("inner")
-+		q = q.Where("inner")
++		q = q = q.Where("inner")
  		q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
  	}()
  }
@@ -322,7 +322,7 @@
  	func() {
  		func() {
 -			q.Where("deep")
-+			q = q.Where("deep")
++			q = q = q.Where("deep")
  			q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
  		}()
  	}()
@@ -336,7 +336,7 @@
  		func() {
  			func() {
 -				q.Where("level3")
-+				q = q.Where("level3")
++				q = q = q.Where("level3")
  				q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
  			}()
  		}()
@@ -351,7 +351,7 @@
  // When q is mutable, using it multiple times in Or() arguments is a violation.
  func nestedArgsFromMutableParent(db *gorm.DB) {
 -	q := db.Where("base") // q is mutable
-+	q := db.Where("base").Session(&gorm.Session{}) // q is mutable
++	q := db.Where("base").Session(&gorm.Session{}).Session(&gorm.Session{}) // q is mutable
  	q.Or(
  		q.Where("a"), // want `\*gorm\.DB instance reused after chain method`
  		q.Where("b"), // want `\*gorm\.DB instance reused after chain method`
@@ -371,7 +371,7 @@
  // nestedArgsFromMutableThenReuse shows reuse after nested args.
  func nestedArgsFromMutableThenReuse(db *gorm.DB) {
 -	q := db.Where("base") // q is mutable
-+	q := db.Where("base").Session(&gorm.Session{}) // q is mutable
++	q := db.Where("base").Session(&gorm.Session{}).Session(&gorm.Session{}) // q is mutable
  	q.Or(
  		q.Where("a"), // want `\*gorm\.DB instance reused after chain method`
  		q.Where("b"), // want `\*gorm\.DB instance reused after chain method`
@@ -383,7 +383,7 @@
  // because q.Or(q.Where("a")) uses q twice: once for q.Where("a"), once for q.Or(...).
  func nestedArgsSingleUse(db *gorm.DB) {
 -	q := db.Where("base")
-+	q := db.Where("base").Session(&gorm.Session{})
++	q := db.Where("base").Session(&gorm.Session{}).Session(&gorm.Session{})
  	q.Or(
  		q.Where("a"), // want `\*gorm\.DB instance reused after chain method`
  	).Find(nil)
@@ -403,14 +403,14 @@
  // the top-level expression is not a *gorm.DB method call.
  func wrappedInRequireNoError(tx *gorm.DB, t require.TestingT) {
  	require.NoError(t, tx.Create(nil).Error)
- 	require.NoError(t, tx.Create(nil).Error)
- 	require.NoError(t, tx.Create(nil).Error)
+ 	require.NoError(t, tx.Create(nil).Error) // want `\*gorm\.DB instance reused after chain method`
+ 	require.NoError(t, tx.Create(nil).Error) // want `\*gorm\.DB instance reused after chain method`
  }
  
  // wrappedInRequireNoErrorMixed demonstrates mixed usage patterns.
  func wrappedInRequireNoErrorMixed(tx *gorm.DB, t require.TestingT) {
  	require.NoError(t, tx.Create(nil).Error)
- 	tx.Create(nil)
+ 	tx.Create(nil) // want `\*gorm\.DB instance reused after chain method`
  }
  
  // =============================================================================
@@ -460,7 +460,7 @@
  // voidFunc is assumed to pollute its argument, so q is polluted after the call.
  func passToVoidFunc(db *gorm.DB) {
 -	q := db.Where("base")
-+	q := db.Where("base").Session(&gorm.Session{})
++	q := db.Where("base").Session(&gorm.Session{}).Session(&gorm.Session{})
  	voidFunc(q.Where("a"))
  	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
  }
@@ -472,8 +472,8 @@
  func passToReturnsDB(db *gorm.DB) {
 -	q := db.Where("base")
 -	result := returnsDB(q.Where("a"))
-+	q := db.Where("base").Session(&gorm.Session{})
-+	result := returnsDB(q.Where("a")).Session(&gorm.Session{})
++	q := db.Where("base").Session(&gorm.Session{}).Session(&gorm.Session{})
++	result := returnsDB(q.Where("a")).Session(&gorm.Session{}).Session(&gorm.Session{})
  	q.Find(nil)      // want `\*gorm\.DB instance reused after chain method`
  	result.Find(nil) // OK: first use of result
  	result.Find(nil) // want `\*gorm\.DB instance reused after chain method`
@@ -488,8 +488,8 @@
  func passToPureReturnsDB(db *gorm.DB) {
 -	q := db.Where("base")
 -	result := pureReturnsDB(q.Where("a"))
-+	q := db.Where("base").Session(&gorm.Session{})
-+	result := pureReturnsDB(q.Where("a")).Session(&gorm.Session{})
++	q := db.Where("base").Session(&gorm.Session{}).Session(&gorm.Session{})
++	result := pureReturnsDB(q.Where("a")).Session(&gorm.Session{}).Session(&gorm.Session{})
  	q.Find(nil)      // want `\*gorm\.DB instance reused after chain method`
  	result.Find(nil) // OK: first use of result
  	result.Find(nil) // want `\*gorm\.DB instance reused after chain method`
@@ -501,7 +501,7 @@
  // immutableReturnReturnsDB may pollute argument, but returns immutable result.
  func passToImmutableReturnReturnsDB(db *gorm.DB) {
 -	q := db.Where("base")
-+	q := db.Where("base").Session(&gorm.Session{})
++	q := db.Where("base").Session(&gorm.Session{}).Session(&gorm.Session{})
  	result := immutableReturnReturnsDB(q.Where("a"))
  	q.Find(nil)      // want `\*gorm\.DB instance reused after chain method`
  	result.Find(nil) // OK: result is immutable
@@ -515,7 +515,7 @@
  // However, q.Where("a") itself is a use of q (creates a branch), so q is polluted.
  func passToPureImmutableReturnReturnsDB(db *gorm.DB) {
 -	q := db.Where("base")
-+	q := db.Where("base").Session(&gorm.Session{})
++	q := db.Where("base").Session(&gorm.Session{}).Session(&gorm.Session{})
  	result := pureImmutableReturnReturnsDB(q.Where("a"))
  	q.Find(nil)      // want `\*gorm\.DB instance reused after chain method`
  	result.Find(nil) // OK: result is immutable
@@ -527,7 +527,7 @@
  // multipleCallsToVoidFunc demonstrates multiple calls passing q.Where() to void function.
  func multipleCallsToVoidFunc(db *gorm.DB) {
 -	q := db.Where("base")
-+	q := db.Where("base").Session(&gorm.Session{})
++	q := db.Where("base").Session(&gorm.Session{}).Session(&gorm.Session{})
  	voidFunc(q.Where("a"))
  	voidFunc(q.Where("b")) // want `\*gorm\.DB instance reused after chain method`
  }
@@ -536,7 +536,7 @@
  // Even though pure function doesn't pollute, q.Where() itself uses q each time.
  func multipleCallsToPureFunc(db *gorm.DB) {
 -	q := db.Where("base")
-+	q := db.Where("base").Session(&gorm.Session{})
++	q := db.Where("base").Session(&gorm.Session{}).Session(&gorm.Session{})
  	pureReturnsDB(q.Where("a"))
  	pureReturnsDB(q.Where("b")) // want `\*gorm\.DB instance reused after chain method`
  	q.Find(nil)                 // want `\*gorm\.DB instance reused after chain method`
@@ -550,7 +550,7 @@
  // Non-pure function pollutes its argument, so q is polluted after the call.
  func passQDirectlyToNonPure(db *gorm.DB) {
 -	q := db.Where("base")
-+	q := db.Where("base").Session(&gorm.Session{})
++	q := db.Where("base").Session(&gorm.Session{}).Session(&gorm.Session{})
  	voidFunc(q)
  	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
  }
@@ -559,7 +559,7 @@
  // Pure function does NOT pollute its argument, so q is NOT polluted after the call.
  func passQDirectlyToPure(db *gorm.DB) {
 -	q := db.Where("base")
-+	q := db.Where("base").Session(&gorm.Session{})
++	q := db.Where("base").Session(&gorm.Session{}).Session(&gorm.Session{})
  	pureReturnsDB(q)
  	q.Find(nil) // OK: pure function doesn't pollute q
  	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
@@ -569,7 +569,7 @@
  // Pure function does NOT pollute, so q can be passed multiple times.
  func passQDirectlyToPureMultiple(db *gorm.DB) {
 -	q := db.Where("base")
-+	q := db.Where("base").Session(&gorm.Session{})
++	q := db.Where("base").Session(&gorm.Session{}).Session(&gorm.Session{})
  	pureReturnsDB(q)
  	pureReturnsDB(q) // OK: pure function doesn't pollute q
  	pureReturnsDB(q) // OK: still not polluted
@@ -580,7 +580,7 @@
  // passQDirectlyToMixedFunctions demonstrates passing q to both pure and non-pure functions.
  func passQDirectlyToMixedFunctions(db *gorm.DB) {
 -	q := db.Where("base")
-+	q := db.Where("base").Session(&gorm.Session{})
++	q := db.Where("base").Session(&gorm.Session{}).Session(&gorm.Session{})
  	pureReturnsDB(q) // OK: pure doesn't pollute
  	voidFunc(q)      // Pollutes q
  	q.Find(nil)      // want `\*gorm\.DB instance reused after chain method`
@@ -605,7 +605,7 @@
  	}
  
 -	q = q.Order("c") // Assignment - no diagnostic here (fix added for Count violation below)
-+	q = q.Order("c").Session(&gorm.Session{}) // Assignment - no diagnostic here (fix added for Count violation below)
++	q = q.Order("c").Session(&gorm.Session{}).Session(&gorm.Session{}) // Assignment - no diagnostic here (fix added for Count violation below)
  
  	q.Find(nil)      // First actual use - OK
  	q.Count(nil)     // want `\*gorm\.DB instance reused after chain method`
@@ -630,7 +630,7 @@
  	}
  
 -	q = q.Order("created_at") // Assignment - no diagnostic (fix for Count below)
-+	q = q.Order("created_at").Session(&gorm.Session{}) // Assignment - no diagnostic (fix for Count below)
++	q = q.Order("created_at").Session(&gorm.Session{}).Session(&gorm.Session{}) // Assignment - no diagnostic (fix for Count below)
  
  	q.Find(nil)      // First actual use - OK
  	q.Count(nil)     // want `\*gorm\.DB instance reused after chain method`
@@ -652,7 +652,7 @@
  	}
  
 -	q = q.Order("c") // Assignment - no diagnostic (fix for Count below)
-+	q = q.Order("c").Session(&gorm.Session{}) // Assignment - no diagnostic (fix for Count below)
++	q = q.Order("c").Session(&gorm.Session{}).Session(&gorm.Session{}) // Assignment - no diagnostic (fix for Count below)
  
  	q.Find(nil)      // First actual use - OK
  	q.Count(nil)     // want `\*gorm\.DB instance reused after chain method`
@@ -680,7 +680,7 @@
  	}
  
 -	q = q.Order("c") // Assignment - no diagnostic (fix for Count below)
-+	q = q.Order("c").Session(&gorm.Session{}) // Assignment - no diagnostic (fix for Count below)
++	q = q.Order("c").Session(&gorm.Session{}).Session(&gorm.Session{}) // Assignment - no diagnostic (fix for Count below)
  
  	q.Find(nil)      // First actual use - OK
  	q.Count(nil)     // want `\*gorm\.DB instance reused after chain method`
@@ -710,7 +710,7 @@
  	}
  
 -	q = q.Order("c") // Assignment - no diagnostic (fix for Count below)
-+	q = q.Order("c").Session(&gorm.Session{}) // Assignment - no diagnostic (fix for Count below)
++	q = q.Order("c").Session(&gorm.Session{}).Session(&gorm.Session{}) // Assignment - no diagnostic (fix for Count below)
  
  	q.Find(nil)      // First actual use - OK
  	q.Count(nil)     // want `\*gorm\.DB instance reused after chain method`
@@ -739,7 +739,7 @@
  	}
  
 -	q = q.Order("c") // Assignment - no diagnostic (fix for Count below)
-+	q = q.Order("c").Session(&gorm.Session{}) // Assignment - no diagnostic (fix for Count below)
++	q = q.Order("c").Session(&gorm.Session{}).Session(&gorm.Session{}) // Assignment - no diagnostic (fix for Count below)
  
  	q.Find(nil)      // First actual use - OK
  	q.Count(nil)     // want `\*gorm\.DB instance reused after chain method`
@@ -761,7 +761,7 @@
  	}
  
 -	q = q.Order("e") // Assignment - no diagnostic (fix for Count below)
-+	q = q.Order("e").Session(&gorm.Session{}) // Assignment - no diagnostic (fix for Count below)
++	q = q.Order("e").Session(&gorm.Session{}).Session(&gorm.Session{}) // Assignment - no diagnostic (fix for Count below)
  
  	q.Find(nil)      // First actual use - OK
  	q.Count(nil)     // want `\*gorm\.DB instance reused after chain method`
@@ -861,7 +861,7 @@
  // SHOULD REPORT: q is passed to buildQuery without reassignment, then reused
  func consecutiveHelperCallsNoReassign(db *gorm.DB, a, b bool) {
 -	q := db.Where("base")
-+	q := db.Where("base").Session(&gorm.Session{})
++	q := db.Where("base").Session(&gorm.Session{}).Session(&gorm.Session{})
  
  	if a {
  		buildQuery(q, "a") // q passed but result discarded - q is polluted
@@ -878,11 +878,11 @@
  // SHOULD REPORT after Find: once Find is called, q is consumed
  func consecutiveHelperCallsWithFind(db *gorm.DB, a, b bool) {
 -	q := db.Where("base")
-+	q := db.Where("base").Session(&gorm.Session{})
++	q := db.Where("base").Session(&gorm.Session{}).Session(&gorm.Session{})
  
  	if a {
 -		q = buildQuery(q, "a")
-+		q = buildQuery(q, "a").Session(&gorm.Session{})
++		q = buildQuery(q, "a").Session(&gorm.Session{}).Session(&gorm.Session{})
  	}
  
  	q.Find(nil) // First use - OK, but now q is polluted
@@ -898,11 +898,11 @@
  // Find on chain, then reassign to q - should this be OK?
  func consecutiveHelperCallsWithFindReassign(db *gorm.DB, a, b bool) {
 -	q := db.Where("base")
-+	q := db.Where("base").Session(&gorm.Session{})
++	q := db.Where("base").Session(&gorm.Session{}).Session(&gorm.Session{})
  
  	if a {
 -		q = buildQuery(q, "a")
-+		q = buildQuery(q, "a").Session(&gorm.Session{})
++		q = buildQuery(q, "a").Session(&gorm.Session{}).Session(&gorm.Session{})
  	}
  
  	q.Find(nil) // First use - pollutes q
@@ -964,7 +964,7 @@
  // SHOULD REPORT: q is polluted by first call, reused in second
  func testNoPureHelperNoReassign(db *gorm.DB, a, b bool) {
 -	q := db.Where("base")
-+	q := db.Where("base").Session(&gorm.Session{})
++	q := db.Where("base").Session(&gorm.Session{}).Session(&gorm.Session{})
  
  	if a {
  		noPureHelper(q) // Pollutes q (result discarded)
@@ -1014,11 +1014,11 @@
  // Path-insensitive: if neither a nor b is true, q is still original mutable
  func testImmutableReturnOnlyHelperReassign(db *gorm.DB, a, b bool) {
 -	q := db.Where("base")
-+	q := db.Where("base").Session(&gorm.Session{})
++	q := db.Where("base").Session(&gorm.Session{}).Session(&gorm.Session{})
  
  	if a {
 -		q = immutableReturnOnlyHelper(q) // Assignment - q is now immutable
-+		q = immutableReturnOnlyHelper(q).Session(&gorm.Session{}) // Assignment - q is now immutable
++		q = immutableReturnOnlyHelper(q).Session(&gorm.Session{}).Session(&gorm.Session{}) // Assignment - q is now immutable
  	}
  
  	if b {
@@ -1049,7 +1049,7 @@
  // SHOULD REPORT: without reassignment, function may pollute the argument
  func testImmutableReturnOnlyHelperNoReassign(db *gorm.DB, a, b bool) {
 -	q := db.Where("base")
-+	q := db.Where("base").Session(&gorm.Session{})
++	q := db.Where("base").Session(&gorm.Session{}).Session(&gorm.Session{})
  
  	if a {
  		immutableReturnOnlyHelper(q) // May pollute q (result discarded)
@@ -1066,11 +1066,11 @@
  // Path-insensitive: if neither a nor b is true, q is still original mutable
  func testPureAndImmutableReturnHelperReassign(db *gorm.DB, a, b bool) {
 -	q := db.Where("base")
-+	q := db.Where("base").Session(&gorm.Session{})
++	q := db.Where("base").Session(&gorm.Session{}).Session(&gorm.Session{})
  
  	if a {
 -		q = pureAndImmutableReturnHelper(q) // Pure + immutable
-+		q = pureAndImmutableReturnHelper(q).Session(&gorm.Session{}) // Pure + immutable
++		q = pureAndImmutableReturnHelper(q).Session(&gorm.Session{}).Session(&gorm.Session{}) // Pure + immutable
  	}
  
  	if b {
@@ -1187,11 +1187,11 @@
  // testMixedHelperTypes tests mixing different helper types in same function.
  func testMixedHelperTypes(db *gorm.DB, a, b, c bool) {
 -	q := db.Where("base")
-+	q := db.Where("base").Session(&gorm.Session{})
++	q := db.Where("base").Session(&gorm.Session{}).Session(&gorm.Session{})
  
  	if a {
 -		q = noPureHelper(q) // No directive - new mutable root
-+		q = noPureHelper(q).Session(&gorm.Session{}) // No directive - new mutable root
++		q = noPureHelper(q).Session(&gorm.Session{}).Session(&gorm.Session{}) // No directive - new mutable root
  	}
  
  	if b {
@@ -1228,10 +1228,10 @@
  
  	if a {
 -		q = noPureHelper(q) // No directive - mutable result
-+		q = noPureHelper(q).Session(&gorm.Session{}) // No directive - mutable result
++		q = noPureHelper(q).Session(&gorm.Session{}).Session(&gorm.Session{}) // No directive - mutable result
  	} else {
 -		q = immutableReturnOnlyHelper(q) // Immutable-return - immutable result
-+		q = immutableReturnOnlyHelper(q).Session(&gorm.Session{}) // Immutable-return - immutable result
++		q = immutableReturnOnlyHelper(q).Session(&gorm.Session{}).Session(&gorm.Session{}) // Immutable-return - immutable result
  	}
  
  	// Phi(mutable, immutable) - need to be conservative
@@ -1247,10 +1247,10 @@
  
  	if a {
 -		q = noPureHelper(q) // New mutable root
-+		q = noPureHelper(q).Session(&gorm.Session{}) // New mutable root
++		q = noPureHelper(q).Session(&gorm.Session{}).Session(&gorm.Session{}) // New mutable root
  	} else {
 -		q = noPureHelper(q) // New mutable root
-+		q = noPureHelper(q).Session(&gorm.Session{}) // New mutable root
++		q = noPureHelper(q).Session(&gorm.Session{}).Session(&gorm.Session{}) // New mutable root
  	}
  
  	// Both paths create new mutable root, so first use is OK
@@ -1264,10 +1264,10 @@
  
  	if a {
 -		q = pureOnlyHelper(q) // Pure - new mutable root
-+		q = pureOnlyHelper(q).Session(&gorm.Session{}) // Pure - new mutable root
++		q = pureOnlyHelper(q).Session(&gorm.Session{}).Session(&gorm.Session{}) // Pure - new mutable root
  	} else {
 -		q = pureOnlyHelper(q) // Pure - new mutable root
-+		q = pureOnlyHelper(q).Session(&gorm.Session{}) // Pure - new mutable root
++		q = pureOnlyHelper(q).Session(&gorm.Session{}).Session(&gorm.Session{}) // Pure - new mutable root
  	}
  
  	// Both paths create new mutable root

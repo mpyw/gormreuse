@@ -73,6 +73,7 @@ func variadicInterfaceArgs(db *gorm.DB) {
 
 // variadicInterfaceArgsMultiple: Multiple args to variadic
 func variadicInterfaceArgsMultiple(db *gorm.DB) {
+	db = db.Session(&gorm.Session{}) // Make parameter immutable for testing interface patterns
 	q1 := db.Where("x")
 	q2 := db.Where("y")
 
@@ -85,6 +86,7 @@ func variadicInterfaceArgsMultiple(db *gorm.DB) {
 
 // variadicInterfaceArgsOnlyOne: Only one of multiple is passed
 func variadicInterfaceArgsOnlyOne(db *gorm.DB) {
+	db = db.Session(&gorm.Session{}) // Make parameter immutable for testing interface patterns
 	q1 := db.Where("x")
 	q2 := db.Where("y")
 
@@ -138,6 +140,7 @@ func gormOrMethodChain(db *gorm.DB) {
 
 // gormOrMethodFresh: Fresh query passed to Or (no reuse)
 func gormOrMethodFresh(db *gorm.DB) {
+	db = db.Session(&gorm.Session{}) // Make parameter immutable for testing interface patterns
 	base := db.Where("base")
 
 	// Fresh query passed to Or - no reuse issue for the fresh query
@@ -163,6 +166,7 @@ func interfaceSliceLiteral(db *gorm.DB) {
 
 // interfaceSliceMultiple: Multiple *gorm.DB in slice
 func interfaceSliceMultiple(db *gorm.DB) {
+	db = db.Session(&gorm.Session{}) // Make parameter immutable for testing interface patterns
 	q1 := db.Where("x")
 	q2 := db.Where("y")
 

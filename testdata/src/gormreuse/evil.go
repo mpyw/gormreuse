@@ -253,6 +253,7 @@ func loopWithSession(db *gorm.DB, items []string) {
 
 // loopNewChainEachIteration demonstrates creating new chain in each iteration.
 func loopNewChainEachIteration(db *gorm.DB, items []string) {
+	db = db.Session(&gorm.Session{}) // Make parameter immutable for testing loop patterns
 	for _, item := range items {
 		q := db.Where("item = ?", item)
 		q.Find(nil) // OK: new q each iteration
@@ -2186,6 +2187,7 @@ func iifeArgumentReturnsChain(db *gorm.DB) {
 
 // iifeArgumentAndFreeVarMixed demonstrates IIFE with both argument and FreeVar.
 func iifeArgumentAndFreeVarMixed(db *gorm.DB) {
+	db = db.Session(&gorm.Session{}) // Make parameter immutable for testing IIFE patterns
 	q1 := db.Where("q1", 1)
 	q2 := db.Where("q2", 2)
 
@@ -2308,6 +2310,7 @@ func beginChainedBecomesMutable(db *gorm.DB) {
 // reassignInLoop demonstrates reassignment inside a loop.
 // Each iteration creates a new mutable instance.
 func reassignInLoop(db *gorm.DB, items []string) {
+	db = db.Session(&gorm.Session{}) // Make parameter immutable for testing reassignment patterns
 	var q *gorm.DB
 	for _, item := range items {
 		q = db.Where("name = ?", item)
@@ -2319,6 +2322,7 @@ func reassignInLoop(db *gorm.DB, items []string) {
 // reassignInLoopSafe demonstrates safe reassignment pattern in loop.
 // Reassignment before each use prevents pollution carry-over.
 func reassignInLoopSafe(db *gorm.DB, items []string) {
+	db = db.Session(&gorm.Session{}) // Make parameter immutable for testing reassignment patterns
 	var q *gorm.DB
 	for _, item := range items {
 		q = db.Where("name = ?", item)
@@ -2343,6 +2347,7 @@ func reassignConditionalPartial(db *gorm.DB, flag bool) {
 // reassignConditionalBoth demonstrates reassignment in both branches.
 // Both branches reassign - should be safe.
 func reassignConditionalBoth(db *gorm.DB, flag bool) {
+	db = db.Session(&gorm.Session{}) // Make parameter immutable for testing reassignment patterns
 	q := db.Where("x = ?", 1)
 	q.Find(nil) // Pollutes q
 
@@ -2368,6 +2373,7 @@ func reassignAfterPollutionSameValue(db *gorm.DB) {
 // reassignShadowing demonstrates variable shadowing vs reassignment.
 // Inner q shadows outer q - they are different variables.
 func reassignShadowing(db *gorm.DB) {
+	db = db.Session(&gorm.Session{}) // Make parameter immutable for testing reassignment patterns
 	q := db.Where("x = ?", 1)
 	q.Find(nil) // Pollutes outer q
 
@@ -2382,6 +2388,7 @@ func reassignShadowing(db *gorm.DB) {
 
 // reassignInClosure demonstrates reassignment inside closure.
 func reassignInClosure(db *gorm.DB) {
+	db = db.Session(&gorm.Session{}) // Make parameter immutable for testing reassignment patterns
 	q := db.Where("x = ?", 1)
 	q.Find(nil) // Pollutes q
 
@@ -2394,6 +2401,7 @@ func reassignInClosure(db *gorm.DB) {
 
 // reassignFromHelper demonstrates reassignment from helper function.
 func reassignFromHelper(db *gorm.DB) {
+	db = db.Session(&gorm.Session{}) // Make parameter immutable for testing reassignment patterns
 	q := db.Where("x = ?", 1)
 	q.Find(nil) // Pollutes q
 
@@ -2408,6 +2416,7 @@ func helperReturnsDB(db *gorm.DB) *gorm.DB {
 
 // reassignNilThenUse demonstrates reassigning to nil then using.
 func reassignNilThenUse(db *gorm.DB) {
+	db = db.Session(&gorm.Session{}) // Make parameter immutable for testing reassignment patterns
 	q := db.Where("x = ?", 1)
 	q.Find(nil) // Pollutes q
 
@@ -2419,6 +2428,7 @@ func reassignNilThenUse(db *gorm.DB) {
 
 // reassignChainExtension demonstrates extending a chain after reassignment.
 func reassignChainExtension(db *gorm.DB) {
+	db = db.Session(&gorm.Session{}) // Make parameter immutable for testing reassignment patterns
 	q := db.Where("x = ?", 1)
 	q.Find(nil) // Pollutes q
 
@@ -2430,6 +2440,7 @@ func reassignChainExtension(db *gorm.DB) {
 
 // reassignMultipleTimes demonstrates multiple reassignments.
 func reassignMultipleTimes(db *gorm.DB) {
+	db = db.Session(&gorm.Session{}) // Make parameter immutable for testing reassignment patterns
 	q := db.Where("a = ?", 1)
 	q.Find(nil) // Pollutes first q
 
@@ -2446,6 +2457,7 @@ func reassignMultipleTimes(db *gorm.DB) {
 // reassignInSwitch demonstrates reassignment in switch statement.
 // Only some branches reassign - default branch keeps polluted value.
 func reassignInSwitch(db *gorm.DB, mode int) {
+	db = db.Session(&gorm.Session{}) // Make parameter immutable for testing reassignment patterns
 	q := db.Where("x = ?", 1)
 	q.Find(nil) // Pollutes q
 
@@ -2463,6 +2475,7 @@ func reassignInSwitch(db *gorm.DB, mode int) {
 
 // reassignInSwitchAll demonstrates reassignment in all switch branches.
 func reassignInSwitchAll(db *gorm.DB, mode int) {
+	db = db.Session(&gorm.Session{}) // Make parameter immutable for testing reassignment patterns
 	q := db.Where("x = ?", 1)
 	q.Find(nil) // Pollutes q
 
@@ -2480,6 +2493,7 @@ func reassignInSwitchAll(db *gorm.DB, mode int) {
 
 // reassignFromMethodValue demonstrates reassignment via method value result.
 func reassignFromMethodValue(db *gorm.DB) {
+	db = db.Session(&gorm.Session{}) // Make parameter immutable for testing reassignment patterns
 	q := db.Where("x = ?", 1)
 	q.Find(nil) // Pollutes q
 
@@ -2492,6 +2506,7 @@ func reassignFromMethodValue(db *gorm.DB) {
 // reassignDeferredUse demonstrates reassignment with deferred use.
 // The defer evaluates q immediately - Count pollutes, then defer uses polluted q.
 func reassignDeferredUse(db *gorm.DB) {
+	db = db.Session(&gorm.Session{}) // Make parameter immutable for testing reassignment patterns
 	q := db.Where("x = ?", 1)
 
 	defer q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
@@ -2941,6 +2956,7 @@ type conditionalFieldAssignHolderForTest struct {
 // where one branch assigns a polluted value.
 // The linter should detect this because q1 (polluted) may be used via h.db.
 func conditionalFieldAssignOnePolluted(db *gorm.DB, cond bool) {
+	db = db.Session(&gorm.Session{}) // Make parameter immutable for testing field assignment patterns
 	q1 := db.Where("a")
 	q2 := db.Where("b")
 	q1.Find(nil) // Pollute q1
@@ -2962,6 +2978,7 @@ func conditionalFieldAssignOnePolluted(db *gorm.DB, cond bool) {
 // [BUG DETECTOR] If this test passes but conditionalFieldAssignOnePolluted fails,
 // or vice versa, there's an ordering bug in traceFieldStore.
 func conditionalFieldAssignOnePollutedReverse(db *gorm.DB, cond bool) {
+	db = db.Session(&gorm.Session{}) // Make parameter immutable for testing field assignment patterns
 	q1 := db.Where("a")
 	q2 := db.Where("b")
 	q2.Find(nil) // Pollute q2 (reversed from above)
@@ -2980,6 +2997,7 @@ func conditionalFieldAssignOnePollutedReverse(db *gorm.DB, cond bool) {
 // conditionalFieldAssignBothPolluted demonstrates conditional field assignment
 // where both branches assign polluted values.
 func conditionalFieldAssignBothPolluted(db *gorm.DB, cond bool) {
+	db = db.Session(&gorm.Session{}) // Make parameter immutable for testing field assignment patterns
 	q1 := db.Where("a")
 	q2 := db.Where("b")
 	q1.Find(nil) // Pollute q1

@@ -798,6 +798,7 @@ func chaosInterwovenVariables(db *gorm.DB, a, b, c bool) {
 
 // chaosVariableSwap demonstrates variable swapping patterns.
 func chaosVariableSwap(db *gorm.DB, a, b bool) {
+	db = db.Session(&gorm.Session{}) // Make parameter immutable for testing swap patterns
 	q1 := db.Where("q1_base").Session(&gorm.Session{})
 	q2 := db.Where("q2_base").Session(&gorm.Session{})
 
@@ -835,6 +836,7 @@ func chaosVariableSwapConditional(db *gorm.DB, swap bool) {
 
 // chaosVariableSwapChain demonstrates swapping with chaining.
 func chaosVariableSwapChain(db *gorm.DB) {
+	db = db.Session(&gorm.Session{}) // Make parameter immutable for testing swap patterns
 	q1 := db.Where("q1")
 	q2 := db.Where("q2")
 
@@ -906,6 +908,7 @@ func chaosMultipleSwaps(db *gorm.DB, a, b, c bool) {
 
 // chaosModernSwapSyntax demonstrates modern Go swap syntax (a, b = b, a).
 func chaosModernSwapSyntax(db *gorm.DB, a bool) {
+	db = db.Session(&gorm.Session{}) // Make parameter immutable for testing swap patterns
 	q1 := db.Where("q1").Session(&gorm.Session{})
 	q2 := db.Where("q2").Session(&gorm.Session{})
 
