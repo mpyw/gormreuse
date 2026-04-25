@@ -595,3 +595,105 @@ func TestContainsGormDBCycleDetection(t *testing.T) {
 		t.Error("containsGormDB(Recursive) should return false")
 	}
 }
+
+func TestIsImmutableReturnDirective(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		text     string
+		expected bool
+	}{
+		{"exact match", "//gormreuse:immutable-return", true},
+		{"with space", "// gormreuse:immutable-return", true},
+		{"with trailing comment", "//gormreuse:immutable-return // returns immutable", true},
+		{"combined with pure first", "//gormreuse:pure,immutable-return", true},
+		{"combined with pure second", "//gormreuse:immutable-return,pure", true},
+		{"combined with whitespace", "//gormreuse: pure , immutable-return ", true},
+		{"wrong directive", "//gormreuse:pure", false},
+		{"unrelated comment", "// some comment", false},
+		{"prefix only", "//gormreuse:", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := IsImmutableReturnDirective(tt.text); got != tt.expected {
+				t.Errorf("IsImmutableReturnDirective(%q) = %v, want %v", tt.text, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestExtractImmutableInputParams(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		text     string
+		expected []string
+	}{
+		{
+			name:     "single parameter",
+			text:     "//gormreuse:immutable-input(fc)",
+			expected: []string{"fc"},
+		},
+		{
+			name:     "with leading slashes trimmed",
+			text:     "// gormreuse:immutable-input(cb)",
+			expected: []string{"cb"},
+		},
+		{
+			name:     "two parameters separated by comma",
+			text:     "//gormreuse:immutable-input(cb1),immutable-input(cb2)",
+			expected: []string{"cb1", "cb2"},
+		},
+		{
+			name:     "trailing comment is stripped",
+			text:     "//gormreuse:immutable-input(fc) // tx is fresh",
+			expected: []string{"fc"},
+		},
+		{
+			name:     "whitespace inside parens is trimmed",
+			text:     "//gormreuse:immutable-input( fc )",
+			expected: []string{"fc"},
+		},
+		{
+			name:     "empty parameter name is skipped",
+			text:     "//gormreuse:immutable-input()",
+			expected: nil,
+		},
+		{
+			name:     "no immutable-input directive returns nil",
+			text:     "//gormreuse:pure",
+			expected: nil,
+		},
+		{
+			name:     "non-gormreuse comment returns nil",
+			text:     "// just a comment",
+			expected: nil,
+		},
+		{
+			name:     "mixed with unrelated directive",
+			text:     "//gormreuse:pure,immutable-input(fc)",
+			expected: []string{"fc"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := ExtractImmutableInputParams(tt.text)
+			if len(got) != len(tt.expected) {
+				t.Fatalf("ExtractImmutableInputParams(%q) = %v, want %v", tt.text, got, tt.expected)
+			}
+			for i := range got {
+				if got[i] != tt.expected[i] {
+					t.Errorf("ExtractImmutableInputParams(%q)[%d] = %q, want %q", tt.text, i, got[i], tt.expected[i])
+				}
+			}
+		})
+	}
+}
