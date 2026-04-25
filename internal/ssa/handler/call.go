@@ -391,11 +391,11 @@ func (h *GoHandler) Handle(g *ssa.Go, ctx *Context) {
 type DeferHandler struct{}
 
 // Handle processes a Defer instruction.
-// Defer uses IsPollutedAnywhere because it executes at function exit.
+// Defer executes at function exit, so we use the function-wide IsPolluted
+// (any pollution anywhere in the function counts) instead of the
+// block-scoped IsPollutedAt.
 func (h *DeferHandler) Handle(d *ssa.Defer, ctx *Context) {
-	processGormDBCallCommonWith(&d.Call, d.Pos(), ctx, func(root ssa.Value) bool {
-		return ctx.Tracker.IsPollutedAnywhere(root)
-	})
+	processGormDBCallCommonWith(&d.Call, d.Pos(), ctx, ctx.Tracker.IsPolluted)
 }
 
 // SendHandler handles *ssa.Send instructions.
@@ -575,8 +575,8 @@ func Dispatch(instr ssa.Instruction, ctx *Context) {
 // DispatchDefer handles defer instructions separately from regular Dispatch.
 //
 // Defer executes at function exit (not where declared), so it uses
-// IsPollutedAnywhere instead of IsPollutedAt to check pollution across
-// the entire function.
+// the function-wide IsPolluted instead of block-scoped IsPollutedAt to
+// check pollution across the entire function.
 //
 // Example:
 //

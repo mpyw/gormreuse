@@ -143,10 +143,11 @@ func (t *Tracker) addViolationWithContext(pos token.Pos, root ssa.Value, allUses
 	})
 }
 
-// IsPolluted checks if a root has been polluted (for defer).
+// IsPolluted reports whether a root has any polluting usage anywhere in the
+// function. This is the function-wide variant used by defer, where we don't
+// know which use will be live at function exit.
 func (t *Tracker) IsPolluted(root ssa.Value) bool {
-	uses := t.pollutingUses[root]
-	return len(uses) > 0
+	return len(t.pollutingUses[root]) > 0
 }
 
 // IsPollutedAt checks if a root has polluting usage that can reach the target block.
@@ -249,9 +250,4 @@ func (t *Tracker) DetectViolations() {
 // CollectViolations returns all detected violations.
 func (t *Tracker) CollectViolations() []Violation {
 	return t.violations
-}
-
-// IsPollutedAnywhere checks if root has any usage (for defer).
-func (t *Tracker) IsPollutedAnywhere(root ssa.Value) bool {
-	return t.IsPolluted(root)
 }

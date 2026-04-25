@@ -1496,23 +1496,9 @@ func isNilConst(v ssa.Value) bool {
 	return ok && c.Value == nil
 }
 
-// isClosureResultStored checks if a closure call's result is stored in a variable.
-// This happens when the closure returns multiple values and the result is extracted.
-// Example: `publishedQuery, err := closureFunc()` - result goes through Extract.
-// In contrast, IIFE chains like `closure().Find()` use the result directly.
-// isClosureResultStored checks if a closure call's result is stored rather than
-// directly chained to a method call.
-//
-// Returns true (stored) for patterns like:
-//   - `q, err := closureFunc()` (multi-return with Extract)
-//   - `q := closureFunc()` (single-return assigned to variable)
-//   - Result flows into Phi node
-//
-// Returns false (chained) for IIFE patterns like:
-//   - `closureFunc().Find(nil)` (result directly used as method receiver)
-//
-// isClosureResultStored checks if a closure call's result is stored (assigned to
-// a variable) rather than directly chained in an IIFE pattern.
+// isClosureResultStored reports whether a closure call's result is stored
+// (assigned to a variable, extracted from a tuple, or fed into a Phi/MakeInterface)
+// rather than directly chained in an IIFE pattern.
 //
 // Returns true (stored) for patterns like:
 //   - `q, err := closureFunc()` (flows to Extract → stored)
