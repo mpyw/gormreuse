@@ -1472,11 +1472,7 @@ func (t *RootTracer) isClosurePassedToImmutableInputMethod(mc *ssa.MakeClosure) 
 func (t *RootTracer) isCallToImmutableInputMethod(call *ssa.Call) bool {
 	// Handle method calls (db.Transaction)
 	if call.Call.IsInvoke() {
-		methodName := call.Call.Method.Name()
-		if typeutil.IsImmutableInputBuiltin(methodName) != "" {
-			return true
-		}
-		return false
+		return typeutil.IsImmutableInputBuiltin(call.Call.Method.Name()) != ""
 	}
 
 	// Handle static calls
@@ -1485,16 +1481,9 @@ func (t *RootTracer) isCallToImmutableInputMethod(call *ssa.Call) bool {
 		return false
 	}
 
-	// Check builtin methods
-	methodName := callee.Name()
-	if typeutil.IsImmutableInputBuiltin(methodName) != "" {
-		return true
-	}
-
-	// TODO: Check user-defined immutable-input directives
-	// For now, only builtin methods are supported
-
-	return false
+	// Only builtin methods supported today; user-defined
+	// //gormreuse:immutable-input(name) directives are tracked as a follow-up.
+	return typeutil.IsImmutableInputBuiltin(callee.Name()) != ""
 }
 
 // =============================================================================

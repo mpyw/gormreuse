@@ -228,29 +228,28 @@ func validateScopesCallback(fn *ssa.Function) []scopesWarning {
 	return warnings
 }
 
+// storeRefersToFunction reports whether store's value is fn directly or
+// a MakeClosure wrapping fn.
+func storeRefersToFunction(store *ssa.Store, fn *ssa.Function) bool {
+	if directFn, ok := store.Val.(*ssa.Function); ok && directFn == fn {
+		return true
+	}
+	if mc, ok := store.Val.(*ssa.MakeClosure); ok {
+		if closureFn, ok := mc.Fn.(*ssa.Function); ok && closureFn == fn {
+			return true
+		}
+	}
+	return false
+}
+
 // isScopesCallback checks if fn is a callback passed to the Scopes method.
 func isScopesCallback(fn *ssa.Function, parent *ssa.Function) bool {
 	// Look for Store instructions that store our function
 	for _, block := range parent.Blocks {
 		for _, instr := range block.Instrs {
 			store, ok := instr.(*ssa.Store)
-			if !ok {
+			if !ok || !storeRefersToFunction(store, fn) {
 				continue
-			}
-
-			// Check if the stored value is our function
-			storedFn, ok := store.Val.(*ssa.Function)
-			if !ok || storedFn != fn {
-				// Also check for MakeClosure
-				if mc, ok := store.Val.(*ssa.MakeClosure); ok {
-					if closureFn, ok := mc.Fn.(*ssa.Function); ok && closureFn == fn {
-						storedFn = closureFn
-					} else {
-						continue
-					}
-				} else {
-					continue
-				}
 			}
 
 			// Found a Store of our function. Trace the destination.
