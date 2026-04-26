@@ -272,6 +272,34 @@ if condition {
 q.Find(&users)             // OK - first branch from whichever root
 ```
 
+#### Function parameters are also mutable
+
+[`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) values arriving as a function parameter are treated as **mutable roots** — the same rule as locally-built chains. The runtime really does interfere across branches, regardless of where the value came from:
+
+```go
+// VIOLATION: parameter reused across two chains
+func handler(db *gorm.DB) {
+    db.Where("a = ?", 1).Find(&one)   // first branch from db - OK
+    db.Where("b = ?", 2).Find(&two)   // VIOLATION: second branch from db
+}
+```
+
+To branch the same parameter into multiple independent chains, isolate it with [`Session`](https://pkg.go.dev/gorm.io/gorm#DB.Session) at the top of the function:
+
+```go
+// OK: parameter is reassigned to an immutable session
+func handler(db *gorm.DB) {
+    db = db.Session(&gorm.Session{})   // new immutable root
+    db.Where("a = ?", 1).Find(&one)    // OK - branch 1
+    db.Where("b = ?", 2).Find(&two)    // OK - branch 2
+}
+```
+
+The same migration applies to callbacks. [`Scopes`](https://pkg.go.dev/gorm.io/gorm#DB.Scopes), [`Preload`](https://pkg.go.dev/gorm.io/gorm#DB.Preload), and any user-defined helper that takes `func(*gorm.DB) ...` receive a mutable parameter unless the helper is annotated as [`immutable-input`](#gormreuseimmutable-inputname) (next section).
+
+> [!IMPORTANT]
+> This is a breaking change vs. earlier releases that treated parameters as immutable. Most affected sites can be fixed by adding `db = db.Session(&gorm.Session{})` at the top of the function. The fix is also what makes the code actually safe at runtime, not just lint-clean.
+
 ## Directives
 
 - Directives can be combined with commas: `//gormreuse:pure,immutable-return`
@@ -395,6 +423,40 @@ func useIt(db *gorm.DB) {
 
 > [!WARNING]
 > Unused `//gormreuse:pure` and `//gormreuse:immutable-return` directives are reported as warnings. This helps identify misplaced or stale directives. For combined directives like `//gormreuse:pure,immutable-return`, if either part is used, no unused warning is reported.
+
+### `//gormreuse:immutable-input(name)`
+
+Mark a function parameter `name` whose [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) callback argument is **already immutable**, so the body of the callback may reuse it freely. This is the parameter-level dual of `//gormreuse:immutable-return` for callbacks:
+
+```go
+//gormreuse:immutable-input(cb)
+func WithFreshDB(cb func(*gorm.DB) error, db *gorm.DB) error {
+    fresh := db.Session(&gorm.Session{})
+    return cb(fresh) // contract: cb receives an immutable *gorm.DB
+}
+
+func use(db *gorm.DB) {
+    db = db.Session(&gorm.Session{})
+    _ = WithFreshDB(func(q *gorm.DB) error {
+        q.Find(nil)
+        q.Count(nil) // OK — q is declared immutable by immutable-input(cb)
+        return nil
+    }, db)
+}
+```
+
+Built-in GORM methods that already pass an immutable `*gorm.DB` are recognised automatically and do **not** need the directive: [`Transaction`](https://pkg.go.dev/gorm.io/gorm#DB.Transaction), [`Connection`](https://pkg.go.dev/gorm.io/gorm#DB.Connection), and [`FindInBatches`](https://pkg.go.dev/gorm.io/gorm#DB.FindInBatches) (the callback argument in each is freshly minted).
+
+The directive is verified two ways:
+
+1. **Body honours the contract.** If the function body actually hands `cb` a mutable [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB), the linter reports `immutable-input(cb) declared but mutable *gorm.DB passed to callback` at the offending call.
+2. **Directive targets a real callback.** Misuses are reported as unused-directive diagnostics:
+   - `parameter "x" not found` — the named parameter doesn't exist.
+   - `parameter "x" is not a function type` — the named parameter is not a callback.
+   - `callback "cb" has no *gorm.DB parameter` — the callback signature doesn't take `*gorm.DB`.
+
+> [!NOTE]
+> `//gormreuse:immutable-input(name)` is the **only** directive that opts a callback parameter out of mutable treatment. There is intentionally no `//gormreuse:immutable-param` for raw function parameters — see Issue [#56](https://github.com/mpyw/gormreuse/issues/56) for the rationale (use [`Session`](https://pkg.go.dev/gorm.io/gorm#DB.Session) to actually fix the code rather than annotate around it).
 
 ## Documentation
 
