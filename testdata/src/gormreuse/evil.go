@@ -298,14 +298,18 @@ func deferWithSession(db *gorm.DB) {
 }
 
 // =============================================================================
-// SHOULD REPORT - Function call pollution
-// Functions taking *gorm.DB as argument are assumed to pollute it.
+// SHOULD NOT REPORT - HELPER FUNCTIONS (drive pollution detection elsewhere)
 // =============================================================================
 
 // helperPollute is a helper that takes *gorm.DB as argument.
 func helperPollute(db *gorm.DB) {
 	db.Find(nil) // This pollutes db
 }
+
+// =============================================================================
+// SHOULD REPORT - Function call pollution
+// Functions taking *gorm.DB as argument are assumed to pollute it.
+// =============================================================================
 
 // interProceduralPollution demonstrates function call pollution detection.
 // Functions receiving *gorm.DB are assumed to pollute unless marked pure.
