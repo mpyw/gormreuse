@@ -478,7 +478,7 @@ func goroutineIndependentChain(db *gorm.DB) {
 }
 
 // =============================================================================
-// EVIL PATTERNS - Deep Nested Closures (3-4 levels)
+// SHOULD REPORT - EVIL PATTERNS - Deep Nested Closures (3-4 levels)
 // =============================================================================
 
 // tripleNestedClosure demonstrates 3-level nested closure detection.
@@ -561,7 +561,7 @@ func parentPollutesTripleNestedUses(db *gorm.DB) {
 }
 
 // =============================================================================
-// EVIL PATTERNS - Higher-Order Functions (go fn()())
+// SHOULD REPORT - EVIL PATTERNS - Higher-Order Functions (go fn()())
 // =============================================================================
 
 // makeWorker returns a function that uses *gorm.DB.
@@ -618,7 +618,7 @@ func tripleHigherOrder(db *gorm.DB) {
 }
 
 // =============================================================================
-// EVIL PATTERNS - Nested Defer/Goroutine Combinations
+// SHOULD REPORT - EVIL PATTERNS - Nested Defer/Goroutine Combinations
 // =============================================================================
 
 // deferInsideGoroutine demonstrates defer inside goroutine closure.
@@ -673,7 +673,7 @@ func multipleDefers(db *gorm.DB) {
 }
 
 // =============================================================================
-// EVIL PATTERNS - FreeVar from Deep Levels
+// SHOULD REPORT - EVIL PATTERNS - FreeVar from Deep Levels
 // =============================================================================
 
 // freeVarFrom4To2 demonstrates FreeVar reference from 4 levels deep to level 2.
@@ -725,7 +725,7 @@ func freeVarMixedLevels(db *gorm.DB) {
 }
 
 // =============================================================================
-// EVIL PATTERNS - IIFE (Immediately Invoked Function Expression)
+// SHOULD REPORT - EVIL PATTERNS - IIFE (Immediately Invoked Function Expression)
 // =============================================================================
 
 // iifeReuse demonstrates IIFE pattern.
@@ -810,7 +810,7 @@ func multiStructField(db *gorm.DB) {
 }
 
 // =============================================================================
-// EVIL PATTERNS - Pointer Indirection
+// SHOULD REPORT - EVIL PATTERNS - Pointer Indirection
 // =============================================================================
 
 // pointerIndirection demonstrates pollution through pointer.
@@ -870,7 +870,7 @@ func mapPollution(db *gorm.DB) {
 }
 
 // =============================================================================
-// EVIL PATTERNS - Panic/Recover
+// SHOULD REPORT - EVIL PATTERNS - Panic/Recover
 // =============================================================================
 
 // panicRecover demonstrates pollution in recover block.
@@ -887,7 +887,7 @@ func panicRecover(db *gorm.DB) {
 }
 
 // =============================================================================
-// EVIL PATTERNS - Select Statement
+// SHOULD REPORT - EVIL PATTERNS - Select Statement
 // =============================================================================
 
 // selectStatement demonstrates that select cases are mutually exclusive.
@@ -985,7 +985,7 @@ func methodValuePhiWithNil(db *gorm.DB, flag bool) {
 }
 
 // =============================================================================
-// EVIL PATTERNS - Closure Modifying Captured Variable
+// SHOULD REPORT - EVIL PATTERNS - Closure Modifying Captured Variable
 // =============================================================================
 
 // closureModifiesCaptured demonstrates closure modifying captured variable.
@@ -1004,7 +1004,7 @@ func closureModifiesCaptured(db *gorm.DB) {
 }
 
 // =============================================================================
-// EVIL PATTERNS - Named Return Values
+// SHOULD REPORT - EVIL PATTERNS - Named Return Values
 // =============================================================================
 
 func helperWithNamedReturn(db *gorm.DB) (result *gorm.DB) {
@@ -1039,7 +1039,7 @@ func variadicPollution(db *gorm.DB) {
 }
 
 // =============================================================================
-// EVIL PATTERNS - Goto Statement
+// SHOULD REPORT - EVIL PATTERNS - Goto Statement
 // =============================================================================
 
 // gotoStatement demonstrates pollution with goto.
@@ -1059,7 +1059,7 @@ cleanup:
 }
 
 // =============================================================================
-// EVIL PATTERNS - Fallthrough in Switch
+// SHOULD REPORT - EVIL PATTERNS - Fallthrough in Switch
 // =============================================================================
 
 // switchFallthrough demonstrates pollution with fallthrough.
@@ -1077,7 +1077,7 @@ func switchFallthrough(db *gorm.DB, level int) {
 }
 
 // =============================================================================
-// EVIL PATTERNS - Multiple Goroutines
+// SHOULD REPORT - EVIL PATTERNS - Multiple Goroutines
 // =============================================================================
 
 // multipleGoroutines demonstrates multiple goroutines using same q.
@@ -1096,7 +1096,7 @@ func multipleGoroutines(db *gorm.DB) {
 }
 
 // =============================================================================
-// EVIL PATTERNS - Interleaved Function Calls
+// SHOULD REPORT - EVIL PATTERNS - Interleaved Function Calls
 // =============================================================================
 
 // interleavedCalls demonstrates interleaved function calls.
@@ -1113,7 +1113,7 @@ func interleavedCalls(db *gorm.DB) {
 }
 
 // =============================================================================
-// EVIL PATTERNS - Combined Chaos
+// SHOULD REPORT - EVIL PATTERNS - Combined Chaos
 // =============================================================================
 
 // combinedChaos demonstrates multiple evil patterns combined.
@@ -1156,7 +1156,7 @@ func ultimateChaos(db *gorm.DB) {
 }
 
 // =============================================================================
-// EVIL PATTERNS - Nested If Statements
+// SHOULD REPORT - EVIL PATTERNS - Nested If Statements
 // =============================================================================
 
 // nestedIf demonstrates nested if statements with mutually exclusive branches.
@@ -1216,7 +1216,7 @@ func ifElseChain(db *gorm.DB, level int) {
 }
 
 // =============================================================================
-// EVIL PATTERNS - If Inside For
+// SHOULD REPORT - EVIL PATTERNS - If Inside For
 // =============================================================================
 
 // ifInsideFor demonstrates if inside for loop.
@@ -1257,7 +1257,7 @@ func nestedIfInsideFor(db *gorm.DB, items []int, flag bool) {
 }
 
 // =============================================================================
-// EVIL PATTERNS - For Inside If
+// SHOULD REPORT - EVIL PATTERNS - For Inside If
 // =============================================================================
 
 // forInsideIf demonstrates for inside if.
@@ -1291,7 +1291,7 @@ func forInsideIfElse(db *gorm.DB, items []string, flag bool) {
 }
 
 // =============================================================================
-// EVIL PATTERNS - Nested For Loops
+// SHOULD REPORT - EVIL PATTERNS - Nested For Loops
 // =============================================================================
 
 // nestedFor demonstrates nested for loops.
@@ -1336,7 +1336,7 @@ func forWithBreakContinue(db *gorm.DB, items []int) {
 }
 
 // =============================================================================
-// EVIL PATTERNS - Defer Inside If
+// SHOULD REPORT - EVIL PATTERNS - Defer Inside If
 // =============================================================================
 
 // deferInsideIf demonstrates defer inside if.
@@ -1391,7 +1391,7 @@ func multipleDeferInsideIf(db *gorm.DB, flag bool) {
 }
 
 // =============================================================================
-// EVIL PATTERNS - Defer Inside For
+// SHOULD REPORT - EVIL PATTERNS - Defer Inside For
 // =============================================================================
 
 // deferInsideFor demonstrates defer inside for loop.
@@ -1435,7 +1435,7 @@ func deferInsideNestedFor(db *gorm.DB) {
 }
 
 // =============================================================================
-// EVIL PATTERNS - For Inside Defer
+// SHOULD REPORT - EVIL PATTERNS - For Inside Defer
 // =============================================================================
 
 // forInsideDefer demonstrates for inside defer closure.
@@ -1469,7 +1469,7 @@ func nestedForInsideDefer(db *gorm.DB) {
 }
 
 // =============================================================================
-// EVIL PATTERNS - If Inside Defer
+// SHOULD REPORT - EVIL PATTERNS - If Inside Defer
 // =============================================================================
 
 // ifInsideDefer demonstrates if inside defer closure.
@@ -1518,7 +1518,7 @@ func nestedIfInsideDefer(db *gorm.DB, a, b bool) {
 }
 
 // =============================================================================
-// EVIL PATTERNS - Complex If/For/Defer Combinations
+// SHOULD REPORT - EVIL PATTERNS - Complex If/For/Defer Combinations
 // =============================================================================
 
 // ifForDefer demonstrates if containing for containing defer.
@@ -1647,7 +1647,7 @@ func tripleNestingDeferForIf(db *gorm.DB, items []int) {
 }
 
 // =============================================================================
-// EVIL PATTERNS - 4-Level Nesting Combinations
+// SHOULD REPORT - EVIL PATTERNS - 4-Level Nesting Combinations
 // =============================================================================
 
 // quadNestingIfForIfDefer demonstrates 4-level: if -> for -> if -> defer.
@@ -1717,7 +1717,7 @@ func quadNestingDeferForIfFor(db *gorm.DB, outer []bool) {
 }
 
 // =============================================================================
-// EVIL PATTERNS - Multiple Defers with If/For
+// SHOULD REPORT - EVIL PATTERNS - Multiple Defers with If/For
 // =============================================================================
 
 // multipleDefersInDifferentBranches demonstrates multiple defers in different if branches.
@@ -1751,7 +1751,7 @@ func multipleDefersInLoopBranches(db *gorm.DB, items []int) {
 }
 
 // =============================================================================
-// EVIL PATTERNS - Early Return with Defer
+// SHOULD REPORT - EVIL PATTERNS - Early Return with Defer
 // =============================================================================
 
 // earlyReturnWithDefer demonstrates early return with defer.
@@ -1786,7 +1786,7 @@ func earlyReturnInLoopWithDefer(db *gorm.DB, items []int) {
 }
 
 // =============================================================================
-// EVIL PATTERNS - Labeled Break/Continue with Defer
+// SHOULD REPORT - EVIL PATTERNS - Labeled Break/Continue with Defer
 // =============================================================================
 
 // labeledBreakWithDefer demonstrates labeled break with defer.
@@ -1826,7 +1826,7 @@ outer:
 }
 
 // =============================================================================
-// EVIL PATTERNS - Infinite Loop Patterns
+// SHOULD REPORT - EVIL PATTERNS - Infinite Loop Patterns
 // =============================================================================
 
 // foreverLoopWithBreak demonstrates for{} with break.
@@ -1850,7 +1850,7 @@ func foreverLoopWithBreak(db *gorm.DB, ch chan bool) {
 }
 
 // =============================================================================
-// EVIL PATTERNS - Closure Capturing Loop Variable
+// SHOULD REPORT - EVIL PATTERNS - Closure Capturing Loop Variable
 // =============================================================================
 
 // closureCapturingLoopVar demonstrates closure capturing loop variable.
@@ -1885,7 +1885,7 @@ func deferCapturingLoopVar(db *gorm.DB, items []string) {
 }
 
 // =============================================================================
-// EVIL PATTERNS - Nested Defer Closures
+// SHOULD REPORT - EVIL PATTERNS - Nested Defer Closures
 // =============================================================================
 
 // nestedDeferClosures demonstrates nested defer closures.
@@ -1932,7 +1932,7 @@ func nestedDeferWithFor(db *gorm.DB) {
 }
 
 // =============================================================================
-// EVIL PATTERNS - Range Over Channel with Defer
+// SHOULD REPORT - EVIL PATTERNS - Range Over Channel with Defer
 // =============================================================================
 
 // rangeOverChannelWithDefer demonstrates range over channel with defer.
@@ -1947,7 +1947,7 @@ func rangeOverChannelWithDefer(db *gorm.DB, ch chan int) {
 }
 
 // =============================================================================
-// EVIL PATTERNS - Type Switch with Defer/For
+// SHOULD REPORT - EVIL PATTERNS - Type Switch with Defer/For
 // =============================================================================
 
 // typeSwitchWithDefer demonstrates type switch with defer.
@@ -1982,7 +1982,7 @@ func typeSwitchInsideFor(db *gorm.DB, items []interface{}) {
 }
 
 // =============================================================================
-// EVIL PATTERNS - Ultimate If/For/Defer Chaos
+// SHOULD REPORT - EVIL PATTERNS - Ultimate If/For/Defer Chaos
 // =============================================================================
 
 // ultimateIfForDeferChaos demonstrates the ultimate if/for/defer combination.
@@ -2009,7 +2009,7 @@ func ultimateIfForDeferChaos(db *gorm.DB, a, b bool, outer []int, inner []string
 }
 
 // =============================================================================
-// EVIL PATTERNS - Triple Nested IIFE
+// SHOULD REPORT - EVIL PATTERNS - Triple Nested IIFE
 // =============================================================================
 
 // tripleNestedIIFE demonstrates triple nested IIFE with pollution tracking.
@@ -2046,7 +2046,7 @@ func tripleNestedIIFEWithBranch(db *gorm.DB, cond bool) {
 }
 
 // =============================================================================
-// EVIL PATTERNS - IIFE with Multiple Return Paths
+// SHOULD REPORT - EVIL PATTERNS - IIFE with Multiple Return Paths
 // =============================================================================
 
 // iifeMultipleReturns demonstrates IIFE with multiple return statements.
@@ -2070,7 +2070,7 @@ func iifeMultipleReturns(db *gorm.DB, flag int) {
 }
 
 // =============================================================================
-// EVIL PATTERNS - IIFE Returning Session (Safe)
+// SHOULD REPORT - EVIL PATTERNS - IIFE Returning Session (Safe)
 // =============================================================================
 
 // iifeReturnsSession demonstrates safe IIFE that returns Session result.
@@ -2085,7 +2085,7 @@ func iifeReturnsSession(db *gorm.DB) {
 }
 
 // =============================================================================
-// EVIL PATTERNS - Struct Field with IIFE
+// SHOULD REPORT - EVIL PATTERNS - Struct Field with IIFE
 // =============================================================================
 
 type iifeHolder struct {
@@ -2112,7 +2112,7 @@ func structFieldIIFE(db *gorm.DB) {
 }
 
 // =============================================================================
-// EVIL PATTERNS - Chained IIFE
+// SHOULD REPORT - EVIL PATTERNS - Chained IIFE
 // =============================================================================
 
 // chainedIIFE demonstrates chained IIFE calls.
@@ -2129,7 +2129,7 @@ func chainedIIFE(db *gorm.DB) {
 }
 
 // =============================================================================
-// EVIL PATTERNS - IIFE with Closure Capture
+// SHOULD REPORT - EVIL PATTERNS - IIFE with Closure Capture
 // =============================================================================
 
 // iifeCaptureAndModify demonstrates IIFE that captures and uses a variable.
@@ -2146,7 +2146,7 @@ func iifeCaptureAndModify(db *gorm.DB) {
 }
 
 // =============================================================================
-// EVIL PATTERNS - IIFE with Phi Node
+// SHOULD REPORT - EVIL PATTERNS - IIFE with Phi Node
 // =============================================================================
 
 // iifeWithPhiNode demonstrates IIFE where the value comes from a Phi node.
@@ -2168,7 +2168,7 @@ func iifeWithPhiNode(db *gorm.DB, cond bool) {
 }
 
 // =============================================================================
-// EVIL PATTERNS - IIFE with Argument Returning Chain
+// SHOULD REPORT - EVIL PATTERNS - IIFE with Argument Returning Chain
 // =============================================================================
 
 // iifeArgumentReturnsChain demonstrates IIFE that receives *gorm.DB as argument and returns chain.
@@ -2202,7 +2202,7 @@ func iifeArgumentAndFreeVarMixed(db *gorm.DB) {
 }
 
 // =============================================================================
-// EVIL PATTERNS - Complex Nested FreeVar + Argument (5-6 levels)
+// SHOULD REPORT - EVIL PATTERNS - Complex Nested FreeVar + Argument (5-6 levels)
 // =============================================================================
 
 // deepNestedMixedCapture demonstrates 6-level nesting with mixed FreeVar and Argument.
@@ -2239,7 +2239,7 @@ func deepNestedMixedCapture(db *gorm.DB) {
 }
 
 // =============================================================================
-// EVIL PATTERNS - Stored Closure (User's test cases)
+// SHOULD REPORT - EVIL PATTERNS - Stored Closure (User's test cases)
 // =============================================================================
 
 // storedClosureChain demonstrates stored closure returning a chain.
@@ -2304,7 +2304,7 @@ func beginChainedBecomesMutable(db *gorm.DB) {
 }
 
 // =============================================================================
-// EVIL PATTERNS - Reassignment Edge Cases
+// SHOULD REPORT - EVIL PATTERNS - Reassignment Edge Cases
 // =============================================================================
 
 // reassignInLoop demonstrates reassignment inside a loop.
@@ -2815,7 +2815,7 @@ func singleChainedExpressionSafe(db *gorm.DB) {
 }
 
 // =============================================================================
-// EVIL PATTERNS - Complex Phi Patterns (Mixed Immutability)
+// SHOULD REPORT - EVIL PATTERNS - Complex Phi Patterns (Mixed Immutability)
 // =============================================================================
 
 // phiOneHasSession demonstrates Phi where one branch already has Session.

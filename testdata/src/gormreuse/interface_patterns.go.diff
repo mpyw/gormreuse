@@ -1,6 +1,6 @@
 --- interface_patterns.go	1970-01-01 00:00:00
 +++ interface_patterns.go.golden	1970-01-01 00:00:00
-@@ -1,349 +1,349 @@
+@@ -1,358 +1,358 @@
  package internal
  
  import "gorm.io/gorm"
@@ -333,11 +333,12 @@
  }
  
  // =============================================================================
- // INTERFACE CONVERSION THEN USE - ORDER MATTERS
+ // SHOULD NOT REPORT - INTERFACE CONVERSION DOES NOT POLLUTE
  // =============================================================================
  
- // interfaceConversionThenGormUse: Interface conversion then gorm use
- // Interface conversion doesn't pollute, so subsequent gorm use is first use
+ // interfaceConversionThenGormUse: Interface conversion then gorm use.
+ // Interface conversion doesn't pollute, so the subsequent gorm use is the
+ // first (and only) branch from q.
  func interfaceConversionThenGormUse(db *gorm.DB) {
  	q := db.Where("x")
  
@@ -346,7 +347,9 @@
  	q.Find(nil) // First use - should NOT report
  }
  
- // gormUseThenInterfaceConversion: Gorm use then interface conversion
+ // gormUseThenInterfaceConversion: Gorm use then interface conversion.
+ // q is polluted by Find, but no second gorm method call follows so the
+ // final interface conversion is harmless on its own.
  func gormUseThenInterfaceConversion(db *gorm.DB) {
  	q := db.Where("x")
  
@@ -356,7 +359,13 @@
  	// No second gorm method call, so no violation
  }
  
- // gormUseThenInterfaceConversionThenGormUse: Use, convert, use again
+ // =============================================================================
+ // SHOULD REPORT - INTERFACE CONVERSION DOES NOT MASK PRIOR POLLUTION
+ // =============================================================================
+ 
+ // gormUseThenInterfaceConversionThenGormUse: Use, convert, use again.
+ // The middle interface conversion does not "reset" q — the second gorm
+ // call is still a reuse of the polluted root.
  func gormUseThenInterfaceConversionThenGormUse(db *gorm.DB) {
 -	q := db.Where("x")
 +	q := db.Where("x").Session(&gorm.Session{})
