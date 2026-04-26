@@ -1,6 +1,10 @@
 package internal
 
-import "gorm.io/gorm"
+import (
+	"context"
+
+	"gorm.io/gorm"
+)
 
 // =============================================================================
 // Parameter Reuse Detection
@@ -180,7 +184,7 @@ func scopesWithSession(db *gorm.DB) {
 func scopesWithContext(db *gorm.DB) {
 	db = db.Session(&gorm.Session{}) // Make parameter immutable
 	db.Scopes(func(q *gorm.DB) *gorm.DB {
-		return q.WithContext(nil).Where("x") // want `WithContext\(\) in Scopes callback causes transaction leak`
+		return q.WithContext(context.TODO()).Where("x") // want `WithContext\(\) in Scopes callback causes transaction leak`
 	})
 }
 
