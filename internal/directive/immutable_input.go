@@ -102,7 +102,7 @@ type paramRef struct {
 // pushing unused-diagnostic entries into s.unused otherwise.
 func (s *ImmutableInputSet) processDirectiveTargets(fd *ast.FuncDecl, refs []paramRef, key FuncKey) {
 	for _, ref := range refs {
-		idx, paramExpr, paramTV := s.lookupParam(fd, ref.name)
+		idx, paramTV := s.lookupParam(fd, ref.name)
 		if idx < 0 {
 			s.unused = append(s.unused, ImmutableInputUnused{
 				Pos:    ref.commentPos,
@@ -111,7 +111,7 @@ func (s *ImmutableInputSet) processDirectiveTargets(fd *ast.FuncDecl, refs []par
 			continue
 		}
 		// Verify parameter has function type (U2)
-		funcSig := asFunctionSignature(paramExpr, paramTV)
+		funcSig := asFunctionSignature(paramTV)
 		if funcSig == nil {
 			s.unused = append(s.unused, ImmutableInputUnused{
 				Pos:    ref.commentPos,
@@ -135,11 +135,10 @@ func (s *ImmutableInputSet) processDirectiveTargets(fd *ast.FuncDecl, refs []par
 }
 
 // lookupParam finds a parameter by name in the function declaration and
-// returns (index, AST type expression, recorded type). Returns idx=-1 if
-// not found.
-func (s *ImmutableInputSet) lookupParam(fd *ast.FuncDecl, name string) (int, ast.Expr, types.Type) {
+// returns (index, recorded type). Returns idx=-1 if not found.
+func (s *ImmutableInputSet) lookupParam(fd *ast.FuncDecl, name string) (int, types.Type) {
 	if fd.Type == nil || fd.Type.Params == nil {
-		return -1, nil, nil
+		return -1, nil
 	}
 	idx := 0
 	for _, field := range fd.Type.Params.List {
@@ -155,32 +154,30 @@ func (s *ImmutableInputSet) lookupParam(fd *ast.FuncDecl, name string) (int, ast
 				if s.typesInfo != nil {
 					tv = s.typesInfo.TypeOf(field.Type)
 				}
-				return idx, field.Type, tv
+				return idx, tv
 			}
 			idx++
 		}
 	}
-	return -1, nil, nil
+	return -1, nil
 }
 
 // asFunctionSignature returns the *types.Signature for a parameter that
-// is itself a function, or nil if it isn't. We prefer recorded type info,
-// falling back to AST shape (FuncType) so the check still works in
-// degraded type-info environments.
-func asFunctionSignature(expr ast.Expr, t types.Type) *types.Signature {
-	if t != nil {
-		if sig, ok := t.Underlying().(*types.Signature); ok {
-			return sig
-		}
+// is itself a function, or nil if it isn't.
+//
+// The recorded *types.Signature carries the parameter list, which the
+// caller (processDirectiveTargets) needs to verify the callback actually
+// has a *gorm.DB parameter (U3). In degraded environments without type
+// info we cannot make that determination, so we treat the directive as
+// pointing to "not a function type" — an honest U2 in those edge cases —
+// rather than synthesising an empty signature that would still flow
+// through to a misleading U3 diagnostic.
+func asFunctionSignature(t types.Type) *types.Signature {
+	if t == nil {
+		return nil
 	}
-	// AST fallback: only confirms it's *some* function, not its detailed signature.
-	if _, ok := expr.(*ast.FuncType); ok {
-		// Without types.Signature we cannot validate the param list, but
-		// we want to err on the side of accepting the directive in this
-		// degraded mode rather than reporting U2.
-		return types.NewSignatureType(nil, nil, nil, nil, nil, false)
-	}
-	return nil
+	sig, _ := t.Underlying().(*types.Signature)
+	return sig
 }
 
 // buildFuncKey produces a FuncKey for a function declaration that matches

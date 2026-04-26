@@ -4,6 +4,8 @@ import (
 	"go/token"
 
 	"golang.org/x/tools/go/ssa"
+
+	"github.com/mpyw/gormreuse/internal/typeutil"
 )
 
 // =============================================================================
@@ -52,11 +54,13 @@ func validateScopesCallback(fn *ssa.Function) []scopesWarning {
 			if !ok {
 				continue
 			}
-			methodName := getMethodName(call)
-			if methodName == "" {
+			// Only flag the GORM bug when these names are actually
+			// methods on *gorm.DB; an unrelated package's Session() or
+			// Debug() shouldn't trigger the warning.
+			if !isGormDBMethodCall(call) {
 				continue
 			}
-			switch methodName {
+			switch getMethodName(call) {
 			case "Session":
 				warnings = append(warnings, scopesWarning{
 					Pos:     call.Pos(),
@@ -127,7 +131,8 @@ func isScopesCallback(fn *ssa.Function, parent *ssa.Function) bool {
 					continue
 				}
 				for _, sliceRef := range *sliceRefs {
-					if call, ok := sliceRef.(*ssa.Call); ok && getMethodName(call) == "Scopes" {
+					if call, ok := sliceRef.(*ssa.Call); ok &&
+						getMethodName(call) == "Scopes" && isGormDBMethodCall(call) {
 						return true
 					}
 				}
@@ -139,7 +144,7 @@ func isScopesCallback(fn *ssa.Function, parent *ssa.Function) bool {
 	for _, block := range parent.Blocks {
 		for _, instr := range block.Instrs {
 			call, ok := instr.(*ssa.Call)
-			if !ok || getMethodName(call) != "Scopes" {
+			if !ok || getMethodName(call) != "Scopes" || !isGormDBMethodCall(call) {
 				continue
 			}
 			for _, arg := range call.Call.Args {
@@ -167,4 +172,19 @@ func getMethodName(call *ssa.Call) string {
 		return callee.Name()
 	}
 	return ""
+}
+
+// isGormDBMethodCall reports whether call is dispatching to a method on
+// *gorm.DB. We need this whenever we key off a method *name*
+// (Session/WithContext/Debug/Scopes) so that an unrelated package's
+// identically-named method doesn't trigger GORM-specific diagnostics.
+func isGormDBMethodCall(call *ssa.Call) bool {
+	if call.Call.IsInvoke() {
+		return typeutil.IsGormDB(call.Call.Value.Type())
+	}
+	callee := call.Call.StaticCallee()
+	if callee == nil || callee.Signature == nil || callee.Signature.Recv() == nil {
+		return false
+	}
+	return typeutil.IsGormDB(callee.Signature.Recv().Type())
 }

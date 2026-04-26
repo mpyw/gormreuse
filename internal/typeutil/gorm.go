@@ -114,30 +114,46 @@ func IsImmutableReturningBuiltin(name string) bool {
 // Immutable Input Methods
 // =============================================================================
 
-// immutableInputMethods are methods that pass immutable *gorm.DB to their callbacks.
-// The value is the parameter name that receives immutable input.
-//
-// These callbacks can safely reuse their *gorm.DB parameter because it's created
-// fresh by the method (via Begin, Session, or similar).
-var immutableInputMethods = map[string]string{
-	// Transaction: tx is created by Begin (immutable)
-	// func (db *DB) Transaction(fc func(tx *DB) error, opts ...*sql.TxOptions) error
-	"Transaction": "fc",
-
-	// Connection: fresh connection from pool (immutable)
-	// func (db *DB) Connection(fc func(tx *DB) error) error
-	"Connection": "fc",
-
-	// FindInBatches: fresh tx per batch (immutable)
-	// func (db *DB) FindInBatches(dest interface{}, batchSize int, fc func(tx *DB, batch int) error) error
-	"FindInBatches": "fc",
+// ImmutableInputBuiltinDecl describes a builtin GORM method that hands its
+// callback a freshly created *gorm.DB.
+type ImmutableInputBuiltinDecl struct {
+	// CallbackParam is the source-level parameter name (for diagnostics).
+	CallbackParam string
+	// ParamIdx is the 0-based index of the callback parameter in the
+	// method's signature, **excluding the receiver**. Callers that
+	// inspect SSA Args must add 1 for static method calls (where Args[0]
+	// holds the receiver) and use the value as-is for interface invokes.
+	ParamIdx int
 }
 
-// IsImmutableInputBuiltin returns the callback parameter name if the method passes
-// immutable *gorm.DB to callbacks, empty string otherwise.
+// immutableInputBuiltins are methods that pass immutable *gorm.DB to their
+// callbacks. They are recognised by name *and* by which argument position
+// the closure occupies — checking the name alone would mis-classify
+// non-callback arguments such as FindInBatches' `dest` and `batchSize`.
 //
-// Methods like Transaction, Connection, and FindInBatches create fresh *gorm.DB
-// for their callbacks, so the callback can safely reuse the parameter.
-func IsImmutableInputBuiltin(name string) string {
-	return immutableInputMethods[name]
+// All entries are methods on *gorm.DB. Callers must additionally verify the
+// receiver type before trusting these constraints.
+var immutableInputBuiltins = map[string]ImmutableInputBuiltinDecl{
+	// func (db *DB) Transaction(fc func(tx *DB) error, opts ...*sql.TxOptions) error
+	"Transaction": {CallbackParam: "fc", ParamIdx: 0},
+	// func (db *DB) Connection(fc func(tx *DB) error) error
+	"Connection": {CallbackParam: "fc", ParamIdx: 0},
+	// func (db *DB) FindInBatches(dest interface{}, batchSize int, fc func(tx *DB, batch int) error) *DB
+	"FindInBatches": {CallbackParam: "fc", ParamIdx: 2},
+}
+
+// ImmutableInputBuiltin returns the builtin metadata for a method name.
+// Callers must additionally verify that the method's receiver is *gorm.DB
+// before treating the result as authoritative — the name alone is not safe.
+func ImmutableInputBuiltin(name string) (ImmutableInputBuiltinDecl, bool) {
+	decl, ok := immutableInputBuiltins[name]
+	return decl, ok
+}
+
+// IsImmutableInputBuiltin reports whether the method name is one of the
+// known builtins. It is a simple presence check; use ImmutableInputBuiltin
+// to recover the callback parameter position.
+func IsImmutableInputBuiltin(name string) bool {
+	_, ok := immutableInputBuiltins[name]
+	return ok
 }

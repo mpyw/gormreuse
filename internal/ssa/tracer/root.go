@@ -1432,69 +1432,92 @@ func (t *RootTracer) isImmutableInputParameter(param *ssa.Parameter) bool {
 }
 
 // closureFlowsToImmutableInputCallback walks the MakeClosure's referrers
-// and reports whether any of them is a Call that registers the closure as
-// an immutable-input callback at the matching argument position.
+// and reports whether the closure is *exclusively* used as an
+// immutable-input callback.
+//
+// We require every Call that consumes the closure to satisfy the
+// constraint at the argument position used. If even one call site passes
+// the same closure as a non-immutable-input argument, the receiving
+// parameter must remain mutable so reuse warnings still fire on that
+// path. (Issue: PR #57 review.)
 func (t *RootTracer) closureFlowsToImmutableInputCallback(mc *ssa.MakeClosure) bool {
 	refs := mc.Referrers()
 	if refs == nil {
 		return false
 	}
+	sawCallSite := false
 	for _, ref := range *refs {
 		call, ok := ref.(*ssa.Call)
 		if !ok {
 			continue
 		}
 		for argIdx, arg := range call.Call.Args {
-			if arg == mc && t.callDeclaresImmutableInputAt(call, argIdx) {
-				return true
+			if arg != mc {
+				continue
+			}
+			sawCallSite = true
+			if !t.callDeclaresImmutableInputAt(call, argIdx) {
+				return false // mixed usage — be conservative
 			}
 		}
 	}
-	return false
+	return sawCallSite
 }
 
 // callDeclaresImmutableInputAt reports whether call's callee declares an
-// immutable-input constraint on argument argIdx, considering both builtin
-// constraints (typeutil.IsImmutableInputBuiltin) and user-defined ones
-// (directive.ImmutableInputSet).
+// immutable-input constraint on argument argIdx. It considers both builtin
+// constraints (typeutil.ImmutableInputBuiltin) and user-defined ones
+// (directive.ImmutableInputSet), and verifies that:
 //
-// argIdx is the index in call.Call.Args. For static method calls this
-// includes the receiver at position 0, so a user-defined free function
-// declaring immutable-input on its 0th parameter and a method declaring
-// it on its 0th-from-receiver are both handled correctly because we
-// resolve via the SSA function's parameter list, not the source line.
+//  1. The callee is a method on *gorm.DB for the builtin path (otherwise
+//     a user-defined method named Transaction/Connection/FindInBatches on
+//     an unrelated type would silently match).
+//  2. The argument position matches the declared callback parameter
+//     index. SSA Args has the receiver at position 0 for static method
+//     calls and no receiver for interface invokes; the resolution below
+//     normalises that into a signature-relative parameter index.
 func (t *RootTracer) callDeclaresImmutableInputAt(call *ssa.Call, argIdx int) bool {
 	if call.Call.IsInvoke() {
-		// Interface dispatch — only builtin names are recognised.
-		return typeutil.IsImmutableInputBuiltin(call.Call.Method.Name()) != ""
+		// Interface dispatch: SSA Args has no receiver, so argIdx is
+		// already a signature parameter index. Verify the receiver type
+		// is *gorm.DB before trusting the builtin name match.
+		if !typeutil.IsGormDB(call.Call.Value.Type()) {
+			return false
+		}
+		decl, ok := typeutil.ImmutableInputBuiltin(call.Call.Method.Name())
+		return ok && decl.ParamIdx == argIdx
 	}
+
 	callee := call.Call.StaticCallee()
 	if callee == nil {
 		return false
 	}
 
-	// Builtin constraint: identify by method name on a *gorm.DB receiver.
-	if name := typeutil.IsImmutableInputBuiltin(callee.Name()); name != "" {
-		return true
+	// Static call: receiver (if any) sits at Args[0]. Convert to signature
+	// parameter index by stripping the receiver position.
+	hasRecv := callee.Signature != nil && callee.Signature.Recv() != nil
+	paramIdx := argIdx
+	if hasRecv {
+		paramIdx = argIdx - 1
+	}
+	if paramIdx < 0 {
+		return false
 	}
 
-	// User-defined constraint: look up the callee in the ImmutableInputSet
-	// and confirm the matching parameter position.
+	// Builtin: must be a method on *gorm.DB AND the argument position
+	// must match the declared callback parameter.
+	if hasRecv && typeutil.IsGormDB(callee.Signature.Recv().Type()) {
+		if decl, ok := typeutil.ImmutableInputBuiltin(callee.Name()); ok && decl.ParamIdx == paramIdx {
+			return true
+		}
+	}
+
+	// User-defined constraint via //gormreuse:immutable-input(name).
 	if t.immutableInputs == nil {
 		return false
 	}
-	wantParam := argIdx
-	if callee.Signature != nil && callee.Signature.Recv() != nil && len(call.Call.Args) > 0 {
-		// SSA represents method calls as static calls whose Args[0] is
-		// the receiver. The directive's ParamIdx counts from the first
-		// non-receiver parameter, so subtract one for methods.
-		wantParam = argIdx - 1
-	}
-	if wantParam < 0 {
-		return false
-	}
 	for _, cb := range t.immutableInputs.AllCallbacks(callee) {
-		if cb.ParamIdx == wantParam {
+		if cb.ParamIdx == paramIdx {
 			return true
 		}
 	}

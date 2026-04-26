@@ -328,12 +328,13 @@ go run ./testdata/cmd/gengolden/main.go
 
 ```
 testdata/src/gormreuse/
-├── basic.go              # Basic reuse patterns, Session at end/middle
-├── advanced.go           # Derived variables, helper functions, conditional reuse
-├── evil.go               # Edge cases: closures, defer, goroutines, struct fields, loops
-├── ignore.go             # //gormreuse:ignore directive tests
-├── directive_validation.go  # //gormreuse:pure and //gormreuse:immutable-return tests
-└── param_mutable_test.go # Phase 1: Parameter as mutable root tests
+├── basic.go                # Basic reuse patterns, Session at end/middle
+├── advanced.go             # Derived variables, helper functions, conditional reuse
+├── evil.go                 # Edge cases: closures, defer, goroutines, struct fields, loops
+├── ignore.go               # //gormreuse:ignore directive tests
+├── directive_validation.go # //gormreuse:pure and //gormreuse:immutable-return tests
+├── param_mutable.go        # Phase 1: Parameter as mutable root tests
+└── immutable_input.go      # Phase 2: //gormreuse:immutable-input(name) directive tests
 ```
 
 ### E2E Tests
