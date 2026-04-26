@@ -37,9 +37,8 @@ type ImmutableInputUnused struct {
 // ImmutableInputSet stores all //gormreuse:immutable-input(name) directives
 // found in the analyzed source, keyed by the enclosing function.
 type ImmutableInputSet struct {
-	known     map[FuncKey][]ImmutableInputCallback
-	unused    []ImmutableInputUnused
-	processed map[token.Pos]struct{} // Directive positions this set has seen
+	known  map[FuncKey][]ImmutableInputCallback
+	unused []ImmutableInputUnused
 
 	fset      *token.FileSet
 	typesInfo *types.Info
@@ -50,7 +49,6 @@ type ImmutableInputSet struct {
 func NewImmutableInputSet(fset *token.FileSet, typesInfo *types.Info) *ImmutableInputSet {
 	return &ImmutableInputSet{
 		known:     make(map[FuncKey][]ImmutableInputCallback),
-		processed: make(map[token.Pos]struct{}),
 		fset:      fset,
 		typesInfo: typesInfo,
 	}
@@ -87,7 +85,6 @@ func (s *ImmutableInputSet) extractParamsFromComments(list []*ast.Comment) []par
 		if len(names) == 0 {
 			continue
 		}
-		s.processed[c.Pos()] = struct{}{}
 		for _, name := range names {
 			refs = append(refs, paramRef{commentPos: c.Pos(), name: name})
 		}
@@ -199,30 +196,9 @@ func (s *ImmutableInputSet) buildFuncKey(fd *ast.FuncDecl, pkgPath string) FuncK
 	return key
 }
 
-// CallbackParamIdx returns the callback parameter index registered for fn,
-// or -1 if fn has no immutable-input directive.
-func (s *ImmutableInputSet) CallbackParamIdx(fn *ssa.Function) int {
-	if s == nil || fn == nil {
-		return -1
-	}
-	key := FuncKey{FuncName: fn.Name()}
-	if fn.Pkg != nil && fn.Pkg.Pkg != nil {
-		key.PkgPath = fn.Pkg.Pkg.Path()
-	}
-	if sig := fn.Signature; sig != nil && sig.Recv() != nil {
-		key.ReceiverType = formatReceiverType(sig.Recv().Type())
-	}
-	cbs := s.known[key]
-	if len(cbs) == 0 {
-		return -1
-	}
-	// One directive per (function, param) is enough for the tracer; if
-	// multiple are declared, prefer the first.
-	return cbs[0].ParamIdx
-}
-
 // AllCallbacks returns the registered callbacks for fn, used by the
-// purity-style validator that checks 2.3/2.4.
+// tracer (to recognise immutable-input arguments) and by the purity-style
+// validator that checks Issue #56 cases 2.3 / 2.4.
 func (s *ImmutableInputSet) AllCallbacks(fn *ssa.Function) []ImmutableInputCallback {
 	if s == nil || fn == nil {
 		return nil
@@ -237,16 +213,6 @@ func (s *ImmutableInputSet) AllCallbacks(fn *ssa.Function) []ImmutableInputCallb
 	out := make([]ImmutableInputCallback, len(s.known[key]))
 	copy(out, s.known[key])
 	return out
-}
-
-// IsProcessed reports whether the directive at pos has already been seen
-// by this set (used to avoid duplicating "unused" reports across sets).
-func (s *ImmutableInputSet) IsProcessed(pos token.Pos) bool {
-	if s == nil {
-		return false
-	}
-	_, ok := s.processed[pos]
-	return ok
 }
 
 // GetUnused returns the diagnostics for directives that don't apply to
