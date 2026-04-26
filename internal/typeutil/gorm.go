@@ -149,11 +149,3 @@ func ImmutableInputBuiltin(name string) (ImmutableInputBuiltinDecl, bool) {
 	decl, ok := immutableInputBuiltins[name]
 	return decl, ok
 }
-
-// IsImmutableInputBuiltin reports whether the method name is one of the
-// known builtins. It is a simple presence check; use ImmutableInputBuiltin
-// to recover the callback parameter position.
-func IsImmutableInputBuiltin(name string) bool {
-	_, ok := immutableInputBuiltins[name]
-	return ok
-}

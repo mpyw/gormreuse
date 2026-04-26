@@ -501,7 +501,7 @@ func (s *DirectiveFuncSet) findDirectiveForFuncLit(funcLit *ast.FuncLit) token.P
 		return token.NoPos
 	}
 	return s.findMatchingDirective(funcLit, func(file *ast.File, cg *ast.CommentGroup) bool {
-		return s.matchesSameLineDirective(file, funcLit, cg) || s.matchesNextLineDirective(file, funcLit, cg)
+		return s.matchesSameLineDirective(funcLit, cg) || s.matchesNextLineDirective(file, funcLit, cg)
 	})
 }
 
@@ -611,7 +611,7 @@ func (s *DirectiveFuncSet) matchesNextLineDirective(file *ast.File, funcLit *ast
 //	outer := func() { //gormreuse:pure
 //	    inner := func() {}  ← inner is on different line
 //	}
-func (s *DirectiveFuncSet) matchesSameLineDirective(file *ast.File, funcLit *ast.FuncLit, cg *ast.CommentGroup) bool {
+func (s *DirectiveFuncSet) matchesSameLineDirective(funcLit *ast.FuncLit, cg *ast.CommentGroup) bool {
 	if funcLit.Body == nil {
 		return false
 	}

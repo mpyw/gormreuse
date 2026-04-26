@@ -105,7 +105,7 @@ type CallHandler struct{}
 // Non-assignment patterns (pollute):
 //   - q.Find(nil) → direct use (finisher)
 //   - q.Where("x").Find(nil) → chained use where final result is NOT assigned
-func isAssignment(call *ssa.Call, ctx *Context) bool {
+func isAssignment(call *ssa.Call) bool {
 	return isAssignmentRecursive(call, make(map[*ssa.Call]bool))
 }
 
@@ -224,7 +224,7 @@ func (h *CallHandler) Handle(call *ssa.Call, ctx *Context) {
 	if isImmutableReturning {
 		// Pure methods check for pollution but don't pollute
 		ctx.Tracker.RecordPureUse(root, call.Block(), call.Pos())
-	} else if isAssignment(call, ctx) {
+	} else if isAssignment(call) {
 		// Assignment creates new root - record but doesn't pollute
 		ctx.Tracker.RecordAssignment(root, call.Block(), call.Pos())
 	} else {
@@ -337,7 +337,7 @@ func (h *CallHandler) checkFunctionCallPollution(call *ssa.Call, ctx *Context) {
 	// The assignment creates a new mutable root, so we shouldn't ADD pollution to args.
 	// However, we still need to CHECK if args are already polluted (to detect reuse).
 	// This enables patterns like: q = buildQuery(q, "filter")
-	isReassignment := typeutil.IsGormDB(call.Type()) && isAssignment(call, ctx)
+	isReassignment := typeutil.IsGormDB(call.Type()) && isAssignment(call)
 
 	for _, arg := range call.Call.Args {
 		// Check if arg is *gorm.DB (directly or wrapped in MakeInterface)
