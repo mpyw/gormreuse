@@ -65,7 +65,7 @@
  // iifeConditionalReturnSameRoot: IIFE with conditional returns from same root
  func iifeConditionalReturnSameRoot(db *gorm.DB) {
 -	q := db.Where("base")
-+	q := db.Where("base").Session(&gorm.Session{}).Session(&gorm.Session{})
++	q := db.Where("base").Session(&gorm.Session{})
  
  	// Both returns derive from same root (q)
  	_ = func() *gorm.DB {
@@ -81,7 +81,7 @@
  // iifeConditionalReturnDifferentRoots: IIFE with conditional returns from different roots
  func iifeConditionalReturnDifferentRoots(db *gorm.DB) {
 -	q1 := db.Where("q1")
-+	q1 := db.Where("q1").Session(&gorm.Session{}).Session(&gorm.Session{})
++	q1 := db.Where("q1").Session(&gorm.Session{})
  	q2 := db.Where("q2")
  
  	q1.Find(nil) // Pollute q1
@@ -98,7 +98,7 @@
  // storedClosureSingleReturn: Stored closure with single return value
  func storedClosureSingleReturn(db *gorm.DB) {
 -	q := db.Where("base")
-+	q := db.Where("base").Session(&gorm.Session{}).Session(&gorm.Session{})
++	q := db.Where("base").Session(&gorm.Session{})
  
  	getQuery := func() *gorm.DB {
  		return q.Where("inner")
@@ -114,7 +114,7 @@
  // storedClosureMultiReturn: Stored closure with multi return value
  func storedClosureMultiReturn(db *gorm.DB) {
 -	q := db.Where("base")
-+	q := db.Where("base").Session(&gorm.Session{}).Session(&gorm.Session{})
++	q := db.Where("base").Session(&gorm.Session{})
  
  	getQuery := func() (*gorm.DB, error) {
  		return q.Where("inner"), nil

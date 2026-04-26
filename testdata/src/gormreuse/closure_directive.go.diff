@@ -75,7 +75,7 @@
  	}
  
 -	q := db.Where("base")
-+	q := db.Where("base").Session(&gorm.Session{}).Session(&gorm.Session{})
++	q := db.Where("base").Session(&gorm.Session{})
  	impureHelper(q)
  	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
  }
@@ -84,7 +84,7 @@
  func closureNoImmutableReturn(db *gorm.DB) {
  	getDB := func() *gorm.DB {
 -		return db.Session(&gorm.Session{}).Where("setup")
-+		return db.Session(&gorm.Session{}).Where("setup").Session(&gorm.Session{}).Session(&gorm.Session{})
++		return db.Session(&gorm.Session{}).Where("setup").Session(&gorm.Session{})
  	}
  
  	q := getDB()
@@ -196,7 +196,7 @@
  
  	q := db.Where("base")
 -	result := outer(q)
-+	result := outer(q).Session(&gorm.Session{}).Session(&gorm.Session{})
++	result := outer(q).Session(&gorm.Session{})
  	q.Find(nil)      // OK - outer is pure
  	result.Find(nil) // outer's return is NOT immutable-return
  	result.Count(nil) // want `\*gorm\.DB instance reused after chain method`
@@ -238,7 +238,7 @@
  	}; inner(q); _ = q }
  
 -	q := db.Where("base")
-+	q := db.Where("base").Session(&gorm.Session{}).Session(&gorm.Session{})
++	q := db.Where("base").Session(&gorm.Session{})
  	outer(q)    // outer is NOT pure (directive is for inner)
  	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
  }
@@ -325,7 +325,7 @@
  
  	base := db.Where("x")
 -	result := helper(base)
-+	result := helper(base).Session(&gorm.Session{}).Session(&gorm.Session{})
++	result := helper(base).Session(&gorm.Session{})
  	base.Find(nil) // OK - helper is pure
  	result.Find(nil)
  	result.Count(nil) // want `\*gorm\.DB instance reused after chain method`
@@ -339,7 +339,7 @@
  	}
  
 -	base := db.Where("x")
-+	base := db.Where("x").Session(&gorm.Session{}).Session(&gorm.Session{})
++	base := db.Where("x").Session(&gorm.Session{})
  	result := helper(base)
  	base.Find(nil) // want `\*gorm\.DB instance reused after chain method`
  	result.Find(nil)
@@ -428,7 +428,7 @@
  	q.Find(nil) // OK - a is pure
  
 -	q2 := db.Where("base2")
-+	q2 := db.Where("base2").Session(&gorm.Session{}).Session(&gorm.Session{})
++	q2 := db.Where("base2").Session(&gorm.Session{})
  	b.Fn(q2)
  	q2.Find(nil) // want `\*gorm\.DB instance reused after chain method`
  }
@@ -448,7 +448,7 @@
  	q2.Find(nil) // OK - b is pure
  
 -	q3 := db.Where("base3")
-+	q3 := db.Where("base3").Session(&gorm.Session{}).Session(&gorm.Session{})
++	q3 := db.Where("base3").Session(&gorm.Session{})
  	c(q3)
  	q3.Find(nil) // want `\*gorm\.DB instance reused after chain method`
  }
@@ -465,7 +465,7 @@
  	q.Find(nil) // OK - a is pure
  
 -	q2 := db.Where("base2")
-+	q2 := db.Where("base2").Session(&gorm.Session{}).Session(&gorm.Session{})
++	q2 := db.Where("base2").Session(&gorm.Session{})
  	b(q2)
  	q2.Find(nil) // want `\*gorm\.DB instance reused after chain method`
  }
@@ -481,7 +481,7 @@
  	q.Find(nil) // OK - a is pure
  
 -	q2 := db.Where("base2")
-+	q2 := db.Where("base2").Session(&gorm.Session{}).Session(&gorm.Session{})
++	q2 := db.Where("base2").Session(&gorm.Session{})
  	b(q2)
  	q2.Find(nil) // want `\*gorm\.DB instance reused after chain method`
  }
@@ -554,7 +554,7 @@
  	q1.Find(nil) // OK - a is pure
  
 -	q2 := db.Where("base2")
-+	q2 := db.Where("base2").Session(&gorm.Session{}).Session(&gorm.Session{})
++	q2 := db.Where("base2").Session(&gorm.Session{})
  	b(q2)
  	q2.Find(nil) // want "reused"
  
@@ -590,7 +590,7 @@
  // funcArgNoPure: No directive, closure receives mutable q - should report on q.Find
  func funcArgNoPure(db *gorm.DB) {
 -	q := db.Where("base")
-+	q := db.Where("base").Session(&gorm.Session{}).Session(&gorm.Session{})
++	q := db.Where("base").Session(&gorm.Session{})
  	applyToDB(func(x *gorm.DB) {
  		_ = x
  	}, q)
@@ -603,7 +603,7 @@
  // This is because the analysis doesn't track that applyToDB passes its *gorm.DB arg to the closure.
  func funcArgPureBeforeLine(db *gorm.DB) {
 -	q := db.Where("base")
-+	q := db.Where("base").Session(&gorm.Session{}).Session(&gorm.Session{})
++	q := db.Where("base").Session(&gorm.Session{})
  	applyToDB(
  		//gormreuse:pure
  		func(x *gorm.DB) {
@@ -618,7 +618,7 @@
  // BUG: Directive is recognized (no unused warning) but doesn't take effect
  func funcArgPureInline(db *gorm.DB) {
 -	q := db.Where("base")
-+	q := db.Where("base").Session(&gorm.Session{}).Session(&gorm.Session{})
++	q := db.Where("base").Session(&gorm.Session{})
  	applyToDB(func(x *gorm.DB) { //gormreuse:pure
  		_ = x
  	}, q)
@@ -634,7 +634,7 @@
  	q := callReturningDB(func() *gorm.DB {
  		return db.Session(&gorm.Session{}).Where("setup")
 -	})
-+	}).Session(&gorm.Session{}).Session(&gorm.Session{})
++	}).Session(&gorm.Session{})
  	q.Find(nil)
  	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
  }
@@ -650,7 +650,7 @@
  			return db.Session(&gorm.Session{}).Where("setup")
  		},
 -	)
-+	).Session(&gorm.Session{}).Session(&gorm.Session{})
++	).Session(&gorm.Session{})
  	q.Find(nil)
  	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
  }
@@ -661,7 +661,7 @@
  	q := callReturningDB(func() *gorm.DB { //gormreuse:immutable-return
  		return db.Session(&gorm.Session{}).Where("setup")
 -	})
-+	}).Session(&gorm.Session{}).Session(&gorm.Session{})
++	}).Session(&gorm.Session{})
  	q.Find(nil)
  	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
  }
@@ -673,11 +673,11 @@
  // funcArgCombinedNoDirective: No directive - both should report
  func funcArgCombinedNoDirective(db *gorm.DB) {
 -	base := db.Where("x")
-+	base := db.Where("x").Session(&gorm.Session{}).Session(&gorm.Session{})
++	base := db.Where("x").Session(&gorm.Session{})
  	result := callTransform(func(q *gorm.DB) *gorm.DB {
  		return q.Session(&gorm.Session{})
 -	}, base)
-+	}, base).Session(&gorm.Session{}).Session(&gorm.Session{})
++	}, base).Session(&gorm.Session{})
  	base.Find(nil)    // want `\*gorm\.DB instance reused after chain method`
  	result.Find(nil)
  	result.Count(nil) // want `\*gorm\.DB instance reused after chain method`
@@ -688,13 +688,13 @@
  // callTransform is treated. The analysis tracks callTransform, not the closure.
  func funcArgCombinedBeforeLine(db *gorm.DB) {
 -	base := db.Where("x")
-+	base := db.Where("x").Session(&gorm.Session{}).Session(&gorm.Session{})
++	base := db.Where("x").Session(&gorm.Session{})
  	result := callTransform(
  		//gormreuse:pure,immutable-return
  		func(q *gorm.DB) *gorm.DB {
  			return q.Session(&gorm.Session{})
 -		}, base)
-+		}, base).Session(&gorm.Session{}).Session(&gorm.Session{})
++		}, base).Session(&gorm.Session{})
  	base.Find(nil)    // want `\*gorm\.DB instance reused after chain method`
  	result.Find(nil)
  	result.Count(nil) // want `\*gorm\.DB instance reused after chain method`
@@ -704,11 +704,11 @@
  // BUG: Directive is recognized (no unused warning) but doesn't take effect
  func funcArgCombinedInline(db *gorm.DB) {
 -	base := db.Where("x")
-+	base := db.Where("x").Session(&gorm.Session{}).Session(&gorm.Session{})
++	base := db.Where("x").Session(&gorm.Session{})
  	result := callTransform(func(q *gorm.DB) *gorm.DB { //gormreuse:pure,immutable-return
  		return q.Session(&gorm.Session{})
 -	}, base)
-+	}, base).Session(&gorm.Session{}).Session(&gorm.Session{})
++	}, base).Session(&gorm.Session{})
  	base.Find(nil) // want `\*gorm\.DB instance reused after chain method`
  	result.Find(nil)
  	result.Count(nil) // want `\*gorm\.DB instance reused after chain method`

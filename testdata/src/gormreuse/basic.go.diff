@@ -21,7 +21,7 @@
  // basicReuse demonstrates unsafe reuse of a *gorm.DB after chain method.
  func basicReuse(db *gorm.DB) {
 -	q := db.Model(&User{}).Where("active = ?", true)
-+	q := db.Model(&User{}).Where("active = ?", true).Session(&gorm.Session{}).Session(&gorm.Session{})
++	q := db.Model(&User{}).Where("active = ?", true).Session(&gorm.Session{})
  	q.Find(&[]User{})
  	q.Count(new(int64)) // want `\*gorm\.DB instance reused after chain method`
  }
@@ -29,7 +29,7 @@
  // reuseAfterChain demonstrates reuse after multiple chain methods.
  func reuseAfterChain(db *gorm.DB) {
 -	q := db.Where("x = ?", 1).Order("id")
-+	q := db.Where("x = ?", 1).Order("id").Session(&gorm.Session{}).Session(&gorm.Session{})
++	q := db.Where("x = ?", 1).Order("id").Session(&gorm.Session{})
  	q.Find(&[]User{})
  	q.First(&User{}) // want `\*gorm\.DB instance reused after chain method`
  }
@@ -37,7 +37,7 @@
  // tripleUse demonstrates multiple violations from triple reuse.
  func tripleUse(db *gorm.DB) {
 -	q := db.Model(&User{}).Where("a = ?", 1)
-+	q := db.Model(&User{}).Where("a = ?", 1).Session(&gorm.Session{}).Session(&gorm.Session{})
++	q := db.Model(&User{}).Where("a = ?", 1).Session(&gorm.Session{})
  	q.Find(&[]User{})
  	q.Count(new(int64)) // want `\*gorm\.DB instance reused after chain method`
  	q.First(&User{})    // want `\*gorm\.DB instance reused after chain method`
@@ -46,7 +46,7 @@
  // sessionInMiddle demonstrates that Session in the middle doesn't make reuse safe.
  func sessionInMiddle(db *gorm.DB) {
 -	q := db.Model(&User{}).Session(&gorm.Session{}).Where("x = ?", 1)
-+	q := db.Model(&User{}).Session(&gorm.Session{}).Where("x = ?", 1).Session(&gorm.Session{}).Session(&gorm.Session{})
++	q := db.Model(&User{}).Session(&gorm.Session{}).Where("x = ?", 1).Session(&gorm.Session{})
  	q.Find(&[]User{})
  	q.Find(&[]User{}) // want `\*gorm\.DB instance reused after chain method`
  }

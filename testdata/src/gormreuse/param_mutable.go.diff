@@ -1,0 +1,218 @@
+--- param_mutable.go	1970-01-01 00:00:00
++++ param_mutable.go.golden	1970-01-01 00:00:00
+@@ -1,210 +1,210 @@
+ package internal
+ 
+ import "gorm.io/gorm"
+ 
+ // =============================================================================
+ // Parameter Reuse Detection
+ // =============================================================================
+ 
+ // parameterReuse demonstrates basic parameter reuse detection.
+ // Parameters are treated as mutable, so using the parameter twice is a violation.
+ func parameterReuse(db *gorm.DB) {
+ 	db.Find(nil)
+ 	db.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+ }
+ 
+ // parameterWithSessionCorrect demonstrates safe parameter usage with Session.
+ func parameterWithSessionCorrect(db *gorm.DB) {
+ 	db = db.Session(&gorm.Session{}) // Make parameter immutable
+ 	db.Find(nil)
+ 	db.Count(nil) // OK - Session creates isolation
+ }
+ 
+ // nonPureWrapper is a NON-pure function that pollutes db argument.
+ func nonPureWrapper(db *gorm.DB) *gorm.DB {
+ 	return db.Where("wrapped")
+ }
+ 
+ // passingParamToNonPure demonstrates that passing parameter to non-pure function pollutes it.
+ func passingParamToNonPure(db *gorm.DB) {
+ 	wrapped := nonPureWrapper(db) // This pollutes db
+ 	wrapped.Find(nil)
+ 	db.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+ }
+ 
+ // pureWrapper is a pure function that doesn't pollute its argument.
+ //
+ //gormreuse:pure
+ func pureWrapper(db *gorm.DB) *gorm.DB {
+ 	return db.Session(&gorm.Session{}).Where("wrapped")
+ }
+ 
+ // passingParamToPure demonstrates that passing parameter to pure function is safe.
+ func passingParamToPure(db *gorm.DB) {
+ 	pureWrapper(db) // Pure doesn't pollute db
+ 	pureWrapper(db) // Still OK
+ 	db.Find(nil)    // OK - db is not polluted by pure functions
+ }
+ 
+ // mutableReuse demonstrates that mutable reuse detection still works.
+ func mutableReuse(db *gorm.DB) {
+-	q := db.Where("x") // q is mutable
++	q := db.Where("x").Session(&gorm.Session{}) // q is mutable
+ 	q.Find(nil)
+ 	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+ }
+ 
+ // badPure is a pure function that INCORRECTLY reuses its parameter.
+ //
+ //gormreuse:pure
+ func badPure(db *gorm.DB) *gorm.DB {
+ 	db.Find(nil)         // want `pure function pollutes \*gorm\.DB argument by calling Find`
+ 	return db.Where("x") // want `pure function pollutes \*gorm\.DB argument by calling Where` `\*gorm\.DB instance reused after chain method`
+ }
+ 
+ // correctPure is a pure function that correctly uses Session.
+ //
+ //gormreuse:pure
+ func correctPure(db *gorm.DB) *gorm.DB {
+ 	return db.Session(&gorm.Session{}).Where("x") // OK - Session first
+ }
+ 
+ // pureWithMutable is a pure function that reuses a mutable value.
+ //
+ //gormreuse:pure
+ func pureWithMutable(db *gorm.DB) *gorm.DB {
+-	q := db.Where("base")        // want `pure function pollutes \*gorm\.DB argument by calling Where`
++	q := db.Where("base").Session(&gorm.Session{})        // want `pure function pollutes \*gorm\.DB argument by calling Where`
+ 	q.Find(nil)                  // want `pure function pollutes \*gorm\.DB argument by calling Find`
+ 	return q.Where("x")          // want `pure function pollutes \*gorm\.DB argument by calling Where` `\*gorm\.DB instance reused after chain method`
+ }
+ 
+ // =============================================================================
+ // Callback Parameter Reuse Detection
+ // =============================================================================
+ 
+ // scopesCallbackReuse demonstrates callback reuse in Scopes is detected.
+ func scopesCallbackReuse(db *gorm.DB) {
+ 	db = db.Session(&gorm.Session{}) // Make parameter immutable
+ 	db.Scopes(func(q *gorm.DB) *gorm.DB {
+ 		q.Find(nil)
+ 		return q.Where("x") // want `\*gorm\.DB instance reused after chain method`
+-	})
++	}).Session(&gorm.Session{})
+ }
+ 
+ // scopesCallbackCorrect demonstrates correct Scopes callback usage.
+ func scopesCallbackCorrect(db *gorm.DB) {
+ 	db = db.Session(&gorm.Session{}) // Make parameter immutable
+ 	db.Scopes(func(q *gorm.DB) *gorm.DB {
+ 		return q.Where("active = ?", true) // OK - single use
+ 	})
+ }
+ 
+ // preloadCallbackReuse demonstrates callback reuse in Preload is detected.
+ func preloadCallbackReuse(db *gorm.DB) {
+ 	db = db.Session(&gorm.Session{}) // Make parameter immutable
+ 	db.Preload("Orders", func(q *gorm.DB) *gorm.DB {
+ 		q.Find(nil)
+ 		return q.Where("x") // want `\*gorm\.DB instance reused after chain method`
+-	})
++	}).Session(&gorm.Session{})
+ }
+ 
+ // preloadCallbackCorrect demonstrates correct Preload callback usage.
+ func preloadCallbackCorrect(db *gorm.DB) {
+ 	db = db.Session(&gorm.Session{}) // Make parameter immutable
+ 	db.Preload("Orders", func(q *gorm.DB) *gorm.DB {
+ 		return q.Order("created_at DESC") // OK - single use
+ 	})
+ }
+ 
+ // =============================================================================
+ // Immutable Input Callbacks (Transaction/Connection/FindInBatches)
+ // =============================================================================
+ 
+ // transactionCallbackReuse demonstrates that Transaction callback can reuse its parameter.
+ // Transaction creates a fresh tx via Begin, so the callback receives immutable *gorm.DB.
+ func transactionCallbackReuse(db *gorm.DB) {
+ 	db = db.Session(&gorm.Session{}) // Make parameter immutable
+ 	_ = db.Transaction(func(tx *gorm.DB) error {
+ 		tx.Find(nil)
+ 		tx.Count(nil) // OK - tx is immutable (from Begin)
+ 		return nil
+ 	})
+ }
+ 
+ // connectionCallbackReuse demonstrates that Connection callback can reuse its parameter.
+ // Connection creates a fresh connection from the pool.
+ func connectionCallbackReuse(db *gorm.DB) {
+ 	db = db.Session(&gorm.Session{}) // Make parameter immutable
+ 	_ = db.Connection(func(tx *gorm.DB) error {
+ 		tx.Find(nil)
+ 		tx.Count(nil) // OK - tx is immutable (fresh connection)
+ 		return nil
+ 	})
+ }
+ 
+ // findInBatchesCallbackReuse demonstrates that FindInBatches callback can reuse its parameter.
+ // FindInBatches creates a fresh tx per batch.
+ func findInBatchesCallbackReuse(db *gorm.DB) {
+ 	db = db.Session(&gorm.Session{}) // Make parameter immutable
+ 	var results []struct{}
+ 	_ = db.FindInBatches(&results, 100, func(tx *gorm.DB, batch int) error {
+ 		tx.Find(nil)
+ 		tx.Count(nil) // OK - tx is immutable (fresh per batch)
+ 		return nil
+ 	})
+ }
+ 
+ // regularCallbackStillDetectsReuse verifies that non-immutable-input callbacks
+ // still detect reuse (ensuring we didn't break existing detection).
+ func regularCallbackStillDetectsReuse(db *gorm.DB) {
+ 	db = db.Session(&gorm.Session{}) // Make parameter immutable
+ 	// Scopes does NOT have immutable-input - should still detect reuse
+ 	db.Scopes(func(q *gorm.DB) *gorm.DB {
+ 		q.Find(nil)
+ 		return q.Where("x") // want `\*gorm\.DB instance reused after chain method`
+-	})
++	}).Session(&gorm.Session{})
+ }
+ 
+ // =============================================================================
+ // Scopes Session() Warning (GORM Bug)
+ // =============================================================================
+ 
+ // scopesWithSession demonstrates warning for Session() in Scopes callback.
+ func scopesWithSession(db *gorm.DB) {
+ 	db = db.Session(&gorm.Session{}) // Make parameter immutable
+ 	db.Scopes(func(q *gorm.DB) *gorm.DB {
+ 		return q.Session(&gorm.Session{}).Where("x") // want `Session\(\) in Scopes callback causes transaction leak`
+ 	})
+ }
+ 
+ // scopesWithContext demonstrates warning for WithContext() in Scopes callback.
+ func scopesWithContext(db *gorm.DB) {
+ 	db = db.Session(&gorm.Session{}) // Make parameter immutable
+ 	db.Scopes(func(q *gorm.DB) *gorm.DB {
+ 		return q.WithContext(nil).Where("x") // want `WithContext\(\) in Scopes callback causes transaction leak`
+ 	})
+ }
+ 
+ // scopesWithDebug demonstrates warning for Debug() in Scopes callback.
+ func scopesWithDebug(db *gorm.DB) {
+ 	db = db.Session(&gorm.Session{}) // Make parameter immutable
+ 	db.Scopes(func(q *gorm.DB) *gorm.DB {
+ 		return q.Debug().Where("x") // want `Debug\(\) in Scopes callback causes transaction leak`
+ 	})
+ }
+ 
+ // preloadWithSession demonstrates that Session() in Preload callback is OK.
+ // Only Scopes has the transaction leak bug.
+ func preloadWithSession(db *gorm.DB) {
+ 	db = db.Session(&gorm.Session{}) // Make parameter immutable
+ 	db.Preload("Orders", func(q *gorm.DB) *gorm.DB {
+ 		return q.Session(&gorm.Session{}).Order("created_at DESC") // OK - Preload doesn't have the bug
+ 	})
+ }
+ 
+ // scopesCorrectUsage demonstrates the correct pattern for Scopes callbacks.
+ func scopesCorrectUsage(db *gorm.DB) {
+ 	db = db.Session(&gorm.Session{}) // Make parameter immutable
+ 	db.Scopes(func(q *gorm.DB) *gorm.DB {
+ 		return q.Where("active = ?", true) // OK - single use without Session
+ 	})
+ }
