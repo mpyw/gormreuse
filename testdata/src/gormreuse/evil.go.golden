@@ -21,6 +21,10 @@ func conditionalUsageBothMayExecute(db *gorm.DB, flag1, flag2 bool) {
 		q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
 	}
 }
+// =============================================================================
+// SHOULD NOT REPORT - Mutually-exclusive branches are safe
+// =============================================================================
+
 
 // conditionalUsageEitherOr demonstrates either Find or Count executes.
 // Note: Linter does NOT report this as violation (mutually exclusive branches).
@@ -33,6 +37,11 @@ func conditionalUsageEitherOr(db *gorm.DB, flag bool) {
 		q.Count(nil) // OK: mutually exclusive with Find
 	}
 }
+
+// =============================================================================
+// SHOULD REPORT - Conditional usage (finisher methods in conditionals)
+// =============================================================================
+
 
 // conditionalUsageOneConditionalOneUnconditional demonstrates one conditional, one unconditional.
 func conditionalUsageOneConditionalOneUnconditional(db *gorm.DB, flag bool) {
@@ -196,6 +205,10 @@ func conditionalBothBranches(db *gorm.DB, flag bool) {
 	// After either branch, q is polluted - this IS a reuse
 	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
 }
+// =============================================================================
+// SHOULD NOT REPORT - Switch case branches are mutually exclusive
+// =============================================================================
+
 
 // switchReuse demonstrates that switch cases are mutually exclusive.
 // Each case is a first use in its exclusive path - no violations within cases.
@@ -212,6 +225,11 @@ func switchReuse(db *gorm.DB, mode int) {
 		q.Where("c = ?", 3).Find(nil) // First use in default
 	}
 }
+
+// =============================================================================
+// SHOULD REPORT - Conditional reuse
+// =============================================================================
+
 
 // =============================================================================
 // SHOULD REPORT - Loop reuse (assumes 2+ iterations)
@@ -356,8 +374,14 @@ func pureFunctionWithReturn(db *gorm.DB) {
 	q.Find(nil) // OK: q was not polluted
 }
 
+// =============================================================================
+// SHOULD REPORT - Pure factory function (directive misapplied + return is mutable)
+// =============================================================================
+
 // pureFactoryFunction is a pure function that returns a new *gorm.DB without
-// taking *gorm.DB as argument. This simulates a DB factory/wrapper.
+// taking *gorm.DB as argument. This simulates a DB factory/wrapper. The
+// directive itself is unused because the function takes no *gorm.DB
+// argument to protect.
 //
 //gormreuse:pure // want `unused gormreuse:pure directive`
 func pureFactoryFunction() *gorm.DB {
@@ -519,6 +543,10 @@ func quadrupleNestedClosure(db *gorm.DB) {
 
 	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
 }
+// =============================================================================
+// SHOULD NOT REPORT - Safe variant (Session at root)
+// =============================================================================
+
 
 // tripleNestedClosureSafe demonstrates 3-level nested closure with Session.
 func tripleNestedClosureSafe(db *gorm.DB) {
@@ -534,6 +562,11 @@ func tripleNestedClosureSafe(db *gorm.DB) {
 
 	q.Count(nil) // OK: q has Session
 }
+
+// =============================================================================
+// SHOULD REPORT - EVIL PATTERNS - Deep Nested Closures (3-4 levels)
+// =============================================================================
+
 
 // parentPollutesNestedClosureUses demonstrates pollution in parent, violation in nested closure.
 // This is the reverse of closurePollutesOutside - parent pollutes first, then nested closure reuses.
@@ -567,6 +600,10 @@ func parentPollutesTripleNestedUses(db *gorm.DB) {
 // =============================================================================
 // SHOULD REPORT - EVIL PATTERNS - Higher-Order Functions (go fn()())
 // =============================================================================
+// =============================================================================
+// SHOULD NOT REPORT - HIGHER-ORDER HELPERS
+// =============================================================================
+
 
 // makeWorker returns a function that uses *gorm.DB.
 func makeWorker(db *gorm.DB) func() {
@@ -574,6 +611,11 @@ func makeWorker(db *gorm.DB) func() {
 		db.Find(nil)
 	}
 }
+
+// =============================================================================
+// SHOULD REPORT - EVIL PATTERNS - Higher-Order Functions (go fn()())
+// =============================================================================
+
 
 // higherOrderGoroutine demonstrates go fn()() pattern.
 func higherOrderGoroutine(db *gorm.DB) {
@@ -583,6 +625,10 @@ func higherOrderGoroutine(db *gorm.DB) {
 
 	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
 }
+// =============================================================================
+// SHOULD NOT REPORT - HIGHER-ORDER HELPERS
+// =============================================================================
+
 
 // makeWorkerMaker returns a function that returns a function.
 func makeWorkerMaker(db *gorm.DB) func() func() {
@@ -592,6 +638,11 @@ func makeWorkerMaker(db *gorm.DB) func() func() {
 		}
 	}
 }
+
+// =============================================================================
+// SHOULD REPORT - EVIL PATTERNS - Higher-Order Functions (go fn()())
+// =============================================================================
+
 
 // doubleHigherOrderGoroutine demonstrates go fn()()() pattern.
 func doubleHigherOrderGoroutine(db *gorm.DB) {
@@ -788,6 +839,10 @@ func iifeReturnChain(db *gorm.DB) {
 type queryHolder struct {
 	db *gorm.DB
 }
+// =============================================================================
+// SHOULD NOT REPORT - Struct field storage without use
+// =============================================================================
+
 
 // structFieldPollution demonstrates struct field storage without actual usage.
 // Storing to struct field alone doesn't pollute - the struct is discarded without using the field.
@@ -797,6 +852,11 @@ func structFieldPollution(db *gorm.DB) {
 
 	q.Count(nil) // OK: struct was discarded, no actual reuse occurred
 }
+
+// =============================================================================
+// SHOULD REPORT - Struct Fields
+// =============================================================================
+
 
 type multiHolder struct {
 	q1 *gorm.DB
@@ -943,6 +1003,10 @@ func methodValueInLoop(db *gorm.DB, items []string) {
 		find(nil) // want `\*gorm\.DB instance reused after chain method`
 	}
 }
+// =============================================================================
+// SHOULD NOT REPORT - Bound method on non-finisher (single use)
+// =============================================================================
+
 
 // methodValueNonTerminal demonstrates non-terminal bound method call.
 // Tests line 408: non-terminal bound method early return.
@@ -953,6 +1017,11 @@ func methodValueNonTerminal(db *gorm.DB) {
 	// This should NOT report a violation since Where is a chain method
 	where("y = ?", 2).Find(nil)
 }
+
+// =============================================================================
+// SHOULD REPORT - EVIL PATTERNS - Method Values on chain methods
+// =============================================================================
+
 
 // methodValueConditional demonstrates method value with conditional.
 // [LIMITATION] Phi node tracing for bound methods not fully supported.
@@ -1010,11 +1079,20 @@ func closureModifiesCaptured(db *gorm.DB) {
 // =============================================================================
 // SHOULD REPORT - EVIL PATTERNS - Named Return Values
 // =============================================================================
+// =============================================================================
+// SHOULD NOT REPORT - HELPER FUNCTIONS
+// =============================================================================
+
 
 func helperWithNamedReturn(db *gorm.DB) (result *gorm.DB) {
 	result = db.Where("x = ?", 1)
 	return
 }
+
+// =============================================================================
+// SHOULD REPORT - EVIL PATTERNS - Named Return Values
+// =============================================================================
+
 
 // namedReturn demonstrates pollution with named return.
 func namedReturn(db *gorm.DB) {
@@ -1026,12 +1104,21 @@ func namedReturn(db *gorm.DB) {
 // =============================================================================
 // SHOULD REPORT - Variadic Functions
 // =============================================================================
+// =============================================================================
+// SHOULD NOT REPORT - HELPER FUNCTIONS
+// =============================================================================
+
 
 func processQueries(queries ...*gorm.DB) {
 	for _, q := range queries {
 		q.Find(nil)
 	}
 }
+
+// =============================================================================
+// SHOULD REPORT - EVIL PATTERNS - Named Return Values
+// =============================================================================
+
 
 // variadicPollution demonstrates pollution through variadic function.
 // Passing *gorm.DB to variadic function is assumed to pollute it.
@@ -2076,6 +2163,10 @@ func iifeMultipleReturns(db *gorm.DB, flag int) {
 // =============================================================================
 // SHOULD REPORT - EVIL PATTERNS - IIFE Returning Session (Safe)
 // =============================================================================
+// =============================================================================
+// SHOULD NOT REPORT - IIFE returning Session() (Safe)
+// =============================================================================
+
 
 // iifeReturnsSession demonstrates safe IIFE that returns Session result.
 // Direct Session call creates immutable clone.
@@ -2087,6 +2178,11 @@ func iifeReturnsSession(db *gorm.DB) {
 	result.Find(nil)
 	result.Count(nil) // Safe: Session creates immutable clone
 }
+
+// =============================================================================
+// SHOULD REPORT - EVIL PATTERNS - IIFE (Immediately Invoked Function Expression)
+// =============================================================================
+
 
 // =============================================================================
 // SHOULD REPORT - EVIL PATTERNS - Struct Field with IIFE
@@ -2291,6 +2387,10 @@ func iifeStoredResult(db *gorm.DB) {
 // =============================================================================
 // DB INIT METHODS - Begin/Transaction (Immutable Source)
 // =============================================================================
+// =============================================================================
+// SHOULD NOT REPORT - Begin() result is immutable
+// =============================================================================
+
 
 // beginReturnsImmutable demonstrates that Begin() returns an immutable source.
 // Using tx (from Begin()) multiple times is safe - Begin() creates a new transaction.
@@ -2299,6 +2399,11 @@ func beginReturnsImmutable(db *gorm.DB) {
 	tx.Find(nil)
 	tx.Count(nil) // Safe - tx is from Begin(), treated as immutable source
 }
+
+// =============================================================================
+// SHOULD REPORT - EVIL PATTERNS - Reassignment Edge Cases
+// =============================================================================
+
 
 // beginChainedBecomesMutable demonstrates chaining after Begin() creates mutable.
 func beginChainedBecomesMutable(db *gorm.DB) {
@@ -2322,6 +2427,10 @@ func reassignInLoop(db *gorm.DB, items []string) {
 		q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
 	}
 }
+// =============================================================================
+// SHOULD NOT REPORT - Reassignment per iteration is safe
+// =============================================================================
+
 
 // reassignInLoopSafe demonstrates safe reassignment pattern in loop.
 // Reassignment before each use prevents pollution carry-over.
@@ -2335,6 +2444,11 @@ func reassignInLoopSafe(db *gorm.DB, items []string) {
 	}
 }
 
+// =============================================================================
+// SHOULD REPORT - EVIL PATTERNS - Reassignment Edge Cases
+// =============================================================================
+
+
 // reassignConditionalPartial demonstrates partial reassignment in conditional.
 // Only one branch reassigns - other branch uses polluted value.
 func reassignConditionalPartial(db *gorm.DB, flag bool) {
@@ -2347,6 +2461,10 @@ func reassignConditionalPartial(db *gorm.DB, flag bool) {
 
 	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
 }
+// =============================================================================
+// SHOULD NOT REPORT - Reassignment in both branches
+// =============================================================================
+
 
 // reassignConditionalBoth demonstrates reassignment in both branches.
 // Both branches reassign - should be safe.
@@ -2363,6 +2481,11 @@ func reassignConditionalBoth(db *gorm.DB, flag bool) {
 
 	q.Count(nil) // Safe - q reassigned in both branches
 }
+
+// =============================================================================
+// SHOULD REPORT - EVIL PATTERNS - Reassignment Edge Cases
+// =============================================================================
+
 
 // reassignAfterPollutionSameValue demonstrates reassignment with same polluted source.
 // Reassigning from same polluted chain is still unsafe.
@@ -2413,10 +2536,23 @@ func reassignFromHelper(db *gorm.DB) {
 	q.Find(nil)             // Pollutes new q
 	q.Count(nil)            // want `\*gorm\.DB instance reused after chain method`
 }
+// =============================================================================
+// SHOULD NOT REPORT - HELPER FUNCTIONS
+// =============================================================================
+
 
 func helperReturnsDB(db *gorm.DB) *gorm.DB {
 	return db.Where("from helper", 1)
 }
+
+// =============================================================================
+// SHOULD REPORT - EVIL PATTERNS - Reassignment Edge Cases
+// =============================================================================
+
+// =============================================================================
+// SHOULD NOT REPORT - Reassignment after nil clears state
+// =============================================================================
+
 
 // reassignNilThenUse demonstrates reassigning to nil then using.
 func reassignNilThenUse(db *gorm.DB) {
@@ -2430,6 +2566,11 @@ func reassignNilThenUse(db *gorm.DB) {
 	q.Find(nil) // Safe - new instance
 }
 
+// =============================================================================
+// SHOULD REPORT - EVIL PATTERNS - Reassignment Edge Cases
+// =============================================================================
+
+
 // reassignChainExtension demonstrates extending a chain after reassignment.
 func reassignChainExtension(db *gorm.DB) {
 	db = db.Session(&gorm.Session{}) // Make parameter immutable for testing reassignment patterns
@@ -2441,6 +2582,10 @@ func reassignChainExtension(db *gorm.DB) {
 	q.Find(nil)             // Pollutes new q
 	q.Count(nil)            // want `\*gorm\.DB instance reused after chain method`
 }
+// =============================================================================
+// SHOULD NOT REPORT - Final reassignment yields fresh root
+// =============================================================================
+
 
 // reassignMultipleTimes demonstrates multiple reassignments.
 func reassignMultipleTimes(db *gorm.DB) {
@@ -2457,6 +2602,11 @@ func reassignMultipleTimes(db *gorm.DB) {
 	q = db.Where("d = ?", 4) // Fresh assignment
 	q.Count(nil)             // Safe - new instance
 }
+
+// =============================================================================
+// SHOULD REPORT - EVIL PATTERNS - Reassignment Edge Cases
+// =============================================================================
+
 
 // reassignInSwitch demonstrates reassignment in switch statement.
 // Only some branches reassign - default branch keeps polluted value.
@@ -2476,6 +2626,10 @@ func reassignInSwitch(db *gorm.DB, mode int) {
 
 	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
 }
+// =============================================================================
+// SHOULD NOT REPORT - Reassignment in every switch case
+// =============================================================================
+
 
 // reassignInSwitchAll demonstrates reassignment in all switch branches.
 func reassignInSwitchAll(db *gorm.DB, mode int) {
@@ -2494,6 +2648,11 @@ func reassignInSwitchAll(db *gorm.DB, mode int) {
 
 	q.Count(nil) // Safe - q reassigned in all branches
 }
+
+// =============================================================================
+// SHOULD REPORT - EVIL PATTERNS - Reassignment Edge Cases
+// =============================================================================
+
 
 // reassignFromMethodValue demonstrates reassignment via method value result.
 func reassignFromMethodValue(db *gorm.DB) {
@@ -2566,13 +2725,15 @@ func pointerPhiCase(db *gorm.DB, flag bool) {
 }
 
 // =============================================================================
-// SHOULD NOT REPORT - Pure method (gormreuse:pure directive on method)
+// SHOULD REPORT - Pure method (directive misapplied + return is mutable)
 // =============================================================================
 
 // OrmWrapper is a wrapper type for testing pure methods.
 type OrmWrapper struct{}
 
-// GetDB is a pure method that returns a new *gorm.DB.
+// GetDB is a pure-marked method on a wrapper type that returns a new
+// *gorm.DB. The directive is unused because the method has no *gorm.DB
+// argument to protect.
 //
 //gormreuse:pure // want `unused gormreuse:pure directive`
 func (o *OrmWrapper) GetDB() *gorm.DB {
@@ -2802,6 +2963,10 @@ func chainingWithoutReassignmentViolation(db *gorm.DB) {
 	q = q.Where("b")     // want `\*gorm\.DB instance reused after chain method`
 	q.Find(nil)      // want `\*gorm\.DB instance reused after chain method`
 }
+// =============================================================================
+// SHOULD NOT REPORT - Per-step reassignment fix
+// =============================================================================
+
 
 // chainingWithReassignmentSafe demonstrates the solution: reassign each step.
 // Each reassignment creates a new SSA value, so only the final Find is a branch.
@@ -2812,11 +2977,25 @@ func chainingWithReassignmentSafe(db *gorm.DB) {
 	q.Find(nil) // OK - first branch from final q
 }
 
+// =============================================================================
+// SHOULD REPORT - Where-only patterns (no finisher at violation point)
+// =============================================================================
+
+// =============================================================================
+// SHOULD NOT REPORT - Single chained expression
+// =============================================================================
+
+
 // singleChainedExpressionSafe demonstrates the other solution: single expression.
 // The entire chain is one expression, so it's a single branch.
 func singleChainedExpressionSafe(db *gorm.DB) {
 	db.Where("base").Where("a").Where("b").Find(nil) // OK - single chain
 }
+
+// =============================================================================
+// SHOULD REPORT - Where-only patterns (no finisher at violation point)
+// =============================================================================
+
 
 // =============================================================================
 // SHOULD REPORT - EVIL PATTERNS - Complex Phi Patterns (Mixed Immutability)
@@ -2884,6 +3063,10 @@ func phiSwitchMixedSession(db *gorm.DB, mode int) {
 	q.Find(nil)
 	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
 }
+// =============================================================================
+// SHOULD NOT REPORT - Phi where every edge is immutable
+// =============================================================================
+
 
 // phiSwitchAllImmutable demonstrates switch where all cases are immutable.
 // No Session should be added (already safe).
@@ -2903,15 +3086,29 @@ func phiSwitchAllImmutable(db *gorm.DB, mode int) {
 }
 
 // =============================================================================
+// SHOULD REPORT - EVIL PATTERNS - Complex Phi Patterns (Mixed Immutability)
+// =============================================================================
+
+
+// =============================================================================
 // FIX GENERATOR EDGE CASE - Callback wrapper functions
 // These test cases verify that Session is NOT added to wrapper function calls
 // =============================================================================
+// =============================================================================
+// SHOULD NOT REPORT - HELPER FUNCTIONS
+// =============================================================================
+
 
 // wrapperFunc is a helper that takes a callback (like t.Run or Transaction).
 func wrapperFunc(fn func()) bool {
 	fn()
 	return true
 }
+
+// =============================================================================
+// SHOULD REPORT - EVIL PATTERNS - FIX GENERATOR EDGE CASE - Callback wrapper functions
+// =============================================================================
+
 
 // callbackViolationInWrapper demonstrates violation inside callback.
 // Session should be added to `db.Where("x")` call, NOT to wrapperFunc call.

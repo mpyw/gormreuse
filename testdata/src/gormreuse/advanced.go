@@ -167,11 +167,16 @@ func sessionBeforeFinisher(db *gorm.DB) {
 // =============================================================================
 
 // reassignNewInstance demonstrates that reassigning a variable is safe.
+// The parameter is frozen with Session() so the two top-level chains
+// from db are themselves valid; the point of the fixture is the q
+// reassignment yielding a fresh root, not the parameter reuse.
 func reassignNewInstance(db *gorm.DB) {
+	db = db.Session(&gorm.Session{})
+
 	q := db.Model(&User{}).Where("active = ?", true)
 	q.Count(new(int64))
 
-	q = db.Where("name = ?", "test") // want `\*gorm\.DB instance reused after chain method`
+	q = db.Where("name = ?", "test") // OK: reassignment creates a new root
 	q.Find(&[]User{})
 }
 
@@ -758,7 +763,7 @@ func buildQuery(db *gorm.DB, filter string) *gorm.DB {
 // - Mutable q from chain method
 // - Consecutive if blocks calling user-defined helpers with q as argument
 // - Each helper receives q, pollutes it, and result is reassigned to q
-// SHOULD NOT REPORT: Each reassignment creates a new mutable root
+// Note (SHOULD NOT REPORT): Each reassignment creates a new mutable root
 func consecutiveHelperCalls(db *gorm.DB, a, b bool) {
 	q := db.Where("base")
 
@@ -810,7 +815,7 @@ func consecutiveHelperCallsMultiple(db *gorm.DB, a, b, c bool) {
 }
 
 // consecutiveHelperCallsNoReassign tests calling helper without reassigning result.
-// SHOULD REPORT: q is passed to buildQuery without reassignment, then reused
+// Note (SHOULD REPORT): q is passed to buildQuery without reassignment, then reused
 func consecutiveHelperCallsNoReassign(db *gorm.DB, a, b bool) {
 	q := db.Where("base")
 
@@ -826,7 +831,7 @@ func consecutiveHelperCallsNoReassign(db *gorm.DB, a, b bool) {
 }
 
 // consecutiveHelperCallsWithFind tests when Find breaks the chain.
-// SHOULD REPORT after Find: once Find is called, q is consumed
+// Note (SHOULD REPORT after Find): once Find is called, q is consumed
 func consecutiveHelperCallsWithFind(db *gorm.DB, a, b bool) {
 	q := db.Where("base")
 
@@ -892,7 +897,7 @@ func pureAndImmutableReturnHelper(db *gorm.DB) *gorm.DB {
 }
 
 // testNoPureHelperReassign tests helper WITHOUT directive, result reassigned.
-// SHOULD NOT REPORT: assignment creates new mutable root
+// Note (SHOULD NOT REPORT): assignment creates new mutable root
 func testNoPureHelperReassign(db *gorm.DB, a, b bool) {
 	q := db.Where("base")
 
@@ -908,7 +913,7 @@ func testNoPureHelperReassign(db *gorm.DB, a, b bool) {
 }
 
 // testNoPureHelperNoReassign tests helper WITHOUT directive, result NOT reassigned.
-// SHOULD REPORT: q is polluted by first call, reused in second
+// Note (SHOULD REPORT): q is polluted by first call, reused in second
 func testNoPureHelperNoReassign(db *gorm.DB, a, b bool) {
 	q := db.Where("base")
 
@@ -924,7 +929,7 @@ func testNoPureHelperNoReassign(db *gorm.DB, a, b bool) {
 }
 
 // testPureOnlyHelperReassign tests helper with pure directive, result reassigned.
-// SHOULD NOT REPORT: pure function doesn't pollute, assignment creates new root
+// Note (SHOULD NOT REPORT): pure function doesn't pollute, assignment creates new root
 func testPureOnlyHelperReassign(db *gorm.DB, a, b bool) {
 	q := db.Where("base")
 
@@ -940,7 +945,7 @@ func testPureOnlyHelperReassign(db *gorm.DB, a, b bool) {
 }
 
 // testPureOnlyHelperNoReassign tests helper with pure directive, result NOT reassigned.
-// SHOULD NOT REPORT: pure function doesn't pollute
+// Note (SHOULD NOT REPORT): pure function doesn't pollute
 func testPureOnlyHelperNoReassign(db *gorm.DB, a, b bool) {
 	q := db.Where("base")
 
@@ -990,7 +995,7 @@ func testImmutableReturnOnlyHelperReassignGuaranteed(db *gorm.DB, a bool) {
 }
 
 // testImmutableReturnOnlyHelperNoReassign tests helper with immutable-return directive.
-// SHOULD REPORT: without reassignment, function may pollute the argument
+// Note (SHOULD REPORT): without reassignment, function may pollute the argument
 func testImmutableReturnOnlyHelperNoReassign(db *gorm.DB, a, b bool) {
 	q := db.Where("base")
 
@@ -1039,7 +1044,7 @@ func testPureAndImmutableReturnHelperReassignGuaranteed(db *gorm.DB, a bool) {
 }
 
 // testPureAndImmutableReturnHelperNoReassign tests helper with both directives.
-// SHOULD NOT REPORT: pure function doesn't pollute even without reassignment
+// Note (SHOULD NOT REPORT): pure function doesn't pollute even without reassignment
 func testPureAndImmutableReturnHelperNoReassign(db *gorm.DB, a, b bool) {
 	q := db.Where("base")
 
