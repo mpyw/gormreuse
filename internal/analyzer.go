@@ -70,6 +70,7 @@ func RunSSA(
 	ignoreMaps map[string]directive.IgnoreMap,
 	funcIgnores map[string]map[token.Pos]directive.FunctionIgnoreEntry,
 	pureFuncs, immutableReturnFuncs *directive.DirectiveFuncSet,
+	immutableInputs *directive.ImmutableInputSet,
 	skipFiles map[string]bool,
 ) {
 	// Share a single reported map across all functions to deduplicate
@@ -119,13 +120,22 @@ func RunSSA(
 			}
 		}
 
+		// Validate immutable-input declarations: function bodies must
+		// actually pass an immutable *gorm.DB to the declared callback
+		// (Issue #56 cases 2.3 / 2.4).
+		if immutableInputs != nil {
+			for _, v := range purity.ValidateImmutableInputs(fn, immutableInputs, pureFuncs, immutableReturnFuncs) {
+				pass.Reportf(v.Pos, "%s", v.Message)
+			}
+		}
+
 		// Warn on Session/WithContext/Debug calls inside Scopes callbacks
 		// GORM has a bug where Session() in Scopes causes transaction leaks
 		for _, warning := range validateScopesCallback(fn) {
 			pass.Reportf(warning.Pos, "%s", warning.Message)
 		}
 
-		chk := newChecker(pass, ignoreMap, pureFuncs, immutableReturnFuncs, globalReported, globalSuggestedEdits, fixGen)
+		chk := newChecker(pass, ignoreMap, pureFuncs, immutableReturnFuncs, immutableInputs, globalReported, globalSuggestedEdits, fixGen)
 		chk.checkFunction(fn)
 	}
 
@@ -162,6 +172,13 @@ func RunSSA(
 			pass.Reportf(pos, "unused gormreuse:immutable-return directive")
 		}
 	}
+
+	// Report unused immutable-input directives (U1–U3)
+	if immutableInputs != nil {
+		for _, u := range immutableInputs.GetUnused() {
+			pass.Reportf(u.Pos, "%s", u.Reason)
+		}
+	}
 }
 
 // =============================================================================
@@ -175,13 +192,14 @@ func RunSSA(
 //   - Line-level ignore directives suppress violations
 //   - Violations are reported through the analysis.Pass
 type checker struct {
-	pass                 *analysis.Pass              // For reporting diagnostics
-	ignoreMap            directive.IgnoreMap         // Line-level ignore directives
-	pureFuncs            *directive.DirectiveFuncSet // Pure functions for analysis
-	immutableReturnFuncs *directive.DirectiveFuncSet // Immutable-return functions
-	reported             map[token.Pos]bool          // Deduplication of reports
-	suggestedEdits       map[editKey]bool            // Global deduplication of suggested fixes
-	fixGen               *fix.Generator              // Cached fix generator for all violations
+	pass                 *analysis.Pass               // For reporting diagnostics
+	ignoreMap            directive.IgnoreMap          // Line-level ignore directives
+	pureFuncs            *directive.DirectiveFuncSet  // Pure functions for analysis
+	immutableReturnFuncs *directive.DirectiveFuncSet  // Immutable-return functions
+	immutableInputs      *directive.ImmutableInputSet // User-defined immutable-input(name)
+	reported             map[token.Pos]bool           // Deduplication of reports
+	suggestedEdits       map[editKey]bool             // Global deduplication of suggested fixes
+	fixGen               *fix.Generator               // Cached fix generator for all violations
 }
 
 // editKey uniquely identifies an edit to avoid duplicates across violations.
@@ -196,12 +214,13 @@ type editKey struct {
 // across parent functions and their closures.
 // The suggestedEdits map is shared to avoid duplicate fix edits.
 // The fixGen is shared to avoid recreating the generator for each violation.
-func newChecker(pass *analysis.Pass, ignoreMap directive.IgnoreMap, pureFuncs, immutableReturnFuncs *directive.DirectiveFuncSet, reported map[token.Pos]bool, suggestedEdits map[editKey]bool, fixGen *fix.Generator) *checker {
+func newChecker(pass *analysis.Pass, ignoreMap directive.IgnoreMap, pureFuncs, immutableReturnFuncs *directive.DirectiveFuncSet, immutableInputs *directive.ImmutableInputSet, reported map[token.Pos]bool, suggestedEdits map[editKey]bool, fixGen *fix.Generator) *checker {
 	return &checker{
 		pass:                 pass,
 		ignoreMap:            ignoreMap,
 		pureFuncs:            pureFuncs,
 		immutableReturnFuncs: immutableReturnFuncs,
+		immutableInputs:      immutableInputs,
 		reported:             reported,
 		suggestedEdits:       suggestedEdits,
 		fixGen:               fixGen,
@@ -210,7 +229,7 @@ func newChecker(pass *analysis.Pass, ignoreMap directive.IgnoreMap, pureFuncs, i
 
 // checkFunction runs SSA analysis on a single function and reports violations.
 func (c *checker) checkFunction(fn *ssa.Function) {
-	analyzer := ssautil.NewAnalyzer(fn, c.pureFuncs, c.immutableReturnFuncs)
+	analyzer := ssautil.NewAnalyzer(fn, c.pureFuncs, c.immutableReturnFuncs, c.immutableInputs)
 	violations := analyzer.Analyze()
 
 	// Deduplicate violations by root to avoid generating duplicate fixes.

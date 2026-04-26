@@ -92,15 +92,17 @@ import (
 // Note: User-defined pure functions (//gormreuse:pure) are NOT immutable sources.
 // They may return mutable values - only builtin pure methods guarantee immutable returns.
 type RootTracer struct {
-	pureFuncs            *directive.DirectiveFuncSet // User-defined pure functions
-	immutableReturnFuncs *directive.DirectiveFuncSet // Functions returning immutable *gorm.DB
+	pureFuncs            *directive.DirectiveFuncSet  // User-defined pure functions
+	immutableReturnFuncs *directive.DirectiveFuncSet  // Functions returning immutable *gorm.DB
+	immutableInputs      *directive.ImmutableInputSet // User-defined immutable-input(name) declarations
 }
 
 // New creates a new RootTracer.
-func New(pureFuncs, immutableReturnFuncs *directive.DirectiveFuncSet) *RootTracer {
+func New(pureFuncs, immutableReturnFuncs *directive.DirectiveFuncSet, immutableInputs *directive.ImmutableInputSet) *RootTracer {
 	return &RootTracer{
 		pureFuncs:            pureFuncs,
 		immutableReturnFuncs: immutableReturnFuncs,
+		immutableInputs:      immutableInputs,
 	}
 }
 
@@ -1372,19 +1374,20 @@ func (t *RootTracer) isImmutableSource(v ssa.Value) bool {
 // =============================================================================
 
 // isImmutableInputParameter checks if a parameter is from a callback passed to
-// an immutable-input method (Transaction, Connection, FindInBatches, or user-defined).
+// an immutable-input method (builtin: Transaction/Connection/FindInBatches,
+// or user-defined via //gormreuse:immutable-input(name)).
 //
 // These callbacks receive freshly created *gorm.DB, so their parameter can be
 // safely reused without pollution concerns.
 //
-// Detection process:
-//  1. Check if parameter is *gorm.DB type
-//  2. Get the enclosing function (must be a closure)
-//  3. Find the MakeClosure instruction in the parent function
-//  4. Find where the closure is passed as an argument to a Call
-//  5. Check if the call is to an immutable-input method
+// Detection:
+//  1. Parameter must be *gorm.DB.
+//  2. Enclosing function must be a closure (has a parent SSA function).
+//  3. Closure must reach the parent at *some* call site as an argument.
+//  4. That call site's callee must declare immutable-input on the
+//     receiving parameter index, either as a builtin or via the
+//     ImmutableInputSet (user-defined directive).
 func (t *RootTracer) isImmutableInputParameter(param *ssa.Parameter) bool {
-	// Must be *gorm.DB type
 	if !typeutil.IsGormDB(param.Type()) {
 		return false
 	}
@@ -1393,37 +1396,31 @@ func (t *RootTracer) isImmutableInputParameter(param *ssa.Parameter) bool {
 	if fn == nil {
 		return false
 	}
-
-	// Must be a closure (has parent function)
 	parent := fn.Parent()
 	if parent == nil {
 		return false
 	}
 
-	// Find where the closure is used in the parent function.
-	// Closures can be referenced in two ways:
-	// 1. MakeClosure instruction (when closure captures free variables)
-	// 2. Direct function reference (when closure has no free variables)
 	for _, block := range parent.Blocks {
 		for _, instr := range block.Instrs {
-			// Case 1: MakeClosure with free variables
+			// MakeClosure path: closure captures free vars; we then look
+			// at the closure's Referrers() to find a Call that takes it.
 			if mc, ok := instr.(*ssa.MakeClosure); ok {
 				closureFn, ok := mc.Fn.(*ssa.Function)
 				if !ok || closureFn != fn {
 					continue
 				}
-				if t.isClosurePassedToImmutableInputMethod(mc) {
+				if t.closureFlowsToImmutableInputCallback(mc) {
 					return true
 				}
 			}
 
-			// Case 2: Direct function reference (no free variables)
-			// Check if this is a call that uses our closure function directly
+			// Direct function path: function literal without captures
+			// is passed straight as a Call argument.
 			if call, ok := instr.(*ssa.Call); ok {
-				for _, arg := range call.Call.Args {
-					// Check if the argument is our closure function directly
+				for argIdx, arg := range call.Call.Args {
 					if funcVal, ok := arg.(*ssa.Function); ok && funcVal == fn {
-						if t.isCallToImmutableInputMethod(call) {
+						if t.callDeclaresImmutableInputAt(call, argIdx) {
 							return true
 						}
 					}
@@ -1431,59 +1428,77 @@ func (t *RootTracer) isImmutableInputParameter(param *ssa.Parameter) bool {
 			}
 		}
 	}
-
 	return false
 }
 
-// isClosurePassedToImmutableInputMethod checks if a closure is passed as an argument
-// to a method with immutable-input constraint.
-func (t *RootTracer) isClosurePassedToImmutableInputMethod(mc *ssa.MakeClosure) bool {
+// closureFlowsToImmutableInputCallback walks the MakeClosure's referrers
+// and reports whether any of them is a Call that registers the closure as
+// an immutable-input callback at the matching argument position.
+func (t *RootTracer) closureFlowsToImmutableInputCallback(mc *ssa.MakeClosure) bool {
 	refs := mc.Referrers()
 	if refs == nil {
 		return false
 	}
-
 	for _, ref := range *refs {
 		call, ok := ref.(*ssa.Call)
 		if !ok {
 			continue
 		}
-
-		// Check if the closure is passed as an argument (not the method receiver)
-		for _, arg := range call.Call.Args {
-			if arg != mc {
-				continue
-			}
-
-			// Found the call where our closure is an argument
-			// Check if it's an immutable-input method
-			if t.isCallToImmutableInputMethod(call) {
+		for argIdx, arg := range call.Call.Args {
+			if arg == mc && t.callDeclaresImmutableInputAt(call, argIdx) {
 				return true
 			}
 		}
 	}
-
 	return false
 }
 
-// isCallToImmutableInputMethod checks if a call is to an immutable-input method.
-// This includes both builtin methods (Transaction, Connection, FindInBatches)
-// and user-defined methods marked with //gormreuse:immutable-input(name).
-func (t *RootTracer) isCallToImmutableInputMethod(call *ssa.Call) bool {
-	// Handle method calls (db.Transaction)
+// callDeclaresImmutableInputAt reports whether call's callee declares an
+// immutable-input constraint on argument argIdx, considering both builtin
+// constraints (typeutil.IsImmutableInputBuiltin) and user-defined ones
+// (directive.ImmutableInputSet).
+//
+// argIdx is the index in call.Call.Args. For static method calls this
+// includes the receiver at position 0, so a user-defined free function
+// declaring immutable-input on its 0th parameter and a method declaring
+// it on its 0th-from-receiver are both handled correctly because we
+// resolve via the SSA function's parameter list, not the source line.
+func (t *RootTracer) callDeclaresImmutableInputAt(call *ssa.Call, argIdx int) bool {
 	if call.Call.IsInvoke() {
+		// Interface dispatch — only builtin names are recognised.
 		return typeutil.IsImmutableInputBuiltin(call.Call.Method.Name()) != ""
 	}
-
-	// Handle static calls
 	callee := call.Call.StaticCallee()
 	if callee == nil {
 		return false
 	}
 
-	// Only builtin methods supported today; user-defined
-	// //gormreuse:immutable-input(name) directives are tracked as a follow-up.
-	return typeutil.IsImmutableInputBuiltin(callee.Name()) != ""
+	// Builtin constraint: identify by method name on a *gorm.DB receiver.
+	if name := typeutil.IsImmutableInputBuiltin(callee.Name()); name != "" {
+		return true
+	}
+
+	// User-defined constraint: look up the callee in the ImmutableInputSet
+	// and confirm the matching parameter position.
+	if t.immutableInputs == nil {
+		return false
+	}
+	wantParam := argIdx
+	if callee.Signature != nil && callee.Signature.Recv() != nil && len(call.Call.Args) > 0 {
+		// SSA represents method calls as static calls whose Args[0] is
+		// the receiver. The directive's ParamIdx counts from the first
+		// non-receiver parameter, so subtract one for methods.
+		wantParam = argIdx - 1
+	}
+	if wantParam < 0 {
+		return false
+	}
+	for _, cb := range t.immutableInputs.AllCallbacks(callee) {
+		if cb.ParamIdx == wantParam {
+			return true
+		}
+	}
+	return false
 }
 
 // =============================================================================

@@ -76,6 +76,7 @@ func run(pass *analysis.Pass) (any, error) {
 	funcIgnores := make(map[string]map[token.Pos]directive.FunctionIgnoreEntry)
 	pureFuncs := directive.NewPureFuncSet(pass.Fset, pass.TypesInfo)
 	immutableReturnFuncs := directive.NewImmutableReturnFuncSet(pass.Fset, pass.TypesInfo)
+	immutableInputs := directive.NewImmutableInputSet(pass.Fset, pass.TypesInfo)
 
 	pkgPath := pass.Pkg.Path()
 	for _, file := range pass.Files {
@@ -89,6 +90,7 @@ func run(pass *analysis.Pass) (any, error) {
 		// Add original file to sets (for position-correct directive detection)
 		pureFuncs.AddFile(file)
 		immutableReturnFuncs.AddFile(file)
+		immutableInputs.AddFile(file, pkgPath)
 
 		// Build pure function set for this file
 		for key := range directive.BuildPureFunctionSet(file, pkgPath) {
@@ -101,7 +103,7 @@ func run(pass *analysis.Pass) (any, error) {
 	}
 
 	// Run SSA-based analysis
-	internal.RunSSA(pass, ssaInfo, ignoreMaps, funcIgnores, pureFuncs, immutableReturnFuncs, skipFiles)
+	internal.RunSSA(pass, ssaInfo, ignoreMaps, funcIgnores, pureFuncs, immutableReturnFuncs, immutableInputs, skipFiles)
 
 	return nil, nil
 }

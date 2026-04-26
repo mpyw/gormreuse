@@ -20,7 +20,8 @@ func TestNewAnalyzer(t *testing.T) {
 	pureFuncs := directive.NewPureFuncSet(nil, nil)
 	pureFuncs.Add(directive.FuncKey{PkgPath: "test", FuncName: "Pure"})
 	immutableReturnFuncs := directive.NewImmutableReturnFuncSet(nil, nil)
-	analyzer := ssautil.NewAnalyzer(nil, pureFuncs, immutableReturnFuncs)
+	immutableInputs := directive.NewImmutableInputSet(nil, nil)
+	analyzer := ssautil.NewAnalyzer(nil, pureFuncs, immutableReturnFuncs, immutableInputs)
 
 	if analyzer == nil {
 		t.Error("Expected analyzer to be initialized")
@@ -33,10 +34,11 @@ func TestNewChecker(t *testing.T) {
 	ignoreMap := make(directive.IgnoreMap)
 	pureFuncs := directive.NewPureFuncSet(nil, nil)
 	immutableReturnFuncs := directive.NewImmutableReturnFuncSet(nil, nil)
+	immutableInputs := directive.NewImmutableInputSet(nil, nil)
 	reported := make(map[token.Pos]bool)
 	suggestedEdits := make(map[editKey]bool)
 
-	chk := newChecker(nil, ignoreMap, pureFuncs, immutableReturnFuncs, reported, suggestedEdits, nil)
+	chk := newChecker(nil, ignoreMap, pureFuncs, immutableReturnFuncs, immutableInputs, reported, suggestedEdits, nil)
 
 	if chk == nil {
 		t.Error("Expected checker to be initialized")
@@ -46,7 +48,7 @@ func TestNewChecker(t *testing.T) {
 func TestAnalyzer_Analyze_NilFunction(t *testing.T) {
 	t.Parallel()
 
-	analyzer := ssautil.NewAnalyzer(nil, nil, nil)
+	analyzer := ssautil.NewAnalyzer(nil, nil, nil, nil)
 
 	// Should not panic with nil function
 	violations := analyzer.Analyze()
@@ -59,7 +61,7 @@ func TestAnalyzer_Analyze_EmptyFunction(t *testing.T) {
 	t.Parallel()
 
 	fn := &ssa.Function{}
-	analyzer := ssautil.NewAnalyzer(fn, nil, nil)
+	analyzer := ssautil.NewAnalyzer(fn, nil, nil, nil)
 
 	violations := analyzer.Analyze()
 	if len(violations) != 0 {

@@ -73,10 +73,11 @@ type Analyzer struct {
 //   - fn: The SSA function to analyze (can be nil, will return no violations)
 //   - pureFuncs: Set of functions marked with //gormreuse:pure directive
 //   - immutableReturnFuncs: Set of functions marked with //gormreuse:immutable-return directive
-func NewAnalyzer(fn *ssa.Function, pureFuncs, immutableReturnFuncs *directive.DirectiveFuncSet) *Analyzer {
+//   - immutableInputs: Set of functions with //gormreuse:immutable-input(name) directives
+func NewAnalyzer(fn *ssa.Function, pureFuncs, immutableReturnFuncs *directive.DirectiveFuncSet, immutableInputs *directive.ImmutableInputSet) *Analyzer {
 	return &Analyzer{
 		fn:          fn,
-		rootTracer:  tracer.New(pureFuncs, immutableReturnFuncs),
+		rootTracer:  tracer.New(pureFuncs, immutableReturnFuncs, immutableInputs),
 		cfgAnalyzer: cfg.New(),
 	}
 }

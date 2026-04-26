@@ -56,6 +56,7 @@ func TestGenerateDiffFiles(t *testing.T) {
 		"closure_loop.go",
 		"closure_directive.go",
 		"param_mutable.go",
+		"immutable_input.go",
 	}
 
 	for _, filename := range testFiles {
@@ -202,6 +203,7 @@ func TestDiffFilesUpToDate(t *testing.T) {
 		"closure_loop.go",
 		"closure_directive.go",
 		"param_mutable.go",
+		"immutable_input.go",
 	}
 
 	for _, filename := range testFiles {
