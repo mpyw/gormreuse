@@ -677,7 +677,11 @@ func (s *DirectiveFuncSet) isDirectValueInStatementAfterLine(file *ast.File, fun
 	}
 
 	if enclosingStmt == nil {
-		return false
+		// No enclosing statement: this is a package-level `var f = func(){}`
+		// declaration (a GenDecl/ValueSpec is a Decl, not a Stmt). Local-var
+		// closures reach here via a DeclStmt and are handled above; package-level
+		// ones need the ValueSpec handled directly (issue #72 gap2).
+		return s.isDirectValueInValueSpecAfterLine(path, funcLit, directiveLine)
 	}
 
 	stmtLine := s.fset.Position(enclosingStmt.Pos()).Line
@@ -701,6 +705,51 @@ func (s *DirectiveFuncSet) isDirectValueInStatementAfterLine(file *ast.File, fun
 
 	// Check if FuncLit is a direct value (not inside CompositeLit)
 	return s.isDirectRHSValue(enclosingStmt, funcLit)
+}
+
+// isDirectValueInValueSpecAfterLine handles the package-level counterpart of
+// isDirectValueInStatementAfterLine: a closure that is a direct RHS value of a
+// package-level `var` declaration whose directive sits on the preceding line.
+//
+//	//gormreuse:pure
+//	var pkgFn = func(q *gorm.DB) { ... }   ← pkgFn gets the directive
+//
+// As with the statement form, the closure must be a DIRECT value in the spec
+// (not nested inside a composite literal), and either the spec or the closure
+// must begin on directiveLine+1. All direct closures in a multi-value spec
+// (`var a, b = func(){}, func(){}`) get the directive.
+func (s *DirectiveFuncSet) isDirectValueInValueSpecAfterLine(path []ast.Node, funcLit *ast.FuncLit, directiveLine int) bool {
+	expectedLine := directiveLine + 1
+
+	var spec *ast.ValueSpec
+	for _, node := range path {
+		if vs, ok := node.(*ast.ValueSpec); ok {
+			spec = vs
+			break
+		}
+		// A composite literal between the FuncLit and the spec means the closure
+		// is not a direct value (e.g. `var x = &S{Fn: func(){}}`).
+		if _, ok := node.(*ast.CompositeLit); ok {
+			return false
+		}
+	}
+	if spec == nil {
+		return false
+	}
+
+	specLine := s.fset.Position(spec.Pos()).Line
+	funcLitLine := s.fset.Position(funcLit.Pos()).Line
+	if specLine != expectedLine && funcLitLine != expectedLine {
+		return false
+	}
+
+	// The closure must be a direct value of the spec.
+	for _, v := range spec.Values {
+		if v == funcLit {
+			return true
+		}
+	}
+	return false
 }
 
 // isFirstStatementOnLine checks if the given statement is the first (leftmost) one on its line.

@@ -25,6 +25,16 @@ import (
 // SHOULD REPORT - Pure function pollutes argument
 // =============================================================================
 
+// PV000: Directive on a package-level `var` closure is matched, not reported as
+// unused (issue #72 gap2). A package-level var is a Decl, not a Stmt, so the
+// directive-matching path must handle the ValueSpec directly. (The closure body
+// itself is not contract-validated — package-level var closures are not among
+// the analyzed source functions — but the directive is correctly associated, so
+// no spurious "unused" warning is emitted.)
+//
+//gormreuse:pure
+var pkgLevelPureClosure = func(q *gorm.DB) { _ = q }
+
 // PV001: Pure function calls non-pure method on argument
 //
 //gormreuse:pure
@@ -412,9 +422,13 @@ func pureReturningClosure(db *gorm.DB) func() {
 	}
 }
 
-// PV213: TypeAssert - extracting *gorm.DB from interface{}
+// PV213: TypeAssert - extracting *gorm.DB from interface{}.
+// The pure directive is vacuous here: the parameter is interface{}, not a
+// concrete *gorm.DB, so there is no argument for the pure contract to govern.
+// gap4 (#72) requires a concrete *gorm.DB in the signature, so this is reported
+// as unused.
 //
-//gormreuse:pure
+//gormreuse:pure // want `unused gormreuse:pure directive`
 func pureWithTypeAssert(v interface{}) *gorm.DB {
 	if db, ok := v.(*gorm.DB); ok {
 		return db.Session(&gorm.Session{})
@@ -466,13 +480,13 @@ func pureReturnsMapValue(m map[string]*gorm.DB) *gorm.DB {
 	return m["key"] // OK - no *gorm.DB argument pollution
 }
 
-// PV219: Return type assertion result directly (TypeAssert)
-// TypeAssert traces through to underlying value (interface{})
-// Since interface{} is not *gorm.DB, returns Clean
+// PV219: Return type assertion result directly (TypeAssert).
+// As with PV213, the parameter is interface{} (no concrete *gorm.DB), so the
+// pure directive governs nothing and is reported as unused (gap4, #72).
 //
-//gormreuse:pure
+//gormreuse:pure // want `unused gormreuse:pure directive`
 func pureReturnsTypeAssertDirect(v interface{}) *gorm.DB {
-	return v.(*gorm.DB) // OK: traces to v (Clean - interface{} not *gorm.DB)
+	return v.(*gorm.DB) // traces to v (interface{}, not *gorm.DB)
 }
 
 // PV220: Return type alias conversion (ChangeType)
@@ -787,6 +801,15 @@ func mixImmutableAndMutable(db *gorm.DB) {
 	imm.Find(nil)      // OK: imm is immutable
 	q.Find(nil)
 	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// IR103: immutable-return on a function whose return type is a bare interface{}
+// (no concrete *gorm.DB anywhere in the signature) is vacuous — the directive
+// governs nothing, so it is reported as unused (gap4, #72).
+//
+//gormreuse:immutable-return // want `unused gormreuse:immutable-return directive`
+func immutableReturnInterface() interface{} {
+	return globalDB.Session(&gorm.Session{})
 }
 
 // #############################################################################
