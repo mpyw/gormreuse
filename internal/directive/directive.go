@@ -42,7 +42,9 @@
 //
 //	//gormreuse:pure
 //	func applyFilters(db *gorm.DB) *gorm.DB {
-//	    return db.Where("active = ?", true)
+//	    // Session() first: chaining directly on the parameter (return
+//	    // db.Where(...)) consumes the caller's branch and is NOT pure.
+//	    return db.Session(&gorm.Session{}).Where("active = ?", true)
 //	}
 //
 // Immutable-return function (returns immutable, like Session/WithContext):
