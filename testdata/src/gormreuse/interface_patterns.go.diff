@@ -1,6 +1,6 @@
 --- interface_patterns.go	1970-01-01 00:00:00
 +++ interface_patterns.go.golden	1970-01-01 00:00:00
-@@ -1,345 +1,345 @@
+@@ -1,379 +1,379 @@
  package internal
  
  import "gorm.io/gorm"
@@ -103,6 +103,42 @@
  }
  
  func acceptVariadic(args ...interface{}) {}
+ 
+ // =============================================================================
+ // INTERFACE ROUND-TRIP - EXTRACTION KEEPS TRACKING (#69)
+ // Boxing into interface{} then extracting via type assertion yields the SAME
+ // underlying *gorm.DB, so reuse of the extracted value must still be detected.
+ // =============================================================================
+ 
+ // interfaceRoundtripReuse: box into interface{}, extract, then reuse.
+ func interfaceRoundtripReuse(db *gorm.DB) {
+-	q := db.Where("x = ?", 1)
++	q := db.Where("x = ?", 1).Session(&gorm.Session{})
+ 	var i interface{} = q
+ 	q2 := i.(*gorm.DB)
+ 	q2.Find(nil)
+ 	q2.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+ }
+ 
+ // interfaceRoundtripCommaOk: comma-ok extraction form also keeps tracking.
+ func interfaceRoundtripCommaOk(db *gorm.DB) {
+-	q := db.Where("x = ?", 1)
++	q := db.Where("x = ?", 1).Session(&gorm.Session{})
+ 	var i interface{} = q
+ 	if q2, ok := i.(*gorm.DB); ok {
+ 		q2.Find(nil)
+ 		q2.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+ 	}
+ }
+ 
+ // interfaceRoundtripSession: extracted value is immutable (Session) - no report.
+ func interfaceRoundtripSession(db *gorm.DB) {
+ 	q := db.Where("x = ?", 1).Session(&gorm.Session{})
+ 	var i interface{} = q
+ 	q2 := i.(*gorm.DB)
+ 	q2.Find(nil)
+ 	q2.Count(nil) // OK: extracted value is immutable
+ }
  
  // =============================================================================
  // GORM METHODS WITH INTERFACE ARGUMENTS
