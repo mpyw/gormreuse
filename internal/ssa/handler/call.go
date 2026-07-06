@@ -429,7 +429,18 @@ func (h *StoreHandler) Handle(store *ssa.Store, ctx *Context) {
 	}
 
 	// Only stores to IndexAddr (slice element)
-	if _, ok := store.Addr.(*ssa.IndexAddr); !ok {
+	idx, ok := store.Addr.(*ssa.IndexAddr)
+	if !ok {
+		return
+	}
+
+	// Passing a *gorm.DB into a variadic ...interface{} parameter of a known
+	// read-only stdlib function (fmt.Println(q), log.Printf("%v", q),
+	// t.Logf("%v", q)) lowers to packing an interface-boxed value into a varargs
+	// array. Those functions never retain or mutate their arguments, so skip them
+	// to avoid false positives. User-defined variadic functions are intentionally
+	// NOT exempt (they may branch the value), matching the conservative bias.
+	if isReadOnlyVariadicArg(idx, store.Val) {
 		return
 	}
 
@@ -439,6 +450,76 @@ func (h *StoreHandler) Handle(store *ssa.Store, ctx *Context) {
 	}
 
 	ctx.Tracker.MarkPolluted(root, store.Block(), store.Pos())
+}
+
+// readOnlyVariadicPkgs lists packages whose variadic ...interface{} functions
+// are known not to retain or mutate their arguments (formatting/output/logging
+// only). Passing a *gorm.DB into them must not be treated as pollution.
+var readOnlyVariadicPkgs = map[string]bool{
+	"fmt":     true,
+	"log":     true,
+	"testing": true,
+}
+
+// isReadOnlyVariadicArg reports whether the store packs an interface-boxed
+// *gorm.DB into the varargs array of a variadic call to a known read-only
+// stdlib function (see readOnlyVariadicPkgs). In SSA fmt.Println(q) is:
+//
+//	t2 = new [1]any (varargs)   // array alloc
+//	t3 = &t2[0]                 // idx (IndexAddr)
+//	t4 = make any <- *gorm.DB   // val (MakeInterface — interface-boxed)
+//	*t3 = t4                    // the Store
+//	t5 = slice t2[:]            // sliced ...
+//	t6 = fmt.Println(t5...)     // ... and handed to a variadic call
+//
+// It returns true only when the slot is interface-typed (val is a MakeInterface),
+// the array flows into the variadic argument of a call, AND that callee is an
+// allow-listed read-only stdlib function. This deliberately excludes:
+//   - concrete ...*gorm.DB packs (val is the *gorm.DB directly, not boxed),
+//   - user composite slices like []interface{}{q} (no variadic call), and
+//   - user-defined variadic ...interface{} functions (may branch the value),
+//
+// all of which stay conservatively polluting.
+func isReadOnlyVariadicArg(idx *ssa.IndexAddr, val ssa.Value) bool {
+	if _, ok := val.(*ssa.MakeInterface); !ok {
+		return false
+	}
+	alloc, ok := idx.X.(*ssa.Alloc)
+	if !ok || alloc.Referrers() == nil {
+		return false
+	}
+	for _, r := range *alloc.Referrers() {
+		slice, ok := r.(*ssa.Slice)
+		if !ok || slice.Referrers() == nil {
+			continue
+		}
+		for _, sr := range *slice.Referrers() {
+			call, ok := sr.(*ssa.Call)
+			if !ok {
+				continue
+			}
+			sig := call.Call.Signature()
+			args := call.Call.Args
+			if sig != nil && sig.Variadic() && len(args) > 0 && args[len(args)-1] == slice && isReadOnlyStdlibCallee(call) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// isReadOnlyStdlibCallee reports whether call targets a function in an
+// allow-listed read-only package (see readOnlyVariadicPkgs).
+func isReadOnlyStdlibCallee(call *ssa.Call) bool {
+	callee := call.Call.StaticCallee()
+	if callee == nil {
+		return false
+	}
+	obj := callee.Object()
+	if obj == nil || obj.Pkg() == nil {
+		return false
+	}
+	return readOnlyVariadicPkgs[obj.Pkg().Path()]
 }
 
 // MapUpdateHandler handles *ssa.MapUpdate instructions.

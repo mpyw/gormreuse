@@ -1,0 +1,55 @@
+package internal
+
+import (
+	"fmt"
+	"log"
+	"testing"
+
+	"gorm.io/gorm"
+)
+
+// Regression fixtures for #65: passing a *gorm.DB into a variadic ...interface{}
+// parameter of a known read-only stdlib function (fmt/log/testing) lowered to a
+// varargs pack whose element Store was treated as slice-escape pollution, causing
+// false positives on ordinary logging. Such read-only calls are now exempt, while
+// user-defined variadic functions and real slice/map/chan storage still pollute.
+
+// =============================================================================
+// SHOULD NOT REPORT - read-only stdlib variadic sinks do not pollute
+// =============================================================================
+
+func readonlyFmtPrintln(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+	fmt.Println(q)
+	q.Find(&[]User{}) // OK: fmt.Println is read-only
+}
+
+func readonlyFmtSprintf(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+	_ = fmt.Sprintf("query=%v", q)
+	q.Find(&[]User{}) // OK: fmt.Sprintf is read-only
+}
+
+func readonlyLogPrintf(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+	log.Printf("query=%v", q)
+	q.Find(&[]User{}) // OK: log.Printf is read-only
+}
+
+func readonlyTestingLog(db *gorm.DB, t *testing.T) {
+	q := db.Where("x = ?", 1)
+	t.Logf("query=%v", q)
+	q.Find(&[]User{}) // OK: (*testing.T).Logf is read-only
+}
+
+// =============================================================================
+// SHOULD REPORT - user-defined variadic interface func may branch the value
+// =============================================================================
+
+func userVariadicSink(args ...interface{}) {}
+
+func userVariadicPollutes(db *gorm.DB) {
+	q := db.Where("x = ?", 1).Session(&gorm.Session{})
+	userVariadicSink(q)
+	q.Find(&[]User{}) // want `\*gorm\.DB instance reused after chain method`
+}
