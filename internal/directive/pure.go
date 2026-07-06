@@ -178,16 +178,31 @@ func (s *DirectiveFuncSet) collectDirectivePositions(file *ast.File) {
 		}
 	})
 
-	// Check FuncLit directives (next-line and same-line patterns)
+	// Check FuncLit directives (next-line and same-line patterns).
+	//
+	// A single directive position can be shared by multiple FuncLits in a
+	// multi-assignment: `a, b := func(q *gorm.DB){}, func(x int){}`. The directive
+	// is valid as long as AT LEAST ONE of those FuncLits has a matching signature,
+	// so track validity per position and mark a position invalid only when NONE of
+	// its FuncLits are valid. (Marking invalid on the first non-matching sibling
+	// would spuriously flag the whole directive unused.)
+	funcLitSeen := make(map[token.Pos]bool)
+	funcLitValid := make(map[token.Pos]bool)
 	insp.Preorder(funcLitTypes, func(n ast.Node) {
 		fl := n.(*ast.FuncLit)
 		if pos := s.findDirectiveForFuncLit(fl); pos.IsValid() {
 			s.processedDirectives[pos] = struct{}{}
-			if !s.validateFuncLitSignature(fl) {
-				s.invalidDirectives[pos] = struct{}{}
+			funcLitSeen[pos] = true
+			if s.validateFuncLitSignature(fl) {
+				funcLitValid[pos] = true
 			}
 		}
 	})
+	for pos := range funcLitSeen {
+		if !funcLitValid[pos] {
+			s.invalidDirectives[pos] = struct{}{}
+		}
+	}
 
 	// Find orphan directives (not associated with any function)
 	// These are always invalid
