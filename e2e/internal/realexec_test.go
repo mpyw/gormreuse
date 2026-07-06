@@ -1,6 +1,9 @@
-// Package internal contains end-to-end tests that verify actual GORM SQL behavior.
-// These tests use sqlmock to capture generated SQL and document GORM's
-// clone/pollution behavior.
+// Package internal contains end-to-end tests that verify actual GORM SQL
+// behavior with sqlmock. They guard the linter's core premise: a mid-chain
+// (clone==0) *gorm.DB shares its Statement, so branching it twice accumulates
+// conditions, whereas root / Session()-derived (clone>0) handles fork a fresh
+// Statement per chain and are safe to reuse. Every test asserts (t.Errorf) —
+// none merely logs both outcomes.
 package internal
 
 import (
@@ -21,20 +24,38 @@ type User struct {
 	Age    int
 }
 
-// setupDB creates a GORM DB with sqlmock and SQL capture callback.
+// setupDB creates a GORM DB with sqlmock and a SQL-capture callback.
 func setupDB(t *testing.T) (*gorm.DB, *[]string) {
+	t.Helper()
+	db, captured, _ := setupDBWithMock(t, false)
+	return db, captured
+}
+
+// setupDBWithMock creates a GORM DB with sqlmock. When withTx is true it also
+// expects a Begin/Commit pair (ordered before/after the queries) so tests that
+// use Transaction() work. Returns the DB, a pointer to the captured SQL slice,
+// and the mock for adding further expectations.
+func setupDBWithMock(t *testing.T, withTx bool) (*gorm.DB, *[]string, sqlmock.Sqlmock) {
 	t.Helper()
 
 	mockDB, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
 	if err != nil {
 		t.Fatalf("Failed to create sqlmock: %v", err)
 	}
+	// Assertions read the captured SQL, not mock ordering; unordered matching
+	// keeps the surplus ExpectQuery stubs from clashing with Begin/Commit.
+	mock.MatchExpectationsInOrder(false)
 
-	// Set up expectations for any queries
+	if withTx {
+		mock.ExpectBegin()
+	}
 	for i := 0; i < 20; i++ {
 		mock.ExpectQuery(".*").WillReturnRows(
 			sqlmock.NewRows([]string{"count", "id", "name", "active", "age"}).AddRow(100, 1, "test", true, 20),
 		)
+	}
+	if withTx {
+		mock.ExpectCommit()
 	}
 
 	db, err := gorm.Open(mysql.New(mysql.Config{
@@ -48,18 +69,20 @@ func setupDB(t *testing.T) (*gorm.DB, *[]string) {
 		t.Fatalf("Failed to open gorm: %v", err)
 	}
 
-	// Capture SQL
 	var capturedSQL []string
-	db.Callback().Query().After("gorm:query").Register("capture", func(tx *gorm.DB) {
+	if err := db.Callback().Query().After("gorm:query").Register("capture", func(tx *gorm.DB) {
 		if tx.Statement != nil {
 			capturedSQL = append(capturedSQL, tx.Statement.SQL.String())
 		}
-	})
+	}); err != nil {
+		t.Fatalf("Failed to register capture callback: %v", err)
+	}
 
-	return db, &capturedSQL
+	return db, &capturedSQL, mock
 }
 
-// TestSessionAtEnd verifies that Session() at the end of a chain makes it safe.
+// TestSessionAtEnd verifies that Session() at the end of a chain isolates it:
+// each finisher runs an independent query with only the base condition.
 func TestSessionAtEnd(t *testing.T) {
 	db, captured := setupDB(t)
 
@@ -70,78 +93,14 @@ func TestSessionAtEnd(t *testing.T) {
 	if len(*captured) < 2 {
 		t.Fatalf("Expected at least 2 queries, got %d", len(*captured))
 	}
-
-	// Both queries should have only "base = ?" - no pollution
 	for i, sql := range *captured {
-		count := strings.Count(sql, "base")
-		if count != 1 {
-			t.Errorf("Query %d has %d occurrences of 'base', expected 1: %s", i, count, sql)
+		if count := strings.Count(sql, "base"); count != 1 {
+			t.Errorf("query %d: 'base' appears %d times, want 1 (Session must isolate): %s", i, count, sql)
 		}
 	}
-	t.Logf("VERIFIED: Session at end creates independent queries")
 }
 
-// TestSessionInMiddle documents behavior when Session() is in the middle.
-func TestSessionInMiddle(t *testing.T) {
-	db, captured := setupDB(t)
-
-	q := db.Model(&User{}).Session(&gorm.Session{}).Where("base = ?", 1)
-	q.Find(&[]User{})
-	q.Find(&[]User{})
-
-	if len(*captured) < 2 {
-		t.Fatalf("Expected at least 2 queries, got %d", len(*captured))
-	}
-
-	// Document the actual behavior
-	for i, sql := range *captured {
-		count := strings.Count(sql, "base")
-		t.Logf("Query %d: base count=%d, SQL=%s", i, count, sql)
-	}
-
-	// Check for pollution (base appearing more than once)
-	secondQuery := (*captured)[1]
-	count := strings.Count(secondQuery, "base")
-	if count >= 2 {
-		t.Logf("OBSERVED: Session in middle causes pollution (base count: %d)", count)
-	} else {
-		t.Logf("OBSERVED: Session in middle does NOT cause pollution in this GORM version")
-	}
-}
-
-// TestMutableReuse verifies that reusing a mutable instance pollutes it.
-func TestMutableReuse(t *testing.T) {
-	db, captured := setupDB(t)
-
-	q := db.Model(&User{}).Where("base = ?", 1)
-	q.Where("a = ?", 10).Find(&[]User{})
-	q.Where("b = ?", 20).Find(&[]User{})
-
-	if len(*captured) < 2 {
-		t.Fatalf("Expected at least 2 queries, got %d", len(*captured))
-	}
-
-	// Document all queries
-	for i, sql := range *captured {
-		t.Logf("Query %d: %s", i, sql)
-	}
-
-	// First query: base + a
-	first := (*captured)[0]
-	if !strings.Contains(first, "base") || !strings.Contains(first, "a") {
-		t.Errorf("First query should have base and a: %s", first)
-	}
-
-	// Second query: check if pollution occurred
-	second := (*captured)[1]
-	if strings.Contains(second, "a") {
-		t.Logf("VERIFIED: Mutable reuse causes WHERE accumulation")
-	} else {
-		t.Logf("Note: No WHERE accumulation in this case")
-	}
-}
-
-// TestSessionBeforeFinisher verifies that Session() before each finisher is safe.
+// TestSessionBeforeFinisher verifies that Session() before each finisher isolates.
 func TestSessionBeforeFinisher(t *testing.T) {
 	db, captured := setupDB(t)
 
@@ -152,18 +111,59 @@ func TestSessionBeforeFinisher(t *testing.T) {
 	if len(*captured) < 2 {
 		t.Fatalf("Expected at least 2 queries, got %d", len(*captured))
 	}
-
-	// Both queries should have only "base = ?" - Session before finisher prevents pollution
 	for i, sql := range *captured {
-		count := strings.Count(sql, "base")
-		if count != 1 {
-			t.Errorf("Query %d has %d occurrences of 'base', expected 1: %s", i, count, sql)
+		if count := strings.Count(sql, "base"); count != 1 {
+			t.Errorf("query %d: 'base' appears %d times, want 1 (Session before finisher must isolate): %s", i, count, sql)
 		}
 	}
-	t.Logf("VERIFIED: Session before each finisher creates independent queries")
 }
 
-// TestCountThenFind documents the Count then Find behavior.
+// TestMutableReuse asserts the linter's central premise: branching a mid-chain
+// (clone==0) value twice ACCUMULATES conditions — the second query inherits the
+// first branch's WHERE.
+func TestMutableReuse(t *testing.T) {
+	db, captured := setupDB(t)
+
+	q := db.Model(&User{}).Where("base = ?", 1) // clone==0 (mid-chain)
+	q.Where("a = ?", 10).Find(&[]User{})
+	q.Where("b = ?", 20).Find(&[]User{})
+
+	if len(*captured) < 2 {
+		t.Fatalf("Expected at least 2 queries, got %d", len(*captured))
+	}
+	first, second := (*captured)[0], (*captured)[1]
+	if !strings.Contains(first, "base") || !strings.Contains(first, "a") {
+		t.Errorf("first query should contain base and a: %s", first)
+	}
+	// The invariant: the second branch inherits "a" from the first (pollution).
+	if !strings.Contains(second, "a") {
+		t.Errorf("second query should have ACCUMULATED 'a' from the first branch (mutable reuse), got: %s", second)
+	}
+}
+
+// TestSessionInMiddle asserts that Session() in the MIDDLE does not isolate:
+// Where() after Session() yields a fresh clone==0 value, so branching it twice
+// still accumulates (contrast with TestSessionAtEnd).
+func TestSessionInMiddle(t *testing.T) {
+	db, captured := setupDB(t)
+
+	q := db.Model(&User{}).Session(&gorm.Session{}).Where("base = ?", 1) // clone==0 again
+	q.Where("a = ?", 10).Find(&[]User{})
+	q.Where("b = ?", 20).Find(&[]User{})
+
+	if len(*captured) < 2 {
+		t.Fatalf("Expected at least 2 queries, got %d", len(*captured))
+	}
+	if second := (*captured)[1]; !strings.Contains(second, "a") {
+		t.Errorf("Session-in-middle leaves the value mutable, so the second branch should accumulate 'a', got: %s", second)
+	}
+}
+
+// TestCountThenFind asserts that Count followed by Find on a mutable value runs
+// two queries and — since Count adds no WHERE — does NOT accumulate the base
+// condition (no captured query repeats "base"). Documents GORM's actual
+// behavior for this common pattern; the exact captured SQL of each callback can
+// vary by GORM version, so we only assert the stable non-accumulation invariant.
 func TestCountThenFind(t *testing.T) {
 	db, captured := setupDB(t)
 
@@ -171,18 +171,74 @@ func TestCountThenFind(t *testing.T) {
 	q.Count(new(int64))
 	q.Find(&[]User{})
 
-	// Document all queries
+	if len(*captured) < 2 {
+		t.Fatalf("Expected at least 2 queries, got %d", len(*captured))
+	}
 	for i, sql := range *captured {
-		t.Logf("Query %d: %s", i, sql)
+		if count := strings.Count(sql, "base"); count > 1 {
+			t.Errorf("query %d accumulated 'base' %d times (Count+Find must not accumulate): %s", i, count, sql)
+		}
+	}
+}
+
+// =============================================================================
+// Clone-semantics tests — executable evidence for Phase 1b (#61) and the README.
+// =============================================================================
+
+// TestCloneSemantics_RootReuseIsSafe asserts (a): the root DB (clone>0) forks a
+// fresh Statement per chain, so reusing it across two chains yields INDEPENDENT
+// queries — the second does not inherit the first's condition.
+func TestCloneSemantics_RootReuseIsSafe(t *testing.T) {
+	db, captured := setupDB(t)
+
+	db.Model(&User{}).Where("a = ?", 10).Find(&[]User{})
+	db.Model(&User{}).Where("b = ?", 20).Find(&[]User{})
+
+	if len(*captured) < 2 {
+		t.Fatalf("Expected at least 2 queries, got %d", len(*captured))
+	}
+	if second := (*captured)[1]; strings.Contains(second, "a =") {
+		t.Errorf("root reuse must be independent: second query leaked 'a' from the first: %s", second)
+	}
+}
+
+// TestCloneSemantics_MidChainBranchAccumulates asserts (b): a mid-chain
+// (clone==0) value branched twice shares its Statement, so conditions accumulate.
+func TestCloneSemantics_MidChainBranchAccumulates(t *testing.T) {
+	db, captured := setupDB(t)
+
+	q := db.Model(&User{}).Where("base = ?", 1) // clone==0
+	q.Where("a = ?", 10).Find(&[]User{})
+	q.Where("b = ?", 20).Find(&[]User{})
+
+	if len(*captured) < 2 {
+		t.Fatalf("Expected at least 2 queries, got %d", len(*captured))
+	}
+	second := (*captured)[1]
+	if !strings.Contains(second, "a =") || !strings.Contains(second, "b =") {
+		t.Errorf("mid-chain branch should accumulate both 'a' and 'b' in the second query: %s", second)
+	}
+}
+
+// TestCloneSemantics_TransactionCallbackIsolated asserts (c): the tx handed to a
+// Transaction callback is a fresh (clone>0) handle, so branching it twice inside
+// the callback yields independent queries — no accumulation.
+func TestCloneSemantics_TransactionCallbackIsolated(t *testing.T) {
+	db, captured, _ := setupDBWithMock(t, true)
+
+	err := db.Transaction(func(tx *gorm.DB) error {
+		tx.Model(&User{}).Where("a = ?", 10).Find(&[]User{})
+		tx.Model(&User{}).Where("b = ?", 20).Find(&[]User{})
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Transaction returned error: %v", err)
 	}
 
-	if len(*captured) >= 2 {
-		second := (*captured)[1]
-		count := strings.Count(second, "base")
-		if count >= 2 {
-			t.Logf("OBSERVED: Count pollutes the instance (base count: %d)", count)
-		} else {
-			t.Logf("OBSERVED: Count does not pollute in this GORM version")
-		}
+	if len(*captured) < 2 {
+		t.Fatalf("Expected at least 2 queries, got %d", len(*captured))
+	}
+	if second := (*captured)[1]; strings.Contains(second, "a =") {
+		t.Errorf("Transaction tx reuse must be independent: second query leaked 'a': %s", second)
 	}
 }

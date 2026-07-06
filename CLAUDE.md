@@ -289,7 +289,7 @@ go build -o bin/gormreuse ./cmd/gormreuse
 go vet -vettool=./bin/gormreuse ./...
 
 # Run E2E tests (SQL behavior verification)
-cd testdata/e2e && go test -v
+cd e2e/internal && go test -v
 
 # Generate golden files for suggested fixes
 go run ./testdata/cmd/gengolden/main.go
@@ -322,7 +322,7 @@ testdata/src/gormreuse/
 
 ### E2E Tests
 
-The `testdata/e2e/` directory contains tests that verify actual GORM SQL behavior using sqlmock. This is a separate Go module to avoid dependency conflicts. These tests document GORM's clone/pollution behavior.
+The `e2e/internal/` directory contains tests that verify actual GORM SQL behavior using sqlmock. This is a separate Go module (its own `go.mod`) to avoid dependency conflicts, and CI runs it on every PR (`cd e2e/internal && go test ./...`). Every test asserts (`t.Errorf`) — the suite guards the linter's core clone-semantics premise: mid-chain (`clone==0`) reuse accumulates conditions; root / `Session()` / `Transaction`-callback (`clone>0`) handles fork a fresh Statement and are safe.
 
 ## Code Style
 

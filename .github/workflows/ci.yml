@@ -28,6 +28,10 @@ jobs:
       - name: Run tests with coverage
         run: go test -v -race -coverprofile=coverage.txt -covermode=atomic -coverpkg=./... ./...
 
+      - name: Run E2E tests (SQL behavior)
+        run: go test -v ./...
+        working-directory: e2e/internal
+
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
         with:
