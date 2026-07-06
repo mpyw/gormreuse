@@ -1,6 +1,6 @@
 --- advanced.go	1970-01-01 00:00:00
 +++ advanced.go.golden	1970-01-01 00:00:00
-@@ -1,1215 +1,1215 @@
+@@ -1,1215 +1,1217 @@
  package internal
  
  import (
@@ -407,6 +407,7 @@
  //
  // (parameter roots get no auto-fix; the top-level expression is not a *gorm.DB
  // method call anyway).
++//gormreuse:immutable-param
  func wrappedInRequireNoError(tx *gorm.DB, t require.TestingT) {
  	require.NoError(t, tx.Create(nil).Error)
  	require.NoError(t, tx.Create(nil).Error) // want `\*gorm\.DB reused: second branch from mutable root`
@@ -414,6 +415,7 @@
  }
  
  // wrappedInRequireNoErrorMixed demonstrates mixed usage patterns.
++//gormreuse:immutable-param
  func wrappedInRequireNoErrorMixed(tx *gorm.DB, t require.TestingT) {
  	require.NoError(t, tx.Create(nil).Error)
  	tx.Create(nil) // want `\*gorm\.DB reused: second branch from mutable root`

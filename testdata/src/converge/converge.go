@@ -1,8 +1,8 @@
 // Package converge holds self-contained, fully-fixable reuse scenarios for the
 // convergence harness (#71): applying the suggested fix and re-linting the
-// result must report nothing. Unlike the gormreuse fixtures, every violation
-// here is expected to be fully resolved by its fix — no parameter roots, no
-// documented limitations.
+// result must report nothing. Every violation here is expected to be fully
+// resolved by its fix — either a Session() on a local root, or (Phase 1b stage
+// 2c) a //gormreuse:immutable-param annotation on a parameter root.
 package converge
 
 import "gorm.io/gorm"
@@ -62,4 +62,12 @@ func reassignChain(db *gorm.DB) {
 	q = q.Where("a")
 	q.Find(&User{})
 	q.Count(new(int64)) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// paramReuse: a *gorm.DB parameter branched twice (Phase 1b stage 2c). The fix
+// annotates the function //gormreuse:immutable-param; re-linting is then clean
+// (the parameter is immutable and there is no local caller to check).
+func paramReuse(db *gorm.DB) {
+	db.Where("a").Find(&User{})
+	db.Where("b").Find(&User{}) // want `\*gorm\.DB reused: second branch from mutable root`
 }

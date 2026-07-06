@@ -52,14 +52,17 @@ import (
 
 // Generator generates SuggestedFix for a violation.
 type Generator struct {
-	pass       *analysis.Pass
-	fset       *token.FileSet
-	files      map[*token.File]*ast.File          // token.File -> ast.File mapping
-	inspectors map[*ast.File]*inspector.Inspector // cached inspectors per file
+	pass            *analysis.Pass
+	fset            *token.FileSet
+	files           map[*token.File]*ast.File          // token.File -> ast.File mapping
+	inspectors      map[*ast.File]*inspector.Inspector // cached inspectors per file
+	scopesCallbacks map[*ssa.Function]bool             // Scopes/Preload callbacks (no immutable-param fix)
 }
 
-// New creates a new fix Generator.
-func New(pass *analysis.Pass) *Generator {
+// New creates a new fix Generator. scopesCallbacks lists Scopes/Preload callback
+// functions, whose *gorm.DB parameters cannot be made immutable-param, so the
+// parameter-root fix is withheld for them (stage 2c); it may be nil.
+func New(pass *analysis.Pass, scopesCallbacks map[*ssa.Function]bool) *Generator {
 	// Build token.File -> ast.File mapping
 	files := make(map[*token.File]*ast.File)
 	for _, f := range pass.Files {
@@ -70,10 +73,11 @@ func New(pass *analysis.Pass) *Generator {
 	}
 
 	return &Generator{
-		pass:       pass,
-		fset:       pass.Fset,
-		files:      files,
-		inspectors: make(map[*ast.File]*inspector.Inspector),
+		pass:            pass,
+		fset:            pass.Fset,
+		files:           files,
+		inspectors:      make(map[*ast.File]*inspector.Inspector),
+		scopesCallbacks: scopesCallbacks,
 	}
 }
 
@@ -95,14 +99,13 @@ func (g *Generator) Generate(v pollution.Violation) []analysis.SuggestedFix {
 		return nil // Cannot fix without root information
 	}
 
-	// A parameter root (e.g. a Scopes/Preload callback's *gorm.DB, issue #60)
-	// has no definition site to make immutable — the generator's "insert
-	// Session() at the root" model does not apply, and forcing an edit produces
-	// a misleading fix on an unrelated expression. Report the violation without
-	// an auto-fix instead. (Isolating a reused parameter requires a manual
-	// Session() at the branch, which the user must place.)
-	if _, ok := root.(*ssa.Parameter); ok {
-		return nil
+	// A parameter root has no definition site to Session(), so the "insert
+	// Session() at the root" model does not apply. Instead, suggest declaring the
+	// enclosing function //gormreuse:immutable-param — the parameter is then
+	// treated as immutable and the caller becomes responsible for passing an
+	// isolated value (verified caller-side, stage 2b/2c).
+	if p, ok := root.(*ssa.Parameter); ok {
+		return g.generateImmutableParamFix(p)
 	}
 
 	allUses := v.AllUses
@@ -176,6 +179,40 @@ func (g *Generator) Generate(v pollution.Violation) []analysis.SuggestedFix {
 			TextEdits: edits,
 		},
 	}
+}
+
+// generateImmutableParamFix suggests annotating the enclosing function with
+// //gormreuse:immutable-param when a *gorm.DB PARAMETER is the reused root
+// (Phase 1b). This declares the parameter immutable; the caller then owns
+// passing an isolated value (verified caller-side, stage 2b).
+//
+// No fix is offered when:
+//   - the function is a Scopes/Preload callback — immutable-param is rejected
+//     there (the parameter genuinely receives a mid-chain value), so annotating
+//     would not converge; the user must Session() inside the callback.
+//   - the enclosing function is not a named declaration (a closure/func literal) —
+//     directive placement on literals is left to the user.
+func (g *Generator) generateImmutableParamFix(p *ssa.Parameter) []analysis.SuggestedFix {
+	fn := p.Parent()
+	if fn == nil || g.scopesCallbacks[fn] {
+		return nil
+	}
+	fd, ok := fn.Syntax().(*ast.FuncDecl)
+	if !ok {
+		return nil
+	}
+	// Insert the directive on its own line immediately before `func` (after any
+	// doc comment). FuncDecl.Pos() is the `func` keyword, so this is the
+	// recognized next-line placement and needs no indentation for top-level decls.
+	pos := fd.Pos()
+	return []analysis.SuggestedFix{{
+		Message: "Declare //gormreuse:immutable-param (caller must pass an isolated *gorm.DB)",
+		TextEdits: []analysis.TextEdit{{
+			Pos:     pos,
+			End:     pos,
+			NewText: []byte("//gormreuse:immutable-param\n"),
+		}},
+	}}
 }
 
 // findNonFinisherUses finds uses that are non-finisher expression statements.
