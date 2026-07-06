@@ -39,6 +39,7 @@ import (
 	"go/ast"
 	"go/token"
 	"sort"
+	"strconv"
 
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/ast/astutil"
@@ -361,11 +362,43 @@ func (g *Generator) generateSessionEdit(pos token.Pos) *analysis.TextEdit {
 		return nil
 	}
 
+	// Qualify Session with the file's actual local name for gorm.io/gorm so the
+	// fix compiles under an aliased or dot import (issue #71, defect 3).
+	qualifier := "gorm."
+	if file := g.findFileContaining(pos); file != nil {
+		qualifier = gormQualifier(file)
+	}
+
 	return &analysis.TextEdit{
 		Pos:     endPos,
 		End:     endPos,
-		NewText: []byte(".Session(&gorm.Session{})"),
+		NewText: []byte(".Session(&" + qualifier + "Session{})"),
 	}
+}
+
+// gormQualifier returns the selector prefix for referring to gorm types in file:
+// "gorm." for a normal import, "<alias>." for an aliased import, or "" for a
+// dot-import. It defaults to "gorm." when gorm is not imported (an import edit is
+// added separately by generateGormImportEdit).
+func gormQualifier(file *ast.File) string {
+	for _, imp := range file.Imports {
+		path, err := strconv.Unquote(imp.Path.Value)
+		if err != nil || path != gormImportPath {
+			continue
+		}
+		if imp.Name == nil {
+			return "gorm." // normal import; gorm.io/gorm's package name is "gorm"
+		}
+		switch imp.Name.Name {
+		case ".":
+			return "" // dot-import: reference Session unqualified
+		case "_":
+			return "gorm." // blank import provides no usable name; treat as absent
+		default:
+			return imp.Name.Name + "." // aliased import
+		}
+	}
+	return "gorm."
 }
 
 // generateSessionEditsForRoot generates Session edits, handling Phi nodes specially.
