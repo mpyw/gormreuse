@@ -1,0 +1,13 @@
+package internal
+
+import "gorm.io/gorm"
+
+// firstOrCreateReuse: FirstOrCreate/FirstOrInit are terminal finishers (they
+// execute). Reusing the root across two of them is a violation whose fix makes
+// the ROOT immutable — the finishers must NOT be rewritten into reassignments
+// (#71 secondary: they were missing from the finisher allow-list).
+func firstOrCreateReuse(db *gorm.DB) {
+	q := db.Where("x")
+	q.FirstOrCreate(&User{})
+	q.FirstOrInit(&User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+}

@@ -255,23 +255,25 @@ func (g *Generator) isNonFinisherExprStmt(pos token.Pos) bool {
 // isFinisher checks if a method name is a GORM finisher method.
 func isFinisher(methodName string) bool {
 	finishers := map[string]bool{
-		"Find":        true,
-		"First":       true,
-		"Last":        true,
-		"Take":        true,
-		"Count":       true,
-		"Pluck":       true,
-		"Scan":        true,
-		"Row":         true,
-		"Rows":        true,
-		"ScanRows":    true,
-		"Create":      true,
-		"Save":        true,
-		"Update":      true,
-		"Updates":     true,
-		"Delete":      true,
-		"Exec":        true,
-		"Transaction": true,
+		"Find":          true,
+		"First":         true,
+		"Last":          true,
+		"Take":          true,
+		"Count":         true,
+		"Pluck":         true,
+		"Scan":          true,
+		"Row":           true,
+		"Rows":          true,
+		"ScanRows":      true,
+		"Create":        true,
+		"Save":          true,
+		"Update":        true,
+		"Updates":       true,
+		"Delete":        true,
+		"Exec":          true,
+		"Transaction":   true,
+		"FirstOrCreate": true, // terminal (executes); #71 secondary
+		"FirstOrInit":   true, // terminal (executes); #71 secondary
 	}
 	return finishers[methodName]
 }
