@@ -919,17 +919,19 @@ func useDBFactory(f *DBFactory) {
 // If the function pollutes its *gorm.DB argument, it will be reported.
 // =============================================================================
 
-// PIR101: pure,immutable-return but pollutes argument
+// PIR101: pure,immutable-return but pollutes argument. immutable-param keeps the
+// test focused on the pure contract rather than Phase 1b parameter branching.
 //
-//gormreuse:pure,immutable-return
+//gormreuse:pure,immutable-return,immutable-param
 func badPureImmutable(db *gorm.DB) *gorm.DB {
 	db.Where("x") // want `pure function pollutes \*gorm\.DB argument by calling Where`
 	return db.Session(&gorm.Session{})
 }
 
-// PIR102: pure,immutable-return but passes to non-pure function
+// PIR102: pure,immutable-return but passes to non-pure function. immutable-param
+// keeps the test focused on the pure contract, not Phase 1b parameter branching.
 //
-//gormreuse:pure,immutable-return
+//gormreuse:pure,immutable-return,immutable-param
 func badPureImmutablePassesNonPure(db *gorm.DB) *gorm.DB {
 	nonPureHelper(db) // want `pure function passes \*gorm\.DB argument to non-pure function nonPureHelper`
 	return db.Session(&gorm.Session{})
@@ -943,7 +945,7 @@ func badPureImmutablePassesNonPure(db *gorm.DB) *gorm.DB {
 // This function pollutes its argument but that's allowed without pure directive.
 // The return value is still treated as immutable.
 //
-//gormreuse:immutable-return
+//gormreuse:immutable-return,immutable-param
 func immutableOnlyPollutes(db *gorm.DB) *gorm.DB {
 	db.Where("pollute") // No error - not marked as pure
 	return db.Session(&gorm.Session{})
@@ -1135,8 +1137,9 @@ func multiAssignPureValidSibling(db *gorm.DB) {
 }
 
 // blockCommentPureBad: block-comment directive form is now recognized, so the
-// pure contract is enforced (previously a silent no-op).
-/*gormreuse:pure*/
+// pure contract is enforced (previously a silent no-op). immutable-param keeps
+// the test focused on the pure contract, not Phase 1b parameter branching.
+/*gormreuse:pure,immutable-param*/
 func blockCommentPureBad(db *gorm.DB) *gorm.DB {
 	db.Find(nil)         // want `pure function pollutes \*gorm\.DB argument by calling Find`
 	return db.Where("x") // want `pure function pollutes \*gorm\.DB argument by calling Where`

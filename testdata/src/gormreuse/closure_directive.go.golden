@@ -377,6 +377,7 @@ type structWithFuncField struct {
 }
 
 // multiAssign01: Both closures in same assignment get the directive
+//gormreuse:immutable-param
 func multiAssign01(db *gorm.DB) {
 	//gormreuse:pure
 	a, b := func(q *gorm.DB) { _ = q }, func(q *gorm.DB) { _ = q }
@@ -391,6 +392,7 @@ func multiAssign01(db *gorm.DB) {
 }
 
 // multiAssign02: Both variables get directive (direct assignment)
+//gormreuse:immutable-param
 func multiAssign02(db *gorm.DB) {
 	var a, c func(q *gorm.DB)
 
@@ -407,6 +409,7 @@ func multiAssign02(db *gorm.DB) {
 }
 
 // multiAssign03: Only first closure gets directive (second is inside struct literal)
+//gormreuse:immutable-param
 func multiAssign03(db *gorm.DB) {
 	//gormreuse:pure
 	a, b := func(q *gorm.DB) { _ = q }, &structWithFuncField{Fn: func(q *gorm.DB) { _ = q }}
@@ -421,6 +424,7 @@ func multiAssign03(db *gorm.DB) {
 }
 
 // multiAssign04: Three closures - first two direct, third in composite literal
+//gormreuse:immutable-param
 func multiAssign04(db *gorm.DB) {
 	//gormreuse:pure
 	a, b, c := func(q *gorm.DB) { _ = q }, func(q *gorm.DB) { _ = q }, []func(*gorm.DB){func(q *gorm.DB) { _ = q }}[0]
@@ -439,6 +443,7 @@ func multiAssign04(db *gorm.DB) {
 }
 
 // multiAssign05: Separated statements - only first gets directive
+//gormreuse:immutable-param
 func multiAssign05(db *gorm.DB) {
 	//gormreuse:pure
 	a := func(q *gorm.DB) { _ = q }
@@ -454,6 +459,7 @@ func multiAssign05(db *gorm.DB) {
 }
 
 // multiAssign06: Semicolon-separated on same line - only first statement gets directive
+//gormreuse:immutable-param
 func multiAssign06(db *gorm.DB) {
 	//gormreuse:pure
 	a := func(q *gorm.DB) { _ = q }; b := func(q *gorm.DB) { _ = q }
@@ -468,6 +474,7 @@ func multiAssign06(db *gorm.DB) {
 }
 
 // multiAssign07: Multi-line assignment - all closures in same statement get directive
+//gormreuse:immutable-param
 func multiAssign07(db *gorm.DB) {
 	//gormreuse:pure
 	a, b, c := func(q *gorm.DB) { _ = q },
@@ -489,6 +496,7 @@ func multiAssign07(db *gorm.DB) {
 
 
 // multiAssign08: Multi-line assignment with comments between closures
+//gormreuse:immutable-param
 func multiAssign08(db *gorm.DB) {
 	a, b, c := func(q *gorm.DB) { //gormreuse:pure
 		_ = q
@@ -517,6 +525,7 @@ func multiAssign08(db *gorm.DB) {
 
 // multiAssign09: Directive after closing brace does NOT apply to next line
 // }, //gormreuse:pure should not apply to the FuncLit on the next line
+//gormreuse:immutable-param
 func multiAssign09(db *gorm.DB) {
 	a, b, c := func(q *gorm.DB) { //gormreuse:pure
 		_ = q

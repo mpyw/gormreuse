@@ -166,7 +166,11 @@ func sessionBeforeFinisher(db *gorm.DB) {
 // SHOULD NOT REPORT - Reassignment
 // =============================================================================
 
-// reassignNewInstance demonstrates that reassigning a variable is safe.
+// reassignNewInstance demonstrates that reassigning a variable creates a new
+// root. The parameter is immutable-param here so the test stays focused on
+// reassignment semantics rather than Phase 1b parameter branching (#61).
+//
+//gormreuse:immutable-param
 func reassignNewInstance(db *gorm.DB) {
 	q := db.Model(&User{}).Where("active = ?", true)
 	q.Count(new(int64))
@@ -367,22 +371,24 @@ func nestedArgsSingleUse(db *gorm.DB) {
 // =============================================================================
 
 // wrappedInRequireNoError demonstrates GORM calls wrapped in require.NoError.
-// The fix generator should NOT generate inappropriate fixes like:
+// Under Phase 1b (#61) the tx parameter is a mutable root, so branching it
+// repeatedly is a violation — but the fix generator must NOT generate an
+// inappropriate reassignment fix like:
 //
 //	tx = require.NoError(t, tx.Create(...).Error)  // WRONG!
 //
-// Instead, no reassignment fix should be generated for these cases because
-// the top-level expression is not a *gorm.DB method call.
+// (parameter roots get no auto-fix; the top-level expression is not a *gorm.DB
+// method call anyway).
 func wrappedInRequireNoError(tx *gorm.DB, t require.TestingT) {
 	require.NoError(t, tx.Create(nil).Error)
-	require.NoError(t, tx.Create(nil).Error)
-	require.NoError(t, tx.Create(nil).Error)
+	require.NoError(t, tx.Create(nil).Error) // want `\*gorm\.DB reused: second branch from mutable root`
+	require.NoError(t, tx.Create(nil).Error) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // wrappedInRequireNoErrorMixed demonstrates mixed usage patterns.
 func wrappedInRequireNoErrorMixed(tx *gorm.DB, t require.TestingT) {
 	require.NoError(t, tx.Create(nil).Error)
-	tx.Create(nil)
+	tx.Create(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // =============================================================================

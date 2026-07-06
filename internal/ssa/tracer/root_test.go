@@ -80,7 +80,7 @@ func gormMethod(allFuncs map[*ssa.Function]bool, name string) *ssa.Function {
 func TestIsImmutableReturningBuiltin(t *testing.T) {
 	t.Parallel()
 	fixtures, all := loadProgram(t)
-	tr := tracer.New(nil, nil, nil, nil)
+	tr := tracer.New(nil, nil, nil, nil, nil, nil)
 
 	session := gormMethod(all, "Session")
 	if session == nil {
@@ -108,7 +108,7 @@ func TestIsPureFunction(t *testing.T) {
 	t.Parallel()
 	fixtures, all := loadProgram(t)
 	// Syntax-backed pure set resolves //gormreuse:pure via each function's AST.
-	tr := tracer.New(directive.NewPureFuncSet(nil, nil), nil, nil, nil)
+	tr := tracer.New(directive.NewPureFuncSet(nil, nil), nil, nil, nil, nil, nil)
 
 	if session := gormMethod(all, "Session"); session != nil && !tr.IsPureFunction(session) {
 		t.Error("Session (immutable builtin) should count as pure")
@@ -165,7 +165,7 @@ func TestCollectScopesCallbacks(t *testing.T) {
 	}
 
 	// An ordinary helper never handed to Scopes/Preload must NOT be collected.
-	if ord := fixtures["ordinaryHelperParamStillImmutable"]; ord != nil && set[ord] {
+	if ord := fixtures["ordinaryHelperParamBranches"]; ord != nil && set[ord] {
 		t.Error("ordinary helper should not be collected as a Scopes callback")
 	}
 
@@ -187,15 +187,15 @@ func TestFindMutableRootScopesParam(t *testing.T) {
 	loops := cfg.New()
 
 	named := fixtures["namedScope"]
-	ordinary := fixtures["ordinaryHelperParamStillImmutable"]
+	ordinary := fixtures["ordinaryHelperParamBranches"]
 	if named == nil || ordinary == nil {
 		t.Fatal("required fixtures missing")
 	}
 
 	// With namedScope registered as a Scopes callback, its *gorm.DB parameter is
-	// a mutable root; the identical ordinary helper's parameter is not.
+	// a mutable root.
 	scopes := map[*ssa.Function]bool{named: true}
-	tr := tracer.New(nil, nil, nil, scopes)
+	tr := tracer.New(nil, nil, nil, nil, scopes, nil)
 
 	if !tr.IsScopesCallbackFunc(named) {
 		t.Error("namedScope should be recognized as a Scopes callback function")
@@ -212,14 +212,24 @@ func TestFindMutableRootScopesParam(t *testing.T) {
 		t.Errorf("FindAllMutableRoots should return the Scopes param, got %v", roots)
 	}
 
+	// Phase 1b (#61): an ordinary *gorm.DB parameter is now a mutable root by
+	// default, even without any Scopes registration.
 	ordParam := ordinary.Params[0]
-	if root := tr.FindMutableRoot(ordParam, loops.DetectLoops(ordinary)); root != nil {
-		t.Errorf("ordinary parameter should be immutable (nil root), got %v", root)
+	if root := tr.FindMutableRoot(ordParam, loops.DetectLoops(ordinary)); root != ordParam {
+		t.Errorf("Phase 1b: ordinary parameter should be a mutable root, got %v", root)
+	}
+	trPlain := tracer.New(nil, nil, nil, nil, nil, nil)
+	if root := trPlain.FindMutableRoot(namedParam, loops.DetectLoops(named)); root != namedParam {
+		t.Errorf("Phase 1b: unregistered parameter should be a mutable root, got %v", root)
 	}
 
-	// Without the Scopes registration, even namedScope's parameter is immutable.
-	trPlain := tracer.New(nil, nil, nil, nil)
-	if root := trPlain.FindMutableRoot(namedParam, loops.DetectLoops(named)); root != nil {
-		t.Errorf("unregistered parameter should be immutable (nil root), got %v", root)
+	// A Transaction callback's tx parameter is exempt (fresh forkable handle):
+	// registering the helper as a transaction callback makes its param immutable.
+	trTx := tracer.New(nil, nil, nil, nil, nil, map[*ssa.Function]bool{ordinary: true})
+	if root := trTx.FindMutableRoot(ordParam, loops.DetectLoops(ordinary)); root != nil {
+		t.Errorf("Transaction callback parameter should be immutable (nil root), got %v", root)
+	}
+	if roots := trTx.FindAllMutableRoots(ordParam, loops.DetectLoops(ordinary)); len(roots) != 0 {
+		t.Errorf("Transaction callback parameter should yield no roots, got %v", roots)
 	}
 }

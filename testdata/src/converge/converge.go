@@ -21,7 +21,10 @@ func simpleReuse(db *gorm.DB) {
 
 // nestedArg exposes defect 1: q is reused inside base.Or(...). The correct fix
 // makes q's root immutable; the buggy fix rebinds `base` and never addresses q,
-// so re-linting still warns.
+// so re-linting still warns. immutable-param keeps the params off the root set so
+// the only violation is the fully-fixable local q (see the package doc).
+//
+//gormreuse:immutable-param
 func nestedArg(db, base *gorm.DB) {
 	q := db.Where("base")
 	base.Or(q.Where("y"))
@@ -42,6 +45,10 @@ func multiBranchReassign(db *gorm.DB) {
 
 // localBaseReuse: a local root reused via a method whose args are other chains;
 // the fix Sessions the local's own root (not a rebind of anything nested).
+// immutable-param keeps db off the root set so the only violation is the
+// fully-fixable local base (see the package doc).
+//
+//gormreuse:immutable-param
 func localBaseReuse(db *gorm.DB) {
 	base := db.Where("start")
 	base.Or(db.Where("a"))
