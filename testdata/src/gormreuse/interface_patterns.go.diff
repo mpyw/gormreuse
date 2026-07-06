@@ -1,6 +1,6 @@
 --- interface_patterns.go	1970-01-01 00:00:00
 +++ interface_patterns.go.golden	1970-01-01 00:00:00
-@@ -1,379 +1,379 @@
+@@ -1,383 +1,383 @@
  package internal
  
  import "gorm.io/gorm"
@@ -76,6 +76,7 @@
  }
  
  // variadicInterfaceArgsMultiple: Multiple args to variadic
+ //gormreuse:immutable-param
  func variadicInterfaceArgsMultiple(db *gorm.DB) {
 -	q1 := db.Where("x")
 -	q2 := db.Where("y")
@@ -90,6 +91,7 @@
  }
  
  // variadicInterfaceArgsOnlyOne: Only one of multiple is passed
+ //gormreuse:immutable-param
  func variadicInterfaceArgsOnlyOne(db *gorm.DB) {
 -	q1 := db.Where("x")
 +	q1 := db.Where("x").Session(&gorm.Session{})
@@ -183,6 +185,7 @@
  }
  
  // gormOrMethodFresh: Fresh query passed to Or (no reuse)
+ //gormreuse:immutable-param
  func gormOrMethodFresh(db *gorm.DB) {
  	base := db.Where("base")
  
@@ -210,6 +213,7 @@
  }
  
  // interfaceSliceMultiple: Multiple *gorm.DB in slice
+ //gormreuse:immutable-param
  func interfaceSliceMultiple(db *gorm.DB) {
 -	q1 := db.Where("x")
 -	q2 := db.Where("y")

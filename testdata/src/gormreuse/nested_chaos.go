@@ -796,7 +796,10 @@ func chaosInterwovenVariables(db *gorm.DB, a, b, c bool) {
 	q2.Last(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
-// chaosVariableSwap demonstrates variable swapping patterns.
+// chaosVariableSwap demonstrates variable swapping patterns. immutable-param
+// keeps the test focused on the swap, not Phase 1b parameter branching (#61).
+//
+//gormreuse:immutable-param
 func chaosVariableSwap(db *gorm.DB, a, b bool) {
 	q1 := db.Where("q1_base")
 	q2 := db.Where("q2_base")
@@ -833,7 +836,10 @@ func chaosVariableSwapConditional(db *gorm.DB, swap bool) {
 	q2.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
-// chaosVariableSwapChain demonstrates swapping with chaining.
+// chaosVariableSwapChain demonstrates swapping with chaining. immutable-param
+// keeps the test focused on the swap, not Phase 1b parameter branching (#61).
+//
+//gormreuse:immutable-param
 func chaosVariableSwapChain(db *gorm.DB) {
 	q1 := db.Where("q1")
 	q2 := db.Where("q2")
@@ -905,6 +911,9 @@ func chaosMultipleSwaps(db *gorm.DB, a, b, c bool) {
 }
 
 // chaosModernSwapSyntax demonstrates modern Go swap syntax (a, b = b, a).
+// immutable-param keeps the test focused on the swap, not parameter branching.
+//
+//gormreuse:immutable-param
 func chaosModernSwapSyntax(db *gorm.DB, a bool) {
 	q1 := db.Where("q1")
 	q2 := db.Where("q2")

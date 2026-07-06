@@ -75,9 +75,10 @@ func transactionCallbackNoReport(db *gorm.DB) {
 	})
 }
 
-// SC104: An ordinary (non-Scopes) func(*gorm.DB) *gorm.DB helper still treats
-// its parameter as immutable — Phase 1a does NOT broaden to all parameters.
-func ordinaryHelperParamStillImmutable(tx *gorm.DB) *gorm.DB {
+// SC104: Under Phase 1b (#61) an ordinary func(*gorm.DB) *gorm.DB helper's
+// parameter is a mutable root — a caller may pass a mid-chain value, so branching
+// it twice interferes. (Contrast with immutable-param-annotated helpers below.)
+func ordinaryHelperParamBranches(tx *gorm.DB) *gorm.DB {
 	tx.Where("a").Find(nil)
-	return tx.Where("b") // OK: ordinary parameter is immutable (caller's concern)
+	return tx.Where("b") // want `\*gorm\.DB reused: second branch from mutable root`
 }

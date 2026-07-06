@@ -72,6 +72,7 @@ func variadicInterfaceArgs(db *gorm.DB) {
 }
 
 // variadicInterfaceArgsMultiple: Multiple args to variadic
+//gormreuse:immutable-param
 func variadicInterfaceArgsMultiple(db *gorm.DB) {
 	q1 := db.Where("x")
 	q2 := db.Where("y")
@@ -84,6 +85,7 @@ func variadicInterfaceArgsMultiple(db *gorm.DB) {
 }
 
 // variadicInterfaceArgsOnlyOne: Only one of multiple is passed
+//gormreuse:immutable-param
 func variadicInterfaceArgsOnlyOne(db *gorm.DB) {
 	q1 := db.Where("x")
 	q2 := db.Where("y")
@@ -171,6 +173,7 @@ func gormOrMethodChain(db *gorm.DB) {
 }
 
 // gormOrMethodFresh: Fresh query passed to Or (no reuse)
+//gormreuse:immutable-param
 func gormOrMethodFresh(db *gorm.DB) {
 	base := db.Where("base")
 
@@ -196,6 +199,7 @@ func interfaceSliceLiteral(db *gorm.DB) {
 }
 
 // interfaceSliceMultiple: Multiple *gorm.DB in slice
+//gormreuse:immutable-param
 func interfaceSliceMultiple(db *gorm.DB) {
 	q1 := db.Where("x")
 	q2 := db.Where("y")
