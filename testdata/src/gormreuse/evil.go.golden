@@ -283,6 +283,14 @@ func deferFunctionCallWithDB(db *gorm.DB) {
 	defer helperPollute(q) // want `\*gorm\.DB instance reused after chain method`
 }
 
+// twoDefersNoDirectUse: two deferred branches from the same root with NO direct
+// use. Neither defer used to record pollution, so the reuse was missed (#67).
+func twoDefersNoDirectUse(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+	defer q.Find(nil)
+	defer q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
 // =============================================================================
 // SHOULD NOT REPORT - Defer safe patterns
 // =============================================================================
@@ -446,6 +454,14 @@ func goroutineCrossFunctionPollution(db *gorm.DB) {
 
 	// Start goroutine that uses the already-polluted q
 	// isPollutedAt should detect pollution from different function (closure)
+	go q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// twoGoroutinesNoDirectUse: two goroutine branches from the same root with NO
+// direct use. Neither go statement recorded pollution, so the reuse was missed (#67).
+func twoGoroutinesNoDirectUse(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+	go q.Find(nil)
 	go q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
 }
 
