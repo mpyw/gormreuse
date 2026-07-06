@@ -72,7 +72,7 @@ func RunSSA(
 	ssaInfo *buildssa.SSA,
 	ignoreMaps map[string]directive.IgnoreMap,
 	funcIgnores map[string]map[token.Pos]directive.FunctionIgnoreEntry,
-	pureFuncs, immutableReturnFuncs *directive.DirectiveFuncSet,
+	pureFuncs, immutableReturnFuncs, immutableParamFuncs *directive.DirectiveFuncSet,
 	skipFiles map[string]bool,
 ) {
 	// Share a single reported map across all functions to deduplicate
@@ -163,29 +163,38 @@ func RunSSA(
 		}
 	}
 
-	// Report unused pure directives
-	// For combined directives (e.g., //gormreuse:pure,immutable-return),
-	// if either part is used, don't report the other as unused
-	if pureFuncs != nil {
-		for _, pos := range pureFuncs.GetUnusedDirectives() {
-			// Skip if used by immutable-return (combined directive)
-			if immutableReturnFuncs != nil && immutableReturnFuncs.IsUsed(pos) {
+	reportUnusedDirectiveFuncs(pass, pureFuncs, immutableReturnFuncs, immutableParamFuncs)
+}
+
+// reportUnusedDirectiveFuncs reports pure / immutable-return / immutable-param
+// directives that matched no valid function. For combined directives (e.g.
+// //gormreuse:pure,immutable-return,immutable-param) a directive at a position
+// is "used" if ANY of its combined siblings is used, so each set is suppressed
+// when another set reports that position as used.
+func reportUnusedDirectiveFuncs(pass *analysis.Pass, pureFuncs, immutableReturnFuncs, immutableParamFuncs *directive.DirectiveFuncSet) {
+	usedByOther := func(pos token.Pos, others ...*directive.DirectiveFuncSet) bool {
+		for _, s := range others {
+			if s != nil && s.IsUsed(pos) {
+				return true
+			}
+		}
+		return false
+	}
+	report := func(set *directive.DirectiveFuncSet, message string, others ...*directive.DirectiveFuncSet) {
+		if set == nil {
+			return
+		}
+		for _, pos := range set.GetUnusedDirectives() {
+			if usedByOther(pos, others...) {
 				continue
 			}
-			pass.Reportf(pos, "unused gormreuse:pure directive")
+			pass.Reportf(pos, "%s", message)
 		}
 	}
 
-	// Report unused immutable-return directives
-	if immutableReturnFuncs != nil {
-		for _, pos := range immutableReturnFuncs.GetUnusedDirectives() {
-			// Skip if used by pure (combined directive)
-			if pureFuncs != nil && pureFuncs.IsUsed(pos) {
-				continue
-			}
-			pass.Reportf(pos, "unused gormreuse:immutable-return directive")
-		}
-	}
+	report(pureFuncs, "unused gormreuse:pure directive", immutableReturnFuncs, immutableParamFuncs)
+	report(immutableReturnFuncs, "unused gormreuse:immutable-return directive", pureFuncs, immutableParamFuncs)
+	report(immutableParamFuncs, "unused gormreuse:immutable-param directive", pureFuncs, immutableReturnFuncs)
 }
 
 // recoverPerFunction runs work, recovering from any panic so that a single

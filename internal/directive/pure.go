@@ -991,6 +991,14 @@ func NewImmutableReturnFuncSet(fset *token.FileSet, typesInfo *types.Info) *Dire
 	return newDirectiveFuncSet(fset, typesInfo, IsImmutableReturnDirective, hasGormDBReturn)
 }
 
+// NewImmutableParamFuncSet creates a DirectiveFuncSet for //gormreuse:immutable-param.
+// Like pure, the directive is only meaningful on a function with a *gorm.DB
+// parameter, so it reuses hasGormDBParameter for signature validation (an
+// immutable-param directive on a parameter-less function is reported unused).
+func NewImmutableParamFuncSet(fset *token.FileSet, typesInfo *types.Info) *DirectiveFuncSet {
+	return newDirectiveFuncSet(fset, typesInfo, IsImmutableParamDirective, hasGormDBParameter)
+}
+
 // BuildPureFunctionSet builds a set of functions marked with //gormreuse:pure.
 func BuildPureFunctionSet(file *ast.File, pkgPath string) map[FuncKey]struct{} {
 	return buildFunctionSet(file, pkgPath, IsPureDirective)
@@ -999,6 +1007,11 @@ func BuildPureFunctionSet(file *ast.File, pkgPath string) map[FuncKey]struct{} {
 // BuildImmutableReturnFunctionSet builds a set of functions marked with //gormreuse:immutable-return.
 func BuildImmutableReturnFunctionSet(file *ast.File, pkgPath string) map[FuncKey]struct{} {
 	return buildFunctionSet(file, pkgPath, IsImmutableReturnDirective)
+}
+
+// BuildImmutableParamFunctionSet builds a set of functions marked with //gormreuse:immutable-param.
+func BuildImmutableParamFunctionSet(file *ast.File, pkgPath string) map[FuncKey]struct{} {
+	return buildFunctionSet(file, pkgPath, IsImmutableParamDirective)
 }
 
 // =============================================================================
