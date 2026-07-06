@@ -35,6 +35,9 @@ package pollution
 
 import (
 	"go/token"
+	"path/filepath"
+	"strconv"
+	"strings"
 
 	"golang.org/x/tools/go/ssa"
 )
@@ -88,6 +91,10 @@ type Tracker struct {
 
 	// cfgAnalyzer for reachability checks.
 	cfgAnalyzer CFGAnalyzer
+
+	// fset renders root/first-branch positions in diagnostic messages. May be
+	// nil (positions are then omitted).
+	fset *token.FileSet
 }
 
 // CFGAnalyzer interface for control flow analysis.
@@ -95,14 +102,16 @@ type CFGAnalyzer interface {
 	CanReach(src, dst *ssa.BasicBlock) bool
 }
 
-// New creates a new Tracker.
-func New(cfgAnalyzer CFGAnalyzer) *Tracker {
+// New creates a new Tracker. fset is used to render source positions in reuse
+// diagnostics and may be nil (positions are then omitted).
+func New(cfgAnalyzer CFGAnalyzer, fset *token.FileSet) *Tracker {
 	return &Tracker{
 		pollutingUses:  make(map[ssa.Value][]UsageInfo),
 		pureUses:       make(map[ssa.Value][]UsageInfo),
 		assignmentUses: make(map[ssa.Value][]UsageInfo),
 		branchUses:     make(map[ssa.Value][]UsageInfo),
 		cfgAnalyzer:    cfgAnalyzer,
+		fset:           fset,
 	}
 }
 
@@ -155,10 +164,53 @@ func (t *Tracker) isReachable(pollutedBlock, targetBlock *ssa.BasicBlock) bool {
 func (t *Tracker) addViolationWithContext(pos token.Pos, root ssa.Value, allUses []UsageInfo) {
 	t.violations = append(t.violations, Violation{
 		Pos:     pos,
-		Message: "*gorm.DB instance reused after chain method (use .Session(&gorm.Session{}) to make it safe)",
+		Message: t.reuseMessage(root),
 		Root:    root,
 		AllUses: allUses,
 	})
+}
+
+// reuseMessage builds the reuse diagnostic. It names the mutable root and its
+// first branch (when their positions are known) so the report points the user
+// at all three sites — root, first branch, and the offending second branch (the
+// diagnostic's own position) — not just the last one (#76).
+func (t *Tracker) reuseMessage(root ssa.Value) string {
+	msg := "*gorm.DB reused: second branch from mutable root"
+
+	var locs []string
+	if root != nil && root.Pos().IsValid() {
+		locs = append(locs, "root at "+t.loc(root.Pos()))
+	}
+	if fb := t.firstBranchPos(root); fb.IsValid() {
+		locs = append(locs, "first branch at "+t.loc(fb))
+	}
+	if len(locs) > 0 {
+		msg += " (" + strings.Join(locs, ", ") + ")"
+	}
+
+	return msg + "; make the root immutable with .Session(&gorm.Session{})"
+}
+
+// loc renders pos as "file.go:line" (base name only — the file is almost always
+// the one being reported on, and absolute paths would be noise).
+func (t *Tracker) loc(pos token.Pos) string {
+	if t.fset == nil {
+		return ""
+	}
+	p := t.fset.Position(pos)
+	return filepath.Base(p.Filename) + ":" + strconv.Itoa(p.Line)
+}
+
+// firstBranchPos returns the earliest polluting use of root (its first branch),
+// which precedes the second branch that triggered the violation.
+func (t *Tracker) firstBranchPos(root ssa.Value) token.Pos {
+	best := token.NoPos
+	for _, u := range t.pollutingUses[root] {
+		if u.Pos.IsValid() && (!best.IsValid() || u.Pos < best) {
+			best = u.Pos
+		}
+	}
+	return best
 }
 
 // IsPolluted checks if a root has been polluted (for defer).

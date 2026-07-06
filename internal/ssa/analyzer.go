@@ -34,6 +34,8 @@
 package ssa
 
 import (
+	"go/token"
+
 	"golang.org/x/tools/go/ssa"
 
 	"github.com/mpyw/gormreuse/internal/directive"
@@ -99,7 +101,11 @@ func NewAnalyzer(fn *ssa.Function, pureFuncs, immutableReturnFuncs *directive.Di
 // Closures that capture *gorm.DB are processed recursively to detect
 // violations across closure boundaries.
 func (a *Analyzer) Analyze() []Violation {
-	tracker := pollution.New(a.cfgAnalyzer)
+	var fset *token.FileSet
+	if a.fn != nil && a.fn.Prog != nil {
+		fset = a.fn.Prog.Fset
+	}
+	tracker := pollution.New(a.cfgAnalyzer, fset)
 
 	// PHASE 1: TRACKING
 	// Process all instructions and record usages

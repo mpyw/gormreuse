@@ -18,7 +18,7 @@ func conditionalUsageBothMayExecute(db *gorm.DB, flag1, flag2 bool) {
 	}
 
 	if flag2 {
-		q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+		q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 	}
 }
 
@@ -42,7 +42,7 @@ func conditionalUsageOneConditionalOneUnconditional(db *gorm.DB, flag bool) {
 		q.Find(nil)
 	}
 
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // conditionalUsageNestedConditions demonstrates nested conditionals with usage.
@@ -52,7 +52,7 @@ func conditionalUsageNestedConditions(db *gorm.DB, a, b bool) {
 	if a {
 		q.Find(nil)
 		if b {
-			q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+			q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 		}
 	} else {
 		q.First(nil) // OK: mutually exclusive with Find branch
@@ -72,7 +72,7 @@ func loopAssignmentOnly(db *gorm.DB, items []int) {
 	}
 
 	q.Find(nil)   // OK: first actual use (loop only had assignments)
-	q.Count(nil)  // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil)  // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // loopConditionalAssignment demonstrates loop with conditional assignment.
@@ -88,7 +88,7 @@ func loopConditionalAssignment(db *gorm.DB, flags []bool) {
 	}
 
 	q.Find(nil)   // OK: first use after loop with conditional assignments only
-	q.Count(nil)  // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil)  // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // =============================================================================
@@ -107,7 +107,7 @@ func closureReuse(db *gorm.DB) {
 	fn()
 
 	// Detected: q was polluted inside the closure
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // closurePollutesOutside demonstrates closure polluting, then using outside.
@@ -118,7 +118,7 @@ func closurePollutesOutside(db *gorm.DB) {
 		q.Find(nil) // Pollutes q inside closure
 	}()
 
-	q.First(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.First(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // nestedClosure demonstrates nested closure detection.
@@ -133,7 +133,7 @@ func nestedClosure(db *gorm.DB) {
 	}
 	outer()
 
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // =============================================================================
@@ -179,7 +179,7 @@ func conditionalReuse(db *gorm.DB, flag bool) {
 		q.Where("b = ?", 2).Find(nil) // First use in else-branch (mutually exclusive)
 	}
 
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // conditionalBothBranches demonstrates that if/else branches are mutually exclusive.
@@ -194,7 +194,7 @@ func conditionalBothBranches(db *gorm.DB, flag bool) {
 	}
 
 	// After either branch, q is polluted - this IS a reuse
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // switchReuse demonstrates that switch cases are mutually exclusive.
@@ -224,7 +224,7 @@ func loopReuse(db *gorm.DB, items []string) {
 
 	for _, item := range items {
 		// Second iteration reuses polluted q
-		q.Where("item = ?", item).Find(nil) // want `\*gorm\.DB instance reused after chain method`
+		q.Where("item = ?", item).Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 	}
 }
 
@@ -234,7 +234,7 @@ func forLoopReuse(db *gorm.DB) {
 
 	for i := 0; i < 3; i++ {
 		// Second iteration reuses polluted q
-		q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+		q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 	}
 }
 
@@ -269,7 +269,7 @@ func deferReuse(db *gorm.DB) {
 	q := db.Where("x = ?", 1)
 
 	// Defer is processed in second pass, after q.Find pollutes q
-	defer q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	defer q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 
 	q.Find(nil) // LIMITATION: Not detected (defer executes after, but q.Find is first in code order)
 }
@@ -280,7 +280,7 @@ func deferFunctionCallWithDB(db *gorm.DB) {
 	q := db.Where("x = ?", 1)
 	q.Find(nil) // First use - pollutes q
 
-	defer helperPollute(q) // want `\*gorm\.DB instance reused after chain method`
+	defer helperPollute(q) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // twoDefersNoDirectUse: two deferred branches from the same root with NO direct
@@ -288,7 +288,7 @@ func deferFunctionCallWithDB(db *gorm.DB) {
 func twoDefersNoDirectUse(db *gorm.DB) {
 	q := db.Where("x = ?", 1)
 	defer q.Find(nil)
-	defer q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	defer q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // =============================================================================
@@ -320,7 +320,7 @@ func interProceduralPollution(db *gorm.DB) {
 	q := db.Where("x = ?", 1)
 	helperPollute(q) // Marks q as polluted (function assumed to pollute)
 
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // =============================================================================
@@ -373,7 +373,7 @@ func pureFactoryFunction() *gorm.DB {
 func pureFactoryUsage() {
 	db := pureFactoryFunction()
 	db.Find(nil)
-	db.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+	db.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // =============================================================================
@@ -391,7 +391,7 @@ func interfaceMethodPollution(db *gorm.DB, repo Repository) {
 	q := db.Where("x = ?", 1)
 	repo.Query(q) // Interface method assumed to pollute q
 
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // =============================================================================
@@ -404,7 +404,7 @@ func channelPollution(db *gorm.DB, ch chan *gorm.DB) {
 	q := db.Where("x = ?", 1)
 	ch <- q // Sending to channel marks q as polluted
 
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // =============================================================================
@@ -420,7 +420,7 @@ func goroutineClosureReuse(db *gorm.DB) {
 		q.Find(nil) // Pollutes q in goroutine closure
 	}()
 
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // goroutineDirectMethodCall demonstrates direct method call in goroutine.
@@ -429,7 +429,7 @@ func goroutineDirectMethodCall(db *gorm.DB) {
 	q := db.Where("x = ?", 1)
 	q.Find(nil) // First use - pollutes q
 
-	go q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	go q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // goroutineFunctionCallWithDB demonstrates passing *gorm.DB to function in goroutine.
@@ -438,7 +438,7 @@ func goroutineFunctionCallWithDB(db *gorm.DB) {
 	q := db.Where("x = ?", 1)
 	q.Find(nil) // First use - pollutes q
 
-	go helperPollute(q) // want `\*gorm\.DB instance reused after chain method`
+	go helperPollute(q) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // goroutineCrossFunctionPollution demonstrates cross-function pollution with goroutine.
@@ -454,7 +454,7 @@ func goroutineCrossFunctionPollution(db *gorm.DB) {
 
 	// Start goroutine that uses the already-polluted q
 	// isPollutedAt should detect pollution from different function (closure)
-	go q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	go q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // twoGoroutinesNoDirectUse: two goroutine branches from the same root with NO
@@ -462,7 +462,7 @@ func goroutineCrossFunctionPollution(db *gorm.DB) {
 func twoGoroutinesNoDirectUse(db *gorm.DB) {
 	q := db.Where("x = ?", 1)
 	go q.Find(nil)
-	go q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	go q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // =============================================================================
@@ -511,7 +511,7 @@ func tripleNestedClosure(db *gorm.DB) {
 	}
 	level1()
 
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // quadrupleNestedClosure demonstrates 4-level nested closure detection.
@@ -528,7 +528,7 @@ func quadrupleNestedClosure(db *gorm.DB) {
 		}()
 	}()
 
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // tripleNestedClosureSafe demonstrates 3-level nested closure with Session.
@@ -555,7 +555,7 @@ func parentPollutesNestedClosureUses(db *gorm.DB) {
 
 	func() {
 		func() {
-			q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+			q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 		}()
 	}()
 }
@@ -569,7 +569,7 @@ func parentPollutesTripleNestedUses(db *gorm.DB) {
 	func() {
 		func() {
 			func() {
-				q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+				q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 			}()
 		}()
 	}()
@@ -592,7 +592,7 @@ func higherOrderGoroutine(db *gorm.DB) {
 
 	go makeWorker(q)() // Pollutes q through higher-order function
 
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // makeWorkerMaker returns a function that returns a function.
@@ -610,7 +610,7 @@ func doubleHigherOrderGoroutine(db *gorm.DB) {
 
 	go makeWorkerMaker(q)()() // Pollutes q through double higher-order
 
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // tripleHigherOrder demonstrates go fn()()()() pattern.
@@ -629,7 +629,7 @@ func tripleHigherOrder(db *gorm.DB) {
 
 	go maker(q)()()() // Pollutes q through triple higher-order
 
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // =============================================================================
@@ -659,7 +659,7 @@ func goroutineInsideDefer(db *gorm.DB) {
 		}()
 	}()
 
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // nestedDeferGoroutineDefer demonstrates defer->goroutine->defer chain.
@@ -681,8 +681,8 @@ func nestedDeferGoroutineDefer(db *gorm.DB) {
 func multipleDefers(db *gorm.DB) {
 	q := db.Where("x = ?", 1)
 
-	defer q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
-	defer q.First(nil) // want `\*gorm\.DB instance reused after chain method`
+	defer q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	defer q.First(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 
 	q.Find(nil) // LIMITATION: Not detected (defers execute after, but q.Find is first in code order)
 }
@@ -713,7 +713,7 @@ func freeVarFrom4To2(db *gorm.DB) {
 	}
 	level1()
 
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // freeVarMixedLevels demonstrates FreeVar with mixed usage levels.
@@ -736,7 +736,7 @@ func freeVarMixedLevels(db *gorm.DB) {
 	}
 	outer()
 
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // =============================================================================
@@ -751,7 +751,7 @@ func iifeReuse(db *gorm.DB) {
 		q.Find(nil)
 	}()
 
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // nestedIIFE demonstrates nested IIFE pattern.
@@ -764,7 +764,7 @@ func nestedIIFE(db *gorm.DB) {
 		}()
 	}()
 
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // iifeWithArgument demonstrates IIFE with argument passing.
@@ -775,7 +775,7 @@ func iifeWithArgument(db *gorm.DB) {
 		d.Find(nil)
 	}(q)
 
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // iifeReturnChain demonstrates IIFE returning chain result.
@@ -789,7 +789,7 @@ func iifeReturnChain(db *gorm.DB) {
 	}().Find(nil) // First branch (IIFE chain counts as single branch)
 
 	// Second branch from q - violation
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // =============================================================================
@@ -821,7 +821,7 @@ func multiStructField(db *gorm.DB) {
 	h := multiHolder{q1: q, q2: q}
 	h.q1.Find(nil) // First use - pollutes underlying q
 
-	h.q2.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	h.q2.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // =============================================================================
@@ -834,7 +834,7 @@ func pointerIndirection(db *gorm.DB) {
 	ptr := &q
 	(*ptr).Find(nil) // Pollutes q through pointer
 
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // doublePointer demonstrates double pointer indirection.
@@ -844,7 +844,7 @@ func doublePointer(db *gorm.DB) {
 	ptr2 := &ptr
 	(**ptr2).Find(nil) // Pollutes q through double pointer
 
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // =============================================================================
@@ -872,7 +872,7 @@ func slicePollution(db *gorm.DB) {
 	q := db.Where("x = ?", 1)
 	_ = []*gorm.DB{q} // Storing in slice marks q as polluted
 
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // mapPollution demonstrates pollution through map storage.
@@ -881,7 +881,7 @@ func mapPollution(db *gorm.DB) {
 	q := db.Where("x = ?", 1)
 	_ = map[string]*gorm.DB{"main": q} // Storing in map marks q as polluted
 
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // =============================================================================
@@ -898,7 +898,7 @@ func panicRecover(db *gorm.DB) {
 		}
 	}()
 
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // =============================================================================
@@ -917,7 +917,7 @@ func selectStatement(db *gorm.DB, ch chan int) {
 		q.First(nil) // First use in default (mutually exclusive)
 	}
 
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // =============================================================================
@@ -932,7 +932,7 @@ func methodValue(db *gorm.DB) {
 	find := q.Find
 	find(nil) // Pollutes q through method value
 
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // methodValueSameBlock demonstrates same-block pollution with method value.
@@ -941,7 +941,7 @@ func methodValueSameBlock(db *gorm.DB) {
 	q := db.Where("x = ?", 1)
 	find := q.Find
 	find(nil)  // First use - pollutes q
-	find(nil)  // want `\*gorm\.DB instance reused after chain method`
+	find(nil)  // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // methodValueInLoop demonstrates method value in loop.
@@ -951,7 +951,7 @@ func methodValueInLoop(db *gorm.DB, items []string) {
 	find := q.Find
 
 	for range items {
-		find(nil) // want `\*gorm\.DB instance reused after chain method`
+		find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 	}
 }
 
@@ -1031,7 +1031,7 @@ func helperWithNamedReturn(db *gorm.DB) (result *gorm.DB) {
 func namedReturn(db *gorm.DB) {
 	q := helperWithNamedReturn(db)
 	q.Find(nil)
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // =============================================================================
@@ -1050,7 +1050,7 @@ func variadicPollution(db *gorm.DB) {
 	q := db.Where("x = ?", 1)
 	processQueries(q) // Function call assumed to pollute q
 
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // =============================================================================
@@ -1070,7 +1070,7 @@ func gotoStatement(db *gorm.DB, flag bool) {
 	q.First(nil)
 
 cleanup:
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // =============================================================================
@@ -1087,7 +1087,7 @@ func switchFallthrough(db *gorm.DB, level int) {
 		q.Find(nil) // First use in case 0
 		fallthrough
 	case 1:
-		q.First(nil) // want `\*gorm\.DB instance reused after chain method`
+		q.First(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 	}
 }
 
@@ -1104,10 +1104,10 @@ func multipleGoroutines(db *gorm.DB) {
 	}()
 
 	go func() {
-		q.First(nil) // want `\*gorm\.DB instance reused after chain method`
+		q.First(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 	}()
 
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // =============================================================================
@@ -1124,7 +1124,7 @@ func interleavedCalls(db *gorm.DB) {
 		}(d)
 	}(q)
 
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // =============================================================================
@@ -1144,7 +1144,7 @@ func combinedChaos(db *gorm.DB) {
 		}()
 	}()
 
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // ultimateChaos demonstrates the ultimate evil pattern.
@@ -1167,7 +1167,7 @@ func ultimateChaos(db *gorm.DB) {
 		}()
 	}()
 
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // =============================================================================
@@ -1191,7 +1191,7 @@ func nestedIf(db *gorm.DB, a, b, c bool) {
 		}
 	}
 
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // deepNestedIf demonstrates 4-level nested if.
@@ -1209,7 +1209,7 @@ func deepNestedIf(db *gorm.DB, a, b, c, d bool) {
 		}
 	}
 
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // ifElseChain demonstrates if-else-if chain with mutually exclusive branches.
@@ -1227,7 +1227,7 @@ func ifElseChain(db *gorm.DB, level int) {
 		q.Take(nil) // First use in else (mutually exclusive)
 	}
 
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // =============================================================================
@@ -1240,7 +1240,7 @@ func ifInsideFor(db *gorm.DB, items []string) {
 
 	for _, item := range items {
 		if item != "" {
-			q.Where("item = ?", item).Find(nil) // want `\*gorm\.DB instance reused after chain method`
+			q.Where("item = ?", item).Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 		}
 	}
 }
@@ -1251,9 +1251,9 @@ func ifElseInsideFor(db *gorm.DB, items []int) {
 
 	for _, item := range items {
 		if item > 0 {
-			q.Where("positive = ?", item).Find(nil) // want `\*gorm\.DB instance reused after chain method`
+			q.Where("positive = ?", item).Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 		} else {
-			q.Where("negative = ?", item).Find(nil) // want `\*gorm\.DB instance reused after chain method`
+			q.Where("negative = ?", item).Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 		}
 	}
 }
@@ -1265,7 +1265,7 @@ func nestedIfInsideFor(db *gorm.DB, items []int, flag bool) {
 	for _, item := range items {
 		if item > 0 {
 			if flag {
-				q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+				q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 			}
 		}
 	}
@@ -1281,11 +1281,11 @@ func forInsideIf(db *gorm.DB, items []string, flag bool) {
 
 	if flag {
 		for _, item := range items {
-			q.Where("item = ?", item).Find(nil) // want `\*gorm\.DB instance reused after chain method`
+			q.Where("item = ?", item).Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 		}
 	}
 
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // forInsideIfElse demonstrates for inside if-else branches.
@@ -1294,15 +1294,15 @@ func forInsideIfElse(db *gorm.DB, items []string, flag bool) {
 
 	if flag {
 		for _, item := range items {
-			q.Where("a = ?", item).Find(nil) // want `\*gorm\.DB instance reused after chain method`
+			q.Where("a = ?", item).Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 		}
 	} else {
 		for _, item := range items {
-			q.Where("b = ?", item).Find(nil) // want `\*gorm\.DB instance reused after chain method`
+			q.Where("b = ?", item).Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 		}
 	}
 
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // =============================================================================
@@ -1315,7 +1315,7 @@ func nestedFor(db *gorm.DB, outer, inner []string) {
 
 	for _, o := range outer {
 		for _, i := range inner {
-			q.Where("o = ? AND i = ?", o, i).Find(nil) // want `\*gorm\.DB instance reused after chain method`
+			q.Where("o = ? AND i = ?", o, i).Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 		}
 	}
 }
@@ -1327,7 +1327,7 @@ func tripleNestedFor(db *gorm.DB) {
 	for i := 0; i < 3; i++ {
 		for j := 0; j < 3; j++ {
 			for k := 0; k < 3; k++ {
-				q.Where("i = ? AND j = ? AND k = ?", i, j, k).Find(nil) // want `\*gorm\.DB instance reused after chain method`
+				q.Where("i = ? AND j = ? AND k = ?", i, j, k).Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 			}
 		}
 	}
@@ -1344,10 +1344,10 @@ func forWithBreakContinue(db *gorm.DB, items []int) {
 		if item > 100 {
 			break
 		}
-		q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+		q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 	}
 
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // =============================================================================
@@ -1359,7 +1359,7 @@ func deferInsideIf(db *gorm.DB, flag bool) {
 	q := db.Where("x = ?", 1)
 
 	if flag {
-		defer q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+		defer q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 	}
 
 	q.Find(nil) // LIMITATION: Not detected (conditional defer)
@@ -1371,9 +1371,9 @@ func deferInsideIfElse(db *gorm.DB, flag bool) {
 	q := db.Where("x = ?", 1)
 
 	if flag {
-		defer q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+		defer q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 	} else {
-		defer q.First(nil) // want `\*gorm\.DB instance reused after chain method`
+		defer q.First(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 	}
 
 	q.Find(nil) // First use - defers execute AFTER this at function exit
@@ -1386,7 +1386,7 @@ func deferInsideNestedIf(db *gorm.DB, a, b bool) {
 
 	if a {
 		if b {
-			defer q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+			defer q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 		}
 	}
 
@@ -1398,8 +1398,8 @@ func multipleDeferInsideIf(db *gorm.DB, flag bool) {
 	q := db.Where("x = ?", 1)
 
 	if flag {
-		defer q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
-		defer q.First(nil) // want `\*gorm\.DB instance reused after chain method`
+		defer q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+		defer q.First(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 	}
 
 	q.Find(nil) // LIMITATION: Not detected (conditional defer)
@@ -1415,7 +1415,7 @@ func deferInsideFor(db *gorm.DB, items []string) {
 	q := db.Where("x = ?", 1)
 
 	for range items {
-		defer q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+		defer q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 	}
 
 	q.Find(nil) // LIMITATION: Not detected (defer inside loop)
@@ -1432,7 +1432,7 @@ func deferInsideForWithCondition(db *gorm.DB, items []int) {
 		}
 	}
 
-	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // deferInsideNestedFor demonstrates defer inside nested for.
@@ -1446,7 +1446,7 @@ func deferInsideNestedFor(db *gorm.DB) {
 		}
 	}
 
-	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // =============================================================================
@@ -1464,7 +1464,7 @@ func forInsideDefer(db *gorm.DB, items []string) {
 		}
 	}()
 
-	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // nestedForInsideDefer demonstrates nested for inside defer.
@@ -1480,7 +1480,7 @@ func nestedForInsideDefer(db *gorm.DB) {
 		}
 	}()
 
-	q.Where("setup").Find(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Where("setup").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // =============================================================================
@@ -1497,7 +1497,7 @@ func ifInsideDefer(db *gorm.DB, flag bool) {
 		}
 	}()
 
-	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // ifElseInsideDefer demonstrates if-else inside defer closure.
@@ -1512,7 +1512,7 @@ func ifElseInsideDefer(db *gorm.DB, flag bool) {
 		}
 	}()
 
-	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // nestedIfInsideDefer demonstrates nested if inside defer.
@@ -1529,7 +1529,7 @@ func nestedIfInsideDefer(db *gorm.DB, a, b bool) {
 		}
 	}()
 
-	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // =============================================================================
@@ -1542,7 +1542,7 @@ func ifForDefer(db *gorm.DB, flag bool, items []string) {
 
 	if flag {
 		for range items {
-			defer q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+			defer q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 		}
 	}
 
@@ -1560,7 +1560,7 @@ func forIfDefer(db *gorm.DB, items []int) {
 		}
 	}
 
-	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // deferIfFor demonstrates defer closure containing if containing for.
@@ -1576,7 +1576,7 @@ func deferIfFor(db *gorm.DB, flag bool, items []string) {
 		}
 	}()
 
-	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // deferForIf demonstrates defer closure containing for containing if.
@@ -1592,7 +1592,7 @@ func deferForIf(db *gorm.DB, items []int) {
 		}
 	}()
 
-	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // tripleNestingIfForDefer demonstrates 3-level nesting: if -> for -> defer.
@@ -1610,7 +1610,7 @@ func tripleNestingIfForDefer(db *gorm.DB, flag bool, items []string) {
 		}
 	}
 
-	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // tripleNestingForIfDefer demonstrates 3-level nesting: for -> if -> defer.
@@ -1626,7 +1626,7 @@ func tripleNestingForIfDefer(db *gorm.DB, items []int) {
 		}
 	}
 
-	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // tripleNestingDeferIfFor demonstrates 3-level nesting: defer -> if -> for.
@@ -1642,7 +1642,7 @@ func tripleNestingDeferIfFor(db *gorm.DB, flag bool, items []string) {
 		}
 	}()
 
-	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // tripleNestingDeferForIf demonstrates 3-level nesting: defer -> for -> if.
@@ -1658,7 +1658,7 @@ func tripleNestingDeferForIf(db *gorm.DB, items []int) {
 		}
 	}()
 
-	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // =============================================================================
@@ -1672,7 +1672,7 @@ func quadNestingIfForIfDefer(db *gorm.DB, a bool, items []int) {
 	if a {
 		for _, item := range items {
 			if item > 0 {
-				defer q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+				defer q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 			}
 		}
 	}
@@ -1687,12 +1687,12 @@ func quadNestingForIfForDefer(db *gorm.DB, outer []bool, inner []int) {
 	for _, flag := range outer {
 		if flag {
 			for range inner {
-				defer q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+				defer q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 			}
 		}
 	}
 
-	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // quadNestingDeferIfForIf demonstrates 4-level: defer -> if -> for -> if.
@@ -1710,7 +1710,7 @@ func quadNestingDeferIfForIf(db *gorm.DB, a bool, items []int) {
 		}
 	}()
 
-	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // quadNestingDeferForIfFor demonstrates 4-level: defer -> for -> if -> for.
@@ -1728,7 +1728,7 @@ func quadNestingDeferForIfFor(db *gorm.DB, outer []bool) {
 		}
 	}()
 
-	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // =============================================================================
@@ -1740,11 +1740,11 @@ func multipleDefersInDifferentBranches(db *gorm.DB, level int) {
 	q := db.Where("x = ?", 1)
 
 	if level == 0 {
-		defer q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+		defer q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 	} else if level == 1 {
-		defer q.First(nil) // want `\*gorm\.DB instance reused after chain method`
+		defer q.First(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 	} else {
-		defer q.Last(nil) // want `\*gorm\.DB instance reused after chain method`
+		defer q.Last(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 	}
 
 	q.Find(nil) // First use - defers execute AFTER this at function exit
@@ -1756,13 +1756,13 @@ func multipleDefersInLoopBranches(db *gorm.DB, items []int) {
 
 	for _, item := range items {
 		if item > 0 {
-			defer q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+			defer q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 		} else {
-			defer q.First(nil) // want `\*gorm\.DB instance reused after chain method`
+			defer q.First(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 		}
 	}
 
-	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // =============================================================================
@@ -1774,7 +1774,7 @@ func multipleDefersInLoopBranches(db *gorm.DB, items []int) {
 func earlyReturnWithDefer(db *gorm.DB, flag bool) {
 	q := db.Where("x = ?", 1)
 
-	defer q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	defer q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 
 	if flag {
 		q.Find(nil) // Pollutes q
@@ -1789,14 +1789,14 @@ func earlyReturnWithDefer(db *gorm.DB, flag bool) {
 func earlyReturnInLoopWithDefer(db *gorm.DB, items []int) {
 	q := db.Where("x = ?", 1)
 
-	defer q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	defer q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 
 	for _, item := range items {
 		if item < 0 {
-			q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+			q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 			return
 		}
-		q.Where("item = ?", item).Find(nil) // want `\*gorm\.DB instance reused after chain method`
+		q.Where("item = ?", item).Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 	}
 }
 
@@ -1808,16 +1808,16 @@ func earlyReturnInLoopWithDefer(db *gorm.DB, items []int) {
 func labeledBreakWithDefer(db *gorm.DB) {
 	q := db.Where("x = ?", 1)
 
-	defer q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	defer q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 
 outer:
 	for i := 0; i < 3; i++ {
 		for j := 0; j < 3; j++ {
 			if i == 1 && j == 1 {
-				q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+				q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 				break outer
 			}
-			q.Where("i = ? AND j = ?", i, j).Find(nil) // want `\*gorm\.DB instance reused after chain method`
+			q.Where("i = ? AND j = ?", i, j).Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 		}
 	}
 }
@@ -1826,16 +1826,16 @@ outer:
 func labeledContinueWithDefer(db *gorm.DB) {
 	q := db.Where("x = ?", 1)
 
-	defer q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	defer q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 
 outer:
 	for i := 0; i < 3; i++ {
 		for j := 0; j < 3; j++ {
 			if j == 1 {
-				q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+				q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 				continue outer
 			}
-			q.Where("i = ? AND j = ?", i, j).Find(nil) // want `\*gorm\.DB instance reused after chain method`
+			q.Where("i = ? AND j = ?", i, j).Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 		}
 	}
 }
@@ -1861,7 +1861,7 @@ func foreverLoopWithBreak(db *gorm.DB, ch chan bool) {
 		break // Prevent actual infinite loop in test
 	}
 
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // =============================================================================
@@ -1896,7 +1896,7 @@ func deferCapturingLoopVar(db *gorm.DB, items []string) {
 		}()
 	}
 
-	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // =============================================================================
@@ -1913,7 +1913,7 @@ func nestedDeferClosures(db *gorm.DB) {
 		}()
 	}()
 
-	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // tripleNestedDeferClosures demonstrates 3-level nested defer closures.
@@ -1928,7 +1928,7 @@ func tripleNestedDeferClosures(db *gorm.DB) {
 		}()
 	}()
 
-	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // nestedDeferWithFor demonstrates nested defer with for.
@@ -1943,7 +1943,7 @@ func nestedDeferWithFor(db *gorm.DB) {
 		}
 	}()
 
-	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // =============================================================================
@@ -1954,10 +1954,10 @@ func nestedDeferWithFor(db *gorm.DB) {
 func rangeOverChannelWithDefer(db *gorm.DB, ch chan int) {
 	q := db.Where("x = ?", 1)
 
-	defer q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	defer q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 
 	for item := range ch {
-		q.Where("item = ?", item).Find(nil) // want `\*gorm\.DB instance reused after chain method`
+		q.Where("item = ?", item).Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 	}
 }
 
@@ -1970,7 +1970,7 @@ func rangeOverChannelWithDefer(db *gorm.DB, ch chan int) {
 func typeSwitchWithDefer(db *gorm.DB, v interface{}) {
 	q := db.Where("x = ?", 1)
 
-	defer q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	defer q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 
 	switch v.(type) {
 	case int:
@@ -1989,9 +1989,9 @@ func typeSwitchInsideFor(db *gorm.DB, items []interface{}) {
 	for _, item := range items {
 		switch item.(type) {
 		case int:
-			q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+			q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 		case string:
-			q.First(nil) // want `\*gorm\.DB instance reused after chain method`
+			q.First(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 		}
 	}
 }
@@ -2020,7 +2020,7 @@ func ultimateIfForDeferChaos(db *gorm.DB, a, b bool, outer []int, inner []string
 		}
 	}()
 
-	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // =============================================================================
@@ -2041,7 +2041,7 @@ func tripleNestedIIFE(db *gorm.DB) {
 	}().Find(nil)
 
 	// Second branch - violation
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // tripleNestedIIFEWithBranch demonstrates IIFE with conditional branches.
@@ -2057,7 +2057,7 @@ func tripleNestedIIFEWithBranch(db *gorm.DB, cond bool) {
 	}().Find(nil)
 
 	// Second branch - violation
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // =============================================================================
@@ -2081,7 +2081,7 @@ func iifeMultipleReturns(db *gorm.DB, flag int) {
 	}().Find(nil)
 
 	// Second branch - violation
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // =============================================================================
@@ -2123,7 +2123,7 @@ func structFieldIIFE(db *gorm.DB) {
 	h.query.Find(nil) // [LIMITATION] Does not trace through struct field
 
 	// Second use of q - violation (q was polluted by IIFE's internal call)
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // =============================================================================
@@ -2140,7 +2140,7 @@ func chainedIIFE(db *gorm.DB) {
 	}().Where("second", 2).Find(nil)
 
 	// Second branch - violation
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // =============================================================================
@@ -2157,7 +2157,7 @@ func iifeCaptureAndModify(db *gorm.DB) {
 	}()
 
 	result.Find(nil)
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // =============================================================================
@@ -2179,7 +2179,7 @@ func iifeWithPhiNode(db *gorm.DB, cond bool) {
 	}().Find(nil)
 
 	// Second branch - violation
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // =============================================================================
@@ -2197,7 +2197,7 @@ func iifeArgumentReturnsChain(db *gorm.DB) {
 	}(q).Find(nil)
 
 	// Second branch - violation
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // iifeArgumentAndFreeVarMixed demonstrates IIFE with both argument and FreeVar.
@@ -2211,8 +2211,8 @@ func iifeArgumentAndFreeVarMixed(db *gorm.DB) {
 		return inner.Where("arg", 1)
 	}(q1).Find(nil)
 
-	q1.Count(nil) // want `\*gorm\.DB instance reused after chain method`
-	q2.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q1.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	q2.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // =============================================================================
@@ -2247,9 +2247,9 @@ func deepNestedMixedCapture(db *gorm.DB) {
 	}().Find(nil)
 
 	// All second branches - violations
-	q1.Count(nil) // want `\*gorm\.DB instance reused after chain method`
-	q2.Count(nil) // want `\*gorm\.DB instance reused after chain method`
-	q3.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q1.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	q2.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	q3.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // =============================================================================
@@ -2267,7 +2267,7 @@ func storedClosureChain(db *gorm.DB) {
 	}
 	q2 := fn()         // q2 holds first branch from q1
 	q2.Where("y", 2)   // Continues q2's chain (OK)
-	q1.Where("z", 3)   // want `\*gorm\.DB instance reused after chain method`
+	q1.Where("z", 3)   // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // storedClosureReordered demonstrates order of calls with stored closure.
@@ -2282,7 +2282,7 @@ func storedClosureReordered(db *gorm.DB) {
 		return q1.Where("from closure", 1) // Pollutes q1 (closure body processed first in SSA)
 	}
 	q2 := fn()
-	q1.Where("z", 3) // want `\*gorm\.DB instance reused after chain method`
+	q1.Where("z", 3) // want `\*gorm\.DB reused: second branch from mutable root`
 	q2.Where("y", 2) // OK: q2 is fresh root
 }
 
@@ -2295,7 +2295,7 @@ func iifeStoredResult(db *gorm.DB) {
 		return q1.Where("from iife", 1)
 	}()
 	q2.Where("y", 2)   // Continues q2's chain (OK)
-	q1.Where("z", 3)   // want `\*gorm\.DB instance reused after chain method`
+	q1.Where("z", 3)   // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // =============================================================================
@@ -2314,7 +2314,7 @@ func beginReturnsImmutable(db *gorm.DB) {
 func beginChainedBecomesMutable(db *gorm.DB) {
 	tx := db.Begin().Where("x = ?", 1)
 	tx.Find(nil)
-	tx.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	tx.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // =============================================================================
@@ -2328,7 +2328,7 @@ func reassignInLoop(db *gorm.DB, items []string) {
 	for _, item := range items {
 		q = db.Where("name = ?", item)
 		q.Find(nil)
-		q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+		q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 	}
 }
 
@@ -2353,7 +2353,7 @@ func reassignConditionalPartial(db *gorm.DB, flag bool) {
 		q = db.Where("y = ?", 2) // Reassigns q in this branch only
 	}
 
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // reassignConditionalBoth demonstrates reassignment in both branches.
@@ -2377,7 +2377,7 @@ func reassignAfterPollutionSameValue(db *gorm.DB) {
 	base := db.Where("x = ?", 1)
 	base.Find(nil) // Pollutes base
 
-	q := base.Where("y = ?", 2) // want `\*gorm\.DB instance reused after chain method`
+	q := base.Where("y = ?", 2) // want `\*gorm\.DB reused: second branch from mutable root`
 	q.Count(nil)                // OK: q is a fresh root
 }
 
@@ -2390,10 +2390,10 @@ func reassignShadowing(db *gorm.DB) {
 	{
 		q := db.Where("y = ?", 2) // New variable (shadows)
 		q.Find(nil)               // Pollutes inner q
-		q.Count(nil)              // want `\*gorm\.DB instance reused after chain method`
+		q.Count(nil)              // want `\*gorm\.DB reused: second branch from mutable root`
 	}
 
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // reassignInClosure demonstrates reassignment inside closure.
@@ -2405,7 +2405,7 @@ func reassignInClosure(db *gorm.DB) {
 		q = db.Where("y = ?", 2) // Reassign in closure
 	}()
 
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // reassignFromHelper demonstrates reassignment from helper function.
@@ -2415,7 +2415,7 @@ func reassignFromHelper(db *gorm.DB) {
 
 	q = helperReturnsDB(db) // Reassign from helper
 	q.Find(nil)             // Pollutes new q
-	q.Count(nil)            // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil)            // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 func helperReturnsDB(db *gorm.DB) *gorm.DB {
@@ -2441,7 +2441,7 @@ func reassignChainExtension(db *gorm.DB) {
 	q = db.Where("y = ?", 2)
 	q = q.Where("z = ?", 3) // Extend the new chain
 	q.Find(nil)             // Pollutes new q
-	q.Count(nil)            // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil)            // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // reassignMultipleTimes demonstrates multiple reassignments.
@@ -2474,7 +2474,7 @@ func reassignInSwitch(db *gorm.DB, mode int) {
 		// No reassignment in default - q is still polluted
 	}
 
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // reassignInSwitchAll demonstrates reassignment in all switch branches.
@@ -2502,7 +2502,7 @@ func reassignFromMethodValue(db *gorm.DB) {
 	where := db.Where
 	q = where("y = ?", 2) // Reassign from method value
 	q.Find(nil)           // Pollutes new q
-	q.Count(nil)          // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil)          // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // reassignDeferredUse demonstrates reassignment with deferred use.
@@ -2510,7 +2510,7 @@ func reassignFromMethodValue(db *gorm.DB) {
 func reassignDeferredUse(db *gorm.DB) {
 	q := db.Where("x = ?", 1)
 
-	defer q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+	defer q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 
 	q.Count(nil) // Pollutes q, defer will use this polluted q
 
@@ -2528,8 +2528,8 @@ func reassignPointerDeref(db *gorm.DB) {
 	*p = db.Where("y = ?", 2) // Reassign through pointer
 
 	// [LIMITATION] FALSE POSITIVE: Pointer reassignment creates new root tracking
-	q.Find(nil)  // want `\*gorm\.DB instance reused after chain method`
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Find(nil)  // want `\*gorm\.DB reused: second branch from mutable root`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // =============================================================================
@@ -2557,7 +2557,7 @@ func pointerPhiCase(db *gorm.DB, flag bool) {
 	(*pp).Find(nil) // Pollutes through pointer
 
 	// q1 is detected because traceAllAllocStores finds the store
-	q1.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q1.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 	// q2 detection depends on SSA structure - may or may not be detected
 	q2.Count(nil)
 }
@@ -2582,7 +2582,7 @@ func pureMethodUsage() {
 	wrapper := &OrmWrapper{}
 	db := wrapper.GetDB()
 	db.Find(nil)
-	db.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+	db.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // =============================================================================
@@ -2598,7 +2598,7 @@ func whereOnlyBasic(db *gorm.DB) {
 
 	q.Where("a").Find(nil) // First branch - pollutes q
 
-	q.Where("b") // want `\*gorm\.DB instance reused after chain method`
+	q.Where("b") // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // whereOnlyChain demonstrates chained Where without finisher.
@@ -2607,7 +2607,7 @@ func whereOnlyChain(db *gorm.DB) {
 
 	q.Find(nil) // First branch - pollutes q
 
-	q.Where("a").Where("b").Order("c") // want `\*gorm\.DB instance reused after chain method`
+	q.Where("a").Where("b").Order("c") // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // whereOnlyClosure demonstrates closure pollution then Where-only outside.
@@ -2618,7 +2618,7 @@ func whereOnlyClosure(db *gorm.DB) {
 		q.Find(nil) // Pollutes q inside closure
 	}()
 
-	q.Where("outside") // want `\*gorm\.DB instance reused after chain method`
+	q.Where("outside") // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // whereOnlyIIFE demonstrates IIFE pollution then Where-only outside.
@@ -2629,7 +2629,7 @@ func whereOnlyIIFE(db *gorm.DB) {
 		return q.Where("from iife")
 	}().Find(nil) // First branch (IIFE chain)
 
-	q.Where("outside") // want `\*gorm\.DB instance reused after chain method`
+	q.Where("outside") // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // whereOnlyLoop demonstrates loop pollution with Where-only.
@@ -2637,7 +2637,7 @@ func whereOnlyLoop(db *gorm.DB, items []int) {
 	q := db.Where("x = ?", 1)
 
 	for range items {
-		q.Where("in loop") // want `\*gorm\.DB instance reused after chain method`
+		q.Where("in loop") // want `\*gorm\.DB reused: second branch from mutable root`
 	}
 }
 
@@ -2651,14 +2651,14 @@ func whereOnlyConditional(db *gorm.DB, flag bool) {
 		q.Count(nil) // First branch (mutually exclusive)
 	}
 
-	q.Where("after conditional") // want `\*gorm\.DB instance reused after chain method`
+	q.Where("after conditional") // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // whereOnlyDefer demonstrates defer with Where-only.
 func whereOnlyDefer(db *gorm.DB) {
 	q := db.Where("x = ?", 1)
 
-	defer q.Where("deferred") // want `\*gorm\.DB instance reused after chain method`
+	defer q.Where("deferred") // want `\*gorm\.DB reused: second branch from mutable root`
 
 	q.Find(nil)
 }
@@ -2672,7 +2672,7 @@ func whereOnlyGoroutine(db *gorm.DB) {
 		q.Where("in goroutine")
 	}()
 
-	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // whereOnlyStoredClosure demonstrates stored closure with Where-only violation.
@@ -2684,7 +2684,7 @@ func whereOnlyStoredClosure(db *gorm.DB) {
 	}
 	fn()
 
-	q.Where("after stored closure") // want `\*gorm\.DB instance reused after chain method`
+	q.Where("after stored closure") // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // whereOnlyStoredClosureReturn demonstrates stored closure returning chain.
@@ -2696,7 +2696,7 @@ func whereOnlyStoredClosureReturn(db *gorm.DB) {
 	}
 	_ = fn().Find(nil) // First branch
 
-	q.Where("after") // want `\*gorm\.DB instance reused after chain method`
+	q.Where("after") // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // whereOnlyIIFEStored demonstrates stored IIFE result with Where-only.
@@ -2709,7 +2709,7 @@ func whereOnlyIIFEStored(db *gorm.DB) {
 	}()
 
 	q2.Where("use stored") // Continues q2's chain (OK)
-	q.Where("original")    // want `\*gorm\.DB instance reused after chain method`
+	q.Where("original")    // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // whereOnlyBoundMethod demonstrates bound method with Where-only.
@@ -2719,7 +2719,7 @@ func whereOnlyBoundMethod(db *gorm.DB) {
 	where := q.Where
 	where("bound method call") // First use - pollutes q
 
-	q.Where("after bound") // want `\*gorm\.DB instance reused after chain method`
+	q.Where("after bound") // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // whereOnlyNestedIIFE demonstrates nested IIFE with Where-only.
@@ -2732,7 +2732,7 @@ func whereOnlyNestedIIFE(db *gorm.DB) {
 		}()
 	}().Find(nil) // First branch (entire nested IIFE chain)
 
-	q.Where("after nested") // want `\*gorm\.DB instance reused after chain method`
+	q.Where("after nested") // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // whereOnlyIIFEChainContinued demonstrates IIFE chain with Where continuation.
@@ -2743,7 +2743,7 @@ func whereOnlyIIFEChainContinued(db *gorm.DB) {
 		return q.Where("iife inner")
 	}().Where("chained after iife").Find(nil) // First branch
 
-	q.Where("second branch") // want `\*gorm\.DB instance reused after chain method`
+	q.Where("second branch") // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // whereOnlyDoubleIIFE demonstrates two IIFEs with Where-only.
@@ -2755,7 +2755,7 @@ func whereOnlyDoubleIIFE(db *gorm.DB) {
 	}().Find(nil) // First branch
 
 	_ = func() *gorm.DB {
-		return q.Where("second iife") // want `\*gorm\.DB instance reused after chain method`
+		return q.Where("second iife") // want `\*gorm\.DB reused: second branch from mutable root`
 	}()
 }
 
@@ -2773,7 +2773,7 @@ func whereOnlyStructFieldClosure(db *gorm.DB) {
 	}
 	h.fn()
 
-	q.Where("after struct field closure") // want `\*gorm\.DB instance reused after chain method`
+	q.Where("after struct field closure") // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // whereOnlyMultipleBranches demonstrates multiple Where-only branches.
@@ -2782,9 +2782,9 @@ func whereOnlyMultipleBranches(db *gorm.DB) {
 
 	q.Where("branch1").Find(nil) // First branch
 
-	q.Where("branch2") // want `\*gorm\.DB instance reused after chain method`
-	q.Where("branch3") // want `\*gorm\.DB instance reused after chain method`
-	q.Where("branch4") // want `\*gorm\.DB instance reused after chain method`
+	q.Where("branch2") // want `\*gorm\.DB reused: second branch from mutable root`
+	q.Where("branch3") // want `\*gorm\.DB reused: second branch from mutable root`
+	q.Where("branch4") // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // =============================================================================
@@ -2796,8 +2796,8 @@ func whereOnlyMultipleBranches(db *gorm.DB) {
 func chainingWithoutReassignmentViolation(db *gorm.DB) {
 	q := db.Where("base")
 	q.Where("a")     // first branch - OK
-	q.Where("b")     // want `\*gorm\.DB instance reused after chain method`
-	q.Find(nil)      // want `\*gorm\.DB instance reused after chain method`
+	q.Where("b")     // want `\*gorm\.DB reused: second branch from mutable root`
+	q.Find(nil)      // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // chainingWithReassignmentSafe demonstrates the solution: reassign each step.
@@ -2830,7 +2830,7 @@ func phiOneHasSession(db *gorm.DB, cond bool) {
 	}
 
 	q.Find(nil)
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // phiSessionInMiddle demonstrates Session in the middle of a chain.
@@ -2844,7 +2844,7 @@ func phiSessionInMiddle(db *gorm.DB, cond bool) {
 	}
 
 	q.Find(nil)
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // phiThreeBranchesMiddleImmutable demonstrates if/else if/else with middle branch immutable.
@@ -2860,7 +2860,7 @@ func phiThreeBranchesMiddleImmutable(db *gorm.DB, mode int) {
 	}
 
 	q.Find(nil)
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // phiSwitchMixedSession demonstrates switch with mixed Session.
@@ -2879,7 +2879,7 @@ func phiSwitchMixedSession(db *gorm.DB, mode int) {
 	}
 
 	q.Find(nil)
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // phiSwitchAllImmutable demonstrates switch where all cases are immutable.
@@ -2916,7 +2916,7 @@ func callbackViolationInWrapper(db *gorm.DB) {
 	wrapperFunc(func() {
 		q := db.Where("x")
 		q.Find(nil)
-		q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+		q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 	})
 }
 
@@ -2925,8 +2925,8 @@ func callbackMultipleViolationsInWrapper(db *gorm.DB) {
 	wrapperFunc(func() {
 		q := db.Where("base")
 		q.Find(nil)
-		q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
-		q.First(nil) // want `\*gorm\.DB instance reused after chain method`
+		q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+		q.First(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 	})
 }
 
@@ -2936,7 +2936,7 @@ func callbackNestedWrappers(db *gorm.DB) {
 		wrapperFunc(func() {
 			q := db.Where("nested")
 			q.Find(nil)
-			q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+			q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 		})
 	})
 }
@@ -2969,7 +2969,7 @@ func conditionalFieldAssignOnePolluted(db *gorm.DB, cond bool) {
 	}
 	// h.db may be q1 (polluted) or q2 (clean)
 	// Should detect pollution from q1
-	h.db.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	h.db.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // conditionalFieldAssignOnePollutedReverse demonstrates the same pattern
@@ -2990,7 +2990,7 @@ func conditionalFieldAssignOnePollutedReverse(db *gorm.DB, cond bool) {
 	}
 	// h.db may be q1 (clean) or q2 (polluted)
 	// Should detect pollution from q2
-	h.db.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	h.db.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // conditionalFieldAssignBothPolluted demonstrates conditional field assignment
@@ -3008,7 +3008,7 @@ func conditionalFieldAssignBothPolluted(db *gorm.DB, cond bool) {
 		h.db = q2 // Branch 2: also polluted
 	}
 	// h.db may be q1 or q2, both are polluted
-	h.db.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	h.db.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // conditionalFieldAssignThenUseInBothBranches demonstrates field assignment
@@ -3021,7 +3021,7 @@ func conditionalFieldAssignThenUseInBothBranches(db *gorm.DB, cond bool) {
 		h.db = db.Where("b")
 	}
 	h.db.Find(nil) // First use - OK
-	h.db.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	h.db.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // =============================================================================
@@ -3043,7 +3043,7 @@ func closureCapturesPhi(db *gorm.DB, cond bool) {
 	q.Find(nil) // Pollute (both branches get polluted because Phi merges them)
 
 	fn := func() {
-		q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+		q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 	}
 	fn()
 }
@@ -3066,7 +3066,7 @@ func closureCaputresPhiOnePolluted(db *gorm.DB, cond bool) {
 	fn := func() {
 		// FreeVar captures the Phi
 		// Should detect pollution from q1
-		q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+		q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 	}
 	fn()
 }
@@ -3088,7 +3088,7 @@ func closureCaputresPhiOnePollutedReverse(db *gorm.DB, cond bool) {
 	fn := func() {
 		// FreeVar captures the Phi
 		// Should detect pollution from q2
-		q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+		q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 	}
 	fn()
 }
@@ -3109,7 +3109,7 @@ func boundMethodWithPhiOnePolluted(db *gorm.DB, flag bool) {
 	}
 	// q is Phi(q_polluted, q_clean)
 	find := q.Find // Bound method
-	find(nil)      // want `\*gorm\.DB instance reused after chain method`
+	find(nil)      // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // [LIMITATION] boundMethodWithPhiOnePollutedReverse tests bound method with reversed branch order.
@@ -3139,7 +3139,7 @@ func goStatementWithPhiOnePolluted(db *gorm.DB, flag bool) {
 		q = db.Where("b")
 	}
 	// q is Phi(q_polluted, q_clean)
-	go q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	go q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // goStatementWithPhiOnePollutedReverse tests go with reversed branch order.
@@ -3152,7 +3152,7 @@ func goStatementWithPhiOnePollutedReverse(db *gorm.DB, flag bool) {
 		q.Find(nil) // pollutes q from this branch
 	}
 	// q is Phi(q_clean, q_polluted)
-	go q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	go q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // deferStatementWithPhiOnePolluted tests defer where one branch of Phi is polluted.
@@ -3165,7 +3165,7 @@ func deferStatementWithPhiOnePolluted(db *gorm.DB, flag bool) {
 		q = db.Where("b")
 	}
 	// q is Phi(q_polluted, q_clean)
-	defer q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	defer q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // deferStatementWithPhiOnePollutedReverse tests defer with reversed branch order.
@@ -3178,5 +3178,5 @@ func deferStatementWithPhiOnePollutedReverse(db *gorm.DB, flag bool) {
 		q.Find(nil) // pollutes q from this branch
 	}
 	// q is Phi(q_clean, q_polluted)
-	defer q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	defer q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }

@@ -51,7 +51,7 @@ func userVariadicSink(args ...interface{}) {}
 func userVariadicPollutes(db *gorm.DB) {
 	q := db.Where("x = ?", 1)
 	userVariadicSink(q)
-	q.Find(&[]User{}) // want `\*gorm\.DB instance reused after chain method`
+	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // Concrete ...*gorm.DB variadic: value is packed directly (not interface-boxed),
@@ -61,7 +61,7 @@ func concreteVariadicSink(dbs ...*gorm.DB) {}
 func concreteVariadicPollutes(db *gorm.DB) {
 	q := db.Where("x = ?", 1)
 	concreteVariadicSink(q)
-	q.Find(&[]User{}) // want `\*gorm\.DB instance reused after chain method`
+	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // A func-value (dynamic) variadic call has no static callee, so it is not on the
@@ -69,7 +69,7 @@ func concreteVariadicPollutes(db *gorm.DB) {
 func funcValueVariadicPollutes(db *gorm.DB, sink func(...interface{})) {
 	q := db.Where("x = ?", 1)
 	sink(q)
-	q.Find(&[]User{}) // want `\*gorm\.DB instance reused after chain method`
+	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // A user composite slice literal escapes the value and still pollutes; it does
@@ -77,5 +77,5 @@ func funcValueVariadicPollutes(db *gorm.DB, sink func(...interface{})) {
 func sliceLiteralPollutes(db *gorm.DB) {
 	q := db.Where("x = ?", 1)
 	_ = []interface{}{q}
-	q.Find(&[]User{}) // want `\*gorm\.DB instance reused after chain method`
+	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
 }

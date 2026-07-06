@@ -20,7 +20,7 @@ import "gorm.io/gorm"
 func scopesCallbackReuse(db *gorm.DB) {
 	db.Scopes(func(tx *gorm.DB) *gorm.DB {
 		tx.Where("a").Find(nil) // first branch from tx
-		return tx.Where("b")    // want `\*gorm\.DB instance reused after chain method`
+		return tx.Where("b")    // want `\*gorm\.DB reused: second branch from mutable root`
 	})
 }
 
@@ -29,7 +29,7 @@ func scopesCallbackReuse(db *gorm.DB) {
 func preloadCallbackReuse(db *gorm.DB) {
 	db.Preload("Orders", func(tx *gorm.DB) *gorm.DB {
 		tx.Where("a").Find(nil)
-		return tx.Where("b") // want `\*gorm\.DB instance reused after chain method`
+		return tx.Where("b") // want `\*gorm\.DB reused: second branch from mutable root`
 	})
 }
 
@@ -37,7 +37,7 @@ func preloadCallbackReuse(db *gorm.DB) {
 // function; its *gorm.DB parameter is a mutable root too.
 func namedScope(tx *gorm.DB) *gorm.DB {
 	tx.Where("a").Find(nil)
-	return tx.Where("b") // want `\*gorm\.DB instance reused after chain method`
+	return tx.Where("b") // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 func useNamedScope(db *gorm.DB) {

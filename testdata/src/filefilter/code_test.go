@@ -15,5 +15,5 @@ import "gorm.io/gorm"
 func badReuseInTest(db *gorm.DB) {
 	q := db.Model(&User{}).Where("test = ?", true)
 	q.Find(&[]User{})
-	q.Count(new(int64)) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(new(int64)) // want `\*gorm\.DB reused: second branch from mutable root`
 }

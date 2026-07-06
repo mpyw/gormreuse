@@ -15,21 +15,21 @@ func derivedVariables(db *gorm.DB) {
 	queryDB := db.Model(&User{}).Where("name = ?", "jinzhu").Session(&gorm.Session{})
 	q := queryDB.Where("age > ?", 10).Session(&gorm.Session{}) // Derived without Session - mutable
 	q.Find(&[]User{})
-	q.Count(new(int64)) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(new(int64)) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // storedChainResultReuse demonstrates reuse of stored chain result.
 func storedChainResultReuse(db *gorm.DB) {
 	q := db.Where("active = ?", true).Session(&gorm.Session{})
 	q.Find(nil)
-	q.Where("name = ?", "x").Find(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Where("name = ?", "x").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // storedChainResultMultipleDerivations demonstrates multiple derivations from same base.
 func storedChainResultMultipleDerivations(db *gorm.DB) {
 	base := db.Where("tenant_id = ?", 1).Session(&gorm.Session{})
 	base.Where("type = ?", "A").Find(nil)
-	base.Where("type = ?", "B").Find(nil) // want `\*gorm\.DB instance reused after chain method`
+	base.Where("type = ?", "B").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // derivedFromSessionUnsafe demonstrates that chain after Session is still mutable.
@@ -39,7 +39,7 @@ func derivedFromSessionUnsafe(db *gorm.DB) {
 	derived := safe.Where("active = ?", true).Session(&gorm.Session{}) // Mutable!
 
 	derived.Find(nil)
-	derived.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	derived.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // multiLevelUnsafeDerivation demonstrates chained derivation.
@@ -49,7 +49,7 @@ func multiLevelUnsafeDerivation(db *gorm.DB) {
 	level3 := level2.Where("c").Session(&gorm.Session{})
 
 	level3.Find(nil)
-	level3.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	level3.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // =============================================================================
@@ -103,7 +103,7 @@ func helperWhere(db *gorm.DB, name string) *gorm.DB {
 func functionReturnValue(db *gorm.DB) {
 	q := helperWhere(db, "jinzhu").Session(&gorm.Session{})
 	q.Find(&[]User{})
-	q.Count(new(int64)) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(new(int64)) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // =============================================================================
@@ -125,22 +125,22 @@ func functionReturnWithSession(db *gorm.DB) {
 func sessionAfterPolluted(db *gorm.DB) {
 	q := db.Model(&User{}).Where("active = ?", true).Session(&gorm.Session{})
 	q.Count(new(int64))                        // q is polluted
-	q.Session(&gorm.Session{}).Find(&[]User{}) // want `\*gorm\.DB instance reused after chain method`
+	q.Session(&gorm.Session{}).Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // sessionOnPollutedValue demonstrates Session on already-polluted value.
 func sessionOnPollutedValue(db *gorm.DB) {
 	q := db.Where("x = ?", 1).Session(&gorm.Session{})
 	q.Find(nil)
-	q.Session(&gorm.Session{}).Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Session(&gorm.Session{}).Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // multipleDirectUsesWithoutSession demonstrates multiple uses without Session.
 func multipleDirectUsesWithoutSession(db *gorm.DB) {
 	q := db.Where("x = ?", 1).Session(&gorm.Session{})
 	q.Find(nil)
-	q.Count(nil)                          // want `\*gorm\.DB instance reused after chain method`
-	q.Session(&gorm.Session{}).First(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil)                          // want `\*gorm\.DB reused: second branch from mutable root`
+	q.Session(&gorm.Session{}).First(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // =============================================================================
@@ -186,10 +186,10 @@ func conditionalExtendPartialWithPollution(db *gorm.DB, flag bool) {
 	q.Find(nil) // Pollutes q
 
 	if flag {
-		q = q.Where("y = ?", 2) // want `\*gorm\.DB instance reused after chain method`
+		q = q.Where("y = ?", 2) // want `\*gorm\.DB reused: second branch from mutable root`
 	}
 
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // conditionalExtendBothWithPollution demonstrates conditional extension in both branches with initial pollution.
@@ -200,9 +200,9 @@ func conditionalExtendBothWithPollution(db *gorm.DB, flag bool) {
 	q.Find(nil) // Pollutes q
 
 	if flag {
-		q = q.Where("y = ?", 2) // want `\*gorm\.DB instance reused after chain method`
+		q = q.Where("y = ?", 2) // want `\*gorm\.DB reused: second branch from mutable root`
 	} else {
-		q = q.Where("z = ?", 3) // want `\*gorm\.DB instance reused after chain method`
+		q = q.Where("z = ?", 3) // want `\*gorm\.DB reused: second branch from mutable root`
 	}
 
 	q.Count(nil) // OK: both branches created new q via assignment
@@ -218,7 +218,7 @@ func conditionalExtendPartialNoPollution(db *gorm.DB, flag bool) {
 	}
 
 	q.Find(nil)                 // OK: first actual use
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // conditionalExtendBothNoPollution demonstrates conditional extension in both branches without initial pollution.
@@ -233,7 +233,7 @@ func conditionalExtendBothNoPollution(db *gorm.DB, flag bool) {
 	}
 
 	q.Find(nil)                 // OK: first actual use
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // conditionalExtendThreeBranches demonstrates three-way branch with partial assignment.
@@ -249,7 +249,7 @@ func conditionalExtendThreeBranches(db *gorm.DB, n int) {
 	// else: q remains unchanged (original mutable root)
 
 	q.Find(nil)  // OK: Phi(q_1, q_2, q_3) - all first use
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // =============================================================================
@@ -265,7 +265,7 @@ func conditionalExtendThreeBranches(db *gorm.DB, n int) {
 func nonFinisherOnlyGeneratesFix(db *gorm.DB) {
 	q := db.Where("base")
 	q = q.Where("filter1") // Non-finisher expr stmt - should get "q = q.Where("filter1")" fix
-	q.Find(nil)        // want `\*gorm\.DB instance reused after chain method`
+	q.Find(nil)        // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // finisherDoesNotGenerateReassignmentFix demonstrates that finisher calls
@@ -273,7 +273,7 @@ func nonFinisherOnlyGeneratesFix(db *gorm.DB) {
 func finisherDoesNotGenerateReassignmentFix(db *gorm.DB) {
 	q := db.Where("base").Session(&gorm.Session{})
 	q.Find(nil)
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // =============================================================================
@@ -288,7 +288,7 @@ func parentScopeVariable(db *gorm.DB) {
 	q := db.Where("outer")
 	func() {
 		q = q.Where("inner")
-		q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+		q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 	}()
 }
 
@@ -299,7 +299,7 @@ func nestedClosureFixDedup(db *gorm.DB) {
 	func() {
 		func() {
 			q = q.Where("deep")
-			q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+			q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 		}()
 	}()
 }
@@ -312,7 +312,7 @@ func tripleNestedClosureDedup(db *gorm.DB) {
 		func() {
 			func() {
 				q = q.Where("level3")
-				q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+				q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 			}()
 		}()
 	}()
@@ -327,8 +327,8 @@ func tripleNestedClosureDedup(db *gorm.DB) {
 func nestedArgsFromMutableParent(db *gorm.DB) {
 	q := db.Where("base").Session(&gorm.Session{}) // q is mutable
 	q.Or(
-		q.Where("a"), // want `\*gorm\.DB instance reused after chain method`
-		q.Where("b"), // want `\*gorm\.DB instance reused after chain method`
+		q.Where("a"), // want `\*gorm\.DB reused: second branch from mutable root`
+		q.Where("b"), // want `\*gorm\.DB reused: second branch from mutable root`
 	).Find(nil)
 }
 
@@ -346,10 +346,10 @@ func nestedArgsFromImmutableParent(db *gorm.DB) {
 func nestedArgsFromMutableThenReuse(db *gorm.DB) {
 	q := db.Where("base").Session(&gorm.Session{}) // q is mutable
 	q.Or(
-		q.Where("a"), // want `\*gorm\.DB instance reused after chain method`
-		q.Where("b"), // want `\*gorm\.DB instance reused after chain method`
+		q.Where("a"), // want `\*gorm\.DB reused: second branch from mutable root`
+		q.Where("b"), // want `\*gorm\.DB reused: second branch from mutable root`
 	).Find(nil)
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // nestedArgsSingleUse demonstrates that even single nested arg is a violation
@@ -357,9 +357,9 @@ func nestedArgsFromMutableThenReuse(db *gorm.DB) {
 func nestedArgsSingleUse(db *gorm.DB) {
 	q := db.Where("base").Session(&gorm.Session{})
 	q.Or(
-		q.Where("a"), // want `\*gorm\.DB instance reused after chain method`
+		q.Where("a"), // want `\*gorm\.DB reused: second branch from mutable root`
 	).Find(nil)
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // =============================================================================
@@ -433,7 +433,7 @@ func pureImmutableReturnReturnsDB(db *gorm.DB) *gorm.DB {
 func passToVoidFunc(db *gorm.DB) {
 	q := db.Where("base").Session(&gorm.Session{})
 	voidFunc(q.Where("a"))
-	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // --- Test cases for passing q.Where() to function returning *gorm.DB ---
@@ -443,9 +443,9 @@ func passToVoidFunc(db *gorm.DB) {
 func passToReturnsDB(db *gorm.DB) {
 	q := db.Where("base").Session(&gorm.Session{})
 	result := returnsDB(q.Where("a")).Session(&gorm.Session{})
-	q.Find(nil)      // want `\*gorm\.DB instance reused after chain method`
+	q.Find(nil)      // want `\*gorm\.DB reused: second branch from mutable root`
 	result.Find(nil) // OK: first use of result
-	result.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+	result.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // --- Test cases for passing q.Where() to pure function ---
@@ -457,9 +457,9 @@ func passToReturnsDB(db *gorm.DB) {
 func passToPureReturnsDB(db *gorm.DB) {
 	q := db.Where("base").Session(&gorm.Session{})
 	result := pureReturnsDB(q.Where("a")).Session(&gorm.Session{})
-	q.Find(nil)      // want `\*gorm\.DB instance reused after chain method`
+	q.Find(nil)      // want `\*gorm\.DB reused: second branch from mutable root`
 	result.Find(nil) // OK: first use of result
-	result.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+	result.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // --- Test cases for passing q.Where() to immutable-return function ---
@@ -469,7 +469,7 @@ func passToPureReturnsDB(db *gorm.DB) {
 func passToImmutableReturnReturnsDB(db *gorm.DB) {
 	q := db.Where("base").Session(&gorm.Session{})
 	result := immutableReturnReturnsDB(q.Where("a"))
-	q.Find(nil)      // want `\*gorm\.DB instance reused after chain method`
+	q.Find(nil)      // want `\*gorm\.DB reused: second branch from mutable root`
 	result.Find(nil) // OK: result is immutable
 	result.Find(nil) // OK: result is immutable, can reuse freely
 }
@@ -482,7 +482,7 @@ func passToImmutableReturnReturnsDB(db *gorm.DB) {
 func passToPureImmutableReturnReturnsDB(db *gorm.DB) {
 	q := db.Where("base").Session(&gorm.Session{})
 	result := pureImmutableReturnReturnsDB(q.Where("a"))
-	q.Find(nil)      // want `\*gorm\.DB instance reused after chain method`
+	q.Find(nil)      // want `\*gorm\.DB reused: second branch from mutable root`
 	result.Find(nil) // OK: result is immutable
 	result.Find(nil) // OK: result is immutable, can reuse freely
 }
@@ -493,7 +493,7 @@ func passToPureImmutableReturnReturnsDB(db *gorm.DB) {
 func multipleCallsToVoidFunc(db *gorm.DB) {
 	q := db.Where("base").Session(&gorm.Session{})
 	voidFunc(q.Where("a"))
-	voidFunc(q.Where("b")) // want `\*gorm\.DB instance reused after chain method`
+	voidFunc(q.Where("b")) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // multipleCallsToPureFunc demonstrates multiple calls passing q.Where() to pure function.
@@ -501,8 +501,8 @@ func multipleCallsToVoidFunc(db *gorm.DB) {
 func multipleCallsToPureFunc(db *gorm.DB) {
 	q := db.Where("base").Session(&gorm.Session{})
 	pureReturnsDB(q.Where("a"))
-	pureReturnsDB(q.Where("b")) // want `\*gorm\.DB instance reused after chain method`
-	q.Find(nil)                 // want `\*gorm\.DB instance reused after chain method`
+	pureReturnsDB(q.Where("b")) // want `\*gorm\.DB reused: second branch from mutable root`
+	q.Find(nil)                 // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // =============================================================================
@@ -514,7 +514,7 @@ func multipleCallsToPureFunc(db *gorm.DB) {
 func passQDirectlyToNonPure(db *gorm.DB) {
 	q := db.Where("base").Session(&gorm.Session{})
 	voidFunc(q)
-	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // passQDirectlyToPure demonstrates passing q directly to pure function.
@@ -523,7 +523,7 @@ func passQDirectlyToPure(db *gorm.DB) {
 	q := db.Where("base").Session(&gorm.Session{})
 	pureReturnsDB(q)
 	q.Find(nil) // OK: pure function doesn't pollute q
-	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // passQDirectlyToPureMultiple demonstrates multiple calls passing q to pure function.
@@ -534,7 +534,7 @@ func passQDirectlyToPureMultiple(db *gorm.DB) {
 	pureReturnsDB(q) // OK: pure function doesn't pollute q
 	pureReturnsDB(q) // OK: still not polluted
 	q.Find(nil)      // OK: first actual use of q
-	q.Find(nil)      // want `\*gorm\.DB instance reused after chain method`
+	q.Find(nil)      // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // passQDirectlyToMixedFunctions demonstrates passing q to both pure and non-pure functions.
@@ -542,7 +542,7 @@ func passQDirectlyToMixedFunctions(db *gorm.DB) {
 	q := db.Where("base").Session(&gorm.Session{})
 	pureReturnsDB(q) // OK: pure doesn't pollute
 	voidFunc(q)      // Pollutes q
-	q.Find(nil)      // want `\*gorm\.DB instance reused after chain method`
+	q.Find(nil)      // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // =============================================================================
@@ -566,7 +566,7 @@ func consecutiveIfReassignment(db *gorm.DB, a, b bool) {
 	q = q.Order("c").Session(&gorm.Session{}) // Assignment - no diagnostic here (fix added for Count violation below)
 
 	q.Find(nil)      // First actual use - OK
-	q.Count(nil)     // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil)     // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // consecutiveIfSwitchReassignment demonstrates consecutive if and switch with reassignment.
@@ -590,7 +590,7 @@ func consecutiveIfSwitchReassignment(db *gorm.DB, keyword string, status *int) {
 	q = q.Order("created_at").Session(&gorm.Session{}) // Assignment - no diagnostic (fix for Count below)
 
 	q.Find(nil)      // First actual use - OK
-	q.Count(nil)     // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil)     // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // helperFunctionReassignment tests reassignment with helper function return value.
@@ -611,7 +611,7 @@ func helperFunctionReassignment(db *gorm.DB, a, b bool) {
 	q = q.Order("c").Session(&gorm.Session{}) // Assignment - no diagnostic (fix for Count below)
 
 	q.Find(nil)      // First actual use - OK
-	q.Count(nil)     // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil)     // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 type repo struct {
@@ -638,7 +638,7 @@ func methodReceiverReassignment(r *repo, a, b bool) {
 	q = q.Order("c").Session(&gorm.Session{}) // Assignment - no diagnostic (fix for Count below)
 
 	q.Find(nil)      // First actual use - OK
-	q.Count(nil)     // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil)     // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 type repoImmutable struct {
@@ -667,7 +667,7 @@ func immutableReturnMethodReassignment(r *repoImmutable, a, b bool) {
 	q = q.Order("c").Session(&gorm.Session{}) // Assignment - no diagnostic (fix for Count below)
 
 	q.Find(nil)      // First actual use - OK
-	q.Count(nil)     // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil)     // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // switchMultipleCasesReassignment tests switch with multiple cases reassigning q.
@@ -695,7 +695,7 @@ func switchMultipleCasesReassignment(db *gorm.DB, keyword string, status *int) {
 	q = q.Order("c").Session(&gorm.Session{}) // Assignment - no diagnostic (fix for Count below)
 
 	q.Find(nil)      // First actual use - OK
-	q.Count(nil)     // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil)     // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // switchMultipleCasesChainedReassignment tests switch with chained Where calls.
@@ -716,7 +716,7 @@ func switchMultipleCasesChainedReassignment(db *gorm.DB, status *int) {
 	q = q.Order("e").Session(&gorm.Session{}) // Assignment - no diagnostic (fix for Count below)
 
 	q.Find(nil)      // First actual use - OK
-	q.Count(nil)     // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil)     // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // exactUserPatternImmutableReturn reproduces the exact user pattern:
@@ -819,10 +819,10 @@ func consecutiveHelperCallsNoReassign(db *gorm.DB, a, b bool) {
 	}
 
 	if b {
-		buildQuery(q, "b") // want `\*gorm\.DB instance reused after chain method`
+		buildQuery(q, "b") // want `\*gorm\.DB reused: second branch from mutable root`
 	}
 
-	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // consecutiveHelperCallsWithFind tests when Find breaks the chain.
@@ -837,10 +837,10 @@ func consecutiveHelperCallsWithFind(db *gorm.DB, a, b bool) {
 	q.Find(nil) // First use - OK, but now q is polluted
 
 	if b {
-		q = buildQuery(q, "b") // want `\*gorm\.DB instance reused after chain method`
+		q = buildQuery(q, "b") // want `\*gorm\.DB reused: second branch from mutable root`
 	}
 
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // consecutiveHelperCallsWithFindReassign tests when Find result is used in reassignment pattern.
@@ -858,7 +858,7 @@ func consecutiveHelperCallsWithFindReassign(db *gorm.DB, a, b bool) {
 		q = db.Where("new") // NEW mutable root - q is now fresh
 	}
 
-	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // ===== USER-DEFINED HELPER FUNCTION DIRECTIVE PATTERNS =====
@@ -917,10 +917,10 @@ func testNoPureHelperNoReassign(db *gorm.DB, a, b bool) {
 	}
 
 	if b {
-		noPureHelper(q) // want `\*gorm\.DB instance reused after chain method`
+		noPureHelper(q) // want `\*gorm\.DB reused: second branch from mutable root`
 	}
 
-	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // testPureOnlyHelperReassign tests helper with pure directive, result reassigned.
@@ -970,7 +970,7 @@ func testImmutableReturnOnlyHelperReassign(db *gorm.DB, a, b bool) {
 	}
 
 	q.Find(nil)  // First use - OK
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // testImmutableReturnOnlyHelperReassignGuaranteed tests helper with immutable-return directive.
@@ -999,10 +999,10 @@ func testImmutableReturnOnlyHelperNoReassign(db *gorm.DB, a, b bool) {
 	}
 
 	if b {
-		immutableReturnOnlyHelper(q) // want `\*gorm\.DB instance reused after chain method`
+		immutableReturnOnlyHelper(q) // want `\*gorm\.DB reused: second branch from mutable root`
 	}
 
-	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // testPureAndImmutableReturnHelperReassign tests helper with both directives.
@@ -1019,7 +1019,7 @@ func testPureAndImmutableReturnHelperReassign(db *gorm.DB, a, b bool) {
 	}
 
 	q.Find(nil)  // First use - OK
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // testPureAndImmutableReturnHelperReassignGuaranteed tests helper with both directives.
@@ -1070,7 +1070,7 @@ func testImmutableInitialWithNoPureHelper(db *gorm.DB, a, b bool) {
 	}
 
 	q.Find(nil)  // First use - OK
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // testImmutableInitialWithNoPureHelperGuaranteed tests immutable initial q, guaranteed reassign.
@@ -1085,7 +1085,7 @@ func testImmutableInitialWithNoPureHelperGuaranteed(db *gorm.DB, a bool) {
 
 	// q is now mutable (from noPureHelper), but it's first use
 	q.Find(nil)  // First use - OK
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // testImmutableInitialWithImmutableReturnHelper tests immutable initial q with immutable-return helper.
@@ -1143,7 +1143,7 @@ func testMixedHelperTypes(db *gorm.DB, a, b, c bool) {
 
 	// Path-insensitive: q could be original mutable, or any of the helper results
 	q.Find(nil)  // First use - OK
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // testMixedHelperTypesAllImmutablePaths tests mixing helpers where all paths lead to immutable.
@@ -1173,7 +1173,7 @@ func testMixedHelperTypesMutableAndImmutable(db *gorm.DB, a bool) {
 
 	// Phi(mutable, immutable) - need to be conservative
 	q.Find(nil)  // First use - OK
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // ===== NO DIRECTIVE GUARANTEED PATTERN =====
@@ -1190,7 +1190,7 @@ func testNoPureHelperReassignGuaranteed(db *gorm.DB, a bool) {
 
 	// Both paths create new mutable root, so first use is OK
 	q.Find(nil)  // First use - OK
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // testPureOnlyHelperReassignGuaranteed tests pure helper with guaranteed reassignment.
@@ -1205,5 +1205,5 @@ func testPureOnlyHelperReassignGuaranteed(db *gorm.DB, a bool) {
 
 	// Both paths create new mutable root
 	q.Find(nil)  // First use - OK
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
