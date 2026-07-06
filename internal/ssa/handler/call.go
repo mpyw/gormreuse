@@ -57,6 +57,22 @@ type Context struct {
 	CFG        *cfg.Analyzer      // Control flow graph analysis
 	LoopInfo   *cfg.LoopInfo      // Loop detection results for current function
 	CurrentFn  *ssa.Function      // The function being analyzed
+
+	// PosOverride, when valid, replaces the source position recorded for uses
+	// inside this function. It is set when analyzing a closure that is invoked
+	// at a single known call site, so the closure's captured-value uses are
+	// ordered by the call-site (execution) position rather than the closure's
+	// (earlier) body position — the define-early/call-late case of #68.
+	PosOverride token.Pos
+}
+
+// pos returns the effective source position to record for a use: the
+// PosOverride when set (closure analyzed at its call site), otherwise raw.
+func (c *Context) pos(raw token.Pos) token.Pos {
+	if c.PosOverride.IsValid() {
+		return c.PosOverride
+	}
+	return raw
 }
 
 // CallHandler handles *ssa.Call instructions.
@@ -203,20 +219,23 @@ func (h *CallHandler) Handle(call *ssa.Call, ctx *Context) {
 	}
 
 	// KEY CHANGE: Process ALL calls uniformly (no isTerminal skip)
-	// Record usage (violations detected later in DetectViolations)
+	// Record usage (violations detected later in DetectViolations).
+	// pos is the effective position (call-site override inside an invoked
+	// closure, else the call's own position) — see Context.pos / #68.
+	pos := ctx.pos(call.Pos())
 	if isImmutableReturning {
 		// Pure methods check for pollution but don't pollute
-		ctx.Tracker.RecordPureUse(root, call.Block(), call.Pos())
+		ctx.Tracker.RecordPureUse(root, call.Block(), pos)
 	} else if isAssignment(call, ctx) {
 		// Assignment creates new root - record but doesn't pollute
-		ctx.Tracker.RecordAssignment(root, call.Block(), call.Pos())
+		ctx.Tracker.RecordAssignment(root, call.Block(), pos)
 	} else {
 		// Actual use - pollutes the root
-		ctx.Tracker.ProcessBranch(root, call.Block(), call.Pos())
+		ctx.Tracker.ProcessBranch(root, call.Block(), pos)
 
 		// Loop with external root - immediate violation (only for non-pure methods)
 		if isInLoop && ctx.CFG.IsDefinedOutsideLoop(root, ctx.LoopInfo) {
-			ctx.Tracker.AddViolationWithRoot(call.Pos(), root)
+			ctx.Tracker.AddViolationWithRoot(pos, root)
 		}
 	}
 
@@ -227,7 +246,7 @@ func (h *CallHandler) Handle(call *ssa.Call, ctx *Context) {
 			continue
 		}
 		if ctx.Tracker.IsPollutedAt(r, call.Block()) {
-			ctx.Tracker.AddViolationWithRoot(call.Pos(), r)
+			ctx.Tracker.AddViolationWithRoot(pos, r)
 		}
 	}
 }
@@ -265,24 +284,26 @@ func (h *CallHandler) processBoundMethodCall(call *ssa.Call, mc *ssa.MakeClosure
 	// Get ALL possible roots BEFORE recording usage (needed for pollution check)
 	allRoots := ctx.RootTracer.FindAllMutableRoots(recv, ctx.LoopInfo)
 
+	pos := ctx.pos(call.Pos())
+
 	// Check if ANY root was already polluted BEFORE this call
 	for _, r := range allRoots {
 		if ctx.Tracker.IsPollutedAt(r, call.Block()) {
-			ctx.Tracker.AddViolationWithRoot(call.Pos(), r)
+			ctx.Tracker.AddViolationWithRoot(pos, r)
 		}
 	}
 
 	// Record usage (violations detected later)
 	if isImmutableReturning {
 		// Pure methods check for pollution but don't pollute
-		ctx.Tracker.RecordPureUse(root, call.Block(), call.Pos())
+		ctx.Tracker.RecordPureUse(root, call.Block(), pos)
 	} else {
 		// Non-pure methods pollute the root
-		ctx.Tracker.ProcessBranch(root, call.Block(), call.Pos())
+		ctx.Tracker.ProcessBranch(root, call.Block(), pos)
 
 		// Loop with external root - immediate violation (only for non-pure methods)
 		if isInLoop && ctx.CFG.IsDefinedOutsideLoop(root, ctx.LoopInfo) {
-			ctx.Tracker.AddViolationWithRoot(call.Pos(), root)
+			ctx.Tracker.AddViolationWithRoot(pos, root)
 		}
 	}
 }
@@ -337,10 +358,10 @@ func (h *CallHandler) checkFunctionCallPollution(call *ssa.Call, ctx *Context) {
 		if isReassignment {
 			// For reassignment pattern: check if already polluted, but don't add pollution.
 			// This is similar to how gorm methods handle RecordAssignment.
-			ctx.Tracker.RecordAssignment(root, call.Block(), call.Pos())
+			ctx.Tracker.RecordAssignment(root, call.Block(), ctx.pos(call.Pos()))
 		} else {
 			// Mark polluted (function may use the value)
-			ctx.Tracker.MarkPolluted(root, call.Block(), call.Pos())
+			ctx.Tracker.MarkPolluted(root, call.Block(), ctx.pos(call.Pos()))
 		}
 	}
 }
@@ -397,7 +418,7 @@ func (h *SendHandler) Handle(send *ssa.Send, ctx *Context) {
 		return
 	}
 
-	ctx.Tracker.MarkPolluted(root, send.Block(), send.Pos())
+	ctx.Tracker.MarkPolluted(root, send.Block(), ctx.pos(send.Pos()))
 }
 
 // StoreHandler handles *ssa.Store instructions.
@@ -419,7 +440,7 @@ func (h *StoreHandler) Handle(store *ssa.Store, ctx *Context) {
 		return
 	}
 
-	ctx.Tracker.MarkPolluted(root, store.Block(), store.Pos())
+	ctx.Tracker.MarkPolluted(root, store.Block(), ctx.pos(store.Pos()))
 }
 
 // MapUpdateHandler handles *ssa.MapUpdate instructions.
@@ -438,7 +459,7 @@ func (h *MapUpdateHandler) Handle(mapUpdate *ssa.MapUpdate, ctx *Context) {
 		return
 	}
 
-	ctx.Tracker.MarkPolluted(root, mapUpdate.Block(), mapUpdate.Pos())
+	ctx.Tracker.MarkPolluted(root, mapUpdate.Block(), ctx.pos(mapUpdate.Pos()))
 }
 
 // MakeInterfaceHandler handles *ssa.MakeInterface instructions.
