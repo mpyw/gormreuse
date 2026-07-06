@@ -1,0 +1,76 @@
+package internal
+
+import "gorm.io/gorm"
+
+// Regression fixtures for #64: builtin immutable-returning methods were matched
+// by name only, so any user-defined function or method sharing a name
+// (Session, Open, Debug, Begin, Transaction, WithContext) was silently trusted
+// as immutable-returning and pure — disabling reuse detection around it.
+//
+// The name lookup is now gated on the function genuinely belonging to
+// gorm.io/gorm (a method on *gorm.DB, or a package-level gorm function).
+
+// =============================================================================
+// SHOULD REPORT - user-defined names colliding with gorm builtins
+// =============================================================================
+
+// Open is a user-defined package-level function that happens to share a name
+// with gorm.Open. It returns a mutable (mid-chain) value; reuse must be caught.
+func Open(db *gorm.DB) *gorm.DB { return db.Where("x = ?", 1) }
+
+func collisionFreeFuncOpen(db *gorm.DB) {
+	q := Open(db)
+	q.Find(&[]User{})
+	q.Count(new(int64)) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// Debug is a user-defined package-level function sharing a name with the gorm
+// Debug method. It pollutes its argument; the discarded call must pollute q.
+func Debug(db *gorm.DB) { db.Find(&[]User{}) }
+
+func collisionFreeFuncDebug(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+	Debug(q)
+	q.Count(new(int64)) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// collisionRepo has methods whose names collide with gorm builtins.
+type collisionRepo struct{ db *gorm.DB }
+
+// Session is a user-defined method sharing a name with (*gorm.DB).Session.
+// It returns a mutable value; reuse of that value must be caught.
+func (r *collisionRepo) Session() *gorm.DB { return r.db.Where("tenant = ?", 1) }
+
+// Begin is a user-defined method sharing a name with (*gorm.DB).Begin.
+func (r *collisionRepo) Begin() *gorm.DB { return r.db.Where("open = ?", true) }
+
+func collisionMethodSession(r *collisionRepo) {
+	q := r.Session()
+	q.Find(&[]User{})
+	q.Count(new(int64)) // want `\*gorm\.DB instance reused after chain method`
+}
+
+func collisionMethodBegin(r *collisionRepo) {
+	q := r.Begin()
+	q.Find(&[]User{})
+	q.Count(new(int64)) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// =============================================================================
+// SHOULD NOT REPORT - genuine gorm builtins keep their immutable semantics
+// =============================================================================
+
+// realSessionStillImmutable confirms the gate did not break real gorm builtins:
+// the result of (*gorm.DB).Session is immutable and may be branched freely.
+func realSessionStillImmutable(db *gorm.DB) {
+	q := db.Session(&gorm.Session{})
+	q.Where("a = ?", 1).Find(&[]User{})
+	q.Where("b = ?", 2).Find(&[]User{}) // OK: Session result is immutable
+}
+
+// realDebugStillImmutable confirms (*gorm.DB).Debug stays immutable-returning.
+func realDebugStillImmutable(db *gorm.DB) {
+	q := db.Debug()
+	q.Where("a = ?", 1).Find(&[]User{})
+	q.Where("b = ?", 2).Find(&[]User{}) // OK: Debug result is immutable
+}
