@@ -37,6 +37,15 @@ func TestSuggestedFixesWithImport(t *testing.T) {
 	analysistest.RunWithSuggestedFixes(t, testdata, gormreuse.Analyzer, "noimport")
 }
 
+// TestSuggestedFixesWithAlias verifies the Session fix uses the file's local
+// name for gorm (g.Session) under an aliased import, so the output compiles
+// (issue #71, defect 3).
+func TestSuggestedFixesWithAlias(t *testing.T) {
+	t.Parallel()
+	testdata := analysistest.TestData()
+	analysistest.RunWithSuggestedFixes(t, testdata, gormreuse.Analyzer, "aliasimport")
+}
+
 func TestGenerateDiffFiles(t *testing.T) {
 	testdata := analysistest.TestData()
 	srcDir := filepath.Join(testdata, "src", "gormreuse")
