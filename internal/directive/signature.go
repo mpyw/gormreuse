@@ -78,8 +78,16 @@ func containsGormDBWithCache(t types.Type, cache map[types.Type]*cacheEntry) boo
 	result := false
 	switch typ := underlying.(type) {
 	case *types.Interface:
-		// Any interface type could potentially hold *gorm.DB at runtime
-		result = true
+		// An interface could hold *gorm.DB at runtime, but this predicate only
+		// drives unused-directive detection, where we require the signature to
+		// name a CONCRETE *gorm.DB before treating the directive as satisfied.
+		// The pure/immutable-return analysis never tracks values through an
+		// interface-typed parameter/return anyway (it keys on the concrete
+		// *gorm.DB type), so a purely interface-typed signature genuinely does
+		// nothing — reporting it as unused is the correct, actionable signal
+		// (issue #72 gap4). NOTE: containsGormDB is used ONLY for unused
+		// detection; the SSA tracer uses its own containsGormDBThroughPointers.
+		result = false
 	case *types.Struct:
 		for i := 0; i < typ.NumFields(); i++ {
 			if containsGormDBWithCache(typ.Field(i).Type(), cache) {

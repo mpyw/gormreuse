@@ -519,14 +519,17 @@ func TestContainsGormDB(t *testing.T) {
 			expected: false,
 		},
 		{
+			// gap4 (#72): containsGormDB drives ONLY unused-directive detection,
+			// which requires a concrete *gorm.DB in the signature. A bare
+			// interface is no longer treated as potentially-gorm.
 			name:     "empty interface (interface{})",
 			typ:      types.NewInterfaceType(nil, nil),
-			expected: true,
+			expected: false,
 		},
 		{
 			name:     "non-empty interface",
 			typ:      types.NewInterfaceType([]*types.Func{types.NewFunc(0, nil, "Method", types.NewSignatureType(nil, nil, nil, nil, nil, false))}, nil),
-			expected: true,
+			expected: false,
 		},
 	}
 
