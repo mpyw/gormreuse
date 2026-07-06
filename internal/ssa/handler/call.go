@@ -382,7 +382,7 @@ type GoHandler struct{}
 // Handle processes a Go instruction.
 func (h *GoHandler) Handle(g *ssa.Go, ctx *Context) {
 	block := g.Block()
-	processGormDBCallCommonWith(&g.Call, g.Pos(), ctx, func(root ssa.Value) bool {
+	processGormDBCallCommonWith(&g.Call, g.Pos(), block, ctx, func(root ssa.Value) bool {
 		return ctx.Tracker.IsPollutedAt(root, block)
 	})
 }
@@ -393,7 +393,7 @@ type DeferHandler struct{}
 // Handle processes a Defer instruction.
 // Defer uses IsPollutedAnywhere because it executes at function exit.
 func (h *DeferHandler) Handle(d *ssa.Defer, ctx *Context) {
-	processGormDBCallCommonWith(&d.Call, d.Pos(), ctx, func(root ssa.Value) bool {
+	processGormDBCallCommonWith(&d.Call, d.Pos(), d.Block(), ctx, func(root ssa.Value) bool {
 		return ctx.Tracker.IsPollutedAnywhere(root)
 	})
 }
@@ -556,7 +556,14 @@ func (h *MakeInterfaceHandler) Handle(mi *ssa.MakeInterface, ctx *Context) {
 type pollutionChecker func(root ssa.Value) bool
 
 // processGormDBCallCommonWith processes gorm calls with a custom pollution checker.
-func processGormDBCallCommonWith(callCommon *ssa.CallCommon, pos token.Pos, ctx *Context, isPolluted pollutionChecker) {
+//
+// Used by the defer and goroutine handlers. In addition to CHECKING whether the
+// receiver/argument root is already polluted (and reporting a violation if so),
+// it RECORDS each use as a branch use. Recording lets a later defer/goroutine
+// observe an earlier one, so patterns whose ONLY uses are deferred/spawned —
+// e.g. `defer q.Find(nil); defer q.Count(nil)` — are detected. Branch uses are
+// excluded from position-ordered detection (see pollution.Tracker.branchUses).
+func processGormDBCallCommonWith(callCommon *ssa.CallCommon, pos token.Pos, block *ssa.BasicBlock, ctx *Context, isPolluted pollutionChecker) {
 	callee := callCommon.StaticCallee()
 	if callee == nil {
 		return
@@ -590,6 +597,9 @@ func processGormDBCallCommonWith(callCommon *ssa.CallCommon, pos token.Pos, ctx 
 				ctx.Tracker.AddViolationWithRoot(pos, r)
 			}
 		}
+
+		// Record this deferred/spawned use so a later defer/go sees it.
+		ctx.Tracker.RecordBranchUse(root, block, pos)
 		return
 	}
 
@@ -618,6 +628,9 @@ func processGormDBCallCommonWith(callCommon *ssa.CallCommon, pos token.Pos, ctx 
 				ctx.Tracker.AddViolationWithRoot(pos, r)
 			}
 		}
+
+		// Record this deferred/spawned use so a later defer/go sees it.
+		ctx.Tracker.RecordBranchUse(root, block, pos)
 	}
 }
 

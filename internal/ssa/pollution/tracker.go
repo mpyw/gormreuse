@@ -74,6 +74,15 @@ type Tracker struct {
 	// Example: q = q.Where() creates new root from original q
 	assignmentUses map[ssa.Value][]UsageInfo
 
+	// branchUses maps roots to deferred/goroutine usage sites. Like polluting
+	// uses they consume the root, but they are recorded so that a LATER defer/go
+	// can see an EARLIER one (defer q.Find(); defer q.Count() with no direct use).
+	// They are intentionally NOT scanned by DetectViolations: defer/go run at a
+	// different time than their textual position, so position-ordered detection
+	// would misfire. Violations among them are reported inline at record time via
+	// IsPolluted/IsPollutedAt, which do consult this map.
+	branchUses map[ssa.Value][]UsageInfo
+
 	// violations tracks detected violations.
 	violations []Violation
 
@@ -92,6 +101,7 @@ func New(cfgAnalyzer CFGAnalyzer) *Tracker {
 		pollutingUses:  make(map[ssa.Value][]UsageInfo),
 		pureUses:       make(map[ssa.Value][]UsageInfo),
 		assignmentUses: make(map[ssa.Value][]UsageInfo),
+		branchUses:     make(map[ssa.Value][]UsageInfo),
 		cfgAnalyzer:    cfgAnalyzer,
 	}
 }
@@ -116,6 +126,14 @@ func (t *Tracker) RecordPureUse(root ssa.Value, block *ssa.BasicBlock, pos token
 // Caller must ensure root is not nil.
 func (t *Tracker) RecordAssignment(root ssa.Value, block *ssa.BasicBlock, pos token.Pos) {
 	t.assignmentUses[root] = append(t.assignmentUses[root], UsageInfo{Block: block, Pos: pos})
+}
+
+// RecordBranchUse records a deferred/goroutine polluting usage of a root.
+// Recorded so a later defer/go can observe an earlier one; excluded from
+// DetectViolations (see the branchUses field doc). Caller must ensure root is
+// not nil.
+func (t *Tracker) RecordBranchUse(root ssa.Value, block *ssa.BasicBlock, pos token.Pos) {
+	t.branchUses[root] = append(t.branchUses[root], UsageInfo{Block: block, Pos: pos})
 }
 
 // isReachable checks if pollution can reach the target block.
@@ -144,14 +162,21 @@ func (t *Tracker) addViolationWithContext(pos token.Pos, root ssa.Value, allUses
 }
 
 // IsPolluted checks if a root has been polluted (for defer).
+// Includes deferred/goroutine branch uses so multiple defers/goroutines that
+// reuse the same root (with no direct use) are detected.
 func (t *Tracker) IsPolluted(root ssa.Value) bool {
-	uses := t.pollutingUses[root]
-	return len(uses) > 0
+	return len(t.pollutingUses[root]) > 0 || len(t.branchUses[root]) > 0
 }
 
 // IsPollutedAt checks if a root has polluting usage that can reach the target block.
+// Includes deferred/goroutine branch uses (see IsPolluted).
 func (t *Tracker) IsPollutedAt(root ssa.Value, targetBlock *ssa.BasicBlock) bool {
 	for _, use := range t.pollutingUses[root] {
+		if t.isReachable(use.Block, targetBlock) {
+			return true
+		}
+	}
+	for _, use := range t.branchUses[root] {
 		if t.isReachable(use.Block, targetBlock) {
 			return true
 		}
