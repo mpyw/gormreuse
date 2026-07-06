@@ -74,12 +74,14 @@ func withContextAtEnd(db *gorm.DB) {
 // separateChains demonstrates that a *gorm.DB parameter is a mutable root under
 // Phase 1b (#61): a caller may pass a mid-chain value, so branching it twice is a
 // violation.
+//gormreuse:immutable-param
 func separateChains(db *gorm.DB) {
 	db.Where("a = ?", 1).Find(&[]User{})
 	db.Where("b = ?", 2).Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // separateVariables demonstrates branching a parameter into two variables.
+//gormreuse:immutable-param
 func separateVariables(db *gorm.DB) {
 	q1 := db.Where("a = ?", 1)
 	q2 := db.Where("b = ?", 2) // want `\*gorm\.DB reused: second branch from mutable root`
@@ -89,12 +91,14 @@ func separateVariables(db *gorm.DB) {
 }
 
 // parameterDirectUse demonstrates that a parameter is a mutable root (Phase 1b).
+//gormreuse:immutable-param
 func parameterDirectUse(db *gorm.DB) {
 	db.Where("a = ?", 1).Find(nil)
 	db.Where("b = ?", 2).Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // parameterMultipleChains demonstrates multiple chains from a parameter root.
+//gormreuse:immutable-param
 func parameterMultipleChains(db *gorm.DB) {
 	db.Where("x").Order("id").Find(nil)
 	db.Where("y").Limit(10).Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`

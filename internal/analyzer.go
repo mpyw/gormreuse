@@ -85,10 +85,6 @@ func RunSSA(
 	// across different violations that suggest the same edit.
 	globalSuggestedEdits := make(map[editKey]bool)
 
-	// Share a single fix generator to avoid recreating it for each violation.
-	// The generator caches AST inspectors internally, so sharing it improves performance.
-	fixGen := fix.New(pass)
-
 	// skip reports whether a function is in an excluded file or wholly ignored.
 	// When markUsed is true it also records the function-level ignore directive
 	// as used; that side effect must happen exactly once per function, so only
@@ -147,6 +143,11 @@ func RunSSA(
 	// (clone>0) handle, so it is exempt from the Phase 1b mutable-by-default
 	// treatment of *gorm.DB parameters (#60 SC103, #61).
 	transactionCallbacks := tracer.CollectTransactionCallbacks(ssaInfo.SrcFuncs)
+
+	// Share a single fix generator across all violations (it caches AST
+	// inspectors). It needs scopesCallbacks to withhold the immutable-param fix on
+	// Scopes/Preload callbacks, whose parameters cannot be exempted (stage 2c).
+	fixGen := fix.New(pass, scopesCallbacks)
 
 	// Determine which //gormreuse:immutable-param functions actually rely on
 	// immutability — they would reuse a *gorm.DB parameter if it were treated as

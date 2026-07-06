@@ -250,14 +250,29 @@ db.Scopes(func(tx *gorm.DB) *gorm.DB {
 })
 ```
 
-This applies **only** to callbacks actually handed to `Scopes`/`Preload`. An ordinary parameter of a plain helper is still treated as immutable (the caller's responsibility) and needs no migration:
+#### Parameters are mutable
+
+A [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) **parameter** is a mutable root: a caller may pass a mid-chain value, so branching a parameter interferes exactly as branching a local would.
 
 ```go
 func helper(tx *gorm.DB) *gorm.DB {
-    tx.Where("a").Find(&users) // OK - ordinary parameter is treated as immutable
-    return tx.Where("b")
+    tx.Where("a").Find(&users) // first branch from tx - OK
+    return tx.Where("b")       // VIOLATION: second branch from tx
 }
 ```
+
+To opt a helper out — declaring that the caller is responsible for passing an isolated value — annotate it with [`//gormreuse:immutable-param`](#gormreuseimmutable-param).
+
+Reuse safety is determined by GORM's internal `clone` field: a handle with `clone > 0` forks a **fresh** `Statement` on the next chain call (safe to reuse), while a mid-chain handle (`clone == 0`) shares its `Statement`. A parameter's `clone` value is statically unknowable, so it is treated conservatively as mutable.
+
+| Source | `clone` | Reusable? |
+| --- | --- | --- |
+| [`gorm.Open`](https://pkg.go.dev/gorm.io/gorm#Open), [`Session`](https://pkg.go.dev/gorm.io/gorm#DB.Session), [`WithContext`](https://pkg.go.dev/gorm.io/gorm#DB.WithContext), [`Debug`](https://pkg.go.dev/gorm.io/gorm#DB.Debug) | `> 0` | ✅ forks a fresh Statement |
+| [`Begin`](https://pkg.go.dev/gorm.io/gorm#DB.Begin) result, [`Transaction`](https://pkg.go.dev/gorm.io/gorm#DB.Transaction) callback `tx` | `> 0` | ✅ fresh transaction handle |
+| Mid-chain ([`Where`](https://pkg.go.dev/gorm.io/gorm#DB.Where), [`Order`](https://pkg.go.dev/gorm.io/gorm#DB.Order), …) | `== 0` | ❌ shares Statement |
+| A [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) **parameter** | unknown | ❌ treated as mutable |
+
+Transaction callbacks (`tx` in `db.Transaction(func(tx *gorm.DB) error {...})`) are exempt — their `tx` is a fresh forkable handle.
 
 #### Safe: Variable reassignment
 
@@ -293,7 +308,7 @@ q.Find(&users)             // OK - first branch from whichever root
 
 ## Directives
 
-- Directives can be combined with commas: `//gormreuse:pure,immutable-return`
+- Directives can be combined with commas: `//gormreuse:pure,immutable-return`, `//gormreuse:pure,immutable-param`
 - Trailing comments use `//`: `//gormreuse:ignore // reason here`
 
 ### `//gormreuse:ignore`
@@ -392,6 +407,31 @@ func useIt() {
 > [!TIP]
 > Use this directive for DB connection helpers that return a fresh, immutable [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) instance. This allows callers to reuse the returned value freely without worrying about pollution.
 
+### `//gormreuse:immutable-param`
+
+Opt a function's [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) **parameters** out of the default mutable treatment — they are treated as immutable inside the function, so the caller becomes responsible for passing an isolated value:
+
+```go
+//gormreuse:immutable-param
+func applyFilters(tx *gorm.DB) {
+    tx.Where("a").Find(&users) // OK - tx is treated as immutable here
+    tx.Where("b").Find(&more)  // OK
+}
+```
+
+> [!WARNING]
+> **Caller-side contract.** When the function actually branches such a parameter, passing a *mutable* [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) at a call site is reported — the callee's internal branching would interfere because the value is not isolated:
+> ```go
+> func caller(root *gorm.DB) {
+>     q := root.Session(&gorm.Session{}).Where("x") // mutable
+>     applyFilters(q) // VIOLATION: mutable *gorm.DB passed to immutable-param parameter
+> }
+> ```
+> Fix by passing an isolated value (`root.Session(&gorm.Session{})`), or make the caller `//gormreuse:immutable-param` too so the contract propagates.
+
+> [!TIP]
+> Combine with `//gormreuse:pure` when a helper both leaves its argument unpolluted and expects an isolated value. A **redundant** `//gormreuse:immutable-param` — one whose parameter is never reused, so it suppresses nothing — is reported so you can drop it.
+
 ### `//gormreuse:pure,immutable-return`
 
 The recommended pattern for DB connection helpers - combines both guarantees:
@@ -413,7 +453,7 @@ func useIt(db *gorm.DB) {
 ```
 
 > [!WARNING]
-> Unused `//gormreuse:pure` and `//gormreuse:immutable-return` directives are reported as warnings. This helps identify misplaced or stale directives. For combined directives like `//gormreuse:pure,immutable-return`, if either part is used, no unused warning is reported.
+> Unused `//gormreuse:pure`, `//gormreuse:immutable-return`, and `//gormreuse:immutable-param` directives are reported as warnings (a directive whose signature doesn't fit — e.g. `immutable-param` on a function with no [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) parameter). A **redundant** `//gormreuse:immutable-param` (signature-valid but its parameter is never reused) is reported too. For combined directives like `//gormreuse:pure,immutable-return`, if either part is used, no unused warning is reported.
 
 ## Documentation
 

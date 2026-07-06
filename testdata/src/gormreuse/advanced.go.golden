@@ -379,6 +379,7 @@ func nestedArgsSingleUse(db *gorm.DB) {
 //
 // (parameter roots get no auto-fix; the top-level expression is not a *gorm.DB
 // method call anyway).
+//gormreuse:immutable-param
 func wrappedInRequireNoError(tx *gorm.DB, t require.TestingT) {
 	require.NoError(t, tx.Create(nil).Error)
 	require.NoError(t, tx.Create(nil).Error) // want `\*gorm\.DB reused: second branch from mutable root`
@@ -386,6 +387,7 @@ func wrappedInRequireNoError(tx *gorm.DB, t require.TestingT) {
 }
 
 // wrappedInRequireNoErrorMixed demonstrates mixed usage patterns.
+//gormreuse:immutable-param
 func wrappedInRequireNoErrorMixed(tx *gorm.DB, t require.TestingT) {
 	require.NoError(t, tx.Create(nil).Error)
 	tx.Create(nil) // want `\*gorm\.DB reused: second branch from mutable root`
