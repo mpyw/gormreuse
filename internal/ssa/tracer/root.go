@@ -94,13 +94,20 @@ import (
 type RootTracer struct {
 	pureFuncs            *directive.DirectiveFuncSet // User-defined pure functions
 	immutableReturnFuncs *directive.DirectiveFuncSet // Functions returning immutable *gorm.DB
+	failedPure           map[*ssa.Function]bool      // Pure functions that FAILED contract validation
 }
 
 // New creates a new RootTracer.
-func New(pureFuncs, immutableReturnFuncs *directive.DirectiveFuncSet) *RootTracer {
+//
+// failedPure lists functions marked //gormreuse:pure whose bodies definitively
+// leaked their *gorm.DB argument (channel send, slice/array store, map store;
+// validated earlier this pass). They must NOT be trusted as pure at call sites
+// — doing so would hide reuse of the value they leak (issue #66). It may be nil.
+func New(pureFuncs, immutableReturnFuncs *directive.DirectiveFuncSet, failedPure map[*ssa.Function]bool) *RootTracer {
 	return &RootTracer{
 		pureFuncs:            pureFuncs,
 		immutableReturnFuncs: immutableReturnFuncs,
+		failedPure:           failedPure,
 	}
 }
 
@@ -156,7 +163,15 @@ func (t *RootTracer) IsPureFunction(fn *ssa.Function) bool {
 	if fn == nil {
 		return false
 	}
-	return t.IsImmutableReturningBuiltin(fn) || t.pureFuncs.Contains(fn)
+	if t.IsImmutableReturningBuiltin(fn) {
+		return true
+	}
+	// A //gormreuse:pure function that failed its own contract validation is
+	// NOT trusted here: its callers must see the leak it hides.
+	if t.failedPure[fn] {
+		return false
+	}
+	return t.pureFuncs.Contains(fn)
 }
 
 // IsImmutableReturningBuiltin checks if a function is a builtin method that returns immutable *gorm.DB.
