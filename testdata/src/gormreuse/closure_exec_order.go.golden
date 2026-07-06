@@ -29,17 +29,13 @@ func deadClosureNeverAssigned(db *gorm.DB) {
 // ===== SHOULD REPORT =====
 
 // execOrderMismatch: the closure is defined before q.Count but EXECUTES after
-// (when later() runs). The reuse is real and is reported — but at q.Count rather
-// than the call site, because detection currently orders uses by source
-// position, not execution order.
-//
-// [LIMITATION] fix-direction-2 of #68 (use the call-site position as the
-// ordering key for a closure's captured uses) is not yet implemented, so the
-// reported site is q.Count and the "first branch" in the message points at
-// q.Find inside the closure. The violation itself is correctly detected.
+// (when later() runs). Because a closure invoked at a single later call site now
+// orders its captured uses by that call-site position (#68 fix-direction-2), the
+// reuse is reported at later() — the execution site — with q.Count correctly
+// treated as the (safe) first branch, not misreported.
 func execOrderMismatch(db *gorm.DB) {
 	q := db.Where("x").Session(&gorm.Session{})
 	later := func() { q.Find(nil) } // executes last, via later()
-	q.Count(nil)                    // want `\*gorm\.DB reused: second branch from mutable root`
-	later()
+	q.Count(nil)                    // first branch (executes first) - OK
+	later()                         // want `\*gorm\.DB reused: second branch from mutable root`
 }

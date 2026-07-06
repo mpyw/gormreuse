@@ -352,6 +352,8 @@ When refactoring code, follow these rules strictly:
 
 These are documented in `testdata/src/gormreuse/evil.go` with `[LIMITATION]` markers.
 
+**Closure use ordering (#68)**: uses inside a closure that is invoked at a *single* later call site (`f := func() { q.Find(nil) }; …; f()`) are ordered by that **call-site position**, not the closure body's source position — so define-early/call-late reuse is reported at the call site and the earlier direct use is correctly treated as the first branch. This applies only to the unambiguous single-invocation case; IIFEs (invoked inline), deferred/spawned closures, and closures invoked from multiple sites keep their body positions.
+
 ### IIFE/Closure Stored Result Limitation
 
 When a closure result is stored (in a variable or struct field) rather than directly chained to a gorm method, branch tracking may differ from runtime behavior:

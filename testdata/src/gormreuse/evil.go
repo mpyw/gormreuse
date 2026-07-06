@@ -3043,9 +3043,9 @@ func closureCapturesPhi(db *gorm.DB, cond bool) {
 	q.Find(nil) // Pollute (both branches get polluted because Phi merges them)
 
 	fn := func() {
-		q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+		q.Count(nil)
 	}
-	fn()
+	fn() // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // closureCaputresPhiOnePolluted demonstrates closure with Phi where only one branch is polluted.
@@ -3066,9 +3066,9 @@ func closureCaputresPhiOnePolluted(db *gorm.DB, cond bool) {
 	fn := func() {
 		// FreeVar captures the Phi
 		// Should detect pollution from q1
-		q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+		q.Count(nil)
 	}
-	fn()
+	fn() // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // closureCaputresPhiOnePollutedReverse demonstrates the reverse ordering.
@@ -3088,9 +3088,9 @@ func closureCaputresPhiOnePollutedReverse(db *gorm.DB, cond bool) {
 	fn := func() {
 		// FreeVar captures the Phi
 		// Should detect pollution from q2
-		q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+		q.Count(nil)
 	}
-	fn()
+	fn() // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // =============================================================================
