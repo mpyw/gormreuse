@@ -1,0 +1,45 @@
+package internal
+
+import "gorm.io/gorm"
+
+// =============================================================================
+// Closure execution-order cases (#68)
+// =============================================================================
+
+// ===== SHOULD NOT REPORT =====
+
+// deadClosure: a closure that is never invoked contributes no uses. Its body's
+// q.Count never executes, so q.Find is the only real use — clean. Before #68's
+// dead-closure fix this produced a false positive on the closure body.
+func deadClosure(db *gorm.DB) {
+	q := db.Where("x")
+	q.Find(nil)                        // the only use that executes
+	handler := func() { q.Count(nil) } // never called → provably dead (no referrers)
+	_ = handler
+}
+
+// deadClosureNeverAssigned: a bare, never-referenced closure literal is likewise
+// dead and must not contribute uses.
+func deadClosureNeverAssigned(db *gorm.DB) {
+	q := db.Where("x")
+	q.Find(nil)
+	_ = func() { q.Count(nil) } // dead
+}
+
+// ===== SHOULD REPORT =====
+
+// execOrderMismatch: the closure is defined before q.Count but EXECUTES after
+// (when later() runs). The reuse is real and is reported — but at q.Count rather
+// than the call site, because detection currently orders uses by source
+// position, not execution order.
+//
+// [LIMITATION] fix-direction-2 of #68 (use the call-site position as the
+// ordering key for a closure's captured uses) is not yet implemented, so the
+// reported site is q.Count and the "first branch" in the message points at
+// q.Find inside the closure. The violation itself is correctly detected.
+func execOrderMismatch(db *gorm.DB) {
+	q := db.Where("x")
+	later := func() { q.Find(nil) } // executes last, via later()
+	q.Count(nil)                    // want `\*gorm\.DB reused: second branch from mutable root`
+	later()
+}
