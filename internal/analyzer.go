@@ -35,7 +35,9 @@
 package internal
 
 import (
+	"fmt"
 	"go/token"
+	"os"
 
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/analysis/passes/buildssa"
@@ -124,14 +126,16 @@ func RunSSA(
 			continue
 		}
 		if pureFuncs != nil && pureFuncs.Contains(fn) {
-			for _, v := range purity.ValidateFunction(fn, pureFuncs) {
-				pass.Reportf(v.Pos, "%s", v.Message)
-				// Only a definitive escape revokes pure-trust at call sites;
-				// conservative func-arg violations do not (avoids FP cascades).
-				if v.Leak {
-					failedPure[fn] = true
+			recoverPerFunction(fn, func() {
+				for _, v := range purity.ValidateFunction(fn, pureFuncs) {
+					pass.Reportf(v.Pos, "%s", v.Message)
+					// Only a definitive escape revokes pure-trust at call sites;
+					// conservative func-arg violations do not (avoids FP cascades).
+					if v.Leak {
+						failedPure[fn] = true
+					}
 				}
-			}
+			})
 		}
 	}
 
@@ -146,7 +150,7 @@ func RunSSA(
 		}
 
 		chk := newChecker(pass, ignoreMaps[pass.Fset.Position(fn.Pos()).Filename], pureFuncs, immutableReturnFuncs, failedPure, scopesCallbacks, globalReported, globalSuggestedEdits, fixGen)
-		chk.checkFunction(fn)
+		recoverPerFunction(fn, func() { chk.checkFunction(fn) })
 	}
 
 	// Report unused ignore directives
@@ -182,6 +186,23 @@ func RunSSA(
 			pass.Reportf(pos, "unused gormreuse:immutable-return directive")
 		}
 	}
+}
+
+// recoverPerFunction runs work, recovering from any panic so that a single
+// pathological function (exotic SSA the tracer mishandles) cannot abort the
+// entire `go vet` run for the package. Aborting would be worse than any false
+// positive and contrary to the conservative-bias design, so the offending
+// function is simply skipped.
+//
+// Set GORMREUSE_DEBUG_PANIC to a non-empty value to re-panic instead, surfacing
+// the stack trace for debugging.
+func recoverPerFunction(fn *ssa.Function, work func()) {
+	defer func() {
+		if r := recover(); r != nil && os.Getenv("GORMREUSE_DEBUG_PANIC") != "" {
+			panic(fmt.Sprintf("gormreuse: panic analyzing %s: %v", fn, r))
+		}
+	}()
+	work()
 }
 
 // =============================================================================

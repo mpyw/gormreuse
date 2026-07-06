@@ -303,6 +303,13 @@ go run ./testdata/cmd/gengolden/main.go
   - `===== SHOULD REPORT =====` - Cases that should trigger warnings
   - `===== SHOULD NOT REPORT =====` - Negative cases
 
+> **Trap: never name a fixture `*_test.go` unless you mean to.** `analysistest`
+> loads a package's `*_test.go` files as part of both the normal package and the
+> test variant, so every diagnostic in such a fixture is collected **twice**
+> (this produced 343 duplicated diagnostics in PR #57). Use a plain `.go` name.
+> The one intentional exception is `testdata/src/filefilter/code_test.go`, which
+> exists specifically to test the analyzer's `-test` flag handling.
+
 ### Testdata Organization
 
 ```

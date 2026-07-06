@@ -10,6 +10,30 @@ import (
 	ssautil "github.com/mpyw/gormreuse/internal/ssa"
 )
 
+// TestRecoverPerFunction verifies that a panic in per-function analysis is
+// contained (issue #77 item 3) so one pathological function cannot abort the
+// whole vet run, and that GORMREUSE_DEBUG_PANIC re-surfaces it.
+func TestRecoverPerFunction(t *testing.T) {
+	// Default: panic is swallowed, execution continues.
+	ran := false
+	recoverPerFunction(nil, func() { panic("boom") })
+	recoverPerFunction(nil, func() { ran = true })
+	if !ran {
+		t.Fatal("recoverPerFunction did not run work after a prior panic")
+	}
+
+	// With GORMREUSE_DEBUG_PANIC set, the panic is re-surfaced.
+	t.Setenv("GORMREUSE_DEBUG_PANIC", "1")
+	func() {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Error("expected re-panic under GORMREUSE_DEBUG_PANIC, got none")
+			}
+		}()
+		recoverPerFunction(nil, func() { panic("boom") })
+	}()
+}
+
 // =============================================================================
 // Analyzer Tests
 // =============================================================================
