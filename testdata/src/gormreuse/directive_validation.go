@@ -1031,3 +1031,31 @@ func useCombinedOnlyPure(db *gorm.DB) {
 // =============================================================================
 
 var globalDB *gorm.DB
+
+// =============================================================================
+// #72: directive matching robustness
+// =============================================================================
+
+// multiAssignPureValidSibling: multi-assignment where one closure matches the
+// pure signature (*gorm.DB) and a sibling does not (int). The shared directive
+// must NOT be reported unused — it validly applies to the *gorm.DB closure.
+func multiAssignPureValidSibling(db *gorm.DB) {
+	//gormreuse:pure
+	a, b := func(q *gorm.DB) { _ = q }, func(x int) { _ = x }
+	_, _ = a, b
+}
+
+// blockCommentPureBad: block-comment directive form is now recognized, so the
+// pure contract is enforced (previously a silent no-op).
+/*gormreuse:pure*/
+func blockCommentPureBad(db *gorm.DB) *gorm.DB {
+	db.Find(nil)         // want `pure function pollutes \*gorm\.DB argument by calling Find`
+	return db.Where("x") // want `pure function pollutes \*gorm\.DB argument by calling Where`
+}
+
+// blockCommentPureGood: valid pure via block-comment form — no violation, and
+// not reported as an unused directive.
+/*gormreuse:pure*/
+func blockCommentPureGood(db *gorm.DB) *gorm.DB {
+	return db.Session(&gorm.Session{}).Where("x")
+}

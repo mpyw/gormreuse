@@ -61,7 +61,14 @@ const directivePrefix = "gormreuse:"
 // Supports comma-separated directives: "//gormreuse:pure,immutable-return".
 // Trailing comments use "//": "//gormreuse:ignore // reason here".
 func hasDirective(text, name string) bool {
-	text = strings.TrimPrefix(text, "//")
+	// Accept both line (//gormreuse:...) and block (/*gormreuse:...*/) comment
+	// forms. Without the block form, `/*gormreuse:pure*/` was a silent no-op:
+	// neither applied nor reported as unused.
+	if strings.HasPrefix(text, "/*") {
+		text = strings.TrimSuffix(strings.TrimPrefix(text, "/*"), "*/")
+	} else {
+		text = strings.TrimPrefix(text, "//")
+	}
 	text = strings.TrimSpace(text)
 	if !strings.HasPrefix(text, directivePrefix) {
 		return false
