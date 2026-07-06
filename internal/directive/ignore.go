@@ -54,13 +54,15 @@ func BuildIgnoreMap(fset *token.FileSet, file *ast.File) IgnoreMap {
 		for _, c := range cg.List {
 			pos := fset.Position(c.Pos())
 			if IsIgnoreDirective(c.Text) {
-				// Check if this is a file-level ignore (comment before package declaration)
-				// A comment is considered file-level if it appears on the line immediately
-				// before the package declaration, or within a few lines before it
-				if pos.Line < packageLine && pos.Line >= packageLine-5 {
-					// File-level ignore: mark all lines as ignored
-					// We use line -1 as a special marker
-					// File-level ignores are always considered "used" (no warning for them)
+				// A directive anywhere BEFORE the package clause is a file-level
+				// ignore, regardless of distance: there is no code above the
+				// package clause for a line-level ignore to attach to, so the only
+				// sensible meaning is "ignore this whole file". The previous fixed
+				// 5-line window both missed directives sitting above a long license
+				// header and mis-classified nearby ones.
+				if pos.Line < packageLine {
+					// File-level ignore: mark all lines as ignored (line -1 marker).
+					// File-level ignores are always considered "used" (no warning).
 					m[-1] = &ignoreEntry{pos: c.Pos(), used: true}
 				} else {
 					// Regular line-level ignore
