@@ -46,6 +46,7 @@ import (
 	ssautil "github.com/mpyw/gormreuse/internal/ssa"
 	"github.com/mpyw/gormreuse/internal/ssa/pollution"
 	"github.com/mpyw/gormreuse/internal/ssa/purity"
+	"github.com/mpyw/gormreuse/internal/ssa/tracer"
 )
 
 // =============================================================================
@@ -134,13 +135,17 @@ func RunSSA(
 		}
 	}
 
+	// Collect Scopes/Preload callbacks once: their *gorm.DB parameter receives a
+	// mid-chain (clone==0) value, so reuse inside them must be detected (#60).
+	scopesCallbacks := tracer.CollectScopesCallbacks(ssaInfo.SrcFuncs)
+
 	// PASS 2: run SSA reuse analysis.
 	for _, fn := range ssaInfo.SrcFuncs {
 		if skip(fn, true) {
 			continue
 		}
 
-		chk := newChecker(pass, ignoreMaps[pass.Fset.Position(fn.Pos()).Filename], pureFuncs, immutableReturnFuncs, failedPure, globalReported, globalSuggestedEdits, fixGen)
+		chk := newChecker(pass, ignoreMaps[pass.Fset.Position(fn.Pos()).Filename], pureFuncs, immutableReturnFuncs, failedPure, scopesCallbacks, globalReported, globalSuggestedEdits, fixGen)
 		chk.checkFunction(fn)
 	}
 
@@ -195,6 +200,7 @@ type checker struct {
 	pureFuncs            *directive.DirectiveFuncSet // Pure functions for analysis
 	immutableReturnFuncs *directive.DirectiveFuncSet // Immutable-return functions
 	failedPure           map[*ssa.Function]bool      // Pure functions that failed contract validation
+	scopesCallbacks      map[*ssa.Function]bool      // Scopes/Preload callbacks (params are mutable roots)
 	reported             map[token.Pos]bool          // Deduplication of reports
 	suggestedEdits       map[editKey]bool            // Global deduplication of suggested fixes
 	fixGen               *fix.Generator              // Cached fix generator for all violations
@@ -212,13 +218,14 @@ type editKey struct {
 // across parent functions and their closures.
 // The suggestedEdits map is shared to avoid duplicate fix edits.
 // The fixGen is shared to avoid recreating the generator for each violation.
-func newChecker(pass *analysis.Pass, ignoreMap directive.IgnoreMap, pureFuncs, immutableReturnFuncs *directive.DirectiveFuncSet, failedPure map[*ssa.Function]bool, reported map[token.Pos]bool, suggestedEdits map[editKey]bool, fixGen *fix.Generator) *checker {
+func newChecker(pass *analysis.Pass, ignoreMap directive.IgnoreMap, pureFuncs, immutableReturnFuncs *directive.DirectiveFuncSet, failedPure, scopesCallbacks map[*ssa.Function]bool, reported map[token.Pos]bool, suggestedEdits map[editKey]bool, fixGen *fix.Generator) *checker {
 	return &checker{
 		pass:                 pass,
 		ignoreMap:            ignoreMap,
 		pureFuncs:            pureFuncs,
 		immutableReturnFuncs: immutableReturnFuncs,
 		failedPure:           failedPure,
+		scopesCallbacks:      scopesCallbacks,
 		reported:             reported,
 		suggestedEdits:       suggestedEdits,
 		fixGen:               fixGen,
@@ -227,7 +234,7 @@ func newChecker(pass *analysis.Pass, ignoreMap directive.IgnoreMap, pureFuncs, i
 
 // checkFunction runs SSA analysis on a single function and reports violations.
 func (c *checker) checkFunction(fn *ssa.Function) {
-	analyzer := ssautil.NewAnalyzer(fn, c.pureFuncs, c.immutableReturnFuncs, c.failedPure)
+	analyzer := ssautil.NewAnalyzer(fn, c.pureFuncs, c.immutableReturnFuncs, c.failedPure, c.scopesCallbacks)
 	violations := analyzer.Analyze()
 
 	// Deduplicate violations by root to avoid generating duplicate fixes.

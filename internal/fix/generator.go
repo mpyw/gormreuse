@@ -94,6 +94,16 @@ func (g *Generator) Generate(v pollution.Violation) []analysis.SuggestedFix {
 		return nil // Cannot fix without root information
 	}
 
+	// A parameter root (e.g. a Scopes/Preload callback's *gorm.DB, issue #60)
+	// has no definition site to make immutable — the generator's "insert
+	// Session() at the root" model does not apply, and forcing an edit produces
+	// a misleading fix on an unrelated expression. Report the violation without
+	// an auto-fix instead. (Isolating a reused parameter requires a manual
+	// Session() at the branch, which the user must place.)
+	if _, ok := root.(*ssa.Parameter); ok {
+		return nil
+	}
+
 	allUses := v.AllUses
 	if len(allUses) == 0 {
 		return nil // No uses to fix

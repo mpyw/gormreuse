@@ -95,6 +95,7 @@ type RootTracer struct {
 	pureFuncs            *directive.DirectiveFuncSet // User-defined pure functions
 	immutableReturnFuncs *directive.DirectiveFuncSet // Functions returning immutable *gorm.DB
 	failedPure           map[*ssa.Function]bool      // Pure functions that FAILED contract validation
+	scopesCallbacks      map[*ssa.Function]bool      // Scopes/Preload callbacks (params are mutable roots)
 }
 
 // New creates a new RootTracer.
@@ -103,11 +104,17 @@ type RootTracer struct {
 // leaked their *gorm.DB argument (channel send, slice/array store, map store;
 // validated earlier this pass). They must NOT be trusted as pure at call sites
 // — doing so would hide reuse of the value they leak (issue #66). It may be nil.
-func New(pureFuncs, immutableReturnFuncs *directive.DirectiveFuncSet, failedPure map[*ssa.Function]bool) *RootTracer {
+//
+// scopesCallbacks lists function literals passed to gorm's Scopes/Preload, whose
+// *gorm.DB parameter receives a mid-chain (clone==0) value at runtime and is
+// therefore itself a mutable root — reuse inside the callback interferes (#60).
+// It may be nil.
+func New(pureFuncs, immutableReturnFuncs *directive.DirectiveFuncSet, failedPure, scopesCallbacks map[*ssa.Function]bool) *RootTracer {
 	return &RootTracer{
 		pureFuncs:            pureFuncs,
 		immutableReturnFuncs: immutableReturnFuncs,
 		failedPure:           failedPure,
+		scopesCallbacks:      scopesCallbacks,
 	}
 }
 
@@ -242,6 +249,15 @@ func (t *RootTracer) trace(v ssa.Value, visited map[ssa.Value]bool, loopInfo *cf
 		return nil
 	}
 	visited[v] = true
+
+	// A *gorm.DB parameter of a Scopes/Preload callback receives a mid-chain
+	// (clone==0) value at runtime, so it is itself a mutable root — unlike an
+	// ordinary parameter, which is treated as immutable (caller's concern).
+	// This must be checked BEFORE isImmutableSource, which reports parameters as
+	// immutable (issue #60).
+	if p, ok := v.(*ssa.Parameter); ok && t.isScopesCallbackParam(p) {
+		return p
+	}
 
 	// Check if this is an immutable source
 	if t.isImmutableSource(v) {
@@ -1107,6 +1123,13 @@ func (t *RootTracer) traceAll(v ssa.Value, visited map[ssa.Value]bool, loopInfo 
 	}
 	visited[v] = true
 
+	// A Scopes/Preload callback's *gorm.DB parameter is itself a mutable root
+	// (issue #60); keep this consistent with trace()/FindMutableRoot so Phi-based
+	// pollution checks see it too.
+	if p, ok := v.(*ssa.Parameter); ok && t.isScopesCallbackParam(p) {
+		return []ssa.Value{p}
+	}
+
 	switch val := v.(type) {
 	case *ssa.Phi:
 		// =====================================================================
@@ -1373,6 +1396,23 @@ func (t *RootTracer) traceAllFreeVar(fv *ssa.FreeVar, visited map[ssa.Value]bool
 	return nil
 }
 
+// isScopesCallbackParam reports whether p is the *gorm.DB parameter of a
+// function literal passed to gorm's Scopes/Preload (see CollectScopesCallbacks).
+func (t *RootTracer) isScopesCallbackParam(p *ssa.Parameter) bool {
+	if t.scopesCallbacks == nil || !typeutil.IsGormDB(p.Type()) {
+		return false
+	}
+	return t.scopesCallbacks[p.Parent()]
+}
+
+// IsScopesCallbackFunc reports whether fn is a Scopes/Preload callback. The
+// analyzer uses this to recurse into such callbacks even when they capture no
+// *gorm.DB (they operate on their parameter, not a captured variable), so reuse
+// of the mutable parameter inside them is still detected (#60).
+func (t *RootTracer) IsScopesCallbackFunc(fn *ssa.Function) bool {
+	return t.scopesCallbacks[fn]
+}
+
 // isImmutableSource checks if a value is an immutable source (no mutable root).
 //
 // Immutable sources:
@@ -1530,6 +1570,113 @@ func ClosureCapturesGormDB(mc *ssa.MakeClosure) bool {
 		}
 	}
 	return false
+}
+
+// CollectScopesCallbacks returns the set of functions passed as callbacks to
+// gorm's Scopes / Preload across all given functions and their nested closures.
+//
+// Such callbacks receive a mid-chain (clone==0) *gorm.DB at runtime, so their
+// *gorm.DB parameter is a mutable root and reuse inside them interferes (#60).
+// This is deliberately narrow — only functions actually handed to Scopes/Preload
+// qualify, NOT every func(*gorm.DB) *gorm.DB (that broader treatment is Phase
+// 1b, not 1a).
+//
+// Scopes(funcs ...func(*DB) *DB) and Preload(query, args ...interface{}) are
+// variadic, so the callbacks are packed into a varargs array (the last call
+// argument is a slice of it); Preload additionally boxes them in interface{}.
+func CollectScopesCallbacks(funcs []*ssa.Function) map[*ssa.Function]bool {
+	set := make(map[*ssa.Function]bool)
+	visited := make(map[*ssa.Function]bool)
+	for _, fn := range funcs {
+		collectScopesCallbacks(fn, set, visited)
+	}
+	return set
+}
+
+func collectScopesCallbacks(fn *ssa.Function, set, visited map[*ssa.Function]bool) {
+	if fn == nil || visited[fn] {
+		return
+	}
+	visited[fn] = true
+
+	for _, block := range fn.Blocks {
+		for _, instr := range block.Instrs {
+			if call, ok := instr.(*ssa.Call); ok {
+				collectScopesCallbacksFromCall(call, set)
+			}
+		}
+	}
+	for _, af := range fn.AnonFuncs {
+		collectScopesCallbacks(af, set, visited)
+	}
+}
+
+// collectScopesCallbacksFromCall adds any callback function passed to a
+// Scopes/Preload call to set.
+func collectScopesCallbacksFromCall(call *ssa.Call, set map[*ssa.Function]bool) {
+	callee := call.Call.StaticCallee()
+	if callee == nil || !isScopesOrPreloadMethod(callee) {
+		return
+	}
+
+	// The variadic callbacks are packed into an array whose slice is the last
+	// argument. Walk the array's element stores back to the callback functions.
+	args := call.Call.Args
+	if len(args) == 0 {
+		return
+	}
+	slice, ok := args[len(args)-1].(*ssa.Slice)
+	if !ok {
+		return
+	}
+	alloc, ok := slice.X.(*ssa.Alloc)
+	if !ok || alloc.Referrers() == nil {
+		return
+	}
+	for _, r := range *alloc.Referrers() {
+		idx, ok := r.(*ssa.IndexAddr)
+		if !ok || idx.Referrers() == nil {
+			continue
+		}
+		for _, ir := range *idx.Referrers() {
+			store, ok := ir.(*ssa.Store)
+			if !ok {
+				continue
+			}
+			if cb := callbackFuncValue(store.Val); cb != nil {
+				set[cb] = true
+			}
+		}
+	}
+}
+
+// isScopesOrPreloadMethod reports whether callee is gorm's Scopes or Preload
+// method (gated on a gorm.DB receiver so a same-named user method is excluded).
+func isScopesOrPreloadMethod(callee *ssa.Function) bool {
+	name := callee.Name()
+	if name != "Scopes" && name != "Preload" {
+		return false
+	}
+	sig := callee.Signature
+	return sig != nil && sig.Recv() != nil && typeutil.IsGormDB(sig.Recv().Type())
+}
+
+// callbackFuncValue extracts the concrete function from a value stored into a
+// Scopes/Preload varargs slot: a MakeClosure (capturing closure), a bare
+// *ssa.Function (named function reference), or either boxed in an interface
+// (Preload's args are ...interface{}).
+func callbackFuncValue(v ssa.Value) *ssa.Function {
+	switch x := v.(type) {
+	case *ssa.MakeClosure:
+		if fn, ok := x.Fn.(*ssa.Function); ok {
+			return fn
+		}
+	case *ssa.Function:
+		return x
+	case *ssa.MakeInterface:
+		return callbackFuncValue(x.X)
+	}
+	return nil
 }
 
 // containsGormDBThroughPointers checks if a type contains *gorm.DB through pointer chain.
