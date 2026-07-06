@@ -47,9 +47,12 @@
 //	│  *ssa.Alloc             │  Find Store instructions to this alloc     │
 //	│  *ssa.FreeVar           │  Find binding in parent's MakeClosure      │
 //	│  *ssa.FieldAddr         │  Find Store to this field                  │
-//	│  *ssa.Parameter         │  STOP - parameter is immutable source      │
+//	│  *ssa.Parameter         │  STOP - immutable source (caller's concern)│
+//	│  *ssa.Parameter (Scopes)│  ROOT - Scopes/Preload callback param is   │
+//	│                         │  mutable (receives clone==0 db, #60)       │
 //	│  *ssa.Const (nil)       │  STOP - nil is ignored                     │
 //	│  Builtin pure call      │  STOP - returns immutable (nil root)       │
+//	│  immutable-return call  │  STOP - returns immutable (nil root)       │
 //	│  User-defined pure call │  Returns call as root (may be mutable)     │
 //	└───────────────────────────────────────────────────────────────────────┘
 package tracer
@@ -1458,21 +1461,6 @@ func isNilConst(v ssa.Value) bool {
 	return ok && c.Value == nil
 }
 
-// isClosureResultStored checks if a closure call's result is stored in a variable.
-// This happens when the closure returns multiple values and the result is extracted.
-// Example: `publishedQuery, err := closureFunc()` - result goes through Extract.
-// In contrast, IIFE chains like `closure().Find()` use the result directly.
-// isClosureResultStored checks if a closure call's result is stored rather than
-// directly chained to a method call.
-//
-// Returns true (stored) for patterns like:
-//   - `q, err := closureFunc()` (multi-return with Extract)
-//   - `q := closureFunc()` (single-return assigned to variable)
-//   - Result flows into Phi node
-//
-// Returns false (chained) for IIFE patterns like:
-//   - `closureFunc().Find(nil)` (result directly used as method receiver)
-//
 // isClosureResultStored checks if a closure call's result is stored (assigned to
 // a variable) rather than directly chained in an IIFE pattern.
 //
