@@ -74,10 +74,11 @@ type Analyzer struct {
 //   - pureFuncs: Set of functions marked with //gormreuse:pure directive
 //   - immutableReturnFuncs: Set of functions marked with //gormreuse:immutable-return directive
 //   - failedPure: Pure functions that failed contract validation (not trusted as pure)
-func NewAnalyzer(fn *ssa.Function, pureFuncs, immutableReturnFuncs *directive.DirectiveFuncSet, failedPure map[*ssa.Function]bool) *Analyzer {
+//   - scopesCallbacks: Scopes/Preload callbacks whose *gorm.DB param is a mutable root
+func NewAnalyzer(fn *ssa.Function, pureFuncs, immutableReturnFuncs *directive.DirectiveFuncSet, failedPure, scopesCallbacks map[*ssa.Function]bool) *Analyzer {
 	return &Analyzer{
 		fn:          fn,
-		rootTracer:  tracer.New(pureFuncs, immutableReturnFuncs, failedPure),
+		rootTracer:  tracer.New(pureFuncs, immutableReturnFuncs, failedPure, scopesCallbacks),
 		cfgAnalyzer: cfg.New(),
 	}
 }
@@ -155,7 +156,10 @@ func (a *Analyzer) processFunction(fn *ssa.Function, tracker *pollution.Tracker,
 			// Recursively process closures that capture *gorm.DB
 			if mc, ok := instr.(*ssa.MakeClosure); ok {
 				if closureFn, ok := mc.Fn.(*ssa.Function); ok {
-					if tracer.ClosureCapturesGormDB(mc) {
+					// Recurse into closures that capture *gorm.DB, and into
+					// Scopes/Preload callbacks (which operate on their mutable
+					// parameter rather than a captured variable — see #60).
+					if tracer.ClosureCapturesGormDB(mc) || a.rootTracer.IsScopesCallbackFunc(closureFn) {
 						a.processFunction(closureFn, tracker, visited)
 					}
 				}

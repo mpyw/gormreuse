@@ -239,6 +239,26 @@ q.Session(&gorm.Session{}).Count(&c) // VIOLATION: second branch from q
 > db.Where("base").Where("a").Where("b").Find(&users)  // OK - single chain
 > ```
 
+#### Scopes / Preload callbacks
+
+The [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) passed to a [`Scopes`](https://pkg.go.dev/gorm.io/gorm#DB.Scopes) / [`Preload`](https://pkg.go.dev/gorm.io/gorm#DB.Preload) callback is a **mid-chain (mutable) value**, so reusing it inside the callback is a violation — just like any other mutable value:
+
+```go
+db.Scopes(func(tx *gorm.DB) *gorm.DB {
+    tx.Where("a").Find(&users) // first branch from tx - OK
+    return tx.Where("b")       // VIOLATION: second branch from tx
+})
+```
+
+This applies **only** to callbacks actually handed to `Scopes`/`Preload`. An ordinary parameter of a plain helper is still treated as immutable (the caller's responsibility) and needs no migration:
+
+```go
+func helper(tx *gorm.DB) *gorm.DB {
+    tx.Where("a").Find(&users) // OK - ordinary parameter is treated as immutable
+    return tx.Where("b")
+}
+```
+
 #### Safe: Variable reassignment
 
 Variable reassignment creates a **new mutable root**, so the variable can be used fresh:
