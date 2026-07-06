@@ -1162,8 +1162,9 @@ func blockCommentPureGood(db *gorm.DB) *gorm.DB {
 // =============================================================================
 
 // IPARAM001: immutable-param on a *gorm.DB-parameter function is valid (not
-// reported unused). Reuse of db is clean today because parameters are still
-// immutable; this annotation is what will keep it clean once Phase 1b flips.
+// reported unused) AND necessary — db is branched twice, so without the directive
+// Phase 1b would flag the second branch. The directive suppresses that, so it is
+// NOT reported redundant (contrast IPARAM004/005).
 //
 //gormreuse:immutable-param
 func immutableParamValid(db *gorm.DB) {
@@ -1182,4 +1183,23 @@ func immutableParamNoGormArg(x int) int { return x }
 //gormreuse:pure,immutable-param
 func pureAndImmutableParam(db *gorm.DB) {
 	_ = db
+}
+
+// IPARAM004: signature-valid immutable-param that is REDUNDANT — the parameter is
+// branched at most once, so even treated as mutable it would never be reused, and
+// the directive suppresses nothing. Reported (distinct from the signature-invalid
+// "unused" case).
+//
+//gormreuse:immutable-param
+func immutableParamRedundant(db *gorm.DB) { // want `redundant gormreuse:immutable-param directive: no \*gorm\.DB parameter is reused`
+	db.Where("only-one-branch").Find(nil)
+}
+
+// IPARAM005: signature-valid immutable-param on a parameter used but not branched
+// (single chain via a local) is also redundant.
+//
+//gormreuse:immutable-param
+func immutableParamRedundantLocal(db *gorm.DB) { // want `redundant gormreuse:immutable-param directive: no \*gorm\.DB parameter is reused`
+	q := db.Where("x")
+	q.Find(nil)
 }

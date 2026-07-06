@@ -158,6 +158,10 @@ func RunSSA(
 		recoverPerFunction(fn, func() { chk.checkFunction(fn) })
 	}
 
+	// Report immutable-param directives that are signature-valid but have no
+	// effect (no *gorm.DB parameter is reused).
+	reportRedundantImmutableParam(pass, ssaInfo, immutableParamFuncs, pureFuncs, immutableReturnFuncs, failedPure, scopesCallbacks, transactionCallbacks, skip)
+
 	// Report unused ignore directives
 	for _, ignoreMap := range ignoreMaps {
 		if ignoreMap == nil {
@@ -169,6 +173,70 @@ func RunSSA(
 	}
 
 	reportUnusedDirectiveFuncs(pass, pureFuncs, immutableReturnFuncs, immutableParamFuncs)
+}
+
+// reportRedundantImmutableParam flags //gormreuse:immutable-param directives that
+// are signature-valid (the function has a *gorm.DB parameter) yet have no effect:
+// even if the parameter were treated as mutable, it would never be reused, so the
+// directive suppresses nothing.
+//
+// This is checked with a counterfactual analysis: re-run the function with its
+// parameters treated as mutable (immutableParamFuncs = nil) and see whether any
+// resulting violation is rooted at one of the function's own parameters. If none
+// is, removing the directive would change no diagnostic and it is redundant.
+//
+// Scope note: Phase 1b stage 2a makes immutable-param a purely callee-side
+// contract, so "changes no diagnostic" need only consider the function's own
+// body. When stage 2b adds caller-side verification, a directive also becomes
+// "used" if a caller relies on it; this check must then also consult call sites.
+//
+// Signature-invalid directives (no *gorm.DB parameter) are NOT handled here —
+// they are already reported as unused by reportUnusedDirectiveFuncs; the
+// HasGormDBParameter guard below skips them to avoid a double report.
+//
+// Functions also marked //gormreuse:pure are skipped: a valid pure function
+// cannot branch its parameter at all (branching is pollution, which the pure
+// contract forbids), so immutable-param is redundant there by construction.
+// Flagging it would fire on every pure,immutable-param combination and
+// contradict the decision to allow that combination freely (#61).
+func reportRedundantImmutableParam(
+	pass *analysis.Pass,
+	ssaInfo *buildssa.SSA,
+	immutableParamFuncs, pureFuncs, immutableReturnFuncs *directive.DirectiveFuncSet,
+	failedPure, scopesCallbacks, transactionCallbacks map[*ssa.Function]bool,
+	skip func(*ssa.Function, bool) bool,
+) {
+	if immutableParamFuncs == nil {
+		return
+	}
+	for _, fn := range ssaInfo.SrcFuncs {
+		if skip(fn, false) {
+			continue
+		}
+		if !immutableParamFuncs.Contains(fn) {
+			continue
+		}
+		if fn.Signature == nil || !directive.HasGormDBParameter(fn.Signature) {
+			continue // signature-invalid: handled by reportUnusedDirectiveFuncs
+		}
+		if pureFuncs != nil && pureFuncs.Contains(fn) {
+			continue // pure ⇒ param never branched ⇒ immutable-param redundant by construction
+		}
+		redundant := true
+		recoverPerFunction(fn, func() {
+			// Counterfactual: analyze fn with its parameters mutable.
+			cf := ssautil.NewAnalyzer(fn, pureFuncs, immutableReturnFuncs, nil, failedPure, scopesCallbacks, transactionCallbacks)
+			for _, v := range cf.Analyze() {
+				if p, ok := v.Root.(*ssa.Parameter); ok && p.Parent() == fn {
+					redundant = false
+					break
+				}
+			}
+		})
+		if redundant {
+			pass.Reportf(fn.Pos(), "redundant gormreuse:immutable-param directive: no *gorm.DB parameter is reused")
+		}
+	}
 }
 
 // reportUnusedDirectiveFuncs reports pure / immutable-return / immutable-param

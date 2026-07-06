@@ -6,6 +6,13 @@ import "go/types"
 // Signature Validation
 // =============================================================================
 
+// HasGormDBParameter reports whether a function signature has any parameter
+// containing *gorm.DB. It is the same predicate that decides whether a
+// //gormreuse:immutable-param directive has a valid signature, exported so
+// callers (e.g. redundant-directive detection) can distinguish a signature-valid
+// annotation from a signature-invalid one.
+func HasGormDBParameter(sig *types.Signature) bool { return hasGormDBParameter(sig) }
+
 // hasGormDBParameter checks if a function signature has any parameter
 // containing *gorm.DB (directly or in struct fields).
 func hasGormDBParameter(sig *types.Signature) bool {

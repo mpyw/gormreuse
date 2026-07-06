@@ -90,6 +90,8 @@ a, b := func(q *gorm.DB) { _ = q }, func(q *gorm.DB) { _ = q }
 > - Unused `//gormreuse:ignore` - line/function-level ignores that suppress no violations
 > - Unused `//gormreuse:pure` - directives that don't match any function
 > - Unused `//gormreuse:immutable-return` - directives that don't match any function
+> - Unused `//gormreuse:immutable-param` - directives that don't match any function (no `*gorm.DB` parameter)
+> - **Redundant** `//gormreuse:immutable-param` - directive is signature-valid but has no effect: the parameter is never reused, so even treated as mutable it would produce no violation to suppress. Reported at the function declaration. Skipped when combined with `//gormreuse:pure` (a valid pure function cannot branch its parameter, so immutable-param is redundant there by construction). This is callee-side only, matching Phase 1b stage 2a.
 > - For combined directives (`//gormreuse:pure,immutable-return`), if either part is used, no unused warning is reported
 
 ## Architecture
