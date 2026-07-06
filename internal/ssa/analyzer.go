@@ -165,7 +165,9 @@ func (a *Analyzer) processFunction(fn *ssa.Function, tracker *pollution.Tracker,
 					// Recurse into closures that capture *gorm.DB, and into
 					// Scopes/Preload callbacks (which operate on their mutable
 					// parameter rather than a captured variable — see #60).
-					if tracer.ClosureCapturesGormDB(mc) || a.rootTracer.IsScopesCallbackFunc(closureFn) {
+					// Skip provably-dead closures: their uses never execute, so
+					// analyzing them yields false positives (#68).
+					if (tracer.ClosureCapturesGormDB(mc) || a.rootTracer.IsScopesCallbackFunc(closureFn)) && !isDeadClosure(mc) {
 						a.processFunction(closureFn, tracker, visited)
 					}
 				}
@@ -202,4 +204,16 @@ func (a *Analyzer) processFunction(fn *ssa.Function, tracker *pollution.Tracker,
 	for _, d := range defers {
 		handler.DispatchDefer(d, ctx)
 	}
+}
+
+// isDeadClosure reports whether mc's closure value is provably never used: it
+// has no referrers at all, so nothing can invoke it (e.g. `h := func(){...}; _ =
+// h`). Such a closure cannot run, so recording pollution from its body would
+// produce false positives — a captured value "reused" only inside an
+// unreachable closure is not actually reused (#68). Any referrer (a call, a Go/
+// Defer, a store that might escape) makes the closure potentially live, so it is
+// conservatively analyzed.
+func isDeadClosure(mc *ssa.MakeClosure) bool {
+	refs := mc.Referrers()
+	return refs == nil || len(*refs) == 0
 }
