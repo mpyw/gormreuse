@@ -151,7 +151,7 @@
  
  	// Or takes interface{} - base is polluted by method call
 -	base.Or("x = ?", 1)
-+	base = base.Or("x = ?", 1)
++	base = base.Or("x = ?", 1).Session(&gorm.Session{})
  
  	base.Find(nil) // want "\\*gorm\\.DB reused: second branch from mutable root"
  }
@@ -164,7 +164,7 @@
  
  	// q is passed to Or as interface{} - pollutes q
 -	base.Or(q)
-+	base = base.Or(q)
++	base = base.Or(q).Session(&gorm.Session{})
  
  	q.Find(nil) // want "\\*gorm\\.DB reused: second branch from mutable root"
  }
@@ -173,11 +173,11 @@
  // q.Where("y") pollutes q, and the chain result is passed to Or
  func gormOrMethodChain(db *gorm.DB) {
  	base := db.Session(&gorm.Session{}) // immutable base
- 	q := db.Where("x")
+-	q := db.Where("x")
++	q := db.Where("x").Session(&gorm.Session{})
  
  	// q is polluted by .Where("y") chain call
--	base.Or(q.Where("y"))
-+	base = base.Or(q.Where("y"))
+ 	base.Or(q.Where("y"))
  
  	q.Find(nil) // want "\\*gorm\\.DB reused: second branch from mutable root"
  }
@@ -188,7 +188,7 @@
  
  	// Fresh query passed to Or - no reuse issue for the fresh query
 -	base.Or(db.Where("x"))
-+	base = base.Or(db.Where("x"))
++	base = base.Or(db.Where("x")).Session(&gorm.Session{})
  
  	base.Find(nil) // want "\\*gorm\\.DB reused: second branch from mutable root"
  }

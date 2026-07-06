@@ -130,14 +130,20 @@ func (g *Generator) Generate(v pollution.Violation) []analysis.SuggestedFix {
 		}
 	}
 
-	// PHASE 2: Add Session to roots that need it (Rule 2)
-	// Special handling for Phi nodes: add Session to each edge
-	for _, pos := range rootsNeedingSession {
-		sessionEdits := g.generateSessionEditsForRoot(pos, root)
+	// PHASE 2: Add Session to roots that need it (Rule 2).
+	// The original root is Phi-aware (Session on each incoming edge); a virtual
+	// root created by a reassignment gets Session appended at its creation site
+	// (e.g. q = q.Where("a").Session(&gorm.Session{})) — #71 defect 2.
+	for _, vr := range rootsNeedingSession {
+		var sessionEdits []analysis.TextEdit
+		if vr.isOriginal {
+			sessionEdits = g.generateSessionEditsForRoot(vr.pos, root)
+		} else if edit := g.generateSessionEdit(vr.pos); edit != nil {
+			sessionEdits = []analysis.TextEdit{*edit}
+		}
 		if len(sessionEdits) > 0 {
 			edits = append(edits, sessionEdits...)
-			// Mark file as needing gorm import
-			if file := g.findFileContaining(pos); file != nil {
+			if file := g.findFileContaining(vr.pos); file != nil {
 				filesNeedingImport[file] = true
 			}
 		}
@@ -223,6 +229,18 @@ func (g *Generator) isNonFinisherExprStmt(pos token.Pos) bool {
 	callExpr, ok := exprStmt.X.(*ast.CallExpr)
 	if !ok {
 		return false
+	}
+
+	// If the use sits inside an ARGUMENT of the statement's top-level call
+	// (e.g. the reused q in `base.Or(q.Where("y"))`), the use is nested, not on
+	// the receiver spine. Reassigning the whole statement would rebind the wrong
+	// variable (base) and never address the violation root (q) — issue #71
+	// defect 1. Such a use is not a reassignable non-finisher; the root instead
+	// gets a Session at its own definition (Phase 2).
+	for _, arg := range callExpr.Args {
+		if arg.Pos() <= pos && pos <= arg.End() {
+			return false
+		}
 	}
 
 	// Check if it's a method call (selector expression)
@@ -312,21 +330,25 @@ func (g *Generator) simulateReassignments(root ssa.Value, uses []pollution.Usage
 	return virtualUses
 }
 
-// findRootsNeedingSession finds virtual roots that have 2+ uses after simulation.
-// Returns the positions where Session should be inserted.
-func (g *Generator) findRootsNeedingSession(virtualUses map[virtualRootKey][]pollution.UsageInfo) []token.Pos {
-	var positions []token.Pos
+// findRootsNeedingSession finds the roots — the original AND reassignment-created
+// virtual roots — that still branch 2+ times after reassignment simulation and
+// therefore need a Session() to become immutable.
+//
+// Emitting Session for virtual roots too is what makes a fix single-pass
+// complete (#71 defect 2): for `q := db.Where("base"); q.Where("a");
+// q.Where("b").Find(); q.Where("c"); q.Where("d").Find()` the reassignment of
+// the virtual root created at `q.Where("a")` still branches twice, so it needs
+// `.Session()` — without it, re-linting the "fixed" output still warns.
+func (g *Generator) findRootsNeedingSession(virtualUses map[virtualRootKey][]pollution.UsageInfo) []virtualRootKey {
+	var roots []virtualRootKey
 	for root, uses := range virtualUses {
 		if len(uses) >= 2 {
-			// Only add Session to the original root (not virtual roots from reassignments)
-			// Virtual roots from reassignments are created by non-finisher uses,
-			// which already get reassignment edits
-			if root.isOriginal {
-				positions = append(positions, root.pos)
-			}
+			roots = append(roots, root)
 		}
 	}
-	return positions
+	// Deterministic order (map iteration is random) so edits/goldens are stable.
+	sort.Slice(roots, func(i, j int) bool { return roots[i].pos < roots[j].pos })
+	return roots
 }
 
 // generateReassignmentEdit generates a TextEdit for reassignment.
