@@ -317,6 +317,17 @@ func (t *RootTracer) traceNonCall(v ssa.Value, visited map[ssa.Value]bool, loopI
 		// ChangeType: type conversion (same underlying type)
 		return t.trace(val.X, visited, loopInfo)
 
+	case *ssa.MakeInterface:
+		// MakeInterface: interface{}(x) boxing — trace through to the boxed value
+		// so a value stored in an interface{} and later extracted stays tracked.
+		return t.trace(val.X, visited, loopInfo)
+
+	case *ssa.TypeAssert:
+		// TypeAssert: i.(*gorm.DB) extraction — trace through to the asserted
+		// operand. Combined with MakeInterface above, this keeps an interface
+		// round-trip (var i interface{} = q; q2 := i.(*gorm.DB)) connected to q.
+		return t.trace(val.X, visited, loopInfo)
+
 	case *ssa.Extract:
 		// Extract: extract element from tuple (multi-return)
 		return t.trace(val.Tuple, visited, loopInfo)
