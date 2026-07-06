@@ -314,12 +314,8 @@ func (t *RootTracer) traceCall(call *ssa.Call, visited map[ssa.Value]bool, loopI
 	if sig == nil || sig.Recv() == nil || !typeutil.IsGormDB(sig.Recv().Type()) {
 		// Not a gorm method - if it returns *gorm.DB, treat as root
 		if typeutil.IsGormDB(call.Type()) {
-			// Builtin pure function returns immutable
-			if t.IsImmutableReturningBuiltin(callee) {
-				return nil
-			}
-			// User-defined immutable-return function returns immutable
-			if t.immutableReturnFuncs != nil && t.immutableReturnFuncs.Contains(callee) {
+			// Builtin or //gormreuse:immutable-return function returns immutable.
+			if t.returnsImmutable(callee) {
 				return nil
 			}
 			// User-defined pure or non-pure function: treat call as mutable root
@@ -913,6 +909,17 @@ func (t *RootTracer) tracePointerLoad(ptr ssa.Value, visited map[ssa.Value]bool,
 //
 // This function finds the MakeClosure in the parent and traces the binding.
 func (t *RootTracer) traceFreeVar(fv *ssa.FreeVar, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) ssa.Value {
+	if binding := t.freeVarBinding(fv); binding != nil {
+		return t.trace(binding, visited, loopInfo)
+	}
+	return nil
+}
+
+// freeVarBinding resolves the value captured by fv: it locates the MakeClosure
+// that creates fv's parent closure and returns the binding at fv's index in the
+// captured-variable list. Returns nil if the closure or binding can't be found.
+// Shared by traceFreeVar (single root) and traceAllFreeVar (all roots).
+func (t *RootTracer) freeVarBinding(fv *ssa.FreeVar) ssa.Value {
 	fn := fv.Parent()
 	if fn == nil {
 		return nil
@@ -946,9 +953,8 @@ func (t *RootTracer) traceFreeVar(fv *ssa.FreeVar, visited map[ssa.Value]bool, l
 			if !ok || closureFn != fn {
 				continue
 			}
-			// Found the MakeClosure - trace the corresponding binding
 			if idx < len(mc.Bindings) {
-				return t.trace(mc.Bindings[idx], visited, loopInfo)
+				return mc.Bindings[idx]
 			}
 		}
 	}
@@ -1357,44 +1363,8 @@ func (t *RootTracer) traceAllFieldStores(fa *ssa.FieldAddr, visited map[ssa.Valu
 //	fn := func() { q.Find(nil) }  // FreeVar captures Phi of [q1, q2]
 //	fn()  // Need to check BOTH q1 and q2
 func (t *RootTracer) traceAllFreeVar(fv *ssa.FreeVar, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) []ssa.Value {
-	fn := fv.Parent()
-	if fn == nil {
-		return nil
-	}
-
-	// Find the index of this FreeVar in the function's FreeVars list
-	idx := -1
-	for i, v := range fn.FreeVars {
-		if v == fv {
-			idx = i
-			break
-		}
-	}
-	if idx < 0 {
-		return nil
-	}
-
-	// Find the MakeClosure instruction in the parent function
-	parent := fn.Parent()
-	if parent == nil {
-		return nil
-	}
-
-	for _, block := range parent.Blocks {
-		for _, instr := range block.Instrs {
-			mc, ok := instr.(*ssa.MakeClosure)
-			if !ok {
-				continue
-			}
-			closureFn, ok := mc.Fn.(*ssa.Function)
-			if !ok || closureFn != fn {
-				continue
-			}
-			// Found the MakeClosure - trace ALL roots from the corresponding binding
-			if idx < len(mc.Bindings) {
-				return t.traceAll(mc.Bindings[idx], visited, loopInfo)
-			}
-		}
+	if binding := t.freeVarBinding(fv); binding != nil {
+		return t.traceAll(binding, visited, loopInfo)
 	}
 	return nil
 }
@@ -1436,19 +1406,22 @@ func (t *RootTracer) isImmutableSource(v ssa.Value) bool {
 		// Constants (including nil) are immutable
 		return true
 	case *ssa.Call:
-		callee := val.Call.StaticCallee()
-		// Builtin pure function calls return immutable values
-		if t.IsImmutableReturningBuiltin(callee) {
-			return true
-		}
-		// User-defined immutable-return functions return immutable values
-		if t.immutableReturnFuncs != nil && t.immutableReturnFuncs.Contains(callee) {
-			return true
-		}
-		return false
+		// Builtin or //gormreuse:immutable-return call yields an immutable value.
+		return t.returnsImmutable(val.Call.StaticCallee())
 	default:
 		return false
 	}
+}
+
+// returnsImmutable reports whether a call to callee yields an immutable
+// *gorm.DB result — either a gorm builtin (Session, WithContext, Debug, Open,
+// Begin, Transaction) or a function marked //gormreuse:immutable-return. Such
+// results are not mutable roots and can be reused freely. callee may be nil.
+func (t *RootTracer) returnsImmutable(callee *ssa.Function) bool {
+	if t.IsImmutableReturningBuiltin(callee) {
+		return true
+	}
+	return t.immutableReturnFuncs != nil && t.immutableReturnFuncs.Contains(callee)
 }
 
 // =============================================================================
