@@ -1,6 +1,6 @@
 --- directive_validation.go	1970-01-01 00:00:00
 +++ directive_validation.go.golden	1970-01-01 00:00:00
-@@ -1,1150 +1,1150 @@
+@@ -1,1182 +1,1182 @@
  package internal
  
  import (
@@ -1153,4 +1153,36 @@
  /*gormreuse:pure*/
  func blockCommentPureGood(db *gorm.DB) *gorm.DB {
  	return db.Session(&gorm.Session{}).Where("x")
+ }
+ 
+ // =============================================================================
+ // //gormreuse:immutable-param directive (Phase 1b escape hatch, #61) — Stage 1
+ //
+ // The directive is recognized and validated, but parameters are still treated
+ // as immutable in this release, so it does not yet change reuse detection.
+ // These cases lock the plumbing: signature validation, unused detection, and
+ // combination with pure / immutable-return.
+ // =============================================================================
+ 
+ // IPARAM001: immutable-param on a *gorm.DB-parameter function is valid (not
+ // reported unused). Reuse of db is clean today because parameters are still
+ // immutable; this annotation is what will keep it clean once Phase 1b flips.
+ //
+ //gormreuse:immutable-param
+ func immutableParamValid(db *gorm.DB) {
+ 	db.Where("a").Find(nil)
+ 	db.Where("b").Find(nil)
+ }
+ 
+ // IPARAM002: immutable-param on a function without a *gorm.DB parameter is unused.
+ //
+ //gormreuse:immutable-param // want `unused gormreuse:immutable-param directive`
+ func immutableParamNoGormArg(x int) int { return x }
+ 
+ // IPARAM003: combined pure,immutable-param — both recognized, neither reported
+ // unused (the function has a *gorm.DB param and satisfies the pure contract).
+ //
+ //gormreuse:pure,immutable-param
+ func pureAndImmutableParam(db *gorm.DB) {
+ 	_ = db
  }

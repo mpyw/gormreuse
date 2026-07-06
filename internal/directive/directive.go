@@ -105,3 +105,9 @@ func IsPureDirective(text string) bool { return hasDirective(text, "pure") }
 // IsImmutableReturnDirective checks if a comment contains the immutable-return directive.
 // Functions with this directive return immutable *gorm.DB (like Session, WithContext).
 func IsImmutableReturnDirective(text string) bool { return hasDirective(text, "immutable-return") }
+
+// IsImmutableParamDirective checks if a comment contains the immutable-param directive.
+// Functions with this directive assert that their callers guarantee forkable
+// (clone>0) *gorm.DB arguments, so the parameter can be reused safely. It is the
+// escape hatch for the default-mutable parameter treatment (Phase 1b, #61).
+func IsImmutableParamDirective(text string) bool { return hasDirective(text, "immutable-param") }

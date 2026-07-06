@@ -62,6 +62,36 @@ func TestIsPureDirective(t *testing.T) {
 	}
 }
 
+func TestIsImmutableParamDirective(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		text     string
+		expected bool
+	}{
+		{"exact match", "//gormreuse:immutable-param", true},
+		{"with space", "// gormreuse:immutable-param", true},
+		{"block comment", "/*gormreuse:immutable-param*/", true},
+		{"combined with pure", "//gormreuse:pure,immutable-param", true},
+		{"combined with immutable-return", "//gormreuse:immutable-return,immutable-param", true},
+		{"trailing comment", "//gormreuse:immutable-param // callers pass root handles", true},
+		{"not a prefix of immutable-return", "//gormreuse:immutable-return", false},
+		{"wrong directive", "//gormreuse:pure", false},
+		{"random comment", "// some comment", false},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := IsImmutableParamDirective(tt.text); got != tt.expected {
+				t.Errorf("IsImmutableParamDirective(%q) = %v, want %v", tt.text, got, tt.expected)
+			}
+		})
+	}
+}
+
 func TestIgnoreMapShouldIgnore(t *testing.T) {
 	t.Parallel()
 
