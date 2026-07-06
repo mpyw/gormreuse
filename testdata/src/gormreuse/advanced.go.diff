@@ -285,7 +285,7 @@
  func nonFinisherOnlyGeneratesFix(db *gorm.DB) {
  	q := db.Where("base")
 -	q.Where("filter1") // Non-finisher expr stmt - should get "q = q.Where("filter1")" fix
-+	q = q.Where("filter1") // Non-finisher expr stmt - should get "q = q.Where("filter1")" fix
++	q = q.Where("filter1").Session(&gorm.Session{}) // Non-finisher expr stmt - should get "q = q.Where("filter1")" fix
  	q.Find(nil)        // want `\*gorm\.DB reused: second branch from mutable root`
  }
  
@@ -310,7 +310,7 @@
  	q := db.Where("outer")
  	func() {
 -		q.Where("inner")
-+		q = q.Where("inner")
++		q = q.Where("inner").Session(&gorm.Session{})
  		q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  	}()
  }
@@ -322,7 +322,7 @@
  	func() {
  		func() {
 -			q.Where("deep")
-+			q = q.Where("deep")
++			q = q.Where("deep").Session(&gorm.Session{})
  			q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  		}()
  	}()
@@ -336,7 +336,7 @@
  		func() {
  			func() {
 -				q.Where("level3")
-+				q = q.Where("level3")
++				q = q.Where("level3").Session(&gorm.Session{})
  				q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  			}()
  		}()

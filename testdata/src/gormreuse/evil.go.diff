@@ -2810,7 +2810,7 @@
  
  	go func() {
 -		q.Where("in goroutine")
-+		q = q.Where("in goroutine")
++		q = q.Where("in goroutine").Session(&gorm.Session{})
  	}()
  
  	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
@@ -2942,8 +2942,8 @@
 -	q.Where("branch2") // want `\*gorm\.DB reused: second branch from mutable root`
 -	q.Where("branch3") // want `\*gorm\.DB reused: second branch from mutable root`
 -	q.Where("branch4") // want `\*gorm\.DB reused: second branch from mutable root`
-+	q = q.Where("branch2") // want `\*gorm\.DB reused: second branch from mutable root`
-+	q = q.Where("branch3") // want `\*gorm\.DB reused: second branch from mutable root`
++	q = q.Where("branch2").Session(&gorm.Session{}) // want `\*gorm\.DB reused: second branch from mutable root`
++	q = q.Where("branch3").Session(&gorm.Session{}) // want `\*gorm\.DB reused: second branch from mutable root`
 +	q = q.Where("branch4") // want `\*gorm\.DB reused: second branch from mutable root`
  }
  
@@ -2957,8 +2957,8 @@
  	q := db.Where("base")
 -	q.Where("a")     // first branch - OK
 -	q.Where("b")     // want `\*gorm\.DB reused: second branch from mutable root`
-+	q = q.Where("a")     // first branch - OK
-+	q = q.Where("b")     // want `\*gorm\.DB reused: second branch from mutable root`
++	q = q.Where("a").Session(&gorm.Session{})     // first branch - OK
++	q = q.Where("b").Session(&gorm.Session{})     // want `\*gorm\.DB reused: second branch from mutable root`
  	q.Find(nil)      // want `\*gorm\.DB reused: second branch from mutable root`
  }
  
