@@ -971,22 +971,29 @@ func (t *RootTracer) freeVarBinding(fv *ssa.FreeVar) ssa.Value {
 //
 // This function finds the Store instruction that writes to the Alloc.
 func (t *RootTracer) traceAlloc(alloc *ssa.Alloc, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) ssa.Value {
+	// Single-root: trace the first value stored into the Alloc.
+	if vals := allocStoredValues(alloc); len(vals) > 0 {
+		return t.trace(vals[0], visited, loopInfo)
+	}
+	return nil
+}
+
+// allocStoredValues returns, in program order, the values stored into alloc.
+// Shared by traceAlloc (first) and traceAllAllocStores (all).
+func allocStoredValues(alloc *ssa.Alloc) []ssa.Value {
 	fn := alloc.Parent()
 	if fn == nil {
 		return nil
 	}
-
-	// Find Store instructions that write to this Alloc
+	var vals []ssa.Value
 	for _, block := range fn.Blocks {
 		for _, instr := range block.Instrs {
-			store, ok := instr.(*ssa.Store)
-			if !ok || store.Addr != alloc {
-				continue
+			if store, ok := instr.(*ssa.Store); ok && store.Addr == alloc {
+				vals = append(vals, store.Val)
 			}
-			return t.trace(store.Val, visited, loopInfo)
 		}
 	}
-	return nil
+	return vals
 }
 
 // traceFieldStore traces a struct field access by finding Store instructions.
@@ -1004,12 +1011,22 @@ func (t *RootTracer) traceAlloc(alloc *ssa.Alloc, visited map[ssa.Value]bool, lo
 //
 // This function finds the Store that wrote to the same field.
 func (t *RootTracer) traceFieldStore(fa *ssa.FieldAddr, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) ssa.Value {
+	// Single-root: trace the first value stored into the same field.
+	if vals := fieldStoredValues(fa); len(vals) > 0 {
+		return t.trace(vals[0], visited, loopInfo)
+	}
+	return nil
+}
+
+// fieldStoredValues returns, in program order, the values stored into the same
+// struct field as fa (matched by base value and field index). Shared by
+// traceFieldStore (first) and traceAllFieldStores (all).
+func fieldStoredValues(fa *ssa.FieldAddr) []ssa.Value {
 	fn := fa.Parent()
 	if fn == nil {
 		return nil
 	}
-
-	// Find Store instructions that write to the same field
+	var vals []ssa.Value
 	for _, block := range fn.Blocks {
 		for _, instr := range block.Instrs {
 			store, ok := instr.(*ssa.Store)
@@ -1020,10 +1037,10 @@ func (t *RootTracer) traceFieldStore(fa *ssa.FieldAddr, visited map[ssa.Value]bo
 			if !ok || storeFA.X != fa.X || storeFA.Field != fa.Field {
 				continue
 			}
-			return t.trace(store.Val, visited, loopInfo)
+			vals = append(vals, store.Val)
 		}
 	}
-	return nil
+	return vals
 }
 
 // traceIIFEReturns traces through an immediately invoked function expression.
@@ -1215,14 +1232,7 @@ func (t *RootTracer) traceAll(v ssa.Value, visited map[ssa.Value]bool, loopInfo 
 		//   - Reassignment in one branch: if { q = q.Where(...) }
 		//   - Conditional swaps outside loops
 		//
-		var roots []ssa.Value
-		for _, edge := range val.Edges {
-			if isNilConst(edge) || visited[edge] {
-				continue
-			}
-			roots = append(roots, t.traceAll(edge, visited, loopInfo)...)
-		}
-		return roots
+		return t.traceAllPhiEdges(val, visited, loopInfo)
 
 	case *ssa.UnOp:
 		if val.Op == token.MUL {
@@ -1281,34 +1291,30 @@ func (t *RootTracer) traceAllPointerLoads(ptr ssa.Value, visited map[ssa.Value]b
 		}
 
 		// Regular Phi - traverse all edges
-		var roots []ssa.Value
-		for _, edge := range p.Edges {
-			if isNilConst(edge) || visited[edge] {
-				continue
-			}
-			roots = append(roots, t.traceAll(edge, visited, loopInfo)...)
-		}
-		return roots
+		return t.traceAllPhiEdges(p, visited, loopInfo)
 	default:
 		return t.traceAll(ptr, visited, loopInfo)
 	}
 }
 
-func (t *RootTracer) traceAllAllocStores(alloc *ssa.Alloc, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) []ssa.Value {
-	fn := alloc.Parent()
-	if fn == nil {
-		return nil
-	}
-
+// traceAllPhiEdges collects all mutable roots reachable through a Phi node's
+// incoming edges, skipping nil constants and already-visited values. Shared by
+// the Phi cases of traceAll and traceAllPointerLoads.
+func (t *RootTracer) traceAllPhiEdges(phi *ssa.Phi, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) []ssa.Value {
 	var roots []ssa.Value
-	for _, block := range fn.Blocks {
-		for _, instr := range block.Instrs {
-			store, ok := instr.(*ssa.Store)
-			if !ok || store.Addr != alloc {
-				continue
-			}
-			roots = append(roots, t.traceAll(store.Val, visited, loopInfo)...)
+	for _, edge := range phi.Edges {
+		if isNilConst(edge) || visited[edge] {
+			continue
 		}
+		roots = append(roots, t.traceAll(edge, visited, loopInfo)...)
+	}
+	return roots
+}
+
+func (t *RootTracer) traceAllAllocStores(alloc *ssa.Alloc, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) []ssa.Value {
+	var roots []ssa.Value
+	for _, v := range allocStoredValues(alloc) {
+		roots = append(roots, t.traceAll(v, visited, loopInfo)...)
 	}
 	return roots
 }
@@ -1326,24 +1332,9 @@ func (t *RootTracer) traceAllAllocStores(alloc *ssa.Alloc, visited map[ssa.Value
 //	}
 //	h.db.Find(nil)  // Need to check BOTH q1 and q2
 func (t *RootTracer) traceAllFieldStores(fa *ssa.FieldAddr, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) []ssa.Value {
-	fn := fa.Parent()
-	if fn == nil {
-		return nil
-	}
-
 	var roots []ssa.Value
-	for _, block := range fn.Blocks {
-		for _, instr := range block.Instrs {
-			store, ok := instr.(*ssa.Store)
-			if !ok {
-				continue
-			}
-			storeFA, ok := store.Addr.(*ssa.FieldAddr)
-			if !ok || storeFA.X != fa.X || storeFA.Field != fa.Field {
-				continue
-			}
-			roots = append(roots, t.traceAll(store.Val, visited, loopInfo)...)
-		}
+	for _, v := range fieldStoredValues(fa) {
+		roots = append(roots, t.traceAll(v, visited, loopInfo)...)
 	}
 	return roots
 }
