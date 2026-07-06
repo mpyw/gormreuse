@@ -512,14 +512,10 @@ func isReadOnlyVariadicArg(idx *ssa.IndexAddr, val ssa.Value) bool {
 // allow-listed read-only package (see readOnlyVariadicPkgs).
 func isReadOnlyStdlibCallee(call *ssa.Call) bool {
 	callee := call.Call.StaticCallee()
-	if callee == nil {
+	if callee == nil || callee.Object() == nil || callee.Object().Pkg() == nil {
 		return false
 	}
-	obj := callee.Object()
-	if obj == nil || obj.Pkg() == nil {
-		return false
-	}
-	return readOnlyVariadicPkgs[obj.Pkg().Path()]
+	return readOnlyVariadicPkgs[callee.Object().Pkg().Path()]
 }
 
 // MapUpdateHandler handles *ssa.MapUpdate instructions.
