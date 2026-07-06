@@ -25,7 +25,7 @@
 -	q := Open(db)
 +	q := Open(db).Session(&gorm.Session{})
  	q.Find(&[]User{})
- 	q.Count(new(int64)) // want `\*gorm\.DB instance reused after chain method`
+ 	q.Count(new(int64)) // want `\*gorm\.DB reused: second branch from mutable root`
  }
  
  // Debug is a user-defined package-level function sharing a name with the gorm
@@ -36,7 +36,7 @@
 -	q := db.Where("x = ?", 1)
 +	q := db.Where("x = ?", 1).Session(&gorm.Session{})
  	Debug(q)
- 	q.Count(new(int64)) // want `\*gorm\.DB instance reused after chain method`
+ 	q.Count(new(int64)) // want `\*gorm\.DB reused: second branch from mutable root`
  }
  
  // collisionRepo has methods whose names collide with gorm builtins.
@@ -53,14 +53,14 @@
 -	q := r.Session()
 +	q := r.Session().Session(&gorm.Session{})
  	q.Find(&[]User{})
- 	q.Count(new(int64)) // want `\*gorm\.DB instance reused after chain method`
+ 	q.Count(new(int64)) // want `\*gorm\.DB reused: second branch from mutable root`
  }
  
  func collisionMethodBegin(r *collisionRepo) {
 -	q := r.Begin()
 +	q := r.Begin().Session(&gorm.Session{})
  	q.Find(&[]User{})
- 	q.Count(new(int64)) // want `\*gorm\.DB instance reused after chain method`
+ 	q.Count(new(int64)) // want `\*gorm\.DB reused: second branch from mutable root`
  }
  
  // =============================================================================

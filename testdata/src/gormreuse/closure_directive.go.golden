@@ -73,7 +73,7 @@ func closureNoPure(db *gorm.DB) {
 
 	q := db.Where("base").Session(&gorm.Session{})
 	impureHelper(q)
-	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // closureNoImmutableReturn: No directive - closure result is mutable
@@ -84,7 +84,7 @@ func closureNoImmutableReturn(db *gorm.DB) {
 
 	q := getDB()
 	q.Find(nil)
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // =============================================================================
@@ -193,7 +193,7 @@ func nestedClosureInnerImmutableReturn(db *gorm.DB) {
 	result := outer(q).Session(&gorm.Session{})
 	q.Find(nil)      // OK - outer is pure
 	result.Find(nil) // outer's return is NOT immutable-return
-	result.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	result.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // nestedClosurePureImmutableReturnBoth: Outer has both directives
@@ -233,7 +233,7 @@ func nestedClosureSameLineInnerPure(db *gorm.DB) {
 
 	q := db.Where("base").Session(&gorm.Session{})
 	outer(q)    // outer is NOT pure (directive is for inner)
-	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // nestedClosureSameLineOuterPure: Same line, directive AFTER outer's { but BEFORE inner's {
@@ -320,7 +320,7 @@ func complexDirective05(db *gorm.DB) {
 	result := helper(base).Session(&gorm.Session{})
 	base.Find(nil) // OK - helper is pure
 	result.Find(nil)
-	result.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	result.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // complexDirective06: immutable-return only - argument should be polluted
@@ -332,7 +332,7 @@ func complexDirective06(db *gorm.DB) {
 
 	base := db.Where("x").Session(&gorm.Session{})
 	result := helper(base)
-	base.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+	base.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 	result.Find(nil)
 	result.Count(nil) // OK - result is immutable
 }
@@ -417,7 +417,7 @@ func multiAssign03(db *gorm.DB) {
 
 	q2 := db.Where("base2").Session(&gorm.Session{})
 	b.Fn(q2)
-	q2.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+	q2.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // multiAssign04: Three closures - first two direct, third in composite literal
@@ -435,7 +435,7 @@ func multiAssign04(db *gorm.DB) {
 
 	q3 := db.Where("base3").Session(&gorm.Session{})
 	c(q3)
-	q3.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+	q3.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // multiAssign05: Separated statements - only first gets directive
@@ -450,7 +450,7 @@ func multiAssign05(db *gorm.DB) {
 
 	q2 := db.Where("base2").Session(&gorm.Session{})
 	b(q2)
-	q2.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+	q2.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // multiAssign06: Semicolon-separated on same line - only first statement gets directive
@@ -464,7 +464,7 @@ func multiAssign06(db *gorm.DB) {
 
 	q2 := db.Where("base2").Session(&gorm.Session{})
 	b(q2)
-	q2.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+	q2.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // multiAssign07: Multi-line assignment - all closures in same statement get directive

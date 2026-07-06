@@ -141,7 +141,7 @@ func pureLeaksViaInterfaceArg(db *gorm.DB) {
 func reuseAfterLeakingPure(db *gorm.DB, ch chan *gorm.DB) {
 	q := db.Where("x")
 	pureLeaksViaChanSend(q, ch) // leaks q → not trusted as pure here
-	q.Find(nil)                 // want `\*gorm\.DB instance reused after chain method`
+	q.Find(nil)                 // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // nonPureTakesAny is a non-pure helper taking interface{} (used by PV014).
@@ -791,7 +791,7 @@ func deriveMutableFromImmutable() {
 	db := getImmutableDB() // immutable
 	q := db.Where("x")     // q is mutable (derived from chain method)
 	q.Find(nil)
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // IR102: Mixing immutable-return with regular chain methods
@@ -800,7 +800,7 @@ func mixImmutableAndMutable(db *gorm.DB) {
 	q := db.Where("x") // q is mutable
 	imm.Find(nil)      // OK: imm is immutable
 	q.Find(nil)
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // IR103: immutable-return on a function whose return type is a bare interface{}

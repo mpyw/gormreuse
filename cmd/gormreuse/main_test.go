@@ -39,7 +39,7 @@ func TestSmoke(t *testing.T) {
 	if err == nil {
 		t.Errorf("expected non-zero exit (diagnostics reported), got success\n%s", out)
 	}
-	if !strings.Contains(string(out), "reused after chain method") {
-		t.Errorf("expected 'reused after chain method' diagnostic, got:\n%s", out)
+	if !strings.Contains(string(out), "reused: second branch from mutable root") {
+		t.Errorf("expected reuse diagnostic, got:\n%s", out)
 	}
 }

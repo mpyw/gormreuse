@@ -72,7 +72,7 @@
  	// Passing to non-pure function - marks q as polluted
  	acceptVariadic(q)
  
- 	q.Find(nil) // want "\\*gorm\\.DB instance reused"
+ 	q.Find(nil) // want "\\*gorm\\.DB reused: second branch from mutable root"
  }
  
  // variadicInterfaceArgsMultiple: Multiple args to variadic
@@ -85,8 +85,8 @@
  	// Both passed to non-pure function - both polluted
  	acceptVariadic(q1, q2)
  
- 	q1.Find(nil) // want "\\*gorm\\.DB instance reused"
- 	q2.Find(nil) // want "\\*gorm\\.DB instance reused"
+ 	q1.Find(nil) // want "\\*gorm\\.DB reused: second branch from mutable root"
+ 	q2.Find(nil) // want "\\*gorm\\.DB reused: second branch from mutable root"
  }
  
  // variadicInterfaceArgsOnlyOne: Only one of multiple is passed
@@ -98,7 +98,7 @@
  	// Only q1 is passed to function
  	acceptVariadic(q1)
  
- 	q1.Find(nil) // want "\\*gorm\\.DB instance reused"
+ 	q1.Find(nil) // want "\\*gorm\\.DB reused: second branch from mutable root"
  	q2.Find(nil) // q2 is fresh - should NOT report
  }
  
@@ -117,7 +117,7 @@
  	var i interface{} = q
  	q2 := i.(*gorm.DB)
  	q2.Find(nil)
- 	q2.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+ 	q2.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  }
  
  // interfaceRoundtripCommaOk: comma-ok extraction form also keeps tracking.
@@ -127,7 +127,7 @@
  	var i interface{} = q
  	if q2, ok := i.(*gorm.DB); ok {
  		q2.Find(nil)
- 		q2.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+ 		q2.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  	}
  }
  
@@ -153,7 +153,7 @@
 -	base.Or("x = ?", 1)
 +	base = base.Or("x = ?", 1)
  
- 	base.Find(nil) // want "\\*gorm\\.DB instance reused"
+ 	base.Find(nil) // want "\\*gorm\\.DB reused: second branch from mutable root"
  }
  
  // gormOrMethodArg: GORM's Or method - argument pollution
@@ -166,7 +166,7 @@
 -	base.Or(q)
 +	base = base.Or(q)
  
- 	q.Find(nil) // want "\\*gorm\\.DB instance reused"
+ 	q.Find(nil) // want "\\*gorm\\.DB reused: second branch from mutable root"
  }
  
  // gormOrMethodChain: Chain passed to Or
@@ -179,7 +179,7 @@
 -	base.Or(q.Where("y"))
 +	base = base.Or(q.Where("y"))
  
- 	q.Find(nil) // want "\\*gorm\\.DB instance reused"
+ 	q.Find(nil) // want "\\*gorm\\.DB reused: second branch from mutable root"
  }
  
  // gormOrMethodFresh: Fresh query passed to Or (no reuse)
@@ -190,7 +190,7 @@
 -	base.Or(db.Where("x"))
 +	base = base.Or(db.Where("x"))
  
- 	base.Find(nil) // want "\\*gorm\\.DB instance reused"
+ 	base.Find(nil) // want "\\*gorm\\.DB reused: second branch from mutable root"
  }
  
  // =============================================================================
@@ -206,7 +206,7 @@
  	// Slice literal - storage pollutes
  	_ = []interface{}{q}
  
- 	q.Find(nil) // want "\\*gorm\\.DB instance reused"
+ 	q.Find(nil) // want "\\*gorm\\.DB reused: second branch from mutable root"
  }
  
  // interfaceSliceMultiple: Multiple *gorm.DB in slice
@@ -218,8 +218,8 @@
  
  	_ = []interface{}{q1, q2}
  
- 	q1.Find(nil) // want "\\*gorm\\.DB instance reused"
- 	q2.Find(nil) // want "\\*gorm\\.DB instance reused"
+ 	q1.Find(nil) // want "\\*gorm\\.DB reused: second branch from mutable root"
+ 	q2.Find(nil) // want "\\*gorm\\.DB reused: second branch from mutable root"
  }
  
  // =============================================================================
@@ -233,7 +233,7 @@
  
  	_ = map[string]interface{}{"query": q}
  
- 	q.Find(nil) // want "\\*gorm\\.DB instance reused"
+ 	q.Find(nil) // want "\\*gorm\\.DB reused: second branch from mutable root"
  }
  
  // =============================================================================
@@ -269,7 +269,7 @@
  	// Passing to non-pure closure - pollutes q
  	process(q)
  
- 	q.Find(nil) // want "\\*gorm\\.DB instance reused"
+ 	q.Find(nil) // want "\\*gorm\\.DB reused: second branch from mutable root"
  }
  
  // =============================================================================
@@ -337,7 +337,7 @@
  	ch := make(chan interface{}, 1)
  	ch <- q // Channel send pollutes
  
- 	q.Find(nil) // want "\\*gorm\\.DB instance reused"
+ 	q.Find(nil) // want "\\*gorm\\.DB reused: second branch from mutable root"
  }
  
  // =============================================================================
@@ -395,5 +395,5 @@
  
  	q.Find(nil)        // First use - pollutes q
  	_ = interface{}(q) // Just conversion
- 	q.Count(nil)       // want "\\*gorm\\.DB instance reused"
+ 	q.Count(nil)       // want "\\*gorm\\.DB reused: second branch from mutable root"
  }

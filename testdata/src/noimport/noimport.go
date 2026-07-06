@@ -9,5 +9,5 @@ import internal "gormreuse"
 func violationWithoutGormImport() {
 	q := internal.GetDB()
 	q.Find(nil)
-	q.Count(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }

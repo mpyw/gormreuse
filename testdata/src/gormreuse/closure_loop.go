@@ -71,7 +71,7 @@ func iifeConditionalReturnSameRoot(db *gorm.DB) {
 		return q.Where("b")
 	}().Find(nil)
 
-	q.Count(nil) // want "\\*gorm\\.DB instance reused"
+	q.Count(nil) // want "\\*gorm\\.DB reused: second branch from mutable root"
 }
 
 // iifeConditionalReturnDifferentRoots: IIFE with conditional returns from different roots
@@ -84,7 +84,7 @@ func iifeConditionalReturnDifferentRoots(db *gorm.DB) {
 	// Returns from different roots - should detect if any root is polluted
 	_ = func() *gorm.DB {
 		if true {
-			return q1.Where("a") // want "\\*gorm\\.DB instance reused"
+			return q1.Where("a") // want "\\*gorm\\.DB reused: second branch from mutable root"
 		}
 		return q2.Where("b") // q2 is clean
 	}().Find(nil)
@@ -102,7 +102,7 @@ func storedClosureSingleReturn(db *gorm.DB) {
 	result := getQuery()
 	result.Find(nil)
 
-	q.Count(nil) // want "\\*gorm\\.DB instance reused"
+	q.Count(nil) // want "\\*gorm\\.DB reused: second branch from mutable root"
 }
 
 // storedClosureMultiReturn: Stored closure with multi return value
@@ -117,7 +117,7 @@ func storedClosureMultiReturn(db *gorm.DB) {
 	result, _ := getQuery()
 	result.Find(nil)
 
-	q.Count(nil) // want "\\*gorm\\.DB instance reused"
+	q.Count(nil) // want "\\*gorm\\.DB reused: second branch from mutable root"
 }
 
 // =============================================================================

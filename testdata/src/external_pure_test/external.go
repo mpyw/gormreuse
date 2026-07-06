@@ -51,5 +51,5 @@ func externalChainReuse() {
 	db := new(purelib.Orm).GetDB()
 	q := db.Where("x = ?", 1) // Chain method creates mutable
 	q.Find(nil)
-	q.Find(nil) // want `\*gorm\.DB instance reused after chain method`
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }

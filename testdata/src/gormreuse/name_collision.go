@@ -21,7 +21,7 @@ func Open(db *gorm.DB) *gorm.DB { return db.Where("x = ?", 1) }
 func collisionFreeFuncOpen(db *gorm.DB) {
 	q := Open(db)
 	q.Find(&[]User{})
-	q.Count(new(int64)) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(new(int64)) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // Debug is a user-defined package-level function sharing a name with the gorm
@@ -31,7 +31,7 @@ func Debug(db *gorm.DB) { db.Find(&[]User{}) }
 func collisionFreeFuncDebug(db *gorm.DB) {
 	q := db.Where("x = ?", 1)
 	Debug(q)
-	q.Count(new(int64)) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(new(int64)) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // collisionRepo has methods whose names collide with gorm builtins.
@@ -47,13 +47,13 @@ func (r *collisionRepo) Begin() *gorm.DB { return r.db.Where("open = ?", true) }
 func collisionMethodSession(r *collisionRepo) {
 	q := r.Session()
 	q.Find(&[]User{})
-	q.Count(new(int64)) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(new(int64)) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 func collisionMethodBegin(r *collisionRepo) {
 	q := r.Begin()
 	q.Find(&[]User{})
-	q.Count(new(int64)) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(new(int64)) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // =============================================================================

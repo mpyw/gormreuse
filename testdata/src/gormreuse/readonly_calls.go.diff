@@ -55,7 +55,7 @@
 -	q := db.Where("x = ?", 1)
 +	q := db.Where("x = ?", 1).Session(&gorm.Session{})
  	userVariadicSink(q)
- 	q.Find(&[]User{}) // want `\*gorm\.DB instance reused after chain method`
+ 	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
  }
  
  // Concrete ...*gorm.DB variadic: value is packed directly (not interface-boxed),
@@ -66,7 +66,7 @@
 -	q := db.Where("x = ?", 1)
 +	q := db.Where("x = ?", 1).Session(&gorm.Session{})
  	concreteVariadicSink(q)
- 	q.Find(&[]User{}) // want `\*gorm\.DB instance reused after chain method`
+ 	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
  }
  
  // A func-value (dynamic) variadic call has no static callee, so it is not on the
@@ -75,7 +75,7 @@
 -	q := db.Where("x = ?", 1)
 +	q := db.Where("x = ?", 1).Session(&gorm.Session{})
  	sink(q)
- 	q.Find(&[]User{}) // want `\*gorm\.DB instance reused after chain method`
+ 	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
  }
  
  // A user composite slice literal escapes the value and still pollutes; it does
@@ -84,5 +84,5 @@
 -	q := db.Where("x = ?", 1)
 +	q := db.Where("x = ?", 1).Session(&gorm.Session{})
  	_ = []interface{}{q}
- 	q.Find(&[]User{}) // want `\*gorm\.DB instance reused after chain method`
+ 	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
  }

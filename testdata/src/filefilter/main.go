@@ -16,7 +16,7 @@ type User struct {
 func badReuse(db *gorm.DB) {
 	q := db.Model(&User{}).Where("active = ?", true)
 	q.Find(&[]User{})
-	q.Count(new(int64)) // want `\*gorm\.DB instance reused after chain method`
+	q.Count(new(int64)) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // goodReuse properly uses Session.
