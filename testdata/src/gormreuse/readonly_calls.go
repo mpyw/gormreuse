@@ -1,0 +1,81 @@
+package internal
+
+import (
+	"fmt"
+	"log"
+	"testing"
+
+	"gorm.io/gorm"
+)
+
+// Regression fixtures for #65: passing a *gorm.DB into a variadic ...interface{}
+// parameter of a known read-only stdlib function (fmt/log/testing) lowered to a
+// varargs pack whose element Store was treated as slice-escape pollution, causing
+// false positives on ordinary logging. Such read-only calls are now exempt, while
+// user-defined variadic functions and real slice/map/chan storage still pollute.
+
+// =============================================================================
+// SHOULD NOT REPORT - read-only stdlib variadic sinks do not pollute
+// =============================================================================
+
+func readonlyFmtPrintln(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+	fmt.Println(q)
+	q.Find(&[]User{}) // OK: fmt.Println is read-only
+}
+
+func readonlyFmtSprintf(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+	_ = fmt.Sprintf("query=%v", q)
+	q.Find(&[]User{}) // OK: fmt.Sprintf is read-only
+}
+
+func readonlyLogPrintf(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+	log.Printf("query=%v", q)
+	q.Find(&[]User{}) // OK: log.Printf is read-only
+}
+
+func readonlyTestingLog(db *gorm.DB, t *testing.T) {
+	q := db.Where("x = ?", 1)
+	t.Logf("query=%v", q)
+	q.Find(&[]User{}) // OK: (*testing.T).Logf is read-only
+}
+
+// =============================================================================
+// SHOULD REPORT - user-defined variadic interface func may branch the value
+// =============================================================================
+
+func userVariadicSink(args ...interface{}) {}
+
+func userVariadicPollutes(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+	userVariadicSink(q)
+	q.Find(&[]User{}) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// Concrete ...*gorm.DB variadic: value is packed directly (not interface-boxed),
+// so it is never treated as a read-only interface arg and still pollutes.
+func concreteVariadicSink(dbs ...*gorm.DB) {}
+
+func concreteVariadicPollutes(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+	concreteVariadicSink(q)
+	q.Find(&[]User{}) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// A func-value (dynamic) variadic call has no static callee, so it is not on the
+// read-only allow-list and still pollutes.
+func funcValueVariadicPollutes(db *gorm.DB, sink func(...interface{})) {
+	q := db.Where("x = ?", 1)
+	sink(q)
+	q.Find(&[]User{}) // want `\*gorm\.DB instance reused after chain method`
+}
+
+// A user composite slice literal escapes the value and still pollutes; it does
+// not flow into a variadic call, so the read-only exemption does not apply.
+func sliceLiteralPollutes(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+	_ = []interface{}{q}
+	q.Find(&[]User{}) // want `\*gorm\.DB instance reused after chain method`
+}
