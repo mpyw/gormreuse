@@ -1,6 +1,10 @@
 package internal
 
-import "gorm.io/gorm"
+import (
+	"fmt"
+
+	"gorm.io/gorm"
+)
 
 // =============================================================================
 // Directive Validation Test Cases
@@ -90,6 +94,49 @@ func pureOperatesOnSessionResult(db *gorm.DB) {
 	s.Where("x") // OK: s is immutable (result of Session), so this doesn't pollute db
 }
 
+// PV010: Pure function leaks argument via channel send.
+// A "pure" function must not let its argument escape — the receiver of the
+// channel could branch it concurrently (issue #66).
+//
+//gormreuse:pure
+func pureLeaksViaChanSend(db *gorm.DB, ch chan *gorm.DB) {
+	ch <- db // want `pure function leaks \*gorm\.DB argument via channel send`
+}
+
+// PV011: Pure function leaks argument via slice element store.
+//
+//gormreuse:pure
+func pureLeaksViaSliceStore(db *gorm.DB, dst []*gorm.DB) {
+	dst[0] = db // want `pure function leaks \*gorm\.DB argument via slice/array store`
+}
+
+// PV012: Pure function leaks argument via map store.
+//
+//gormreuse:pure
+func pureLeaksViaMapStore(db *gorm.DB, m map[string]*gorm.DB) {
+	m["k"] = db // want `pure function leaks \*gorm\.DB argument via map store`
+}
+
+// PV013: Pure function leaks argument by boxing it into interface{} and passing
+// it to a non-pure function. Interface conversion alone is not a leak, but the
+// non-pure call it flows into is.
+//
+//gormreuse:pure
+func pureLeaksViaInterfaceArg(db *gorm.DB) {
+	nonPureTakesAny(db) // want `pure function passes \*gorm\.DB argument to non-pure function nonPureTakesAny`
+}
+
+// PV015: Reuse after a pure function that DEFINITIVELY leaks its argument is
+// reported at the call site — such a function loses its pure-trust (issue #66).
+func reuseAfterLeakingPure(db *gorm.DB, ch chan *gorm.DB) {
+	q := db.Where("x").Session(&gorm.Session{})
+	pureLeaksViaChanSend(q, ch) // leaks q → not trusted as pure here
+	q.Find(nil)                 // want `\*gorm\.DB instance reused after chain method`
+}
+
+// nonPureTakesAny is a non-pure helper taking interface{} (used by PV014).
+func nonPureTakesAny(v interface{}) {}
+
 // =============================================================================
 // SHOULD NOT REPORT - Valid pure functions
 // =============================================================================
@@ -99,6 +146,25 @@ func pureOperatesOnSessionResult(db *gorm.DB) {
 //gormreuse:pure
 func pureDoesNothing(db *gorm.DB) {
 	_ = db // Just reference, no method calls
+}
+
+// PV116: Pure function passing argument to a read-only variadic stdlib function
+// (fmt.Println) does NOT leak — these never retain or mutate their arguments.
+// The exemption is shared with the main handler via pollutionsource (issue #66).
+//
+//gormreuse:pure
+func pureLogsArgReadOnly(db *gorm.DB) {
+	fmt.Println("db:", db) // OK: read-only variadic stdlib, not a leak
+}
+
+// PV117: Reuse after a pure function whose ONLY violation is conservative
+// (passing to a not-proven-pure function) is NOT reported at the call site —
+// the pure annotation is still trusted, avoiding false positives. Contrast with
+// PV015, where the callee definitively leaks.
+func reuseAfterConservativePure(db *gorm.DB) {
+	q := db.Where("x")
+	purePollutesViaNonPureFunc(q) // conservative violation inside; still trusted here
+	q.Find(nil)                   // OK - no cascade to the caller
 }
 
 // PV102: Pure function only calls pure builtin methods

@@ -42,6 +42,7 @@ import (
 
 	"github.com/mpyw/gormreuse/internal/ssa/cfg"
 	"github.com/mpyw/gormreuse/internal/ssa/pollution"
+	"github.com/mpyw/gormreuse/internal/ssa/pollutionsource"
 	"github.com/mpyw/gormreuse/internal/ssa/tracer"
 	"github.com/mpyw/gormreuse/internal/typeutil"
 )
@@ -56,24 +57,6 @@ type Context struct {
 	CFG        *cfg.Analyzer      // Control flow graph analysis
 	LoopInfo   *cfg.LoopInfo      // Loop detection results for current function
 	CurrentFn  *ssa.Function      // The function being analyzed
-}
-
-// unwrapGormDB extracts the *gorm.DB value from an SSA value that may be
-// wrapped in MakeInterface. Returns the value and true if it's a *gorm.DB,
-// otherwise returns nil and false.
-//
-// This is needed because when storing *gorm.DB to interface{} containers
-// (slice, map, channel), SSA wraps the value in MakeInterface first.
-// For example: []interface{}{q} generates MakeInterface(q) -> Store.
-func unwrapGormDB(v ssa.Value) (ssa.Value, bool) {
-	if typeutil.IsGormDB(v.Type()) {
-		return v, true
-	}
-	// Check if v is MakeInterface wrapping *gorm.DB
-	if mi, ok := v.(*ssa.MakeInterface); ok && typeutil.IsGormDB(mi.X.Type()) {
-		return mi.X, true
-	}
-	return nil, false
 }
 
 // CallHandler handles *ssa.Call instructions.
@@ -341,7 +324,7 @@ func (h *CallHandler) checkFunctionCallPollution(call *ssa.Call, ctx *Context) {
 
 	for _, arg := range call.Call.Args {
 		// Check if arg is *gorm.DB (directly or wrapped in MakeInterface)
-		gormArg, ok := unwrapGormDB(arg)
+		gormArg, ok := pollutionsource.UnwrapGormDB(arg)
 		if !ok {
 			continue
 		}
@@ -404,8 +387,8 @@ type SendHandler struct{}
 // Handle marks *gorm.DB sent to channels as polluted.
 // Handles both direct sends and sends through MakeInterface (chan interface{}).
 func (h *SendHandler) Handle(send *ssa.Send, ctx *Context) {
-	gormVal, ok := unwrapGormDB(send.X)
-	if !ok {
+	gormVal, kind := pollutionsource.Leak(send)
+	if kind == pollutionsource.KindNone {
 		return
 	}
 
@@ -422,25 +405,12 @@ type StoreHandler struct{}
 
 // Handle marks *gorm.DB stored to slice elements as polluted.
 // Handles both direct stores and stores through MakeInterface ([]interface{}).
+//
+// The read-only variadic stdlib exemption (fmt.Println(q), log.Printf, t.Logf)
+// lives in pollutionsource.Leak so the purity validator honors it too.
 func (h *StoreHandler) Handle(store *ssa.Store, ctx *Context) {
-	gormVal, ok := unwrapGormDB(store.Val)
-	if !ok {
-		return
-	}
-
-	// Only stores to IndexAddr (slice element)
-	idx, ok := store.Addr.(*ssa.IndexAddr)
-	if !ok {
-		return
-	}
-
-	// Passing a *gorm.DB into a variadic ...interface{} parameter of a known
-	// read-only stdlib function (fmt.Println(q), log.Printf("%v", q),
-	// t.Logf("%v", q)) lowers to packing an interface-boxed value into a varargs
-	// array. Those functions never retain or mutate their arguments, so skip them
-	// to avoid false positives. User-defined variadic functions are intentionally
-	// NOT exempt (they may branch the value), matching the conservative bias.
-	if isReadOnlyVariadicArg(idx, store.Val) {
+	gormVal, kind := pollutionsource.Leak(store)
+	if kind == pollutionsource.KindNone {
 		return
 	}
 
@@ -452,80 +422,14 @@ func (h *StoreHandler) Handle(store *ssa.Store, ctx *Context) {
 	ctx.Tracker.MarkPolluted(root, store.Block(), store.Pos())
 }
 
-// readOnlyVariadicPkgs lists packages whose variadic ...interface{} functions
-// are known not to retain or mutate their arguments (formatting/output/logging
-// only). Passing a *gorm.DB into them must not be treated as pollution.
-var readOnlyVariadicPkgs = map[string]bool{
-	"fmt":     true,
-	"log":     true,
-	"testing": true,
-}
-
-// isReadOnlyVariadicArg reports whether the store packs an interface-boxed
-// *gorm.DB into the varargs array of a variadic call to a known read-only
-// stdlib function (see readOnlyVariadicPkgs). In SSA fmt.Println(q) is:
-//
-//	t2 = new [1]any (varargs)   // array alloc
-//	t3 = &t2[0]                 // idx (IndexAddr)
-//	t4 = make any <- *gorm.DB   // val (MakeInterface — interface-boxed)
-//	*t3 = t4                    // the Store
-//	t5 = slice t2[:]            // sliced ...
-//	t6 = fmt.Println(t5...)     // ... and handed to a variadic call
-//
-// It returns true only when the slot is interface-typed (val is a MakeInterface),
-// the array flows into the variadic argument of a call, AND that callee is an
-// allow-listed read-only stdlib function. This deliberately excludes:
-//   - concrete ...*gorm.DB packs (val is the *gorm.DB directly, not boxed),
-//   - user composite slices like []interface{}{q} (no variadic call), and
-//   - user-defined variadic ...interface{} functions (may branch the value),
-//
-// all of which stay conservatively polluting.
-func isReadOnlyVariadicArg(idx *ssa.IndexAddr, val ssa.Value) bool {
-	if _, ok := val.(*ssa.MakeInterface); !ok {
-		return false
-	}
-	alloc, ok := idx.X.(*ssa.Alloc)
-	if !ok || alloc.Referrers() == nil {
-		return false
-	}
-	for _, r := range *alloc.Referrers() {
-		slice, ok := r.(*ssa.Slice)
-		if !ok || slice.Referrers() == nil {
-			continue
-		}
-		for _, sr := range *slice.Referrers() {
-			call, ok := sr.(*ssa.Call)
-			if !ok {
-				continue
-			}
-			sig := call.Call.Signature()
-			args := call.Call.Args
-			if sig != nil && sig.Variadic() && len(args) > 0 && args[len(args)-1] == slice && isReadOnlyStdlibCallee(call) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// isReadOnlyStdlibCallee reports whether call targets a function in an
-// allow-listed read-only package (see readOnlyVariadicPkgs).
-func isReadOnlyStdlibCallee(call *ssa.Call) bool {
-	callee := call.Call.StaticCallee()
-	if callee == nil || callee.Object() == nil || callee.Object().Pkg() == nil {
-		return false
-	}
-	return readOnlyVariadicPkgs[callee.Object().Pkg().Path()]
-}
-
 // MapUpdateHandler handles *ssa.MapUpdate instructions.
 type MapUpdateHandler struct{}
 
 // Handle marks *gorm.DB stored in maps as polluted.
 // Handles both direct stores and stores through MakeInterface (map[K]interface{}).
 func (h *MapUpdateHandler) Handle(mapUpdate *ssa.MapUpdate, ctx *Context) {
-	gormVal, ok := unwrapGormDB(mapUpdate.Value)
-	if !ok {
+	gormVal, kind := pollutionsource.Leak(mapUpdate)
+	if kind == pollutionsource.KindNone {
 		return
 	}
 

@@ -27,6 +27,7 @@ import (
 	"golang.org/x/tools/go/ssa"
 
 	"github.com/mpyw/gormreuse/internal/directive"
+	"github.com/mpyw/gormreuse/internal/ssa/pollutionsource"
 	"github.com/mpyw/gormreuse/internal/typeutil"
 )
 
@@ -38,6 +39,14 @@ import (
 type Violation struct {
 	Pos     token.Pos
 	Message string
+
+	// Leak is true when the violation is a definitive escape of the argument
+	// (channel send, slice/array store, map store) rather than a conservative
+	// guess (passing to a not-yet-proven-pure function). Only definitive escapes
+	// revoke the function's pure-trust at its call sites — a conservative
+	// func-arg violation might still be pure in practice, and cascading it would
+	// produce false positives (see nestedClosureOuterPureViolation).
+	Leak bool
 }
 
 // =============================================================================
@@ -83,7 +92,13 @@ func ValidateFunction(fn *ssa.Function, pureFuncs *directive.DirectiveFuncSet) [
 
 			if call, ok := instr.(*ssa.Call); ok {
 				violations = append(violations, v.checkCallPollution(call)...)
+				continue
 			}
+
+			// Non-call leaks (channel send, slice/array store, map store).
+			// These share pollutionsource.Leak with the main handler so the
+			// two cannot disagree on what escapes a value (issue #66).
+			violations = append(violations, v.checkLeak(instr)...)
 		}
 	}
 
@@ -169,18 +184,46 @@ func (v *Validator) checkCallPollution(call *ssa.Call) []Violation {
 	// because IsGormDB only matches *gorm.DB (concrete pointer type).
 	// GORM's DB is a struct, so all method calls go through StaticCallee.
 
-	// Static call
 	callee := call.Call.StaticCallee()
-	if callee == nil {
+
+	// gorm chain method on a param-derived receiver pollutes the argument.
+	if callee != nil {
+		sig := callee.Signature
+		if sig != nil && sig.Recv() != nil && typeutil.IsGormDB(sig.Recv().Type()) {
+			return v.checkStaticMethodPollution(call, callee)
+		}
+	}
+
+	// Any other call — a static function, a builtin (e.g. append, which is how
+	// slice storage lowers), or an indirect call through a func value — leaks a
+	// param-derived *gorm.DB passed to it, unless the callee is itself pure.
+	// callee is nil for builtins and indirect calls; those are never pure, so
+	// they leak conservatively, matching the main handler.
+	return v.checkFunctionCallPollution(call, callee)
+}
+
+// checkLeak reports a contract violation when a param-derived *gorm.DB escapes
+// via a non-call pollution source (channel send, slice/array store, map store).
+func (v *Validator) checkLeak(instr ssa.Instruction) []Violation {
+	val, kind := pollutionsource.Leak(instr)
+	if kind == pollutionsource.KindNone || !v.paramDerived[val] {
 		return nil
 	}
 
-	sig := callee.Signature
-	if sig != nil && sig.Recv() != nil && typeutil.IsGormDB(sig.Recv().Type()) {
-		return v.checkStaticMethodPollution(call, callee)
+	var via string
+	switch kind {
+	case pollutionsource.KindChannelSend:
+		via = "channel send"
+	case pollutionsource.KindSliceStore:
+		via = "slice/array store"
+	case pollutionsource.KindMapStore:
+		via = "map store"
 	}
-
-	return v.checkFunctionCallPollution(call, callee)
+	return []Violation{{
+		Pos:     instr.Pos(),
+		Message: "pure function leaks *gorm.DB argument via " + via,
+		Leak:    true,
+	}}
 }
 
 func (v *Validator) checkStaticMethodPollution(call *ssa.Call, callee *ssa.Function) []Violation {
@@ -200,14 +243,36 @@ func (v *Validator) checkStaticMethodPollution(call *ssa.Call, callee *ssa.Funct
 }
 
 func (v *Validator) checkFunctionCallPollution(call *ssa.Call, callee *ssa.Function) []Violation {
+	// Pure callees don't pollute their arguments.
+	if callee != nil && v.pureFuncs.Contains(callee) {
+		return nil
+	}
+
 	var violations []Violation
 	for _, arg := range call.Call.Args {
-		if typeutil.IsGormDB(arg.Type()) && v.paramDerived[arg] && !v.pureFuncs.Contains(callee) {
-			violations = append(violations, Violation{
-				Pos:     call.Pos(),
-				Message: "pure function passes *gorm.DB argument to non-pure function " + callee.Name(),
-			})
+		// Unwrap interface-boxed args so a *gorm.DB passed as interface{}
+		// (e.g. to a variadic ...any function) is still caught.
+		gormArg, ok := pollutionsource.UnwrapGormDB(arg)
+		if !ok || !v.paramDerived[gormArg] {
+			continue
 		}
+		violations = append(violations, Violation{
+			Pos:     call.Pos(),
+			Message: "pure function passes *gorm.DB argument to non-pure function " + calleeName(call, callee),
+		})
 	}
 	return violations
+}
+
+// calleeName returns a human-readable name for a call's target: the function
+// name for static calls, the builtin name for builtins (append, etc.), or a
+// generic label for indirect calls through a func value.
+func calleeName(call *ssa.Call, callee *ssa.Function) string {
+	if callee != nil {
+		return callee.Name()
+	}
+	if b, ok := call.Call.Value.(*ssa.Builtin); ok {
+		return b.Name()
+	}
+	return "(closure)"
 }

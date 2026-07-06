@@ -86,40 +86,61 @@ func RunSSA(
 	// The generator caches AST inspectors internally, so sharing it improves performance.
 	fixGen := fix.New(pass)
 
-	for _, fn := range ssaInfo.SrcFuncs {
+	// skip reports whether a function is in an excluded file or wholly ignored.
+	// When markUsed is true it also records the function-level ignore directive
+	// as used; that side effect must happen exactly once per function, so only
+	// the analysis pass passes markUsed=true.
+	skip := func(fn *ssa.Function, markUsed bool) bool {
 		pos := fn.Pos()
 		if !pos.IsValid() {
-			continue
+			return true
 		}
-
 		filename := pass.Fset.Position(pos).Filename
-
-		// Skip functions in excluded files
 		if skipFiles[filename] {
-			continue
+			return true
 		}
-
-		ignoreMap := ignoreMaps[filename]
-
-		// Check if entire function is ignored
 		if funcIgnoreSet, ok := funcIgnores[filename]; ok {
 			if entry, ignored := funcIgnoreSet[fn.Pos()]; ignored {
-				// Mark the ignore directive as used (use the stored line number)
-				if ignoreMap != nil {
-					ignoreMap.MarkUsed(entry.DirectiveLine)
+				if markUsed {
+					if ignoreMap := ignoreMaps[filename]; ignoreMap != nil {
+						ignoreMap.MarkUsed(entry.DirectiveLine)
+					}
 				}
-				continue
+				return true
 			}
 		}
+		return false
+	}
 
-		// Validate pure function contracts
+	// PASS 1: validate pure function contracts and collect the functions that
+	// definitively leaked their argument. Such a //gormreuse:pure function must
+	// not be trusted as pure at its call sites (issue #66), so this must complete
+	// for ALL functions before the analysis pass runs — a caller may be visited
+	// before its callee.
+	failedPure := make(map[*ssa.Function]bool)
+	for _, fn := range ssaInfo.SrcFuncs {
+		if skip(fn, false) {
+			continue
+		}
 		if pureFuncs != nil && pureFuncs.Contains(fn) {
 			for _, v := range purity.ValidateFunction(fn, pureFuncs) {
 				pass.Reportf(v.Pos, "%s", v.Message)
+				// Only a definitive escape revokes pure-trust at call sites;
+				// conservative func-arg violations do not (avoids FP cascades).
+				if v.Leak {
+					failedPure[fn] = true
+				}
 			}
 		}
+	}
 
-		chk := newChecker(pass, ignoreMap, pureFuncs, immutableReturnFuncs, globalReported, globalSuggestedEdits, fixGen)
+	// PASS 2: run SSA reuse analysis.
+	for _, fn := range ssaInfo.SrcFuncs {
+		if skip(fn, true) {
+			continue
+		}
+
+		chk := newChecker(pass, ignoreMaps[pass.Fset.Position(fn.Pos()).Filename], pureFuncs, immutableReturnFuncs, failedPure, globalReported, globalSuggestedEdits, fixGen)
 		chk.checkFunction(fn)
 	}
 
@@ -173,6 +194,7 @@ type checker struct {
 	ignoreMap            directive.IgnoreMap         // Line-level ignore directives
 	pureFuncs            *directive.DirectiveFuncSet // Pure functions for analysis
 	immutableReturnFuncs *directive.DirectiveFuncSet // Immutable-return functions
+	failedPure           map[*ssa.Function]bool      // Pure functions that failed contract validation
 	reported             map[token.Pos]bool          // Deduplication of reports
 	suggestedEdits       map[editKey]bool            // Global deduplication of suggested fixes
 	fixGen               *fix.Generator              // Cached fix generator for all violations
@@ -190,12 +212,13 @@ type editKey struct {
 // across parent functions and their closures.
 // The suggestedEdits map is shared to avoid duplicate fix edits.
 // The fixGen is shared to avoid recreating the generator for each violation.
-func newChecker(pass *analysis.Pass, ignoreMap directive.IgnoreMap, pureFuncs, immutableReturnFuncs *directive.DirectiveFuncSet, reported map[token.Pos]bool, suggestedEdits map[editKey]bool, fixGen *fix.Generator) *checker {
+func newChecker(pass *analysis.Pass, ignoreMap directive.IgnoreMap, pureFuncs, immutableReturnFuncs *directive.DirectiveFuncSet, failedPure map[*ssa.Function]bool, reported map[token.Pos]bool, suggestedEdits map[editKey]bool, fixGen *fix.Generator) *checker {
 	return &checker{
 		pass:                 pass,
 		ignoreMap:            ignoreMap,
 		pureFuncs:            pureFuncs,
 		immutableReturnFuncs: immutableReturnFuncs,
+		failedPure:           failedPure,
 		reported:             reported,
 		suggestedEdits:       suggestedEdits,
 		fixGen:               fixGen,
@@ -204,7 +227,7 @@ func newChecker(pass *analysis.Pass, ignoreMap directive.IgnoreMap, pureFuncs, i
 
 // checkFunction runs SSA analysis on a single function and reports violations.
 func (c *checker) checkFunction(fn *ssa.Function) {
-	analyzer := ssautil.NewAnalyzer(fn, c.pureFuncs, c.immutableReturnFuncs)
+	analyzer := ssautil.NewAnalyzer(fn, c.pureFuncs, c.immutableReturnFuncs, c.failedPure)
 	violations := analyzer.Analyze()
 
 	// Deduplicate violations by root to avoid generating duplicate fixes.
