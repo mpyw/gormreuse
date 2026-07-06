@@ -64,6 +64,15 @@ func IsGormDB(t types.Type) bool {
 	return isGormDBNamed(t)
 }
 
+// IsGormPackage reports whether pkg is exactly the gorm.io/gorm package.
+//
+// This is used to distinguish genuine gorm builtins (e.g. the package-level
+// gorm.Open function) from user-defined functions that merely share a name.
+// It uses exact path matching, consistent with isGormDBNamed.
+func IsGormPackage(pkg *types.Package) bool {
+	return pkg != nil && pkg.Path() == gormPkgPath
+}
+
 // isGormDBNamed checks if the type is gorm.DB (named type).
 func isGormDBNamed(t types.Type) bool {
 	named, ok := t.(*types.Named)

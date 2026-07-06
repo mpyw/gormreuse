@@ -156,17 +156,40 @@ func (t *RootTracer) IsPureFunction(fn *ssa.Function) bool {
 	if fn == nil {
 		return false
 	}
-	return typeutil.IsImmutableReturningBuiltin(fn.Name()) || t.pureFuncs.Contains(fn)
+	return t.IsImmutableReturningBuiltin(fn) || t.pureFuncs.Contains(fn)
 }
 
 // IsImmutableReturningBuiltin checks if a function is a builtin method that returns immutable *gorm.DB.
 // Builtin methods (Session, WithContext, Debug, etc.) return immutable *gorm.DB.
 // This is used for tracing - only builtin methods have immutable return values.
+//
+// The name lookup is gated on the function actually belonging to gorm.io/gorm
+// (see isGormBuiltinFunc). Without this gate, any user-defined function sharing a
+// builtin name — a method named Session, a helper named Open — would be silently
+// trusted as immutable-returning (and, via IsPureFunction, as pure), disabling
+// reuse detection around it.
 func (t *RootTracer) IsImmutableReturningBuiltin(fn *ssa.Function) bool {
 	if fn == nil {
 		return false
 	}
-	return typeutil.IsImmutableReturningBuiltin(fn.Name())
+	if !typeutil.IsImmutableReturningBuiltin(fn.Name()) {
+		return false
+	}
+	return isGormBuiltinFunc(fn)
+}
+
+// isGormBuiltinFunc reports whether fn is genuinely defined by gorm.io/gorm:
+// either a method whose receiver is gorm.DB (Session, WithContext, Debug, Begin,
+// Transaction), or a package-level function in the gorm.io/gorm package
+// (gorm.Open). User-defined functions that merely share a builtin name return false.
+func isGormBuiltinFunc(fn *ssa.Function) bool {
+	if sig := fn.Signature; sig != nil && sig.Recv() != nil {
+		return typeutil.IsGormDB(sig.Recv().Type())
+	}
+	if obj := fn.Object(); obj != nil {
+		return typeutil.IsGormPackage(obj.Pkg())
+	}
+	return false
 }
 
 // trace is the core tracing function that finds the mutable root for a value.
