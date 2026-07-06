@@ -62,6 +62,7 @@ The linter detects when a mutable `*gorm.DB` branches into multiple code paths:
 - `//gormreuse:ignore` - Suppress warnings for the next line or same line
 - `//gormreuse:pure` - Mark function/method/closure as not polluting its `*gorm.DB` argument
 - `//gormreuse:immutable-return` - Mark function/method/closure as returning immutable `*gorm.DB` (like Session/WithContext)
+- `//gormreuse:immutable-param` - Opt a function's `*gorm.DB` parameters out of the Phase 1b mutable-by-default treatment: they are treated as immutable inside the function (the caller is responsible for passing an isolated value). **Caller-side contract**: when the function actually branches such a parameter, passing a mutable `*gorm.DB` at a call site is reported (isolate with `.Session(&gorm.Session{})` first, or make the caller `immutable-param` too so the contract propagates).
 
 Directives can be combined with commas: `//gormreuse:pure,immutable-return`
 

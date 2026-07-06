@@ -952,10 +952,12 @@ func immutableOnlyPollutes(db *gorm.DB) *gorm.DB {
 }
 
 func useImmutableOnlyPollutes(db *gorm.DB) {
-	result := immutableOnlyPollutes(db)
+	// immutableOnlyPollutes branches its param, so pass an isolated value to
+	// satisfy its immutable-param contract (stage 2b); this keeps the test focused
+	// on the immutable-RETURN behavior below.
+	result := immutableOnlyPollutes(db.Session(&gorm.Session{}))
 	result.Where("x").Find(nil)
 	result.Where("y").Find(nil) // OK: return is immutable
-	// Note: db is polluted by immutableOnlyPollutes, but we don't track that
 }
 
 // PIR202: immutable-return called multiple times in sequence

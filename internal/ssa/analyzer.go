@@ -65,9 +65,10 @@ type Violation = pollution.Violation
 //	    report(v.Pos, v.Message)
 //	}
 type Analyzer struct {
-	fn          *ssa.Function      // Function being analyzed
-	rootTracer  *tracer.RootTracer // Traces values to mutable roots
-	cfgAnalyzer *cfg.Analyzer      // Control flow analysis
+	fn                  *ssa.Function          // Function being analyzed
+	rootTracer          *tracer.RootTracer     // Traces values to mutable roots
+	cfgAnalyzer         *cfg.Analyzer          // Control flow analysis
+	needsImmutableParam map[*ssa.Function]bool // immutable-param fns that branch a param (2b caller check)
 }
 
 // NewAnalyzer creates a new Analyzer for the given function.
@@ -80,11 +81,14 @@ type Analyzer struct {
 //   - scopesCallbacks: Scopes/Preload callbacks whose *gorm.DB param is a mutable root
 //   - immutableParamFuncs: Functions marked //gormreuse:immutable-param (params opt out of Phase 1b)
 //   - transactionCallbacks: Transaction callbacks whose tx param is forkable (immutable)
-func NewAnalyzer(fn *ssa.Function, pureFuncs, immutableReturnFuncs, immutableParamFuncs *directive.DirectiveFuncSet, failedPure, scopesCallbacks, transactionCallbacks map[*ssa.Function]bool) *Analyzer {
+//   - needsImmutableParam: immutable-param functions that actually branch a param, so a caller
+//     passing a mutable value to them violates the contract (Phase 1b stage 2b)
+func NewAnalyzer(fn *ssa.Function, pureFuncs, immutableReturnFuncs, immutableParamFuncs *directive.DirectiveFuncSet, failedPure, scopesCallbacks, transactionCallbacks, needsImmutableParam map[*ssa.Function]bool) *Analyzer {
 	return &Analyzer{
-		fn:          fn,
-		rootTracer:  tracer.New(pureFuncs, immutableReturnFuncs, immutableParamFuncs, failedPure, scopesCallbacks, transactionCallbacks),
-		cfgAnalyzer: cfg.New(),
+		fn:                  fn,
+		rootTracer:          tracer.New(pureFuncs, immutableReturnFuncs, immutableParamFuncs, failedPure, scopesCallbacks, transactionCallbacks),
+		cfgAnalyzer:         cfg.New(),
+		needsImmutableParam: needsImmutableParam,
 	}
 }
 
@@ -152,12 +156,13 @@ func (a *Analyzer) processFunction(fn *ssa.Function, tracker *pollution.Tracker,
 
 	// Create handler context shared across all instruction handlers
 	ctx := &handler.Context{
-		Tracker:     tracker,
-		RootTracer:  a.rootTracer,
-		CFG:         a.cfgAnalyzer,
-		LoopInfo:    loopInfo,
-		CurrentFn:   fn,
-		PosOverride: posOverride,
+		Tracker:             tracker,
+		RootTracer:          a.rootTracer,
+		CFG:                 a.cfgAnalyzer,
+		LoopInfo:            loopInfo,
+		CurrentFn:           fn,
+		PosOverride:         posOverride,
+		NeedsImmutableParam: a.needsImmutableParam,
 	}
 
 	// Collect defers and go statements for second pass

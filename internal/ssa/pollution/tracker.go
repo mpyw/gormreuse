@@ -242,6 +242,15 @@ func (t *Tracker) MarkPolluted(root ssa.Value, block *ssa.BasicBlock, pos token.
 	t.pollutingUses[root] = append(t.pollutingUses[root], UsageInfo{Block: block, Pos: pos})
 }
 
+// AddMessageViolation records a violation with a fixed message and no root, so it
+// carries no suggested fix. Used for contract violations that are not root-reuse
+// violations — e.g. passing a mutable *gorm.DB to a //gormreuse:immutable-param
+// parameter (Phase 1b stage 2b). It still flows through the normal reporting path,
+// so //gormreuse:ignore and position dedup apply.
+func (t *Tracker) AddMessageViolation(pos token.Pos, message string) {
+	t.violations = append(t.violations, Violation{Pos: pos, Message: message})
+}
+
 // AddViolationWithRoot adds a violation with root information for fix generation.
 func (t *Tracker) AddViolationWithRoot(pos token.Pos, root ssa.Value) {
 	allUses := t.getAllUses(root)

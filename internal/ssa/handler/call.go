@@ -58,6 +58,13 @@ type Context struct {
 	LoopInfo   *cfg.LoopInfo      // Loop detection results for current function
 	CurrentFn  *ssa.Function      // The function being analyzed
 
+	// NeedsImmutableParam holds the functions marked //gormreuse:immutable-param
+	// that genuinely rely on immutability (they branch a *gorm.DB parameter). A
+	// call passing a mutable *gorm.DB to such a function violates the contract
+	// (Phase 1b stage 2b). Functions whose annotation is redundant (never branch
+	// a param) are excluded, so they impose no caller-side obligation.
+	NeedsImmutableParam map[*ssa.Function]bool
+
 	// PosOverride, when valid, replaces the source position recorded for uses
 	// inside this function. It is set when analyzing a closure that is invoked
 	// at a single known call site, so the closure's captured-value uses are
@@ -343,7 +350,11 @@ func (h *CallHandler) checkFunctionCallPollution(call *ssa.Call, ctx *Context) {
 	// This enables patterns like: q = buildQuery(q, "filter")
 	isReassignment := typeutil.IsGormDB(call.Type()) && isAssignment(call, ctx)
 
-	for _, arg := range call.Call.Args {
+	// A method call carries its receiver as Args[0]; //gormreuse:immutable-param
+	// governs parameters, not the receiver, so the contract check below skips it.
+	recvArg := callee != nil && callee.Signature != nil && callee.Signature.Recv() != nil
+
+	for i, arg := range call.Call.Args {
 		// Check if arg is *gorm.DB (directly or wrapped in MakeInterface)
 		gormArg, ok := pollutionsource.UnwrapGormDB(arg)
 		if !ok {
@@ -355,6 +366,14 @@ func (h *CallHandler) checkFunctionCallPollution(call *ssa.Call, ctx *Context) {
 			continue
 		}
 
+		// Caller-side contract check (Phase 1b stage 2b): passing a mutable
+		// (root != nil) *gorm.DB to a parameter of a function that relies on
+		// immutability — it branches the parameter — is unsafe: the callee's
+		// internal branching interferes because the value is not isolated.
+		if callee != nil && ctx.NeedsImmutableParam[callee] && (!recvArg || i != 0) {
+			ctx.Tracker.AddMessageViolation(ctx.pos(call.Pos()), immutableParamContractMessage(callee))
+		}
+
 		if isReassignment {
 			// For reassignment pattern: check if already polluted, but don't add pollution.
 			// This is similar to how gorm methods handle RecordAssignment.
@@ -364,6 +383,17 @@ func (h *CallHandler) checkFunctionCallPollution(call *ssa.Call, ctx *Context) {
 			ctx.Tracker.MarkPolluted(root, call.Block(), ctx.pos(call.Pos()))
 		}
 	}
+}
+
+// immutableParamContractMessage builds the diagnostic for passing a mutable
+// *gorm.DB to a //gormreuse:immutable-param parameter.
+func immutableParamContractMessage(callee *ssa.Function) string {
+	name := "immutable-param function"
+	if callee != nil {
+		name = callee.Name()
+	}
+	return "mutable *gorm.DB passed to //gormreuse:immutable-param parameter of " + name +
+		"; isolate it with .Session(&gorm.Session{}) before passing"
 }
 
 func (h *CallHandler) isGormDBMethodCall(call *ssa.Call) bool {
