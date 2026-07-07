@@ -55,10 +55,12 @@ func scopesCallbackSingleUse(db *gorm.DB) {
 	})
 }
 
-// SC102: Session() inside the callback isolates before branching.
+// SC102: Session() inside the callback isolates before branching, so the reuse
+// of s is fine — but Session() inside a Scopes callback trips the temporary GORM
+// transaction-leak warning (go-gorm/gorm#7592, Phase 3).
 func scopesCallbackSessionIsolated(db *gorm.DB) {
 	db.Scopes(func(tx *gorm.DB) *gorm.DB {
-		s := tx.Session(&gorm.Session{})
+		s := tx.Session(&gorm.Session{}) // want `Session\(\) in Scopes callback causes transaction leak`
 		s.Where("a").Find(nil)
 		return s.Where("b") // OK: s is immutable (Session isolates)
 	})
