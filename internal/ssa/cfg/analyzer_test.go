@@ -75,6 +75,14 @@ func TestDetectLoops(t *testing.T) {
 			fn:       "f",
 			wantLoop: true,
 		},
+		{
+			// Single-block self-loop: the back-edge source is the header itself
+			// (loopTail == loopHead), exercising markLoopBlocks' early return.
+			name:     "infinite self-loop",
+			src:      "package p\nfunc f() { for {} }",
+			fn:       "f",
+			wantLoop: true,
+		},
 	}
 
 	a := New()
@@ -184,5 +192,67 @@ func TestIsDefinedOutsideLoop(t *testing.T) {
 	}
 	if !insideFound {
 		t.Error("expected at least one value defined inside the loop")
+	}
+}
+
+// TestMarkLoopBlocksExcludesExit guards #113: a loop nested inside a switch arm,
+// followed by post-loop code in that arm, must not have its loop-exit block
+// marked in-loop. The invariant is structural — every in-loop block must be able
+// to reach a loop header (be genuinely part of the cycle); a mis-marked exit
+// block cannot and would fail this.
+func TestMarkLoopBlocksExcludesExit(t *testing.T) {
+	t.Parallel()
+	const src = `package p
+func f(s int, xs []int) int {
+	r := 0
+	switch s {
+	case 1:
+		r = 1
+	case 2:
+		for _, x := range xs {
+			if x > 0 {
+				r += x
+			} else {
+				r -= x
+			}
+		}
+		r *= 2
+	case 3:
+		r = 3
+	}
+	return r
+}`
+	fn := buildFunc(t, src, "f")
+	a := New()
+	info := a.DetectLoops(fn)
+
+	var headers []*ssa.BasicBlock
+	for _, b := range fn.Blocks {
+		if info.IsLoopHeader(b) {
+			headers = append(headers, b)
+		}
+	}
+	if len(headers) == 0 {
+		t.Fatal("expected a loop header")
+	}
+	inLoop := 0
+	for _, b := range fn.Blocks {
+		if !info.IsInLoop(b) {
+			continue
+		}
+		inLoop++
+		reaches := false
+		for _, h := range headers {
+			if b == h || a.CanReach(b, h) {
+				reaches = true
+				break
+			}
+		}
+		if !reaches {
+			t.Errorf("block #%d marked in-loop but cannot reach any loop header (#113 loop-exit mis-marking)", b.Index)
+		}
+	}
+	if inLoop == 0 {
+		t.Fatal("expected in-loop blocks")
 	}
 }
