@@ -63,6 +63,9 @@ The linter detects when a mutable `*gorm.DB` branches into multiple code paths:
 - `//gormreuse:pure` - Mark function/method/closure as not polluting its `*gorm.DB` argument
 - `//gormreuse:immutable-return` - Mark function/method/closure as returning immutable `*gorm.DB` (like Session/WithContext)
 - `//gormreuse:immutable-param` - Opt a function's `*gorm.DB` parameters out of the Phase 1b mutable-by-default treatment: they are treated as immutable inside the function (the caller is responsible for passing an isolated value). **Caller-side contract**: when the function actually branches such a parameter, passing a mutable `*gorm.DB` at a call site is reported (isolate with `.Session(&gorm.Session{})` first, or make the caller `immutable-param` too so the contract propagates).
+- `//gormreuse:immutable-input(name)` - Declare that the function passes an **immutable** `*gorm.DB` to its callback parameter `name` (a user-defined equivalent of gorm's `Transaction`/`Connection`/`FindInBatches`). The named callback's `*gorm.DB` parameter is then treated as immutable, so reuse inside the callback is allowed. **Body contract**: if the function actually passes a mutable value to the callback, it is reported. Reported unused when `name` isn't a parameter, isn't a function type, or the callback has no `*gorm.DB` parameter.
+
+Also: gorm's built-in `Transaction`, `Connection`, and `FindInBatches` are known to pass a fresh (immutable) handle to their callbacks, so reuse inside those callbacks is always allowed.
 
 Directives can be combined with commas: `//gormreuse:pure,immutable-return`
 

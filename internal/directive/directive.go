@@ -111,3 +111,37 @@ func IsImmutableReturnDirective(text string) bool { return hasDirective(text, "i
 // (clone>0) *gorm.DB arguments, so the parameter can be reused safely. It is the
 // escape hatch for the default-mutable parameter treatment (Phase 1b, #61).
 func IsImmutableParamDirective(text string) bool { return hasDirective(text, "immutable-param") }
+
+// ExtractImmutableInputParams returns the callback parameter names declared by
+// //gormreuse:immutable-input(name) directives in a comment. A comment may carry
+// several (comma-combinable with other directives), so it returns a slice; nil if
+// none. It accepts both line and block comment forms and ignores a trailing "//"
+// comment, mirroring hasDirective (#62).
+func ExtractImmutableInputParams(text string) []string {
+	if strings.HasPrefix(text, "/*") {
+		text = strings.TrimSuffix(strings.TrimPrefix(text, "/*"), "*/")
+	} else {
+		text = strings.TrimPrefix(text, "//")
+	}
+	text = strings.TrimSpace(text)
+	if !strings.HasPrefix(text, directivePrefix) {
+		return nil
+	}
+	text = strings.TrimPrefix(text, directivePrefix)
+	if idx := strings.Index(text, "//"); idx != -1 {
+		text = text[:idx]
+	}
+
+	var params []string
+	for _, part := range strings.Split(text, ",") {
+		part = strings.TrimSpace(part)
+		if !strings.HasPrefix(part, "immutable-input(") || !strings.HasSuffix(part, ")") {
+			continue
+		}
+		name := strings.TrimSpace(part[len("immutable-input(") : len(part)-1])
+		if name != "" {
+			params = append(params, name)
+		}
+	}
+	return params
+}

@@ -1598,6 +1598,43 @@ func CollectImmutableCallbacks(funcs []*ssa.Function) map[*ssa.Function]bool {
 	return set
 }
 
+// CollectImmutableInputCallbacks adds, to into, every closure passed as the
+// callback argument declared by a //gormreuse:immutable-input(name) function.
+// Such a callback receives an immutable *gorm.DB (the declaring function promised
+// to hand it one), so — like a Transaction callback — its *gorm.DB parameter is
+// exempt from the Phase 1b mutable-by-default treatment (#62 case 2.2).
+func CollectImmutableInputCallbacks(funcs []*ssa.Function, set *directive.ImmutableInputSet, into map[*ssa.Function]bool) {
+	if set == nil || into == nil {
+		return
+	}
+	walkCalls(funcs, func(call *ssa.Call) {
+		callee := call.Call.StaticCallee()
+		if callee == nil {
+			return
+		}
+		cbs := set.Callbacks(callee)
+		if len(cbs) == 0 {
+			return
+		}
+		// A method call carries its receiver as Args[0]; ParamIdx counts from the
+		// first non-receiver parameter, so shift when the callee has a receiver.
+		shift := 0
+		if callee.Signature != nil && callee.Signature.Recv() != nil {
+			shift = 1
+		}
+		args := call.Call.Args
+		for _, cb := range cbs {
+			idx := cb.ParamIdx + shift
+			if idx < 0 || idx >= len(args) {
+				continue
+			}
+			if fn := callbackFuncValue(args[idx]); fn != nil {
+				into[fn] = true
+			}
+		}
+	})
+}
+
 // walkCalls visits every *ssa.Call in funcs and their nested anonymous functions
 // exactly once. Shared by the Scopes/Preload and Transaction callback collectors.
 func walkCalls(funcs []*ssa.Function, visit func(*ssa.Call)) {

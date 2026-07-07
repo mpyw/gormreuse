@@ -73,6 +73,7 @@ func RunSSA(
 	ignoreMaps map[string]directive.IgnoreMap,
 	funcIgnores map[string]map[token.Pos]directive.FunctionIgnoreEntry,
 	pureFuncs, immutableReturnFuncs, immutableParamFuncs *directive.DirectiveFuncSet,
+	immutableInputSet *directive.ImmutableInputSet,
 	skipFiles map[string]bool,
 ) {
 	// Share a single reported map across all functions to deduplicate
@@ -139,10 +140,33 @@ func RunSSA(
 	// mid-chain (clone==0) value, so reuse inside them must be detected (#60).
 	scopesCallbacks := tracer.CollectScopesCallbacks(ssaInfo.SrcFuncs)
 
-	// Collect Transaction callbacks once: their tx parameter is a fresh forkable
-	// (clone>0) handle, so it is exempt from the Phase 1b mutable-by-default
-	// treatment of *gorm.DB parameters (#60 SC103, #61).
+	// Collect immutable callbacks once: gorm's Transaction/Connection/FindInBatches
+	// hand their callback a fresh forkable (clone>0) handle, and a user function
+	// declared //gormreuse:immutable-input(cb) promises the same for cb. Their
+	// callback's tx parameter is therefore exempt from the Phase 1b
+	// mutable-by-default treatment (#60 SC103, #61, #62 case 2.2).
 	immutableCallbacks := tracer.CollectImmutableCallbacks(ssaInfo.SrcFuncs)
+	tracer.CollectImmutableInputCallbacks(ssaInfo.SrcFuncs, immutableInputSet, immutableCallbacks)
+
+	// Enforce the body-side immutable-input contract (#62 cases 2.3/2.4) and
+	// report unused immutable-input directives (U1-U3). Uses a tracer with the
+	// full context so FindMutableRoot classifies immutable sources correctly.
+	inputTracer := tracer.New(pureFuncs, immutableReturnFuncs, immutableParamFuncs, failedPure, scopesCallbacks, immutableCallbacks)
+	for _, fn := range ssaInfo.SrcFuncs {
+		if skip(fn, false) {
+			continue
+		}
+		recoverPerFunction(fn, func() {
+			for _, v := range purity.ValidateImmutableInputs(fn, immutableInputSet, inputTracer) {
+				pass.Reportf(v.Pos, "%s", v.Message)
+			}
+		})
+	}
+	if immutableInputSet != nil {
+		for _, u := range immutableInputSet.GetUnused() {
+			pass.Reportf(u.Pos, "%s", u.Reason)
+		}
+	}
 
 	// Share a single fix generator across all violations (it caches AST
 	// inspectors). It needs scopesCallbacks to withhold the immutable-param fix on

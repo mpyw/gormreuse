@@ -272,7 +272,7 @@ Reuse safety is determined by GORM's internal `clone` field: a handle with `clon
 | Mid-chain ([`Where`](https://pkg.go.dev/gorm.io/gorm#DB.Where), [`Order`](https://pkg.go.dev/gorm.io/gorm#DB.Order), …) | `== 0` | ❌ shares Statement |
 | A [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) **parameter** | unknown | ❌ treated as mutable |
 
-Transaction callbacks (`tx` in `db.Transaction(func(tx *gorm.DB) error {...})`) are exempt — their `tx` is a fresh forkable handle.
+Transaction/Connection/FindInBatches callbacks (e.g. `tx` in `db.Transaction(func(tx *gorm.DB) error {...})`) are exempt — their `tx` is a fresh forkable handle. Declare your own such helpers with [`//gormreuse:immutable-input(name)`](#gormreuseimmutable-inputname).
 
 #### Safe: Variable reassignment
 
@@ -431,6 +431,39 @@ func applyFilters(tx *gorm.DB) {
 
 > [!TIP]
 > Combine with `//gormreuse:pure` when a helper both leaves its argument unpolluted and expects an isolated value. A **redundant** `//gormreuse:immutable-param` — one whose parameter is never reused, so it suppresses nothing — is reported so you can drop it.
+
+### `//gormreuse:immutable-input(name)`
+
+Declare that the function passes an **immutable** [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) to its callback parameter `name` — a user-defined equivalent of gorm's [`Transaction`](https://pkg.go.dev/gorm.io/gorm#DB.Transaction)/[`Connection`](https://pkg.go.dev/gorm.io/gorm#DB.Connection)/[`FindInBatches`](https://pkg.go.dev/gorm.io/gorm#DB.FindInBatches). The named callback's `*gorm.DB` parameter is then treated as immutable, so reuse inside the callback is allowed:
+
+```go
+//gormreuse:immutable-input(cb)
+func withFreshDB(cb func(*gorm.DB) error, db *gorm.DB) error {
+    return cb(db.Session(&gorm.Session{})) // hands the callback an isolated value
+}
+
+func useIt(db *gorm.DB) {
+    _ = withFreshDB(func(q *gorm.DB) error {
+        q.Find(&users)
+        q.Count(&count) // OK — q is declared immutable input
+        return nil
+    }, db)
+}
+```
+
+> [!WARNING]
+> **Body contract.** If the function actually hands the callback a mutable value, it is reported:
+> ```go
+> //gormreuse:immutable-input(cb)
+> func bad(cb func(*gorm.DB) error, db *gorm.DB) error {
+>     q := db.Where("x")
+>     return cb(q) // VIOLATION: immutable-input(cb) declared but mutable *gorm.DB passed to callback
+> }
+> ```
+> The directive is reported **unused** when `name` isn't a parameter, isn't a function type, or the callback has no [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) parameter.
+
+> [!NOTE]
+> gorm's built-in [`Transaction`](https://pkg.go.dev/gorm.io/gorm#DB.Transaction), [`Connection`](https://pkg.go.dev/gorm.io/gorm#DB.Connection), and [`FindInBatches`](https://pkg.go.dev/gorm.io/gorm#DB.FindInBatches) already pass a fresh handle to their callbacks, so reuse inside those callbacks needs no directive.
 
 ### `//gormreuse:pure,immutable-return`
 
