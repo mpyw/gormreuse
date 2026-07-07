@@ -488,6 +488,23 @@ func useIt(db *gorm.DB) {
 > [!WARNING]
 > Unused `//gormreuse:pure`, `//gormreuse:immutable-return`, and `//gormreuse:immutable-param` directives are reported as warnings (a directive whose signature doesn't fit — e.g. `immutable-param` on a function with no [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) parameter). A **redundant** `//gormreuse:immutable-param` (signature-valid but its parameter is never reused) is reported too. For combined directives like `//gormreuse:pure,immutable-return`, if either part is used, no unused warning is reported.
 
+## Temporary rule: `Session`/`WithContext`/`Debug` inside `Scopes` callbacks
+
+> [!WARNING]
+> This is a **temporary** rule working around an upstream GORM bug.
+
+Calling [`Session`](https://pkg.go.dev/gorm.io/gorm#DB.Session), [`WithContext`](https://pkg.go.dev/gorm.io/gorm#DB.WithContext), or [`Debug`](https://pkg.go.dev/gorm.io/gorm#DB.Debug) inside a [`Scopes`](https://pkg.go.dev/gorm.io/gorm#DB.Scopes) callback corrupts GORM's `InstanceSet`/`InstanceGet` bookkeeping and leaks transactions ([go-gorm/gorm#7592](https://github.com/go-gorm/gorm/issues/7592), fix attempt [#7593](https://github.com/go-gorm/gorm/pull/7593)):
+
+```go
+db.Scopes(func(q *gorm.DB) *gorm.DB {
+    return q.Session(&gorm.Session{}).Where("x") // WARNING: Session() in Scopes callback causes transaction leak
+})
+```
+
+[`Preload`](https://pkg.go.dev/gorm.io/gorm#DB.Preload) callbacks are **unaffected** (Preload builds a fresh DB), so the same code inside a Preload callback is not flagged.
+
+**Removal condition**: once the upstream fix ships in a supported GORM release, this rule is deleted by removing `internal/scopes_session_warning.go` and its single call site in `RunSSA` — the file documents this in-line. Re-check go-gorm/gorm#7592 on each GORM version bump.
+
 ## Documentation
 
 - [CLAUDE.md](./CLAUDE.md) - AI assistant guidance for development

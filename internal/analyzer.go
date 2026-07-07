@@ -168,6 +168,18 @@ func RunSSA(
 		}
 	}
 
+	// TEMPORARY (GORM bug go-gorm/gorm#7592): warn on Session/WithContext/Debug
+	// inside Scopes callbacks. Deletable by removing scopes_session_warning.go and
+	// this loop once the upstream fix ships in a supported release — see that file.
+	for _, fn := range ssaInfo.SrcFuncs {
+		if skip(fn, false) {
+			continue
+		}
+		for _, w := range validateScopesCallback(fn) {
+			pass.Reportf(w.Pos, "%s", w.Message)
+		}
+	}
+
 	// Share a single fix generator across all violations (it caches AST
 	// inspectors). It needs scopesCallbacks to withhold the immutable-param fix on
 	// Scopes/Preload callbacks, whose parameters cannot be exempted (stage 2c).
