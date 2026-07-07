@@ -77,6 +77,7 @@ func run(pass *analysis.Pass) (any, error) {
 	pureFuncs := directive.NewPureFuncSet(pass.Fset, pass.TypesInfo)
 	immutableReturnFuncs := directive.NewImmutableReturnFuncSet(pass.Fset, pass.TypesInfo)
 	immutableParamFuncs := directive.NewImmutableParamFuncSet(pass.Fset, pass.TypesInfo)
+	immutableInputSet := directive.NewImmutableInputSet(pass.Fset, pass.TypesInfo)
 
 	pkgPath := pass.Pkg.Path()
 	for _, file := range pass.Files {
@@ -104,10 +105,12 @@ func run(pass *analysis.Pass) (any, error) {
 		for key := range directive.BuildImmutableParamFunctionSet(file, pkgPath) {
 			immutableParamFuncs.Add(key)
 		}
+		// Build immutable-input(name) callback declarations for this file
+		immutableInputSet.AddFile(file, pkgPath)
 	}
 
 	// Run SSA-based analysis
-	internal.RunSSA(pass, ssaInfo, ignoreMaps, funcIgnores, pureFuncs, immutableReturnFuncs, immutableParamFuncs, skipFiles)
+	internal.RunSSA(pass, ssaInfo, ignoreMaps, funcIgnores, pureFuncs, immutableReturnFuncs, immutableParamFuncs, immutableInputSet, skipFiles)
 
 	return nil, nil
 }
