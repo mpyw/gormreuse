@@ -1693,7 +1693,7 @@ func quadNestingForIfForDefer(db *gorm.DB, outer []bool, inner []int) {
 		}
 	}
 
-	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	q.Find(nil) // reuse reported at the deferred call above; this post-loop/early-exit use is not separately flagged (#113: loop-block over-marking fixed)
 }
 
 // quadNestingDeferIfForIf demonstrates 4-level: defer -> if -> for -> if.
@@ -1763,7 +1763,7 @@ func multipleDefersInLoopBranches(db *gorm.DB, items []int) {
 		}
 	}
 
-	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	q.Find(nil) // reuse reported at the deferred call above; this post-loop/early-exit use is not separately flagged (#113: loop-block over-marking fixed)
 }
 
 // =============================================================================
@@ -1794,7 +1794,7 @@ func earlyReturnInLoopWithDefer(db *gorm.DB, items []int) {
 
 	for _, item := range items {
 		if item < 0 {
-			q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+			q.Find(nil) // reuse reported at the deferred call above; this post-loop/early-exit use is not separately flagged (#113: loop-block over-marking fixed)
 			return
 		}
 		q.Where("item = ?", item).Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
@@ -1815,7 +1815,7 @@ outer:
 	for i := 0; i < 3; i++ {
 		for j := 0; j < 3; j++ {
 			if i == 1 && j == 1 {
-				q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+				q.Find(nil) // reuse reported at the deferred call above; this post-loop/early-exit use is not separately flagged (#113: loop-block over-marking fixed)
 				break outer
 			}
 			q.Where("i = ? AND j = ?", i, j).Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`

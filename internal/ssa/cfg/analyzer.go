@@ -167,7 +167,7 @@ func (a *Analyzer) DetectLoops(fn *ssa.Function) *LoopInfo {
 			if blockIndex[succ] <= blockIndex[block] {
 				// Potential back-edge: verify it creates a cycle
 				if a.CanReach(succ, block) {
-					a.markLoopBlocks(fn, succ, block, loopBlocks, blockIndex)
+					a.markLoopBlocks(fn, succ, block, loopBlocks)
 					loopHeaders[succ] = true // succ is the loop header
 				}
 			}
@@ -180,19 +180,41 @@ func (a *Analyzer) DetectLoops(fn *ssa.Function) *LoopInfo {
 	}
 }
 
-// markLoopBlocks marks blocks that are part of a loop.
+// markLoopBlocks marks blocks that are part of the loop whose header is loopHead
+// and whose back-edge originates at loopTail.
 //
-// All blocks between loopHead (header) and loopTail (end) are marked as
-// being inside the loop. This is a simple interval-based approach.
-func (a *Analyzer) markLoopBlocks(fn *ssa.Function, loopHead, loopTail *ssa.BasicBlock, loopBlocks map[*ssa.BasicBlock]bool, blockIndex map[*ssa.BasicBlock]int) {
-	headIdx := blockIndex[loopHead]
-	tailIdx := blockIndex[loopTail]
-
-	// Mark all blocks in the interval [headIdx, tailIdx]
-	for _, block := range fn.Blocks {
-		idx := blockIndex[block]
-		if idx >= headIdx && idx <= tailIdx {
-			loopBlocks[block] = true
+// A block is inside the loop iff it lies on a path from the header to the
+// back-edge source: reachable FROM the header AND able to reach loopTail (from
+// which the back-edge returns to the header). This deliberately excludes
+// loop-EXIT blocks — reachable from the header but unable to reach loopTail.
+//
+// The previous implementation marked every block whose CFG index fell in the
+// interval [headIdx, tailIdx]. That wrongly included blocks that merely happen to
+// be ordered between the header and the back-edge, most notably a loop-exit block
+// living inside a switch arm (issue #113): such a block was then treated as
+// in-loop, and the "externally-defined root used in a loop" heuristic fired a
+// spurious reuse violation.
+func (a *Analyzer) markLoopBlocks(_ *ssa.Function, loopHead, loopTail *ssa.BasicBlock, loopBlocks map[*ssa.BasicBlock]bool) {
+	// Standard natural-loop body for the back-edge loopTail -> loopHead: the
+	// header plus every block that can reach loopTail without passing through the
+	// header. Found by a single reverse walk from loopTail over predecessors,
+	// bounded by the (pre-marked) header. This excludes loop-exit blocks — they
+	// cannot reach loopTail — which the old index-interval marking wrongly
+	// included (#113). O(V+E), reusing loopBlocks with no extra allocation.
+	loopBlocks[loopHead] = true
+	if loopTail == loopHead {
+		return
+	}
+	loopBlocks[loopTail] = true
+	stack := []*ssa.BasicBlock{loopTail}
+	for len(stack) > 0 {
+		b := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		for _, p := range b.Preds {
+			if !loopBlocks[p] {
+				loopBlocks[p] = true
+				stack = append(stack, p)
+			}
 		}
 	}
 }
