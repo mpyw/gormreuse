@@ -102,7 +102,7 @@ type RootTracer struct {
 	immutableParamFuncs  *directive.DirectiveFuncSet // Functions whose *gorm.DB params are immutable (opt out of Phase 1b)
 	failedPure           map[*ssa.Function]bool      // Pure functions that FAILED contract validation
 	scopesCallbacks      map[*ssa.Function]bool      // Scopes/Preload callbacks (params are mutable roots)
-	transactionCallbacks map[*ssa.Function]bool      // Transaction callbacks (tx param is forkable, immutable)
+	immutableCallbacks   map[*ssa.Function]bool      // Transaction/Connection/FindInBatches callbacks (fresh tx)
 }
 
 // New creates a new RootTracer.
@@ -119,17 +119,17 @@ type RootTracer struct {
 //
 // immutableParamFuncs lists functions annotated //gormreuse:immutable-param,
 // whose *gorm.DB parameters opt out of the Phase 1b mutable-by-default treatment
-// (issue #61). transactionCallbacks lists function literals passed to gorm's
-// Transaction, whose tx parameter is a fresh forkable (clone>0) handle and is
-// therefore immutable. Both may be nil.
-func New(pureFuncs, immutableReturnFuncs, immutableParamFuncs *directive.DirectiveFuncSet, failedPure, scopesCallbacks, transactionCallbacks map[*ssa.Function]bool) *RootTracer {
+// (issue #61). immutableCallbacks lists function literals passed to gorm's
+// Transaction/Connection/FindInBatches, whose tx parameter is a fresh forkable
+// (clone>0) handle and is therefore immutable. Both may be nil.
+func New(pureFuncs, immutableReturnFuncs, immutableParamFuncs *directive.DirectiveFuncSet, failedPure, scopesCallbacks, immutableCallbacks map[*ssa.Function]bool) *RootTracer {
 	return &RootTracer{
 		pureFuncs:            pureFuncs,
 		immutableReturnFuncs: immutableReturnFuncs,
 		immutableParamFuncs:  immutableParamFuncs,
 		failedPure:           failedPure,
 		scopesCallbacks:      scopesCallbacks,
-		transactionCallbacks: transactionCallbacks,
+		immutableCallbacks:   immutableCallbacks,
 	}
 }
 
@@ -1379,8 +1379,9 @@ func (t *RootTracer) traceAllFreeVar(fv *ssa.FreeVar, visited map[ssa.Value]bool
 // immutable:
 //   - the enclosing function is annotated //gormreuse:immutable-param (the caller
 //     is responsible for passing a safe value; verified caller-side elsewhere)
-//   - p is the tx parameter of a gorm Transaction callback — a fresh, forkable
-//     (clone>0) handle, so reuse inside the callback is safe (#60 SC103)
+//   - p is the tx parameter of a gorm Transaction/Connection/FindInBatches
+//     callback — a fresh, forkable (clone>0) handle, so reuse inside the callback
+//     is safe (#60 SC103, #62)
 //
 // A Scopes/Preload callback parameter receives a clone==0 value and is ALWAYS
 // mutable; it cannot be exempted by //gormreuse:immutable-param.
@@ -1392,7 +1393,7 @@ func (t *RootTracer) isMutableParam(p *ssa.Parameter) bool {
 	if t.scopesCallbacks[fn] {
 		return true
 	}
-	if t.transactionCallbacks[fn] {
+	if t.immutableCallbacks[fn] {
 		return false
 	}
 	if t.immutableParamFuncs != nil && t.immutableParamFuncs.Contains(fn) {
@@ -1579,19 +1580,20 @@ func CollectScopesCallbacks(funcs []*ssa.Function) map[*ssa.Function]bool {
 	return set
 }
 
-// CollectTransactionCallbacks returns the set of function literals passed as the
-// callback to gorm's Transaction across all given functions and their nested
-// closures.
+// CollectImmutableCallbacks returns the set of function literals passed as the
+// callback to gorm's Transaction, Connection, or FindInBatches across all given
+// functions and their nested closures.
 //
-// A Transaction callback receives a FRESH, forkable (clone>0) transaction handle,
-// so — unlike an ordinary Phase 1b parameter — its *gorm.DB parameter is NOT a
-// mutable root and reuse inside the callback is safe (verified against gorm's
-// clone semantics; see the epic's pivotal finding). It must be exempted from the
-// mutable-by-default treatment (#60 SC103).
-func CollectTransactionCallbacks(funcs []*ssa.Function) map[*ssa.Function]bool {
+// Each of these methods hands the callback a FRESH, forkable (clone>0) handle
+// (they route through Session()/Begin at runtime), so — unlike an ordinary Phase
+// 1b parameter — the callback's *gorm.DB parameter is NOT a mutable root and
+// reuse inside the callback is safe (verified against gorm's clone semantics; see
+// the epic's pivotal finding). It must be exempted from the mutable-by-default
+// treatment (#60 SC103, #62).
+func CollectImmutableCallbacks(funcs []*ssa.Function) map[*ssa.Function]bool {
 	set := make(map[*ssa.Function]bool)
 	walkCalls(funcs, func(call *ssa.Call) {
-		collectTransactionCallbacksFromCall(call, set)
+		collectImmutableCallbacksFromCall(call, set)
 	})
 	return set
 }
@@ -1672,28 +1674,32 @@ func isScopesOrPreloadMethod(callee *ssa.Function) bool {
 	return sig != nil && sig.Recv() != nil && typeutil.IsGormDB(sig.Recv().Type())
 }
 
-// collectTransactionCallbacksFromCall adds the callback function passed to a
-// gorm Transaction call to set.
-func collectTransactionCallbacksFromCall(call *ssa.Call, set map[*ssa.Function]bool) {
+// collectImmutableCallbacksFromCall adds the callback function passed to a gorm
+// Transaction/Connection/FindInBatches call to set. The callback sits at a
+// different argument position per method (Transaction/Connection: first
+// argument; FindInBatches: third), so scan for the func-typed argument whose
+// signature takes a *gorm.DB rather than hard-coding an index.
+func collectImmutableCallbacksFromCall(call *ssa.Call, set map[*ssa.Function]bool) {
 	callee := call.Call.StaticCallee()
-	if callee == nil || !isTransactionMethod(callee) {
+	if callee == nil || !isImmutableCallbackMethod(callee) {
 		return
 	}
-	// Transaction(fc func(tx *DB) error, opts ...): with a static method callee
-	// the receiver is Args[0] and the callback fc is Args[1].
-	args := call.Call.Args
-	if len(args) < 2 {
-		return
-	}
-	if cb := callbackFuncValue(args[1]); cb != nil {
-		set[cb] = true
+	for _, arg := range call.Call.Args {
+		cb := callbackFuncValue(arg)
+		if cb != nil && cb.Signature != nil && directive.HasGormDBParameter(cb.Signature) {
+			set[cb] = true
+		}
 	}
 }
 
-// isTransactionMethod reports whether callee is gorm's Transaction method (gated
-// on a gorm.DB receiver so a same-named user method is excluded).
-func isTransactionMethod(callee *ssa.Function) bool {
-	if callee.Name() != "Transaction" {
+// isImmutableCallbackMethod reports whether callee is a gorm method that hands a
+// fresh (clone>0) *gorm.DB to a callback — Transaction, Connection, or
+// FindInBatches — gated on a gorm.DB receiver so a same-named user method is
+// excluded.
+func isImmutableCallbackMethod(callee *ssa.Function) bool {
+	switch callee.Name() {
+	case "Transaction", "Connection", "FindInBatches":
+	default:
 		return false
 	}
 	sig := callee.Signature

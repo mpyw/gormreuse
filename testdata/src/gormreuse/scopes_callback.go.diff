@@ -1,6 +1,6 @@
 --- scopes_callback.go	1970-01-01 00:00:00
 +++ scopes_callback.go.golden	1970-01-01 00:00:00
-@@ -1,84 +1,85 @@
+@@ -1,104 +1,105 @@
  package internal
  
  import "gorm.io/gorm"
@@ -85,4 +85,24 @@
  func ordinaryHelperParamBranches(tx *gorm.DB) *gorm.DB {
  	tx.Where("a").Find(nil)
  	return tx.Where("b") // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // SC105: A Connection callback also receives a fresh (clone>0) handle, so reuse
+ // inside it is safe (#62).
+ func connectionCallbackNoReport(db *gorm.DB) {
+ 	_ = db.Connection(func(tx *gorm.DB) error {
+ 		tx.Where("a").Find(nil)
+ 		tx.Where("b").Find(nil) // OK: tx is a fresh handle
+ 		return nil
+ 	})
+ }
+ 
+ // SC106: A FindInBatches callback (the tx argument, third parameter of the
+ // method) likewise receives a fresh handle per batch (#62).
+ func findInBatchesCallbackNoReport(db *gorm.DB) {
+ 	_ = db.FindInBatches(nil, 100, func(tx *gorm.DB, batch int) error {
+ 		tx.Where("a").Find(nil)
+ 		tx.Where("b").Find(nil) // OK: tx is a fresh handle
+ 		return nil
+ 	})
  }
