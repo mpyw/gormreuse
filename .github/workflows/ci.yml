@@ -33,7 +33,7 @@ jobs:
         working-directory: e2e/internal
 
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v7
         with:
           files: ./coverage.txt
           flags: unittests
