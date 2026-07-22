@@ -407,6 +407,16 @@ func useIt() {
 > [!TIP]
 > Use this directive for DB connection helpers that return a fresh, immutable [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) instance. This allows callers to reuse the returned value freely without worrying about pollution.
 
+> [!WARNING]
+> **Body contract.** If the function actually returns a *mutable* value, the directive is reported at the declaration — otherwise the linter would trust it and silently allow unsafe reuse of the return value at every call site:
+> ```go
+> //gormreuse:immutable-return // VIOLATION: returns mutable *gorm.DB
+> func GetDB() *gorm.DB {
+>     return globalDB.Session(&gorm.Session{}).Where("x") // trailing Where re-forks a fresh clone==0 Statement
+> }
+> ```
+> Put [`Session`](https://pkg.go.dev/gorm.io/gorm#DB.Session) at the **end** of the chain (`globalDB.Where("x").Session(&gorm.Session{})`) so the returned value is isolated. Only provably-mutable returns (whose root is a gorm chain method like `Where`) are reported; a bare parameter or a value from an unmarked helper the linter can't see through is given the benefit of the doubt.
+
 ### `//gormreuse:immutable-param`
 
 Opt a function's [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) **parameters** out of the default mutable treatment — they are treated as immutable inside the function, so the caller becomes responsible for passing an isolated value:

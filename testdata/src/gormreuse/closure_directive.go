@@ -27,7 +27,8 @@ func closurePureBefore(db *gorm.DB) {
 func closureImmutableReturnBefore(db *gorm.DB) {
 	//gormreuse:immutable-return
 	getDB := func() *gorm.DB {
-		return db.Session(&gorm.Session{}).Where("setup")
+		// Session at END: return value is immutable (safe to reuse).
+		return db.Where("setup").Session(&gorm.Session{})
 	}
 
 	q := getDB()
@@ -53,7 +54,8 @@ func closurePureInline(db *gorm.DB) {
 // closureImmutableReturnInline: immutable-return directive after opening brace
 func closureImmutableReturnInline(db *gorm.DB) {
 	getDB := func() *gorm.DB { //gormreuse:immutable-return
-		return db.Session(&gorm.Session{}).Where("setup")
+		// Session at END: return value is immutable (safe to reuse).
+		return db.Where("setup").Session(&gorm.Session{})
 	}
 
 	q := getDB()
@@ -85,6 +87,25 @@ func closureNoImmutableReturn(db *gorm.DB) {
 	q := getDB()
 	q.Find(nil)
 	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// =============================================================================
+// IMMUTABLE-RETURN BODY CONTRACT VIOLATION - SHOULD REPORT
+// =============================================================================
+
+// closureImmutableReturnViolation: the closure claims immutable-return but
+// returns a mutable chain (no trailing Session). The body contract is reported
+// at the closure literal; call sites still trust the directive (report-only),
+// so the reuse of q below is not additionally flagged.
+func closureImmutableReturnViolation(db *gorm.DB) {
+	//gormreuse:immutable-return
+	getDB := func() *gorm.DB { // want `immutable-return declared but function returns mutable \*gorm\.DB`
+		return db.Session(&gorm.Session{}).Where("setup")
+	}
+
+	q := getDB()
+	q.Find(nil)
+	q.Count(nil) // OK here: directive still trusted; fix the closure above
 }
 
 // =============================================================================
