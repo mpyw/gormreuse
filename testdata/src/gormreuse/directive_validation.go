@@ -734,7 +734,10 @@ func useRepositoryDB(r *IRRepository) {
 //
 //gormreuse:immutable-return
 func getDBForTenant(tenantID int) *gorm.DB {
-	return globalDB.Session(&gorm.Session{}).Where("tenant_id = ?", tenantID)
+	// Session at END isolates: the returned value forks a fresh Statement per
+	// chain, so callers may reuse it. (Session().Where() alone would leave a
+	// mutable clone==0 value — see e2e TestSessionInMiddle.)
+	return globalDB.Where("tenant_id = ?", tenantID).Session(&gorm.Session{})
 }
 
 func useDBInBranches(cond bool) {
@@ -812,6 +815,74 @@ func immutableReturnInterface() interface{} {
 	return globalDB.Session(&gorm.Session{})
 }
 
+// =============================================================================
+// SHOULD REPORT - immutable-return body contract: the function must actually
+// return an immutable *gorm.DB. Marking a function immutable-return does not
+// make its mutable return value safe; the linter otherwise trusts the directive
+// and silently allows unsafe reuse at call sites.
+// =============================================================================
+
+// IRV001: claims immutable-return but returns a mutable chain (db.Where()).
+//
+//gormreuse:immutable-return
+func badImmutableReturnChain() *gorm.DB { // want `immutable-return declared but function returns mutable \*gorm\.DB`
+	return globalDB.Where("x")
+}
+
+// IRV002: Session() in the MIDDLE leaves a mutable clone==0 value (the trailing
+// Where re-forks a fresh Statement) — see e2e TestSessionInMiddle.
+//
+//gormreuse:immutable-return
+func badImmutableReturnSessionMiddle() *gorm.DB { // want `immutable-return declared but function returns mutable \*gorm\.DB`
+	return globalDB.Session(&gorm.Session{}).Where("x")
+}
+
+// IRV003: only one branch returns immutable; the other returns a mutable chain.
+//
+//gormreuse:immutable-return
+func badImmutableReturnConditional(cond bool) *gorm.DB { // want `immutable-return declared but function returns mutable \*gorm\.DB`
+	if cond {
+		return globalDB.Session(&gorm.Session{})
+	}
+	return globalDB.Where("x")
+}
+
+// =============================================================================
+// SHOULD NOT REPORT - immutable-return body contract gives the benefit of the
+// doubt to roots the tracer treats as mutable only conservatively. The directive
+// exists to assert immutability the analyzer cannot prove; only provably-mutable
+// roots (gorm chain-method call results) violate the contract.
+// =============================================================================
+
+// IRV101: bare *gorm.DB parameter returned as-is. The tracer treats parameters
+// as mutable only conservatively — the caller may pass an isolated value — so
+// the directive is the caller's assertion and is not reported.
+//
+//gormreuse:immutable-return
+func assertedImmutableReturnParam(db *gorm.DB) *gorm.DB {
+	return db
+}
+
+// irvConnHolder is a helper receiver for IRV102.
+type irvConnHolder struct {
+	db *gorm.DB
+}
+
+// mutableDB is an unmarked helper the tracer cannot see through (its call
+// result is a conservative mutable root, not a gorm chain call).
+func (h *irvConnHolder) mutableDB() *gorm.DB {
+	return h.db.Where("x")
+}
+
+// IRV102: return via an unmarked user method. The root is the mutableDB() call
+// (receiver is not *gorm.DB), which is only conservatively mutable, so the
+// declaring function gets the benefit of the doubt.
+//
+//gormreuse:immutable-return
+func assertedImmutableReturnViaHelper(h *irvConnHolder) *gorm.DB {
+	return h.mutableDB()
+}
+
 // #############################################################################
 // #############################################################################
 // ##                                                                         ##
@@ -880,7 +951,11 @@ func useSelectDB(db1 *gorm.DB, db2 *gorm.DB) {
 //
 //gormreuse:pure,immutable-return
 func getTenantDB(db *gorm.DB, tenantID int) *gorm.DB {
-	return db.Session(&gorm.Session{}).Where("tenant_id = ?", tenantID)
+	// Session at START keeps the pure contract (db is not polluted); Session at
+	// END makes the return immutable (callers may reuse it). A trailing
+	// Session().Where() without the closing Session() would return a mutable
+	// clone==0 value — see e2e TestSessionInMiddle.
+	return db.Session(&gorm.Session{}).Where("tenant_id = ?", tenantID).Session(&gorm.Session{})
 }
 
 func useTenantDB(db *gorm.DB) {

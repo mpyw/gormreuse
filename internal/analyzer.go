@@ -168,6 +168,23 @@ func RunSSA(
 		}
 	}
 
+	// Enforce the body-side immutable-return contract: a function marked
+	// //gormreuse:immutable-return must actually return an immutable *gorm.DB.
+	// Otherwise the tracer trusts the directive (returnsImmutable) and silently
+	// allows unsafe reuse of the actually-mutable return value at every call
+	// site. Reuses inputTracer, which carries the full pass context so other
+	// immutable-return / immutable-param functions are classified correctly.
+	for _, fn := range ssaInfo.SrcFuncs {
+		if skip(fn, false) {
+			continue
+		}
+		recoverPerFunction(fn, func() {
+			for _, v := range purity.ValidateImmutableReturn(fn, immutableReturnFuncs, inputTracer) {
+				pass.Reportf(v.Pos, "%s", v.Message)
+			}
+		})
+	}
+
 	// TEMPORARY (GORM bug go-gorm/gorm#7592): warn on Session/WithContext/Debug
 	// inside Scopes callbacks. Deletable by removing scopes_session_warning.go and
 	// this loop once the upstream fix ships in a supported release — see that file.
