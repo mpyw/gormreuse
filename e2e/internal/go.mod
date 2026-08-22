@@ -1,6 +1,6 @@
 module github.com/mpyw/gormreuse/e2e/internal
 
-go 1.24.0
+go 1.27.0
 
 require (
 	github.com/DATA-DOG/go-sqlmock v1.5.2

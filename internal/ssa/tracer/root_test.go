@@ -233,3 +233,62 @@ func TestFindMutableRootScopesParam(t *testing.T) {
 		t.Errorf("Transaction callback parameter should yield no roots, got %v", roots)
 	}
 }
+
+// gormCallReceiver returns the receiver of the first call to the named gorm
+// method in fn.
+func gormCallReceiver(fn *ssa.Function, method string) ssa.Value {
+	for _, b := range fn.Blocks {
+		for _, instr := range b.Instrs {
+			call, ok := instr.(*ssa.Call)
+			if !ok {
+				continue
+			}
+			callee := call.Common().StaticCallee()
+			if callee == nil || callee.Name() != method || len(call.Call.Args) == 0 {
+				continue
+			}
+			return call.Call.Args[0]
+		}
+	}
+	return nil
+}
+
+// TestFindMutableRootThroughStructField pins the field-path matching in
+// fieldStoredValues. The SSA builder stages a composite literal in a separate
+// temporary and copies the finished aggregate into the destination, and it emits
+// a fresh FieldAddr chain for every access, so a field read shares neither the
+// store's base value nor its address chain. Matching the whole field path (and
+// following the copy) is what keeps the value stored under a promoted field key
+// (Go 1.27) reachable.
+func TestFindMutableRootThroughStructField(t *testing.T) {
+	t.Parallel()
+	fixtures, _ := loadProgram(t)
+	loops := cfg.New()
+	tr := tracer.New(nil, nil, nil, nil, nil, nil)
+
+	for _, name := range []string{
+		"go127PromotedFieldLiteral",
+		"go127NestedFieldLiteral",
+		"go127PromotedPointerLiteral",
+		"go127PromotedFieldAssign",
+		"multiStructField",
+	} {
+		fn := fixtures[name]
+		if fn == nil {
+			t.Fatalf("%s fixture missing", name)
+		}
+		recv := gormCallReceiver(fn, "Count")
+		if recv == nil {
+			t.Fatalf("%s: no Count call found", name)
+		}
+		root := tr.FindMutableRoot(recv, loops.DetectLoops(fn))
+		call, ok := root.(*ssa.Call)
+		if !ok {
+			t.Errorf("%s: expected the Where call as mutable root, got %v (%T)", name, root, root)
+			continue
+		}
+		if callee := call.Common().StaticCallee(); callee == nil || callee.Name() != "Where" {
+			t.Errorf("%s: expected the Where call as mutable root, got %v", name, root)
+		}
+	}
+}

@@ -24,6 +24,8 @@ q.Find(&admins) // Bug: Conditions accumulate unexpectedly
 
 ## Installation & Usage
 
+Requires Go 1.27 or later.
+
 ### Using [`go install`](https://pkg.go.dev/cmd/go#hdr-Compile_and_install_packages_and_dependencies)
 
 ```bash
@@ -40,7 +42,7 @@ go install github.com/mpyw/gormreuse/cmd/gormreuse@latest
 go vet -vettool=$(which gormreuse) ./...
 ```
 
-### Using [`go tool`](https://pkg.go.dev/cmd/go#hdr-Run_specified_go_tool) (Go 1.24+)
+### Using [`go tool`](https://pkg.go.dev/cmd/go#hdr-Run_specified_go_tool)
 
 ```bash
 # Add to go.mod as a tool dependency

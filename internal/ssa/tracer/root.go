@@ -62,6 +62,7 @@ package tracer
 import (
 	"go/token"
 	"go/types"
+	"slices"
 
 	"golang.org/x/tools/go/ssa"
 
@@ -1030,13 +1031,70 @@ func (t *RootTracer) traceFieldStore(fa *ssa.FieldAddr, visited map[ssa.Value]bo
 }
 
 // fieldStoredValues returns, in program order, the values stored into the same
-// struct field as fa (matched by base value and field index). Shared by
-// traceFieldStore (first) and traceAllFieldStores (all).
+// struct field as fa. Shared by traceFieldStore (first) and
+// traceAllFieldStores (all).
 func fieldStoredValues(fa *ssa.FieldAddr) []ssa.Value {
-	fn := fa.Parent()
-	if fn == nil {
+	root, path := fieldAddrPath(fa)
+	return fieldStoredValuesFrom(fa.Parent(), root, path, make(map[fieldRef]bool))
+}
+
+// fieldAddrPath resolves fa to the address it ultimately selects from together
+// with the chain of field indices it walks to get there:
+//
+//	t1 = &h.inner        // FieldAddr
+//	t2 = &t1.db          // FieldAddr    → fieldAddrPath(t2) = (h, [0 0])
+//
+// Matching on the whole path rather than on the immediate base value is what
+// makes promoted fields (`outer{db: q}`, where db is embedded, allowed since
+// Go 1.27) traceable: the SSA builder emits a fresh `&h.inner` FieldAddr for
+// every access, so two accesses to the same nested field are never the same
+// base value.
+func fieldAddrPath(fa *ssa.FieldAddr) (root ssa.Value, path []int) {
+	path = []int{fa.Field}
+	root = fa.X
+	for {
+		parent, ok := root.(*ssa.FieldAddr)
+		if !ok {
+			return root, path
+		}
+		path = append([]int{parent.Field}, path...)
+		root = parent.X
+	}
+}
+
+// fieldRef identifies one (aggregate, field path) pair being searched. Every
+// path visited during a single fieldStoredValues query is a suffix of the
+// original path, so its length identifies it uniquely.
+type fieldRef struct {
+	root  ssa.Value
+	depth int
+}
+
+// fieldStoredValuesFrom returns, in program order, the values stored into the
+// field that path selects from root.
+//
+// Besides the direct stores it follows whole-aggregate copies into any prefix of
+// path, which is required because the SSA builder does not initialize a
+// composite literal in place at its destination: `h := T{f: q}` fills a separate
+// `local T (complit)` temporary and copies the finished struct over.
+//
+//	t2 = local T (h)
+//	t3 = local T (complit)
+//	t4 = &t3.f
+//	*t4 = q              // the store lives under the temporary
+//	t5 = *t3             // load the finished literal
+//	*t2 = t5             // copy it into h
+//
+// A FieldAddr on t2 has no matching field store of its own; following
+// `*t2 = *t3` back to t3 recovers the store of q. seen guards against
+// aggregates that copy into each other.
+func fieldStoredValuesFrom(fn *ssa.Function, root ssa.Value, path []int, seen map[fieldRef]bool) []ssa.Value {
+	ref := fieldRef{root: root, depth: len(path)}
+	if fn == nil || root == nil || len(path) == 0 || seen[ref] {
 		return nil
 	}
+	seen[ref] = true
+
 	var vals []ssa.Value
 	for _, block := range fn.Blocks {
 		for _, instr := range block.Instrs {
@@ -1044,11 +1102,24 @@ func fieldStoredValues(fa *ssa.FieldAddr) []ssa.Value {
 			if !ok {
 				continue
 			}
-			storeFA, ok := store.Addr.(*ssa.FieldAddr)
-			if !ok || storeFA.X != fa.X || storeFA.Field != fa.Field {
+			storeRoot, storePath := store.Addr, []int(nil)
+			if storeFA, ok := store.Addr.(*ssa.FieldAddr); ok {
+				storeRoot, storePath = fieldAddrPath(storeFA)
+			}
+			if storeRoot != root {
 				continue
 			}
-			vals = append(vals, store.Val)
+			switch {
+			case slices.Equal(storePath, path):
+				vals = append(vals, store.Val)
+			case len(storePath) < len(path) && slices.Equal(storePath, path[:len(storePath)]):
+				// A whole sub-aggregate was copied over a prefix of the path
+				// being read; resume the search at the address it was loaded
+				// from, for the remainder of the path.
+				if load, ok := store.Val.(*ssa.UnOp); ok && load.Op == token.MUL {
+					vals = append(vals, fieldStoredValuesFrom(fn, load.X, path[len(storePath):], seen)...)
+				}
+			}
 		}
 	}
 	return vals
