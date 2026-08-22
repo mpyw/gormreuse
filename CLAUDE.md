@@ -292,9 +292,12 @@ User-Defined Function Reassignment:
 
 ## Development Commands
 
-Requires Go 1.27 or later (generic methods and promoted struct-literal keys
-appear in the fixtures, and `golangci-lint` must be built with Go 1.27+ to load
-the module at all — track its latest release).
+Develop on Go 1.27: the fixtures use generic methods and promoted
+struct-literal keys, so the test harness needs a 1.27 toolchain to compile them.
+The `go` directive stays at the minimum the dependencies need (1.25) — CodeQL's
+default setup builds with `GOTOOLCHAIN=local` on the runner's Go, so a newer
+directive breaks code scanning — and `toolchain go1.27.0` is what actually
+selects 1.27 for everyone using the default `GOTOOLCHAIN=auto`.
 
 ```bash
 # Run tests
