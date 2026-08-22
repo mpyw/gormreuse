@@ -90,7 +90,6 @@ func TestValidateFunction(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.fn, func(t *testing.T) {
 			t.Parallel()
 			fn, ok := funcs[tc.fn]

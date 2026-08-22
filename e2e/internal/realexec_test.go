@@ -49,7 +49,7 @@ func setupDBWithMock(t *testing.T, withTx bool) (*gorm.DB, *[]string, sqlmock.Sq
 	if withTx {
 		mock.ExpectBegin()
 	}
-	for i := 0; i < 20; i++ {
+	for range 20 {
 		mock.ExpectQuery(".*").WillReturnRows(
 			sqlmock.NewRows([]string{"count", "id", "name", "active", "age"}).AddRow(100, 1, "test", true, 20),
 		)

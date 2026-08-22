@@ -62,6 +62,7 @@ package tracer
 import (
 	"go/token"
 	"go/types"
+	"maps"
 	"slices"
 
 	"golang.org/x/tools/go/ssa"
@@ -479,12 +480,12 @@ func isSwapPhiPair(phiA, phiB *ssa.Phi) bool {
 	}
 
 	// Check if there's at least one pair of swapped edges
-	for i := 0; i < len(phiA.Edges); i++ {
+	for i := range phiA.Edges {
 		edgeA := phiA.Edges[i]
 		edgeB := phiB.Edges[i]
 
 		// Look for the swapped pattern in other edges
-		for j := 0; j < len(phiA.Edges); j++ {
+		for j := range phiA.Edges {
 			if i == j {
 				continue
 			}
@@ -1610,9 +1611,7 @@ func isClosureResultStoredRecursive(call *ssa.Call, visited map[*ssa.Call]bool) 
 // Used to isolate tracing state when entering closures.
 func cloneVisited(visited map[ssa.Value]bool) map[ssa.Value]bool {
 	clone := make(map[ssa.Value]bool, len(visited))
-	for k, v := range visited {
-		clone[k] = v
-	}
+	maps.Copy(clone, visited)
 	return clone
 }
 

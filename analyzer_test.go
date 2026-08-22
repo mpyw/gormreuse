@@ -56,7 +56,6 @@ func TestGenerateDiffFiles(t *testing.T) {
 	}
 
 	for _, filename := range fixtures {
-		filename := filename // capture range variable
 		t.Run(filename, func(t *testing.T) {
 			t.Parallel()
 			srcPath := filepath.Join(srcDir, filename)

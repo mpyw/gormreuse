@@ -66,8 +66,8 @@ func hasDirective(text, name string) bool {
 	// Accept both line (//gormreuse:...) and block (/*gormreuse:...*/) comment
 	// forms. Without the block form, `/*gormreuse:pure*/` was a silent no-op:
 	// neither applied nor reported as unused.
-	if strings.HasPrefix(text, "/*") {
-		text = strings.TrimSuffix(strings.TrimPrefix(text, "/*"), "*/")
+	if after, ok := strings.CutPrefix(text, "/*"); ok {
+		text = strings.TrimSuffix(after, "*/")
 	} else {
 		text = strings.TrimPrefix(text, "//")
 	}
@@ -87,7 +87,7 @@ func hasDirective(text, name string) bool {
 	text = strings.TrimSpace(text)
 
 	// Split by comma and check each
-	for _, part := range strings.Split(text, ",") {
+	for part := range strings.SplitSeq(text, ",") {
 		if strings.TrimSpace(part) == name {
 			return true
 		}
@@ -118,8 +118,8 @@ func IsImmutableParamDirective(text string) bool { return hasDirective(text, "im
 // none. It accepts both line and block comment forms and ignores a trailing "//"
 // comment, mirroring hasDirective (#62).
 func ExtractImmutableInputParams(text string) []string {
-	if strings.HasPrefix(text, "/*") {
-		text = strings.TrimSuffix(strings.TrimPrefix(text, "/*"), "*/")
+	if after, ok := strings.CutPrefix(text, "/*"); ok {
+		text = strings.TrimSuffix(after, "*/")
 	} else {
 		text = strings.TrimPrefix(text, "//")
 	}
@@ -133,13 +133,16 @@ func ExtractImmutableInputParams(text string) []string {
 	}
 
 	var params []string
-	for _, part := range strings.Split(text, ",") {
-		part = strings.TrimSpace(part)
-		if !strings.HasPrefix(part, "immutable-input(") || !strings.HasSuffix(part, ")") {
+	for part := range strings.SplitSeq(text, ",") {
+		inner, ok := strings.CutPrefix(strings.TrimSpace(part), "immutable-input(")
+		if !ok {
 			continue
 		}
-		name := strings.TrimSpace(part[len("immutable-input(") : len(part)-1])
-		if name != "" {
+		inner, ok = strings.CutSuffix(inner, ")")
+		if !ok {
+			continue
+		}
+		if name := strings.TrimSpace(inner); name != "" {
 			params = append(params, name)
 		}
 	}
