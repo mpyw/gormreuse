@@ -36,9 +36,10 @@
 package fix
 
 import (
+	"cmp"
 	"go/ast"
 	"go/token"
-	"sort"
+	"slices"
 	"strconv"
 
 	"golang.org/x/tools/go/analysis"
@@ -169,8 +170,8 @@ func (g *Generator) Generate(v pollution.Violation) []analysis.SuggestedFix {
 
 	// Sort edits by position (earlier positions first)
 	// This ensures correct application order
-	sort.Slice(edits, func(i, j int) bool {
-		return edits[i].Pos < edits[j].Pos
+	slices.SortFunc(edits, func(a, b analysis.TextEdit) int {
+		return cmp.Compare(a.Pos, b.Pos)
 	})
 
 	return []analysis.SuggestedFix{
@@ -343,10 +344,9 @@ type virtualRootKey struct {
 // Returns a map from virtual root keys to their uses.
 func (g *Generator) simulateReassignments(root ssa.Value, uses []pollution.UsageInfo) map[virtualRootKey][]pollution.UsageInfo {
 	// Sort uses by position
-	sortedUses := make([]pollution.UsageInfo, len(uses))
-	copy(sortedUses, uses)
-	sort.Slice(sortedUses, func(i, j int) bool {
-		return sortedUses[i].Pos < sortedUses[j].Pos
+	sortedUses := slices.Clone(uses)
+	slices.SortFunc(sortedUses, func(a, b pollution.UsageInfo) int {
+		return cmp.Compare(a.Pos, b.Pos)
 	})
 
 	// Start with the original root
@@ -384,7 +384,7 @@ func (g *Generator) findRootsNeedingSession(virtualUses map[virtualRootKey][]pol
 		}
 	}
 	// Deterministic order (map iteration is random) so edits/goldens are stable.
-	sort.Slice(roots, func(i, j int) bool { return roots[i].pos < roots[j].pos })
+	slices.SortFunc(roots, func(a, b virtualRootKey) int { return cmp.Compare(a.pos, b.pos) })
 	return roots
 }
 
@@ -565,10 +565,8 @@ func (g *Generator) findPhiUsingValue(v ssa.Value) *ssa.Phi {
 			}
 
 			// Check if v is one of the Phi's edges
-			for _, edge := range phi.Edges {
-				if edge == v {
-					return phi
-				}
+			if slices.Contains(phi.Edges, v) {
+				return phi
 			}
 		}
 	}

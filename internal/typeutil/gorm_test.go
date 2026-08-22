@@ -187,3 +187,46 @@ func TestIsGormDBNamed(t *testing.T) {
 		}
 	})
 }
+
+func TestIsGormDBAlias(t *testing.T) {
+	t.Parallel()
+
+	// go/types always materializes an alias declaration as a *types.Alias node,
+	// so both `type Q = *gorm.DB` and `type D = gorm.DB` reach IsGormDB wrapped.
+	gormPkg := types.NewPackage("gorm.io/gorm", "gorm")
+	dbTypeName := types.NewTypeName(0, gormPkg, "DB", nil)
+	dbType := types.NewNamed(dbTypeName, types.NewStruct(nil, nil), nil)
+	gormPkg.Scope().Insert(dbTypeName)
+
+	userPkg := types.NewPackage("example.com/app", "app")
+
+	t.Run("alias to gorm.DB", func(t *testing.T) {
+		t.Parallel()
+
+		alias := types.NewAlias(types.NewTypeName(0, userPkg, "D", nil), dbType)
+		if !IsGormDB(alias) {
+			t.Error("IsGormDB(type D = gorm.DB) should return true")
+		}
+		if !IsGormDB(types.NewPointer(alias)) {
+			t.Error("IsGormDB(*D) where D = gorm.DB should return true")
+		}
+	})
+
+	t.Run("alias to *gorm.DB", func(t *testing.T) {
+		t.Parallel()
+
+		alias := types.NewAlias(types.NewTypeName(0, userPkg, "Q", nil), types.NewPointer(dbType))
+		if !IsGormDB(alias) {
+			t.Error("IsGormDB(type Q = *gorm.DB) should return true")
+		}
+	})
+
+	t.Run("alias to an unrelated type", func(t *testing.T) {
+		t.Parallel()
+
+		alias := types.NewAlias(types.NewTypeName(0, userPkg, "N", nil), types.Typ[types.Int])
+		if IsGormDB(alias) {
+			t.Error("IsGormDB(type N = int) should return false")
+		}
+	})
+}

@@ -221,7 +221,7 @@ The linter marks `*gorm.DB` as polluted in these scenarios:
 - **Map storage**: `map[string]*gorm.DB{"k": db}` marks db as polluted
 - **Interface conversion**: `interface{}(db)` marks db as polluted (type assertion may extract)
 - **Function arguments**: Non-pure functions receiving `*gorm.DB` pollute if result is discarded (not assigned)
-- **Struct field access**: `h.field.Find(nil)` traces back to the original value stored in field
+- **Struct field access**: `h.field.Find(nil)` traces back to the original value stored in field, including fields reached through embedding (`outer{db: q}`, where `db` is promoted from an embedded struct)
 
 Note: Simple struct literal storage (`_ = &S{db: q}`) without actual field usage does NOT pollute.
 The linter tracks actual usage through struct fields, not just storage.
@@ -253,6 +253,17 @@ IIFE Return Tracing (single chain):
   IIFE that returns a chain and is immediately consumed = ONE branch.
   Only subsequent uses of q from outside the IIFE are separate branches.
 
+Struct Field Tracking (field path, not base identity):
+  h := outer{db: q}    <- SSA stages the literal in a `local outer (complit)`
+                       <- temporary and copies the whole struct into h
+  h.db.Find(nil)       <- read emits a FRESH FieldAddr chain: &(&h.embedded).db
+  h.db.Count(nil)      <- and another one, sharing nothing with the store
+
+  Field stores are therefore matched by (root address, field index path) and
+  whole-aggregate copies into any prefix of that path are followed back to the
+  address they were loaded from. Matching the immediate base value instead would
+  miss every nested or promoted field.
+
 Bound Method Tracking:
   find := q.Find    <- MakeClosure with receiver q in Bindings[0]
   find(nil)         <- SSA: Call with Value=*ssa.MakeClosure, Fn.Name()="Find$bound"
@@ -280,6 +291,13 @@ User-Defined Function Reassignment:
 ```
 
 ## Development Commands
+
+Develop on Go 1.27: the fixtures use generic methods and promoted
+struct-literal keys, so the test harness needs a 1.27 toolchain to compile them.
+The `go` directive stays at the minimum the dependencies need (1.25) — CodeQL's
+default setup builds with `GOTOOLCHAIN=local` on the runner's Go, so a newer
+directive breaks code scanning — and `toolchain go1.27.0` is what actually
+selects 1.27 for everyone using the default `GOTOOLCHAIN=auto`.
 
 ```bash
 # Run tests

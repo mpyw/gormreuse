@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        go-version: ['1.24', '1.25']
+        go-version: ['1.27']
 
     steps:
       - name: Checkout code
@@ -53,9 +53,13 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v7.0.0
         with:
-          go-version: '1.24'
+          go-version: '1.27'
 
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
+          # golangci-lint refuses to load a module whose go directive is newer
+          # than the Go version it was itself built with, so it has to track the
+          # latest release.
+          version: latest
           args: --timeout=5m

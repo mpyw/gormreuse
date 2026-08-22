@@ -13,6 +13,9 @@ linters:
     - cyclop
     - funlen
     - gocognit
+    # Keeps the Go 1.27 `go fix` sweep from regressing: the same modernizer
+    # suite, enforced on every PR.
+    - modernize
   settings:
     cyclop:
       max-complexity: 30

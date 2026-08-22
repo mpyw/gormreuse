@@ -32,7 +32,6 @@ func TestFixesConverge(t *testing.T) {
 	}
 
 	for _, name := range fixtures {
-		name := name
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			src := filepath.Join(srcDir, name)

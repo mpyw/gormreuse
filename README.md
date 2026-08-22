@@ -24,6 +24,11 @@ q.Find(&admins) // Bug: Conditions accumulate unexpectedly
 
 ## Installation & Usage
 
+Requires Go 1.25 or later. `go.mod` pins `toolchain go1.27.0`, so the default
+`GOTOOLCHAIN=auto` builds the linter with Go 1.27 — a Go 1.27 toolchain is what
+lets it understand Go 1.27 source (generic methods, promoted struct-literal
+keys).
+
 ### Using [`go install`](https://pkg.go.dev/cmd/go#hdr-Compile_and_install_packages_and_dependencies)
 
 ```bash
@@ -40,7 +45,7 @@ go install github.com/mpyw/gormreuse/cmd/gormreuse@latest
 go vet -vettool=$(which gormreuse) ./...
 ```
 
-### Using [`go tool`](https://pkg.go.dev/cmd/go#hdr-Run_specified_go_tool) (Go 1.24+)
+### Using [`go tool`](https://pkg.go.dev/cmd/go#hdr-Run_specified_go_tool)
 
 ```bash
 # Add to go.mod as a tool dependency

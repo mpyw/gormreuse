@@ -23,7 +23,6 @@ func TestGormQualifier(t *testing.T) {
 		{"other alias", `package p; import orm "gorm.io/gorm"; var _ = orm.DB{}`, "orm."},
 	}
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			f, err := parser.ParseFile(token.NewFileSet(), "x.go", tc.src, 0)
@@ -70,7 +69,6 @@ func TestExtractAssignableLHS(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.expr, func(t *testing.T) {
 			t.Parallel()
 			expr, err := parser.ParseExpr(tc.expr)

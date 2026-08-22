@@ -1,6 +1,10 @@
 package directive
 
-import "go/types"
+import (
+	"go/types"
+
+	"github.com/mpyw/gormreuse/internal/typeutil"
+)
 
 // =============================================================================
 // Signature Validation
@@ -17,8 +21,8 @@ func HasGormDBParameter(sig *types.Signature) bool { return hasGormDBParameter(s
 // containing *gorm.DB (directly or in struct fields).
 func hasGormDBParameter(sig *types.Signature) bool {
 	params := sig.Params()
-	for i := 0; i < params.Len(); i++ {
-		if containsGormDB(params.At(i).Type()) {
+	for v := range params.Variables() {
+		if containsGormDB(v.Type()) {
 			return true
 		}
 	}
@@ -29,8 +33,8 @@ func hasGormDBParameter(sig *types.Signature) bool {
 // containing *gorm.DB (directly or in struct fields).
 func hasGormDBReturn(sig *types.Signature) bool {
 	results := sig.Results()
-	for i := 0; i < results.Len(); i++ {
-		if containsGormDB(results.At(i).Type()) {
+	for v := range results.Variables() {
+		if containsGormDB(v.Type()) {
 			return true
 		}
 	}
@@ -70,14 +74,14 @@ func containsGormDBWithCache(t types.Type, cache map[types.Type]*cacheEntry) boo
 	cache[t] = &cacheEntry{inProgress: true}
 
 	// Direct *gorm.DB check
-	if isGormDB(t) {
+	if typeutil.IsGormDB(t) {
 		cache[t] = &cacheEntry{inProgress: false, result: true}
 		return true
 	}
 
 	// Check underlying type (handles defined types like `type DefinedDB *gorm.DB`)
 	underlying := t.Underlying()
-	if isGormDB(underlying) {
+	if typeutil.IsGormDB(underlying) {
 		cache[t] = &cacheEntry{inProgress: false, result: true}
 		return true
 	}
@@ -96,8 +100,8 @@ func containsGormDBWithCache(t types.Type, cache map[types.Type]*cacheEntry) boo
 		// detection; the SSA tracer uses its own containsGormDBThroughPointers.
 		result = false
 	case *types.Struct:
-		for i := 0; i < typ.NumFields(); i++ {
-			if containsGormDBWithCache(typ.Field(i).Type(), cache) {
+		for field := range typ.Fields() {
+			if containsGormDBWithCache(field.Type(), cache) {
 				result = true
 				break
 			}
@@ -117,32 +121,4 @@ func containsGormDBWithCache(t types.Type, cache map[types.Type]*cacheEntry) boo
 	// Cache the result
 	cache[t] = &cacheEntry{inProgress: false, result: result}
 	return result
-}
-
-// isGormDB checks if a type is *gorm.DB or gorm.DB.
-// Both are dangerous because gorm.DB contains *Statement which is shared on copy.
-func isGormDB(t types.Type) bool {
-	// Check for *gorm.DB
-	if ptr, ok := t.(*types.Pointer); ok {
-		if named, ok := ptr.Elem().(*types.Named); ok {
-			obj := named.Obj()
-			if obj != nil && obj.Pkg() != nil {
-				if obj.Name() == "DB" && obj.Pkg().Path() == "gorm.io/gorm" {
-					return true
-				}
-			}
-		}
-	}
-
-	// Check for gorm.DB (non-pointer, but still dangerous due to *Statement field)
-	if named, ok := t.(*types.Named); ok {
-		obj := named.Obj()
-		if obj != nil && obj.Pkg() != nil {
-			if obj.Name() == "DB" && obj.Pkg().Path() == "gorm.io/gorm" {
-				return true
-			}
-		}
-	}
-
-	return false
 }

@@ -9,11 +9,12 @@ package goldentest
 
 import (
 	"bytes"
+	"cmp"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
 
 	"golang.org/x/tools/go/analysis"
@@ -49,7 +50,7 @@ func Fixtures(srcDir string) ([]string, error) {
 		}
 		out = append(out, base)
 	}
-	sort.Strings(out)
+	slices.Sort(out)
 	return out, nil
 }
 
@@ -90,7 +91,7 @@ func ApplyFixes(testdata, pkg, srcPath string, a *analysis.Analyzer) (original, 
 
 	fixed = append([]byte(nil), original...)
 	if len(edits) > 0 {
-		sort.Slice(edits, func(i, j int) bool { return edits[i].start > edits[j].start })
+		slices.SortFunc(edits, func(a, b offsetEdit) int { return cmp.Compare(b.start, a.start) })
 		for _, e := range edits {
 			fixed = append(fixed[:e.start], append([]byte(e.newText), fixed[e.end:]...)...)
 		}

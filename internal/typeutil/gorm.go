@@ -56,6 +56,10 @@ const (
 // For nested pointers in closure captures, see ClosureCapturesGormDB in tracer package.
 // For conservative checks including interfaces, see containsGormDB in directive package.
 func IsGormDB(t types.Type) bool {
+	// An alias (`type Q = *gorm.DB`) is transparent here: go/types always
+	// materializes alias declarations as *types.Alias nodes, so the pointer and
+	// named checks below need the aliased type.
+	t = types.Unalias(t)
 	// Check for *gorm.DB (most common case)
 	if ptr, ok := t.(*types.Pointer); ok {
 		return isGormDBNamed(ptr.Elem())
@@ -75,7 +79,7 @@ func IsGormPackage(pkg *types.Package) bool {
 
 // isGormDBNamed checks if the type is gorm.DB (named type).
 func isGormDBNamed(t types.Type) bool {
-	named, ok := t.(*types.Named)
+	named, ok := types.Unalias(t).(*types.Named)
 	if !ok {
 		return false
 	}

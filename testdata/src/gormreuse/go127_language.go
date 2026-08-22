@@ -1,0 +1,164 @@
+package internal
+
+import "gorm.io/gorm"
+
+// =============================================================================
+// GO 1.27 LANGUAGE FEATURES
+//
+// Three Go 1.27 language changes reach *gorm.DB tracking:
+//
+//  1. Generic methods: a method declaration may declare its own type
+//     parameters. Reuse inside such a method must be detected, and the
+//     directives (pure / immutable-return / immutable-param), which key on
+//     receiver type + method name, must keep matching them.
+//  2. Promoted fields as struct literal keys: `outer{db: q}` may now fill a
+//     field embedded in outer. The SSA builder emits a nested FieldAddr chain
+//     (&(&h.embedded).db) for both the store and every read, and it emits a
+//     fresh chain each time, so field tracking has to match the whole field
+//     PATH rather than the immediate base value.
+//  3. Generalized function type inference: a generic function assigned to a
+//     variable of matching function type is instantiated implicitly.
+// =============================================================================
+
+// =============================================================================
+// SHOULD REPORT
+// =============================================================================
+
+type go127Repo struct{}
+
+// go127GenericMethodReuse: reuse inside a generic method (Go 1.27).
+func (r go127Repo) findTwice[T any](db *gorm.DB, out *T) {
+	q := db.Where("x")
+	q.Find(out)
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+type go127Inner struct{ db *gorm.DB }
+
+type go127Outer struct {
+	go127Inner
+	n int
+}
+
+// go127PromotedFieldLiteral: promoted field as a struct literal key (Go 1.27).
+func go127PromotedFieldLiteral(db *gorm.DB) {
+	q := db.Where("x")
+	h := go127Outer{db: q, n: 1}
+	h.db.Find(nil)
+	h.db.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// go127NestedFieldLiteral: the pre-1.27 spelling of the same value.
+func go127NestedFieldLiteral(db *gorm.DB) {
+	q := db.Where("x")
+	h := go127Outer{go127Inner: go127Inner{db: q}, n: 1}
+	h.db.Find(nil)
+	h.db.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// go127PromotedPointerLiteral: promoted field key in a pointer literal.
+func go127PromotedPointerLiteral(db *gorm.DB) {
+	q := db.Where("x")
+	h := &go127Outer{db: q}
+	h.db.Find(nil)
+	h.db.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// go127PromotedFieldAssign: promoted field written after construction.
+func go127PromotedFieldAssign(db *gorm.DB) {
+	q := db.Where("x")
+	var h go127Outer
+	h.db = q
+	h.db.Find(nil)
+	h.db.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// go127BoundGenericMethodValue: a bound method value of a generic method.
+func go127BoundGenericMethodValue(db *gorm.DB) {
+	q := db.Where("x")
+	r := go127Repo{}
+	find := r.findAll[int]
+	var out int
+	find(q, &out)
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+func (r go127Repo) findAll[T any](db *gorm.DB, out *T) {
+	db.Find(out)
+}
+
+// go127Scope is a generic function used through a plain function type below.
+func go127Scope[T any](db *gorm.DB) *gorm.DB { return db.Where("g") }
+
+// go127GeneralizedInference: generic function assigned to a matching function
+// type (Go 1.27 infers the type arguments).
+func go127GeneralizedInference(db *gorm.DB) {
+	var scope func(*gorm.DB) *gorm.DB = go127Scope[int]
+	q := db.Where("x")
+	q = scope(q)
+	q.Find(nil)
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// go127PureGenericMethodPollutes: the pure contract is enforced on generic
+// methods too.
+//
+//gormreuse:pure
+func (r go127Repo) pureButPollutes[T any](db *gorm.DB, out *T) {
+	db.Find(out) // want `pure function pollutes \*gorm\.DB argument by calling Find`
+}
+
+// =============================================================================
+// SHOULD NOT REPORT
+// =============================================================================
+
+//gormreuse:pure
+func (r go127Repo) reallyPure[T any](db *gorm.DB, out *T) {
+	_, _ = db, out
+}
+
+// go127UsePureGenericMethod: a pure generic method does not consume its argument.
+func go127UsePureGenericMethod(db *gorm.DB) {
+	q := db.Where("x")
+	r := go127Repo{}
+	var out int
+	r.reallyPure(q, &out)
+	q.Find(nil) // OK: reallyPure is pure, q is still unused
+}
+
+//gormreuse:immutable-return
+func (r go127Repo) conn[T any](db *gorm.DB) *gorm.DB {
+	return db.Session(&gorm.Session{})
+}
+
+// go127UseImmutableReturnGenericMethod: the return value of an
+// immutable-return generic method branches freely.
+func go127UseImmutableReturnGenericMethod(db *gorm.DB) {
+	r := go127Repo{}
+	q := r.conn[int](db)
+	q.Where("a").Find(nil)
+	q.Where("b").Find(nil) // OK: q is immutable
+}
+
+// immutable-param on a generic method: the caller owns isolation.
+//
+//gormreuse:immutable-param
+func (r go127Repo) scoped[T any](db *gorm.DB, out *T) {
+	db.Where("a").Find(out)
+	db.Where("b").Find(out) // OK: db is declared immutable
+}
+
+// go127PromotedFieldIsolated: an isolated value stored in a promoted field.
+func go127PromotedFieldIsolated(db *gorm.DB) {
+	q := db.Where("x").Session(&gorm.Session{})
+	h := go127Outer{db: q}
+	h.db.Find(nil)
+	h.db.Count(nil) // OK: root is immutable
+}
+
+// go127GenericMethodIsolated: isolation inside a generic method.
+func (r go127Repo) isolated[T any](db *gorm.DB, out *T) {
+	q := db.Where("x").Session(&gorm.Session{})
+	q.Find(out)
+	q.Count(nil) // OK: root is immutable
+}
