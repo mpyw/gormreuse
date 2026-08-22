@@ -48,10 +48,10 @@ func exprToString(expr ast.Expr) string {
 // so the pointer is irrelevant for matching.
 func formatReceiverType(t types.Type) string {
 	// Unwrap pointer if present
-	if ptr, ok := t.(*types.Pointer); ok {
+	if ptr, ok := types.Unalias(t).(*types.Pointer); ok {
 		t = ptr.Elem()
 	}
-	if named, ok := t.(*types.Named); ok {
+	if named, ok := types.Unalias(t).(*types.Named); ok {
 		return named.Obj().Name()
 	}
 	return ""

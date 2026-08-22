@@ -1847,7 +1847,7 @@ func containsGormDBThroughPointers(t types.Type) bool {
 	}
 
 	// Unwrap pointer and check recursively
-	if ptr, ok := t.(*types.Pointer); ok {
+	if ptr, ok := types.Unalias(t).(*types.Pointer); ok {
 		return containsGormDBThroughPointers(ptr.Elem())
 	}
 
