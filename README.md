@@ -29,6 +29,47 @@ Requires Go 1.25 or later. `go.mod` pins `toolchain go1.27.0`, so the default
 lets it understand Go 1.27 source (generic methods, promoted struct-literal
 keys).
 
+### <a href="https://mise.jdx.dev/"><img src="https://mise.jdx.dev/logo.svg" height="28" alt=""></a> Using [mise](https://mise.jdx.dev/) (macOS/Linux/Windows)
+
+gormreuse installs through mise's [`go` backend](https://mise.jdx.dev/dev-tools/backends/go.html), which wraps `go install`:
+
+```bash
+mise use -g "go:github.com/mpyw/gormreuse/cmd/gormreuse"
+gormreuse ./...
+```
+
+Or pin it per project. Note that only the tool is listed — Go itself is managed separately:
+
+```toml
+# mise.toml
+[tools]
+"go:github.com/mpyw/gormreuse/cmd/gormreuse" = "latest"
+```
+
+Unlike [`go tool`](#using-go-tool), this keeps gormreuse **out of your module graph**: your `go.mod` gains neither a `tool` directive nor any of the linter's dependencies, so **your project's own `go` directive is unaffected**. Pinning the linter and pinning your project's language version become independent decisions.
+
+> [!IMPORTANT]
+> The `go` backend builds with whatever `go` is on `PATH`, so **the binary is only as capable as the toolchain that built it**.
+>
+> With the default `GOTOOLCHAIN=auto` this is handled for you: `go install` honors this repository's `toolchain go1.27.0` and fetches Go 1.27 on demand, so even an older `go` on `PATH` produces a Go 1.27 binary (any Go 1.21+ can perform the switch).
+>
+> If you have pinned `GOTOOLCHAIN=local`, the switch is suppressed. The build still succeeds — gormreuse's `go` directive is only `1.25.0` — but you silently get a binary that cannot analyze Go 1.27 source:
+>
+> ```console
+> $ GOTOOLCHAIN=local go install github.com/mpyw/gormreuse/cmd/gormreuse@latest  # go1.25.3 on PATH
+> $ gormreuse ./...
+> .../src/math/rand/v2/rand.go:213:17: method must have no type parameters
+> .../src/vendor/golang.org/x/text/unicode/norm/tables17.0.0.go:5:9: file requires newer Go version go1.27 (application built with go1.25)
+> ```
+>
+> Leaving `GOTOOLCHAIN` at its default is enough. To be explicit, let mise manage Go too and set the variable per tool:
+>
+> ```toml
+> [tools]
+> go = "latest"
+> "go:github.com/mpyw/gormreuse/cmd/gormreuse" = { version = "latest", install_env = { GOTOOLCHAIN = "auto" } }
+> ```
+
 ### Using [`go install`](https://pkg.go.dev/cmd/go#hdr-Compile_and_install_packages_and_dependencies)
 
 ```bash
@@ -62,7 +103,7 @@ go run github.com/mpyw/gormreuse/cmd/gormreuse@latest ./...
 ```
 
 > [!CAUTION]
-> To prevent supply chain attacks, pin to a specific version tag instead of `@latest` in CI/CD pipelines (e.g., `@v0.13.2`).
+> To prevent supply chain attacks, pin to a specific version instead of `@latest` in CI/CD pipelines — `@v0.16.0` for the `go` commands, or `"go:github.com/mpyw/gormreuse/cmd/gormreuse" = "0.16.0"` in `mise.toml`.
 
 ## Flags
 
