@@ -24,10 +24,34 @@ q.Find(&admins) // Bug: Conditions accumulate unexpectedly
 
 ## Installation & Usage
 
-Requires Go 1.25 or later. `go.mod` pins `toolchain go1.27.0`, so the default
-`GOTOOLCHAIN=auto` builds the linter with Go 1.27 — a Go 1.27 toolchain is what
-lets it understand Go 1.27 source (generic methods, promoted struct-literal
-keys).
+### <a href="https://mise.jdx.dev/"><img src="https://mise.jdx.dev/logo.svg" height="28" alt=""></a> Using [mise](https://mise.jdx.dev/) (macOS/Linux/Windows)
+
+**Recommended.** gormreuse is installable directly from GitHub Releases via mise's `github` backend — no extra registry required, and no Go toolchain needed because the binaries are prebuilt:
+
+```bash
+mise use -g "github:mpyw/gormreuse"
+gormreuse ./...
+```
+
+Or pin it per project in `mise.toml`:
+
+```toml
+[tools]
+"github:mpyw/gormreuse" = "latest"
+```
+
+> [!IMPORTANT]
+> The `go`-based methods below build gormreuse from source, which requires Go 1.25 or later. `go.mod` pins `toolchain go1.27.0`, so the default `GOTOOLCHAIN=auto` builds the linter with Go 1.27 — a Go 1.27 toolchain is what lets it understand Go 1.27 source (generic methods, promoted struct-literal keys).
+
+### Using [`go tool`](https://pkg.go.dev/cmd/go#hdr-Run_specified_go_tool)
+
+```bash
+# Add to go.mod as a tool dependency
+go get -tool github.com/mpyw/gormreuse/cmd/gormreuse@latest
+
+# Run via go tool
+go tool gormreuse ./...
+```
 
 ### Using [`go install`](https://pkg.go.dev/cmd/go#hdr-Compile_and_install_packages_and_dependencies)
 
@@ -45,16 +69,6 @@ go install github.com/mpyw/gormreuse/cmd/gormreuse@latest
 go vet -vettool=$(which gormreuse) ./...
 ```
 
-### Using [`go tool`](https://pkg.go.dev/cmd/go#hdr-Run_specified_go_tool)
-
-```bash
-# Add to go.mod as a tool dependency
-go get -tool github.com/mpyw/gormreuse/cmd/gormreuse@latest
-
-# Run via go tool
-go tool gormreuse ./...
-```
-
 ### Using [`go run`](https://pkg.go.dev/cmd/go#hdr-Compile_and_run_Go_program)
 
 ```bash
@@ -62,7 +76,33 @@ go run github.com/mpyw/gormreuse/cmd/gormreuse@latest ./...
 ```
 
 > [!CAUTION]
-> To prevent supply chain attacks, pin to a specific version tag instead of `@latest` in CI/CD pipelines (e.g., `@v0.13.2`).
+> To prevent supply chain attacks, pin to a specific version tag instead of `@latest` in CI/CD pipelines (e.g., `@v0.17.0`).
+
+<details>
+<summary><a href="https://curl.se/"><img src="https://cdn.simpleicons.org/curl" height="20" alt=""></a> Downloading the tarball directly (macOS/Linux/Windows)</summary>
+
+No package manager? Grab the archive for your platform from [GitHub Releases](https://github.com/mpyw/gormreuse/releases):
+
+```bash
+export VERSION=0.0.0
+export OS=linux    # or darwin
+export ARCH=amd64  # or arm64
+export BASE_URL="https://github.com/mpyw/gormreuse/releases/download/v${VERSION}"
+
+# Download the archive and the release's checksum list
+curl -LO "${BASE_URL}/gormreuse_${VERSION}_${OS}_${ARCH}.tar.gz"
+curl -LO "${BASE_URL}/checksums.txt"
+
+# Verify before installing (use `shasum -a 256 -c` on macOS)
+sha256sum --ignore-missing -c checksums.txt
+
+tar xzf "gormreuse_${VERSION}_${OS}_${ARCH}.tar.gz"
+sudo mv gormreuse /usr/local/bin/
+```
+
+On Windows, download `gormreuse_${VERSION}_windows_${ARCH}.zip` and extract `gormreuse.exe` somewhere on your `PATH`.
+
+</details>
 
 ## Flags
 
