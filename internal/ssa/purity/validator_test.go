@@ -61,7 +61,7 @@ func loadFixtureFuncs(t *testing.T) map[string]*ssa.Function {
 	return funcs
 }
 
-func TestValidateFunction(t *testing.T) {
+func TestValidatorValidate(t *testing.T) {
 	t.Parallel()
 	funcs := loadFixtureFuncs(t)
 	// A syntax-backed pure set: Contains resolves //gormreuse:pure via each
@@ -96,7 +96,7 @@ func TestValidateFunction(t *testing.T) {
 			if !ok {
 				t.Fatalf("fixture function %q not found", tc.fn)
 			}
-			violations := purity.ValidateFunction(fn, pureFuncs)
+			violations := purity.NewValidator(fn, pureFuncs).Validate()
 
 			if tc.clean {
 				if len(violations) != 0 {
@@ -131,13 +131,13 @@ func TestValidateFunction(t *testing.T) {
 	}
 }
 
-// TestValidateFunctionNil covers the nil/blockless guards.
-func TestValidateFunctionNil(t *testing.T) {
+// TestValidatorValidateNil covers the nil/blockless guards.
+func TestValidatorValidateNil(t *testing.T) {
 	t.Parallel()
-	if v := purity.ValidateFunction(nil, directive.NewPureFuncSet(nil, nil)); v != nil {
+	if v := purity.NewValidator(nil, directive.NewPureFuncSet(nil, nil)).Validate(); v != nil {
 		t.Errorf("nil function: expected nil, got %+v", v)
 	}
-	if v := purity.ValidateFunction(&ssa.Function{}, directive.NewPureFuncSet(nil, nil)); v != nil {
+	if v := purity.NewValidator(&ssa.Function{}, directive.NewPureFuncSet(nil, nil)).Validate(); v != nil {
 		t.Errorf("blockless function: expected nil, got %+v", v)
 	}
 }

@@ -10,10 +10,10 @@ import (
 	"testing"
 )
 
-// parseFileWithTypes parses src as a single Go file in package "demo" and runs
-// go/types over it so the resulting *ast.File / *types.Info combo can drive
+// parseImmutableInputSrc parses src as a single Go file in package "demo" and
+// runs go/types over it so the resulting *ast.File / *types.Info combo can drive
 // ImmutableInputSet.AddFile in tests.
-func parseFileWithTypes(t *testing.T, src string) (*token.FileSet, *ast.File, *types.Info) {
+func parseImmutableInputSrc(t *testing.T, src string) (*token.FileSet, *ast.File, *types.Info) {
 	t.Helper()
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "demo.go", src, parser.ParseComments)
@@ -51,7 +51,7 @@ func TestImmutableInputSet_AddFile_NoDirectives(t *testing.T) {
 	t.Parallel()
 
 	const src = "package demo\n\nfunc plain(cb func()) {}\n"
-	fset, file, info := parseFileWithTypes(t, src)
+	fset, file, info := parseImmutableInputSrc(t, src)
 	s := NewImmutableInputSet(fset, info)
 	s.AddFile(file, "demo")
 	if got := len(s.GetUnused()); got != 0 {
@@ -63,20 +63,20 @@ func TestImmutableInputSet_AddFile_ParamNotFound(t *testing.T) {
 	t.Parallel()
 
 	const src = "package demo\n\n//gormreuse:immutable-input(missing)\nfunc noSuchParam(cb func()) {}\n"
-	fset, file, info := parseFileWithTypes(t, src)
+	fset, file, info := parseImmutableInputSrc(t, src)
 	s := NewImmutableInputSet(fset, info)
 	s.AddFile(file, "demo")
-	assertOneUnused(t, s, `parameter "missing" not found`)
+	assertOneImmutableInputUnused(t, s, `parameter "missing" not found`)
 }
 
 func TestImmutableInputSet_AddFile_ParamNotFunctionType(t *testing.T) {
 	t.Parallel()
 
 	const src = "package demo\n\n//gormreuse:immutable-input(x)\nfunc notFn(x int) {}\n"
-	fset, file, info := parseFileWithTypes(t, src)
+	fset, file, info := parseImmutableInputSrc(t, src)
 	s := NewImmutableInputSet(fset, info)
 	s.AddFile(file, "demo")
-	assertOneUnused(t, s, `parameter "x" is not a function type`)
+	assertOneImmutableInputUnused(t, s, `parameter "x" is not a function type`)
 }
 
 // U3: the named parameter is a function type, but its signature has no *gorm.DB
@@ -85,10 +85,10 @@ func TestImmutableInputSet_AddFile_CallbackHasNoGormDB(t *testing.T) {
 	t.Parallel()
 
 	const src = "package demo\n\n//gormreuse:immutable-input(cb)\nfunc cbNoGormDB(cb func(int) int) {}\n"
-	fset, file, info := parseFileWithTypes(t, src)
+	fset, file, info := parseImmutableInputSrc(t, src)
 	s := NewImmutableInputSet(fset, info)
 	s.AddFile(file, "demo")
-	assertOneUnused(t, s, "no *gorm.DB parameter")
+	assertOneImmutableInputUnused(t, s, "no *gorm.DB parameter")
 }
 
 // Covers the lookupParam branch where a field has no Names slice — it still
@@ -98,10 +98,10 @@ func TestImmutableInputSet_AddFile_AnonymousParam(t *testing.T) {
 	t.Parallel()
 
 	const src = "package demo\n\n//gormreuse:immutable-input(missing)\nfunc anon(int, cb func()) {}\n"
-	fset, file, info := parseFileWithTypes(t, src)
+	fset, file, info := parseImmutableInputSrc(t, src)
 	s := NewImmutableInputSet(fset, info)
 	s.AddFile(file, "demo")
-	assertOneUnused(t, s, `parameter "missing" not found`)
+	assertOneImmutableInputUnused(t, s, `parameter "missing" not found`)
 }
 
 // With no type info, lookupParam returns a nil type, so asFunctionSignature(nil)
@@ -111,13 +111,13 @@ func TestImmutableInputSet_AddFile_NilTypesInfo(t *testing.T) {
 	t.Parallel()
 
 	const src = "package demo\n\n//gormreuse:immutable-input(cb)\nfunc noTypeInfo(cb func()) {}\n"
-	fset, file, _ := parseFileWithTypes(t, src)
+	fset, file, _ := parseImmutableInputSrc(t, src)
 	s := NewImmutableInputSet(fset, nil) // no TypesInfo
 	s.AddFile(file, "demo")
-	assertOneUnused(t, s, `parameter "cb" is not a function type`)
+	assertOneImmutableInputUnused(t, s, `parameter "cb" is not a function type`)
 }
 
-func assertOneUnused(t *testing.T, s *ImmutableInputSet, want string) {
+func assertOneImmutableInputUnused(t *testing.T, s *ImmutableInputSet, want string) {
 	t.Helper()
 	unused := s.GetUnused()
 	if len(unused) != 1 {

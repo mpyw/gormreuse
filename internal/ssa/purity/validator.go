@@ -22,32 +22,12 @@
 package purity
 
 import (
-	"go/token"
-
 	"golang.org/x/tools/go/ssa"
 
 	"github.com/mpyw/gormreuse/internal/directive"
 	"github.com/mpyw/gormreuse/internal/ssa/pollutionsource"
 	"github.com/mpyw/gormreuse/internal/typeutil"
 )
-
-// =============================================================================
-// Violation
-// =============================================================================
-
-// Violation represents a pure function contract violation.
-type Violation struct {
-	Pos     token.Pos
-	Message string
-
-	// Leak is true when the violation is a definitive escape of the argument
-	// (channel send, slice/array store, map store) rather than a conservative
-	// guess (passing to a not-yet-proven-pure function). Only definitive escapes
-	// revoke the function's pure-trust at its call sites — a conservative
-	// func-arg violation might still be pure in practice, and cascading it would
-	// produce false positives (see nestedClosureOuterPureViolation).
-	Leak bool
-}
 
 // =============================================================================
 // Validator
@@ -60,21 +40,25 @@ type Validator struct {
 	paramDerived map[ssa.Value]bool
 }
 
-// ValidateFunction validates that a function marked as pure satisfies the pure contract:
+// NewValidator creates a Validator for a function marked as pure.
+func NewValidator(fn *ssa.Function, pureFuncs *directive.DirectiveFuncSet) *Validator {
+	return &Validator{
+		fn:           fn,
+		pureFuncs:    pureFuncs,
+		paramDerived: make(map[ssa.Value]bool),
+	}
+}
+
+// Validate checks that the function satisfies the pure contract:
 // - Does not pollute *gorm.DB arguments (no non-pure method calls on them)
 //
 // Note: Pure functions MAY return mutable *gorm.DB values. The "pure" contract only
 // guarantees that the function doesn't pollute its arguments - callers must treat
 // the return value as potentially mutable.
-func ValidateFunction(fn *ssa.Function, pureFuncs *directive.DirectiveFuncSet) []Violation {
+func (v *Validator) Validate() []Violation {
+	fn := v.fn
 	if fn == nil || fn.Blocks == nil {
 		return nil
-	}
-
-	v := &Validator{
-		fn:           fn,
-		pureFuncs:    pureFuncs,
-		paramDerived: make(map[ssa.Value]bool),
 	}
 
 	// Initialize with *gorm.DB parameters
@@ -258,16 +242,17 @@ func (v *Validator) checkFunctionCallPollution(call *ssa.Call, callee *ssa.Funct
 		}
 		violations = append(violations, Violation{
 			Pos:     call.Pos(),
-			Message: "pure function passes *gorm.DB argument to non-pure function " + calleeName(call, callee),
+			Message: "pure function passes *gorm.DB argument to non-pure function " + v.calleeName(call, callee),
 		})
 	}
 	return violations
 }
 
-// calleeName returns a human-readable name for a call's target: the function
-// name for static calls, the builtin name for builtins (append, etc.), or a
-// generic label for indirect calls through a func value.
-func calleeName(call *ssa.Call, callee *ssa.Function) string {
+// calleeName returns a human-readable name for a call's target, used in the
+// Validator's violation messages: the function name for static calls, the
+// builtin name for builtins (append, etc.), or a generic label for indirect
+// calls through a func value.
+func (v *Validator) calleeName(call *ssa.Call, callee *ssa.Function) string {
 	if callee != nil {
 		return callee.Name()
 	}

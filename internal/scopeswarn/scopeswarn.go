@@ -1,4 +1,7 @@
-package internal
+// Package scopeswarn warns about Session()-family calls inside Scopes
+// callbacks (TEMPORARY — GORM bug workaround). analyzer.go in package
+// internal drives this check.
+package scopeswarn
 
 import (
 	"go/token"
@@ -21,24 +24,25 @@ import (
 //
 // **Removal condition**: once the upstream fix ships in a tagged GORM
 // release and gormreuse drops support for older versions, delete this
-// entire file and the call site in RunSSA. The remaining detection
+// entire package and the call site in RunSSA. The remaining detection
 // (Scopes callback parameter reuse) is handled by Phase 1 alone.
 //
-// Why this lives in its own file: it is independent of pollution
+// Why this lives in its own package: it is independent of pollution
 // tracking, has a known sunset, and would otherwise pollute the
 // general orchestration code in analyzer.go.
 
-// scopesWarning represents a warning about Session()-family calls
+// Warning represents a warning about Session()-family calls
 // inside a Scopes callback.
-type scopesWarning struct {
+type Warning struct {
 	Pos     token.Pos
 	Message string
 }
 
-// validateScopesCallback checks whether fn is a Scopes callback and warns
-// about Session()/WithContext()/Debug() calls inside it. These three are
+// Validate checks whether fn is a Scopes callback and warns about
+// Session()/WithContext()/Debug() calls inside it. These three are
 // the methods that touch the broken InstanceSet/InstanceGet path.
-func validateScopesCallback(fn *ssa.Function) []scopesWarning {
+// analyzer.go (package internal) drives this check.
+func Validate(fn *ssa.Function) []Warning {
 	parent := fn.Parent()
 	if parent == nil {
 		return nil
@@ -47,7 +51,7 @@ func validateScopesCallback(fn *ssa.Function) []scopesWarning {
 		return nil
 	}
 
-	var warnings []scopesWarning
+	var warnings []Warning
 	for _, block := range fn.Blocks {
 		for _, instr := range block.Instrs {
 			call, ok := instr.(*ssa.Call)
@@ -62,17 +66,17 @@ func validateScopesCallback(fn *ssa.Function) []scopesWarning {
 			}
 			switch getMethodName(call) {
 			case "Session":
-				warnings = append(warnings, scopesWarning{
+				warnings = append(warnings, Warning{
 					Pos:     call.Pos(),
 					Message: "Session() in Scopes callback causes transaction leak (GORM bug)",
 				})
 			case "WithContext":
-				warnings = append(warnings, scopesWarning{
+				warnings = append(warnings, Warning{
 					Pos:     call.Pos(),
 					Message: "WithContext() in Scopes callback causes transaction leak (calls Session internally)",
 				})
 			case "Debug":
-				warnings = append(warnings, scopesWarning{
+				warnings = append(warnings, Warning{
 					Pos:     call.Pos(),
 					Message: "Debug() in Scopes callback causes transaction leak (calls Session internally)",
 				})

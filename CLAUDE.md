@@ -112,7 +112,9 @@ gormreuse/
 │   ├── directive/              # Comment directive handling
 │   │   ├── directive.go        # Directive detection (hasDirective, IsIgnore/IsPure)
 │   │   ├── ignore.go           # //gormreuse:ignore - IgnoreMap, unused tracking
-│   │   └── pure.go             # //gormreuse:pure - PureFuncSet, function key matching
+│   │   └── funcset.go          # DirectiveFuncSet - directive-marked function sets
+│   │
+│   ├── scopeswarn/             # TEMPORARY Session-in-Scopes warning (GORM bug #7592)
 │   │
 │   ├── ssa/                    # SSA-based analysis (modular subpackages)
 │   │   ├── analyzer.go         # Analyzer - orchestrates analysis phases
@@ -130,7 +132,7 @@ gormreuse/
 │   │   │   └── call.go         # Handlers for Call, Go, Defer, Send, Store, etc.
 │   │   │
 │   │   └── purity/             # Pure function validation for //gormreuse:pure
-│   │       └── validator.go    # ValidateFunction - checks pure contracts
+│   │       └── validator.go    # Validator.Validate - checks pure contracts
 │   │
 │   └── typeutil/               # Type utilities
 │       └── gorm.go             # IsGormDB, IsImmutableReturningBuiltin
@@ -162,7 +164,7 @@ gormreuse/
 │                      internal/analyzer.go                               │
 │  For each function:                                                     │
 │    1. Check ignores (directive.IgnoreMap)                              │
-│    2. Validate pure functions (purity.ValidateFunction)                │
+│    2. Validate pure functions (purity.Validator)                       │
 │    3. Detect violations (ssa.Analyzer)                                 │
 └─────────────────────────────────────────────────────────────────────────┘
                                     │
