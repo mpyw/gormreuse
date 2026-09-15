@@ -13,6 +13,8 @@ import (
 
 // ignoreEntry tracks an ignore directive and whether it was used.
 // Used to report "unused ignore directive" warnings.
+//
+//declscope:package // directive_test.go builds these directly
 type ignoreEntry struct {
 	pos  token.Pos // Position of the ignore comment (for reporting unused)
 	used bool      // Whether this ignore was actually used to suppress a warning

@@ -38,6 +38,8 @@ type scopesWarning struct {
 // validateScopesCallback checks whether fn is a Scopes callback and warns
 // about Session()/WithContext()/Debug() calls inside it. These three are
 // the methods that touch the broken InstanceSet/InstanceGet path.
+//
+//declscope:package // analyzer.go drives this check
 func validateScopesCallback(fn *ssa.Function) []scopesWarning {
 	parent := fn.Parent()
 	if parent == nil {
