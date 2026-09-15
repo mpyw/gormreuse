@@ -1,0 +1,90 @@
+# declscope baseline
+#
+# Violations recorded here are suppressed; new ones are still reported.
+# Regenerate with:
+#
+#     declscope baseline ./...
+#
+# Do not edit by hand. An entry disappears when its violation is fixed, so the
+# diff of a regeneration is the record of what was cleaned up.
+packages:
+  github.com/mpyw/gormreuse/internal:
+    boundary:
+      scopesSessionWarning:
+        - validateScopesCallback
+    qualify:
+      analyzer:
+        - RunSSA
+        - checker
+        - computeNeedsImmutableParam
+        - editKey
+        - newChecker
+        - recoverPerFunction
+        - reportImmutableReturnViolations
+        - reportRedundantImmutableParam
+        - reportUnusedDirectiveFuncs
+      scopesSessionWarning:
+        - allocFlowsToScopes
+        - callPassesFuncToScopes
+        - getMethodName
+        - isGormDBMethodCall
+        - isScopesCallback
+        - scopesWarning
+        - sliceFlowsToScopes
+        - storePacksFuncIntoScopes
+        - storeRefersToFunction
+        - validateScopesCallback
+  github.com/mpyw/gormreuse/internal/directive:
+    boundary:
+      ignore:
+        - ignoreEntry
+        - ignoreEntry.pos
+        - ignoreEntry.used
+      pure:
+        - exprToString
+        - formatReceiverType
+        - funcDeclTypes
+        - stripPointer
+      signature:
+        - containsGormDB
+        - hasGormDBParameter
+        - hasGormDBReturn
+    qualify:
+      directive:
+        - ExtractImmutableInputParams
+      immutableInput:
+        - asFunctionSignature
+        - assertOneUnused
+        - paramRef
+        - parseFileWithTypes
+      pure:
+        - BuildImmutableParamFunctionSet
+        - BuildImmutableReturnFunctionSet
+        - DirectiveFuncSet
+        - FuncKey
+        - NewImmutableParamFuncSet
+        - NewImmutableReturnFuncSet
+        - buildFunctionSet
+        - directiveChecker
+        - exprToString
+        - formatReceiverType
+        - funcDeclTypes
+        - funcLitTypes
+        - newDirectiveFuncSet
+        - signatureValidator
+        - stripPointer
+      signature:
+        - HasGormDBParameter
+        - cacheEntry
+        - containsGormDB
+        - containsGormDBWithCache
+        - hasGormDBParameter
+        - hasGormDBReturn
+  github.com/mpyw/gormreuse/internal/ssa/purity:
+    qualify:
+      immutableReturn:
+        - isGormChainCall
+      validator:
+        - ValidateFunction
+        - Violation
+        - calleeName

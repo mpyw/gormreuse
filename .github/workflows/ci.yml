@@ -9,6 +9,25 @@ permissions:
   contents: read
 
 jobs:
+  declscope:
+    name: declscope
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Set up mise
+        uses: jdx/mise-action@v2
+
+      - name: Run declscope
+        run: declscope ./...
+
   test:
     name: Test
     runs-on: ubuntu-latest
