@@ -11,21 +11,6 @@ import (
 	"golang.org/x/tools/go/ssa"
 )
 
-// FuncKey identifies a function by package, receiver type, and name.
-type FuncKey struct {
-	PkgPath      string // Package path (e.g., "github.com/example/pkg")
-	ReceiverType string // Receiver type name without pointer (e.g., "Orm"), empty for functions
-	FuncName     string // Function or method name
-}
-
-// directiveChecker is a function that checks if a comment is a specific directive.
-type directiveChecker func(text string) bool
-
-// signatureValidator checks if a function signature is valid for the directive.
-// For pure: returns true if any parameter contains *gorm.DB
-// For immutable-return: returns true if any return value contains *gorm.DB
-type signatureValidator func(*types.Signature) bool
-
 // DirectiveFuncSet is a generic set of functions matching a directive.
 // It supports both pre-built sets (for current package) and on-demand
 // directive checking (for external packages via source parsing).
@@ -48,13 +33,6 @@ type DirectiveFuncSet struct {
 	// Cache for ast/inspector to avoid repeated traversal setup
 	inspectorCache map[*ast.File]*inspector.Inspector
 }
-
-// Node type filters for inspector
-var (
-	//declscope:package // ignore.go walks function declarations with the same filter
-	funcDeclTypes = []ast.Node{(*ast.FuncDecl)(nil)}
-	funcLitTypes  = []ast.Node{(*ast.FuncLit)(nil)}
-)
 
 // newDirectiveFuncSet creates a new DirectiveFuncSet with the given directive checker and signature validator.
 func newDirectiveFuncSet(fset *token.FileSet, typesInfo *types.Info, isDirective directiveChecker, validateSignature signatureValidator) *DirectiveFuncSet {
@@ -284,7 +262,7 @@ func (s *DirectiveFuncSet) Contains(fn *ssa.Function) bool {
 			key.PkgPath = fn.Pkg.Pkg.Path()
 		}
 		if sig := fn.Signature; sig != nil && sig.Recv() != nil {
-			key.ReceiverType = formatReceiverType(sig.Recv().Type())
+			key.ReceiverType = receiverTypeString(sig.Recv().Type())
 		}
 		if _, exists := s.known[key]; exists {
 			return true
@@ -348,7 +326,7 @@ func (s *DirectiveFuncSet) hasDirective(fn *ssa.Function) bool {
 	funcName := fn.Name()
 	var receiverType string
 	if sig := fn.Signature; sig != nil && sig.Recv() != nil {
-		receiverType = formatReceiverType(sig.Recv().Type())
+		receiverType = receiverTypeString(sig.Recv().Type())
 	}
 	return s.hasDirectiveInFile(file, funcName, receiverType)
 }
@@ -918,7 +896,7 @@ func (s *DirectiveFuncSet) hasDirectiveInFile(file *ast.File, funcName, receiver
 		}
 		declReceiverType := ""
 		if funcDecl.Recv != nil && len(funcDecl.Recv.List) > 0 {
-			declReceiverType = stripPointer(exprToString(funcDecl.Recv.List[0].Type))
+			declReceiverType = receiverTypeStringFromExpr(funcDecl.Recv.List[0].Type)
 		}
 		if declReceiverType != receiverType {
 			continue
@@ -954,27 +932,27 @@ func NewImmutableParamFuncSet(fset *token.FileSet, typesInfo *types.Info) *Direc
 	return newDirectiveFuncSet(fset, typesInfo, IsImmutableParamDirective, hasGormDBParameter)
 }
 
-// BuildPureFunctionSet builds a set of functions marked with //gormreuse:pure.
-func BuildPureFunctionSet(file *ast.File, pkgPath string) map[FuncKey]struct{} {
-	return buildFunctionSet(file, pkgPath, IsPureDirective)
+// BuildPureFuncSet builds a set of functions marked with //gormreuse:pure.
+func BuildPureFuncSet(file *ast.File, pkgPath string) map[FuncKey]struct{} {
+	return buildFuncSet(file, pkgPath, IsPureDirective)
 }
 
-// BuildImmutableReturnFunctionSet builds a set of functions marked with //gormreuse:immutable-return.
-func BuildImmutableReturnFunctionSet(file *ast.File, pkgPath string) map[FuncKey]struct{} {
-	return buildFunctionSet(file, pkgPath, IsImmutableReturnDirective)
+// BuildImmutableReturnFuncSet builds a set of functions marked with //gormreuse:immutable-return.
+func BuildImmutableReturnFuncSet(file *ast.File, pkgPath string) map[FuncKey]struct{} {
+	return buildFuncSet(file, pkgPath, IsImmutableReturnDirective)
 }
 
-// BuildImmutableParamFunctionSet builds a set of functions marked with //gormreuse:immutable-param.
-func BuildImmutableParamFunctionSet(file *ast.File, pkgPath string) map[FuncKey]struct{} {
-	return buildFunctionSet(file, pkgPath, IsImmutableParamDirective)
+// BuildImmutableParamFuncSet builds a set of functions marked with //gormreuse:immutable-param.
+func BuildImmutableParamFuncSet(file *ast.File, pkgPath string) map[FuncKey]struct{} {
+	return buildFuncSet(file, pkgPath, IsImmutableParamDirective)
 }
 
 // =============================================================================
 // Common Helper
 // =============================================================================
 
-// buildFunctionSet builds a set of functions matching the given directive checker.
-func buildFunctionSet(file *ast.File, pkgPath string, isDirective func(string) bool) map[FuncKey]struct{} {
+// buildFuncSet builds a set of functions matching the given directive checker.
+func buildFuncSet(file *ast.File, pkgPath string, isDirective func(string) bool) map[FuncKey]struct{} {
 	result := make(map[FuncKey]struct{})
 
 	ast.Inspect(file, func(n ast.Node) bool {
@@ -988,7 +966,7 @@ func buildFunctionSet(file *ast.File, pkgPath string, isDirective func(string) b
 							FuncName: node.Name.Name,
 						}
 						if node.Recv != nil && len(node.Recv.List) > 0 {
-							key.ReceiverType = stripPointer(exprToString(node.Recv.List[0].Type))
+							key.ReceiverType = receiverTypeStringFromExpr(node.Recv.List[0].Type)
 						}
 						result[key] = struct{}{}
 						break

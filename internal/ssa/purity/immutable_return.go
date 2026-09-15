@@ -51,7 +51,7 @@ func ValidateImmutableReturn(fn *ssa.Function, set *directive.DirectiveFuncSet, 
 					continue
 				}
 				for _, root := range rt.FindAllMutableRoots(res, nil) {
-					if !isGormChainCall(root) {
+					if !provablyMutableForImmutableReturn(root) {
 						continue // not a provably-mutable root
 					}
 					// One diagnostic per function: the directive, not each
@@ -67,12 +67,13 @@ func ValidateImmutableReturn(fn *ssa.Function, set *directive.DirectiveFuncSet, 
 	return nil
 }
 
-// isGormChainCall reports whether v is the result of a gorm chain method call
-// (a method on *gorm.DB that is not an immutable-returning builtin). Such a
-// result is a definitively mutable clone==0 handle; every other mutable root the
-// tracer produces (parameters, user-function/closure calls) is only a
-// conservative guess and must not drive an immutable-return contract violation.
-func isGormChainCall(v ssa.Value) bool {
+// provablyMutableForImmutableReturn reports whether v is the result of a gorm
+// chain method call (a method on *gorm.DB that is not an immutable-returning
+// builtin). Such a result is a definitively mutable clone==0 handle; every other
+// mutable root the tracer produces (parameters, user-function/closure calls) is
+// only a conservative guess and must not drive an immutable-return contract
+// violation.
+func provablyMutableForImmutableReturn(v ssa.Value) bool {
 	call, ok := v.(*ssa.Call)
 	if !ok {
 		return false

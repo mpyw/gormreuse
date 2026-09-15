@@ -45,6 +45,7 @@ import (
 
 	"github.com/mpyw/gormreuse/internal/directive"
 	"github.com/mpyw/gormreuse/internal/fix"
+	"github.com/mpyw/gormreuse/internal/scopeswarn"
 	ssautil "github.com/mpyw/gormreuse/internal/ssa"
 	"github.com/mpyw/gormreuse/internal/ssa/pollution"
 	"github.com/mpyw/gormreuse/internal/ssa/purity"
@@ -124,7 +125,7 @@ func RunSSA(
 		}
 		if pureFuncs != nil && pureFuncs.Contains(fn) {
 			recoverPerFunction(fn, func() {
-				for _, v := range purity.ValidateFunction(fn, pureFuncs) {
+				for _, v := range purity.NewValidator(fn, pureFuncs).Validate() {
 					pass.Reportf(v.Pos, "%s", v.Message)
 					// Only a definitive escape revokes pure-trust at call sites;
 					// conservative func-arg violations do not (avoids FP cascades).
@@ -174,13 +175,13 @@ func RunSSA(
 	reportImmutableReturnViolations(pass, ssaInfo, immutableReturnFuncs, inputTracer, skip)
 
 	// TEMPORARY (GORM bug go-gorm/gorm#7592): warn on Session/WithContext/Debug
-	// inside Scopes callbacks. Deletable by removing scopes_session_warning.go and
-	// this loop once the upstream fix ships in a supported release — see that file.
+	// inside Scopes callbacks. Deletable by removing the scopeswarn package and
+	// this loop once the upstream fix ships in a supported release — see that package.
 	for _, fn := range ssaInfo.SrcFuncs {
 		if skip(fn, false) {
 			continue
 		}
-		for _, w := range validateScopesCallback(fn) {
+		for _, w := range scopeswarn.Validate(fn) {
 			pass.Reportf(w.Pos, "%s", w.Message)
 		}
 	}

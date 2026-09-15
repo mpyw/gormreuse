@@ -5,6 +5,7 @@ import (
 	"go/ast"
 	"go/token"
 	"go/types"
+	"strings"
 
 	"golang.org/x/tools/go/ssa"
 )
@@ -74,18 +75,57 @@ func (s *ImmutableInputSet) AddFile(file *ast.File, pkgPath string) {
 	}
 }
 
-type paramRef struct {
+// ExtractImmutableInputParams returns the callback parameter names declared by
+// //gormreuse:immutable-input(name) directives in a comment. A comment may carry
+// several (comma-combinable with other directives), so it returns a slice; nil if
+// none. It accepts both line and block comment forms and ignores a trailing "//"
+// comment, mirroring hasDirective (#62).
+func ExtractImmutableInputParams(text string) []string {
+	if after, ok := strings.CutPrefix(text, "/*"); ok {
+		text = strings.TrimSuffix(after, "*/")
+	} else {
+		text = strings.TrimPrefix(text, "//")
+	}
+	text = strings.TrimSpace(text)
+	if !strings.HasPrefix(text, directivePrefix) {
+		return nil
+	}
+	text = strings.TrimPrefix(text, directivePrefix)
+	if idx := strings.Index(text, "//"); idx != -1 {
+		text = text[:idx]
+	}
+
+	var params []string
+	for part := range strings.SplitSeq(text, ",") {
+		inner, ok := strings.CutPrefix(strings.TrimSpace(part), "immutable-input(")
+		if !ok {
+			continue
+		}
+		inner, ok = strings.CutSuffix(inner, ")")
+		if !ok {
+			continue
+		}
+		if name := strings.TrimSpace(inner); name != "" {
+			params = append(params, name)
+		}
+	}
+	return params
+}
+
+// immutableInputRef is one occurrence of an immutable-input(name) directive:
+// the comment position and the parameter name it declares.
+type immutableInputRef struct {
 	commentPos token.Pos
 	name       string
 }
 
 // extractParamsFromComments collects (commentPos, paramName) tuples for every
 // immutable-input(name) directive in the comment list.
-func (s *ImmutableInputSet) extractParamsFromComments(list []*ast.Comment) []paramRef {
-	var refs []paramRef
+func (s *ImmutableInputSet) extractParamsFromComments(list []*ast.Comment) []immutableInputRef {
+	var refs []immutableInputRef
 	for _, c := range list {
 		for _, name := range ExtractImmutableInputParams(c.Text) {
-			refs = append(refs, paramRef{commentPos: c.Pos(), name: name})
+			refs = append(refs, immutableInputRef{commentPos: c.Pos(), name: name})
 		}
 	}
 	return refs
@@ -94,7 +134,7 @@ func (s *ImmutableInputSet) extractParamsFromComments(list []*ast.Comment) []par
 // processDirectiveTargets validates each (commentPos, paramName) against the
 // function's signature, registering usable callbacks in s.known and pushing
 // unused-diagnostic entries into s.unused otherwise.
-func (s *ImmutableInputSet) processDirectiveTargets(fd *ast.FuncDecl, refs []paramRef, key FuncKey) {
+func (s *ImmutableInputSet) processDirectiveTargets(fd *ast.FuncDecl, refs []immutableInputRef, key FuncKey) {
 	for _, ref := range refs {
 		idx, paramType := s.lookupParam(fd, ref.name)
 		if idx < 0 {
@@ -152,23 +192,12 @@ func (s *ImmutableInputSet) lookupParam(fd *ast.FuncDecl, name string) (int, typ
 	return -1, nil
 }
 
-// asFunctionSignature returns the *types.Signature for a parameter that is itself
-// a function, or nil if it isn't (or if type info is unavailable — an honest U2
-// in that degraded case rather than a misleading U3).
-func asFunctionSignature(t types.Type) *types.Signature {
-	if t == nil {
-		return nil
-	}
-	sig, _ := t.Underlying().(*types.Signature)
-	return sig
-}
-
 // buildFuncKey produces a FuncKey for a function declaration matching what the
 // tracer/analyzer use for SSA functions.
 func (s *ImmutableInputSet) buildFuncKey(fd *ast.FuncDecl, pkgPath string) FuncKey {
 	key := FuncKey{PkgPath: pkgPath, FuncName: fd.Name.Name}
 	if fd.Recv != nil && len(fd.Recv.List) > 0 {
-		key.ReceiverType = stripPointer(exprToString(fd.Recv.List[0].Type))
+		key.ReceiverType = receiverTypeStringFromExpr(fd.Recv.List[0].Type)
 	}
 	return key
 }
@@ -185,7 +214,7 @@ func (s *ImmutableInputSet) Callbacks(fn *ssa.Function) []ImmutableInputCallback
 		key.PkgPath = fn.Pkg.Pkg.Path()
 	}
 	if sig := fn.Signature; sig != nil && sig.Recv() != nil {
-		key.ReceiverType = formatReceiverType(sig.Recv().Type())
+		key.ReceiverType = receiverTypeString(sig.Recv().Type())
 	}
 	out := make([]ImmutableInputCallback, len(s.known[key]))
 	copy(out, s.known[key])

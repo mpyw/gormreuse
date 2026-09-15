@@ -57,7 +57,13 @@ package directive
 
 import "strings"
 
+//declscope:package // immutable_input.go parses its directive with the same prefix
 const directivePrefix = "gormreuse:"
+
+// directiveChecker is a function that checks if a comment is a specific directive.
+//
+//declscope:package // funcset.go keys each DirectiveFuncSet on one
+type directiveChecker func(text string) bool
 
 // hasDirective checks if a comment contains the specified directive.
 // Supports comma-separated directives: "//gormreuse:pure,immutable-return".
@@ -111,40 +117,3 @@ func IsImmutableReturnDirective(text string) bool { return hasDirective(text, "i
 // (clone>0) *gorm.DB arguments, so the parameter can be reused safely. It is the
 // escape hatch for the default-mutable parameter treatment (Phase 1b, #61).
 func IsImmutableParamDirective(text string) bool { return hasDirective(text, "immutable-param") }
-
-// ExtractImmutableInputParams returns the callback parameter names declared by
-// //gormreuse:immutable-input(name) directives in a comment. A comment may carry
-// several (comma-combinable with other directives), so it returns a slice; nil if
-// none. It accepts both line and block comment forms and ignores a trailing "//"
-// comment, mirroring hasDirective (#62).
-func ExtractImmutableInputParams(text string) []string {
-	if after, ok := strings.CutPrefix(text, "/*"); ok {
-		text = strings.TrimSuffix(after, "*/")
-	} else {
-		text = strings.TrimPrefix(text, "//")
-	}
-	text = strings.TrimSpace(text)
-	if !strings.HasPrefix(text, directivePrefix) {
-		return nil
-	}
-	text = strings.TrimPrefix(text, directivePrefix)
-	if idx := strings.Index(text, "//"); idx != -1 {
-		text = text[:idx]
-	}
-
-	var params []string
-	for part := range strings.SplitSeq(text, ",") {
-		inner, ok := strings.CutPrefix(strings.TrimSpace(part), "immutable-input(")
-		if !ok {
-			continue
-		}
-		inner, ok = strings.CutSuffix(inner, ")")
-		if !ok {
-			continue
-		}
-		if name := strings.TrimSpace(inner); name != "" {
-			params = append(params, name)
-		}
-	}
-	return params
-}

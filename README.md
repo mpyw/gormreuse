@@ -558,7 +558,7 @@ db.Scopes(func(q *gorm.DB) *gorm.DB {
 
 [`Preload`](https://pkg.go.dev/gorm.io/gorm#DB.Preload) callbacks are **unaffected** (Preload builds a fresh DB), so the same code inside a Preload callback is not flagged.
 
-**Removal condition**: once the upstream fix ships in a supported GORM release, this rule is deleted by removing `internal/scopes_session_warning.go` and its single call site in `RunSSA` — the file documents this in-line. Re-check go-gorm/gorm#7592 on each GORM version bump.
+**Removal condition**: once the upstream fix ships in a supported GORM release, this rule is deleted by removing the `internal/scopeswarn` package and its single call site in `RunSSA` — the package documents this in-line. Re-check go-gorm/gorm#7592 on each GORM version bump.
 
 ## Documentation
 

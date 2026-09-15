@@ -94,15 +94,15 @@ func run(pass *analysis.Pass) (any, error) {
 		immutableParamFuncs.AddFile(file)
 
 		// Build pure function set for this file
-		for key := range directive.BuildPureFunctionSet(file, pkgPath) {
+		for key := range directive.BuildPureFuncSet(file, pkgPath) {
 			pureFuncs.Add(key)
 		}
 		// Build immutable-return function set for this file
-		for key := range directive.BuildImmutableReturnFunctionSet(file, pkgPath) {
+		for key := range directive.BuildImmutableReturnFuncSet(file, pkgPath) {
 			immutableReturnFuncs.Add(key)
 		}
 		// Build immutable-param function set for this file
-		for key := range directive.BuildImmutableParamFunctionSet(file, pkgPath) {
+		for key := range directive.BuildImmutableParamFuncSet(file, pkgPath) {
 			immutableParamFuncs.Add(key)
 		}
 		// Build immutable-input(name) callback declarations for this file

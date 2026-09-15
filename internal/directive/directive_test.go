@@ -274,7 +274,7 @@ func notIgnored() {}
 	}
 }
 
-func TestBuildPureFunctionSet(t *testing.T) {
+func TestBuildPureFuncSet(t *testing.T) {
 	t.Parallel()
 
 	src := `package test
@@ -314,7 +314,7 @@ func notPure() {}
 		t.Fatalf("Failed to parse: %v", err)
 	}
 
-	set := BuildPureFunctionSet(file, "test/pkg")
+	set := BuildPureFuncSet(file, "test/pkg")
 	if len(set) != 6 {
 		t.Errorf("Expected 6 pure functions, got %d", len(set))
 	}
@@ -380,9 +380,9 @@ func TestExprToString(t *testing.T) {
 			for _, decl := range file.Decls {
 				if fn, ok := decl.(*ast.FuncDecl); ok {
 					if fn.Recv != nil && len(fn.Recv.List) > 0 {
-						got := exprToString(fn.Recv.List[0].Type)
+						got := exprToTypeString(fn.Recv.List[0].Type)
 						if got != tt.expected {
-							t.Errorf("exprToString() = %q, want %q", got, tt.expected)
+							t.Errorf("exprToTypeString() = %q, want %q", got, tt.expected)
 						}
 					}
 				}
@@ -395,7 +395,7 @@ func TestExprToStringUnknown(t *testing.T) {
 	t.Parallel()
 
 	// Test with an expression type that returns empty string
-	// ArrayType is not handled by exprToString
+	// ArrayType is not handled by exprToTypeString
 	src := `package test; func (r [2]int) m() {}`
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "test.go", src, 0)
@@ -406,9 +406,9 @@ func TestExprToStringUnknown(t *testing.T) {
 	for _, decl := range file.Decls {
 		if fn, ok := decl.(*ast.FuncDecl); ok {
 			if fn.Recv != nil && len(fn.Recv.List) > 0 {
-				got := exprToString(fn.Recv.List[0].Type)
+				got := exprToTypeString(fn.Recv.List[0].Type)
 				if got != "" {
-					t.Errorf("exprToString(ArrayType) = %q, want empty string", got)
+					t.Errorf("exprToTypeString(ArrayType) = %q, want empty string", got)
 				}
 			}
 		}
@@ -458,9 +458,9 @@ func TestExprToStringGeneric(t *testing.T) {
 			for _, decl := range file.Decls {
 				if fn, ok := decl.(*ast.FuncDecl); ok {
 					if fn.Recv != nil && len(fn.Recv.List) > 0 {
-						got := exprToString(fn.Recv.List[0].Type)
+						got := exprToTypeString(fn.Recv.List[0].Type)
 						if got != tt.expected {
-							t.Errorf("exprToString() = %q, want %q", got, tt.expected)
+							t.Errorf("exprToTypeString() = %q, want %q", got, tt.expected)
 						}
 					}
 				}
