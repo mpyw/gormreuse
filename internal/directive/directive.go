@@ -55,50 +55,62 @@
 //	}
 package directive
 
-import "strings"
+import (
+	"go/ast"
+	"go/token"
+	"slices"
+	"strings"
+)
 
-//declscope:package // immutable_input.go parses its directive with the same prefix
-const directivePrefix = "gormreuse:"
+// directiveTool is the tool part of every gormreuse directive.
+const directiveTool = "gormreuse"
 
 // directiveChecker is a function that checks if a comment is a specific directive.
 //
 //declscope:package // funcset.go keys each DirectiveFuncSet on one
 type directiveChecker func(text string) bool
 
-// hasDirective checks if a comment contains the specified directive.
-// Supports comma-separated directives: "//gormreuse:pure,immutable-return".
-// Trailing comments use "//": "//gormreuse:ignore // reason here".
-func hasDirective(text, name string) bool {
-	// Accept both line (//gormreuse:...) and block (/*gormreuse:...*/) comment
-	// forms. Without the block form, `/*gormreuse:pure*/` was a silent no-op:
-	// neither applied nor reported as unused.
+// parseDirective returns the comma-separated parts of a gormreuse directive
+// comment, each trimmed, or nil when the comment is not one.
+//
+// Both line (//gormreuse:...) and block (/*gormreuse:...*/) forms are accepted,
+// with or without spaces after the comment marker. Without the block form,
+// `/*gormreuse:pure*/` was a silent no-op: neither applied nor reported as
+// unused. A trailing comment ("//gormreuse:ignore // reason") is dropped.
+//
+//declscope:package // immutable_input.go splits its immutable-input(name) parts from the same list
+func parseDirective(text string) []string {
+	// go/ast only recognises the canonical, space-free line form, so strip the
+	// comment markers and re-attach "//" to the trimmed body.
 	if after, ok := strings.CutPrefix(text, "/*"); ok {
 		text = strings.TrimSuffix(after, "*/")
 	} else {
 		text = strings.TrimPrefix(text, "//")
 	}
-	text = strings.TrimSpace(text)
-	if !strings.HasPrefix(text, directivePrefix) {
-		return false
+	d, ok := ast.ParseDirective(token.NoPos, "//"+strings.TrimSpace(text))
+	if !ok || d.Tool != directiveTool {
+		return nil
 	}
-	// Extract directive part after prefix
-	text = strings.TrimPrefix(text, directivePrefix)
+	// ParseDirective splits Name at the first space, so a list written with a
+	// space after a comma ("pure, immutable-return") continues into Args.
+	list := d.Name
+	if d.Args != "" {
+		list += " " + d.Args
+	}
+	// Drop a trailing comment: "pure,immutable-return // note".
+	list, _, _ = strings.Cut(list, "//")
+	var parts []string
+	for part := range strings.SplitSeq(list, ",") {
+		parts = append(parts, strings.TrimSpace(part))
+	}
+	return parts
+}
 
-	// Split off trailing comment (// ...)
-	// e.g., "ignore // reason" -> "ignore"
-	// e.g., "pure,immutable-return // note" -> "pure,immutable-return"
-	if idx := strings.Index(text, "//"); idx != -1 {
-		text = text[:idx]
-	}
-	text = strings.TrimSpace(text)
-
-	// Split by comma and check each
-	for part := range strings.SplitSeq(text, ",") {
-		if strings.TrimSpace(part) == name {
-			return true
-		}
-	}
-	return false
+// hasDirective checks if a comment contains the specified directive.
+// Supports comma-separated directives: "//gormreuse:pure,immutable-return".
+// Trailing comments use "//": "//gormreuse:ignore // reason here".
+func hasDirective(text, name string) bool {
+	return slices.Contains(parseDirective(text), name)
 }
 
 // IsIgnoreDirective checks if a comment is an ignore directive.

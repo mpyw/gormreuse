@@ -5,6 +5,7 @@ import (
 	"go/parser"
 	"go/token"
 	"go/types"
+	"slices"
 	"testing"
 )
 
@@ -625,5 +626,75 @@ func TestContainsGormDBCycleDetection(t *testing.T) {
 	got := containsGormDB(recursiveType)
 	if got {
 		t.Error("containsGormDB(Recursive) should return false")
+	}
+}
+
+func TestParseDirective(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		text string
+		want []string
+	}{
+		{"canonical", "//gormreuse:pure", []string{"pure"}},
+		{"space after marker", "// gormreuse:pure", []string{"pure"}},
+		{"tab after marker", "//\tgormreuse:pure", []string{"pure"}},
+		{"block form", "/*gormreuse:pure*/", []string{"pure"}},
+		{"spaced block form", "/* gormreuse:pure */", []string{"pure"}},
+		{"comma list", "//gormreuse:pure,immutable-return", []string{"pure", "immutable-return"}},
+		{"comma list with spaces", "//gormreuse:pure, immutable-return , immutable-param", []string{"pure", "immutable-return", "immutable-param"}},
+		{"block comma list", "/*gormreuse:pure,immutable-param*/", []string{"pure", "immutable-param"}},
+		{"trailing reason", "//gormreuse:ignore // reason here", []string{"ignore"}},
+		{"trailing reason without space", "//gormreuse:ignore// reason", []string{"ignore"}},
+		{"comma list with trailing reason", "//gormreuse:pure,immutable-return // note", []string{"pure", "immutable-return"}},
+		{"immutable-input combined", "//gormreuse:pure,immutable-input(fn)", []string{"pure", "immutable-input(fn)"}},
+		{"lookalike tool", "//gormreusex:pure", nil},
+		{"tool as suffix", "//xgormreuse:pure", nil},
+		{"other tool", "//nolint:gormreuse", nil},
+		{"no name", "//gormreuse:", nil},
+		// go/ast wants the name right after the colon, as //go:build does.
+		{"space after colon", "//gormreuse: pure", nil},
+		{"random comment", "// some comment", nil},
+		{"empty", "//", nil},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := parseDirective(tt.text); !slices.Equal(got, tt.want) {
+				t.Errorf("parseDirective(%q) = %q, want %q", tt.text, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestHasDirectiveForms(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		text  string
+		check func(string) bool
+		want  bool
+	}{
+		{"pure in spaced comma list", "//gormreuse:pure, immutable-return", IsPureDirective, true},
+		{"immutable-return in spaced comma list", "//gormreuse:pure, immutable-return", IsImmutableReturnDirective, true},
+		{"ignore with block form", "/*gormreuse:ignore*/", IsIgnoreDirective, true},
+		{"pure next to immutable-input", "//gormreuse:immutable-input(fn),pure // reason", IsPureDirective, true},
+		{"name in trailing reason does not count", "//gormreuse:ignore // not pure", IsPureDirective, false},
+		{"lookalike tool", "//gormreusex:pure", IsPureDirective, false},
+		{"name prefix does not count", "//gormreuse:pure-ish", IsPureDirective, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := tt.check(tt.text); got != tt.want {
+				t.Errorf("check(%q) = %v, want %v", tt.text, got, tt.want)
+			}
+		})
 	}
 }
