@@ -26,16 +26,18 @@ q.Find(&admins) // Bug: Conditions accumulate unexpectedly
 **Recommended.** gormreuse is installable directly from GitHub Releases via mise's `github` backend — no extra registry required, and no Go toolchain needed because the binaries are prebuilt:
 
 ```bash
-mise use -g "github:mpyw/gormreuse"
+mise use "github:mpyw/gormreuse@0.18.1"
 gormreuse ./...
 ```
 
-Or pin it per project in `mise.toml`:
+Run it in the project root. It pins the version in the project's `mise.toml`, so every checkout and CI run the same one:
 
 ```toml
 [tools]
-"github:mpyw/gormreuse" = "latest"
+"github:mpyw/gormreuse" = "0.18.1"
 ```
+
+Add `-g` to install it for every project on your machine instead.
 
 > [!IMPORTANT]
 > The `go`-based methods below build gormreuse from source, which requires Go 1.25 or later. `go.mod` pins `toolchain go1.27.0`, so the default `GOTOOLCHAIN=auto` builds the linter with Go 1.27 — a Go 1.27 toolchain is what lets it understand Go 1.27 source (generic methods, promoted struct-literal keys). `go tool` also needs Go 1.24+ on `PATH`, which is where tool directives were introduced.
