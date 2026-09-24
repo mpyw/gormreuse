@@ -26,7 +26,7 @@ q.Find(&admins) // Bug: Conditions accumulate unexpectedly
 **Recommended.** gormreuse is installable directly from GitHub Releases via mise's `github` backend — no extra registry required, and no Go toolchain needed because the binaries are prebuilt:
 
 ```bash
-mise use "github:mpyw/gormreuse@0.19.0"
+mise use "github:mpyw/gormreuse@0.20.0"
 gormreuse ./...
 ```
 
@@ -34,7 +34,7 @@ Run it in the project root. It pins the version in the project's `mise.toml`, so
 
 ```toml
 [tools]
-"github:mpyw/gormreuse" = "0.19.0"
+"github:mpyw/gormreuse" = "0.20.0"
 ```
 
 Add `-g` to install it for every project on your machine instead.
