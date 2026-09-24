@@ -15,7 +15,7 @@
 // # Syntax
 //
 // Only //gormreuse:name[,name...] is a directive: a line comment, lowercase
-// names, and no space after "//" or after the colon. It is read by
+// names, and no space anywhere in it, including after a comma. It is read by
 // [ast.ParseDirective], and a trailing "// reason" is dropped. Any other
 // comment that starts with "gormreuse:" is reported with
 // [MalformedDirectiveMessage].
@@ -79,11 +79,12 @@ const directiveTool = "gormreuse"
 type directiveChecker func(text string) bool
 
 // parseDirective returns the comma-separated parts of a gormreuse directive
-// comment, each trimmed, or nil when the comment is not one.
+// comment, or nil when the comment is not one.
 //
 // Only Go's directive form is read, exactly as [ast.ParseDirective] reads it:
-// "//gormreuse:" with no space after "//" or after the colon. A trailing
-// comment ("//gormreuse:ignore // reason") is dropped.
+// "//gormreuse:" with no space after "//" or after the colon. The whole list is
+// the directive's name, so it holds no space and no empty part. The only thing
+// allowed after it is a trailing comment ("//gormreuse:ignore // reason").
 //
 //declscope:package // immutable_input.go splits its immutable-input(name) parts from the same list
 func parseDirective(text string) []string {
@@ -91,17 +92,16 @@ func parseDirective(text string) []string {
 	if !ok || d.Tool != directiveTool {
 		return nil
 	}
-	// ParseDirective splits Name at the first space, so a list written with a
-	// space after a comma ("pure, immutable-return") continues into Args.
-	list := d.Name
-	if d.Args != "" {
-		list += " " + d.Args
+	// A comment written straight after the list ("ignore// reason") ends the
+	// name, and the rest of the line is its text. Otherwise anything after the
+	// name must be a comment: "pure, immutable-return" is not a list.
+	list, _, commented := strings.Cut(d.Name, "//")
+	if args := strings.TrimSpace(d.Args); !commented && args != "" && !strings.HasPrefix(args, "//") {
+		return nil
 	}
-	// Drop a trailing comment: "pure,immutable-return // note".
-	list, _, _ = strings.Cut(list, "//")
-	var parts []string
-	for part := range strings.SplitSeq(list, ",") {
-		parts = append(parts, strings.TrimSpace(part))
+	parts := strings.Split(list, ",")
+	if slices.Contains(parts, "") {
+		return nil
 	}
 	return parts
 }
@@ -115,9 +115,10 @@ const MalformedDirectiveMessage = "malformed gormreuse directive: write it as //
 // A comment is addressed to gormreuse when its body, after "//" or "/*" and
 // any whitespace, starts with "gormreuse:". Prose that only mentions
 // gormreuse: later in a sentence is not. It is malformed when
-// [ast.ParseDirective] does not read it as a gormreuse directive: a space
-// after "//" or after the colon, a block comment, a name that does not start
-// with [a-z0-9], or no name at all.
+// [ast.ParseDirective] does not read it as a gormreuse directive, or when its
+// list is not one name: a space after "//", after the colon or after a comma, a
+// block comment, a name that does not start with [a-z0-9], an empty part, or
+// no name at all.
 func IsMalformedDirective(text string) bool {
 	if parseDirective(text) != nil {
 		return false

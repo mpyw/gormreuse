@@ -639,7 +639,12 @@ func TestParseDirective(t *testing.T) {
 	}{
 		{"canonical", "//gormreuse:pure", []string{"pure"}},
 		{"comma list", "//gormreuse:pure,immutable-return", []string{"pure", "immutable-return"}},
-		{"comma list with spaces", "//gormreuse:pure, immutable-return , immutable-param", []string{"pure", "immutable-return", "immutable-param"}},
+		{"space after comma", "//gormreuse:pure, immutable-return", nil},
+		{"space before comma", "//gormreuse:pure ,immutable-return", nil},
+		{"trailing comma", "//gormreuse:pure,", nil},
+		{"leading comma", "//gormreuse:,pure", nil},
+		{"empty part", "//gormreuse:pure,,immutable-return", nil},
+		{"words after the name", "//gormreuse:ignore reason here", nil},
 		{"trailing reason", "//gormreuse:ignore // reason here", []string{"ignore"}},
 		{"trailing reason without space", "//gormreuse:ignore// reason", []string{"ignore"}},
 		{"comma list with trailing reason", "//gormreuse:pure,immutable-return // note", []string{"pure", "immutable-return"}},
@@ -678,8 +683,8 @@ func TestHasDirectiveForms(t *testing.T) {
 		check func(string) bool
 		want  bool
 	}{
-		{"pure in spaced comma list", "//gormreuse:pure, immutable-return", IsPureDirective, true},
-		{"immutable-return in spaced comma list", "//gormreuse:pure, immutable-return", IsImmutableReturnDirective, true},
+		{"pure in spaced comma list", "//gormreuse:pure, immutable-return", IsPureDirective, false},
+		{"immutable-return in spaced comma list", "//gormreuse:pure, immutable-return", IsImmutableReturnDirective, false},
 		{"pure next to immutable-input", "//gormreuse:immutable-input(fn),pure // reason", IsPureDirective, true},
 		{"ignore with block form", "/*gormreuse:ignore*/", IsIgnoreDirective, false},
 		{"ignore with space after marker", "// gormreuse:ignore", IsIgnoreDirective, false},
@@ -715,7 +720,11 @@ func TestIsMalformedDirective(t *testing.T) {
 		{"uppercase name", "//gormreuse:Pure", true},
 		{"no name", "//gormreuse:", true},
 		{"no name in block form", "/*gormreuse:*/", true},
+		{"space after comma", "//gormreuse:pure, immutable-return", true},
+		{"trailing comma", "//gormreuse:pure,", true},
+		{"words after the name", "//gormreuse:ignore reason here", true},
 		{"canonical", "//gormreuse:pure", false},
+		{"canonical with reason and no space", "//gormreuse:ignore// reason", false},
 		{"canonical comma list", "//gormreuse:pure,immutable-return", false},
 		{"canonical with reason", "//gormreuse:ignore // reason", false},
 		{"canonical immutable-input", "//gormreuse:immutable-input(fn)", false},

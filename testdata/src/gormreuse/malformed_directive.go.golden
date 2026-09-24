@@ -29,6 +29,16 @@ func malformedUppercaseName(db *gorm.DB) *gorm.DB {
 //gormreuse: // want `malformed gormreuse directive: write it as //gormreuse:name`
 func malformedNoName() {}
 
+//gormreuse:pure, immutable-return // want `malformed gormreuse directive: write it as //gormreuse:name`
+func malformedSpaceAfterComma(db *gorm.DB) *gorm.DB {
+	return db.Session(&gorm.Session{})
+}
+
+//gormreuse:pure, // want `malformed gormreuse directive: write it as //gormreuse:name`
+func malformedTrailingComma(db *gorm.DB) *gorm.DB {
+	return db.Session(&gorm.Session{})
+}
+
 // A malformed ignore suppresses nothing.
 func malformedIgnoreSuppressesNothing(db *gorm.DB) {
 	q := db.Where("active = ?", true).Session(&gorm.Session{})
