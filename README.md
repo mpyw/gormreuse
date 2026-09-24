@@ -352,10 +352,10 @@ q.Find(&users)             // OK - first branch from whichever root
 
 ## Directives
 
-Only `//gormreuse:name[,name...]` is a directive: a line comment, lowercase names, and no space after `//` or after the colon. A trailing reason may follow after `//`, as in `//gormreuse:ignore // reason here`.
+Only `//gormreuse:name[,name...]` is a directive: a line comment, lowercase names, and no space anywhere in it, including after a comma. A trailing reason may follow after `//`, as in `//gormreuse:ignore // reason here`.
 
 > [!WARNING]
-> Any other comment that starts with `gormreuse:`, such as `// gormreuse:pure`, `//gormreuse: pure` or `/*gormreuse:pure*/`, has no effect and is reported as `malformed gormreuse directive: write it as //gormreuse:name`.
+> Any other comment that starts with `gormreuse:`, such as `// gormreuse:pure`, `//gormreuse: pure`, `//gormreuse:pure, immutable-return` or `/*gormreuse:pure*/`, has no effect and is reported as `malformed gormreuse directive: write it as //gormreuse:name`.
 
 ### `//gormreuse:ignore`
 
