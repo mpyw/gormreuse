@@ -578,12 +578,6 @@ go build -o bin/gormreuse ./cmd/gormreuse
 ./bin/gormreuse ./...
 ```
 
-## Related Tools
-
-- [goroutinectx](https://github.com/mpyw/goroutinectx) - Goroutine context propagation linter
-- [zerologlintctx](https://github.com/mpyw/zerologlintctx) - Zerolog context propagation linter
-- [ctxweaver](https://github.com/mpyw/ctxweaver) - Code generator for context-aware instrumentation
-
 ## License
 
 MIT License
