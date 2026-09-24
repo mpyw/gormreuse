@@ -19,13 +19,6 @@ func ignoreOnPreviousLine(db *gorm.DB) {
 	q.Count(nil)
 }
 
-func ignoreWithSpace(db *gorm.DB) {
-	q := db.Where("active = ?", true)
-	q.Find(nil)
-	// gormreuse:ignore
-	q.Count(nil)
-}
-
 func ignoreMultiple(db *gorm.DB) {
 	q := db.Where("active = ?", true)
 	q.Find(nil)

@@ -33,6 +33,10 @@
 //	//gormreuse:ignore           - Suppress for next line or same line
 //	//gormreuse:pure             - Mark function as not polluting *gorm.DB args
 //	//gormreuse:immutable-return - Mark function as returning immutable *gorm.DB
+//
+// Only //gormreuse:name[,name...] (lowercase, no spaces, line comment) is a
+// directive. Any other comment that starts with "gormreuse:" is reported as
+// malformed.
 package gormreuse
 
 import (
@@ -84,6 +88,9 @@ func run(pass *analysis.Pass) (any, error) {
 		filename := pass.Fset.Position(file.Pos()).Filename
 		if skipFiles[filename] {
 			continue
+		}
+		for _, pos := range directive.FindMalformedDirectives(file) {
+			pass.Reportf(pos, "%s", directive.MalformedDirectiveMessage)
 		}
 		ignoreMaps[filename] = directive.BuildIgnoreMap(pass.Fset, file)
 		funcIgnores[filename] = directive.BuildFunctionIgnoreSet(pass.Fset, file)

@@ -6,6 +6,7 @@ import (
 	"go/parser"
 	"go/token"
 	"go/types"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -125,5 +126,38 @@ func assertOneImmutableInputUnused(t *testing.T, s *ImmutableInputSet, want stri
 	}
 	if got := unused[0].Reason; !strings.Contains(got, want) {
 		t.Errorf("Reason = %q, want substring %q", got, want)
+	}
+}
+
+func TestExtractImmutableInputParams(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		text string
+		want []string
+	}{
+		{"canonical", "//gormreuse:immutable-input(fn)", []string{"fn"}},
+		{"space after marker", "// gormreuse:immutable-input(fn)", nil},
+		{"block form", "/*gormreuse:immutable-input(fn)*/", nil},
+		{"combined with others", "//gormreuse:pure,immutable-input(fn),immutable-return", []string{"fn"}},
+		{"several", "//gormreuse:immutable-input(a),immutable-input(b)", []string{"a", "b"}},
+		{"spaced list", "//gormreuse:pure, immutable-input( fn )", []string{"fn"}},
+		{"trailing reason", "//gormreuse:immutable-input(fn) // passes a fresh session", []string{"fn"}},
+		{"empty name", "//gormreuse:immutable-input()", nil},
+		{"unclosed", "//gormreuse:immutable-input(fn", nil},
+		{"only in trailing reason", "//gormreuse:pure // immutable-input(fn)", nil},
+		{"lookalike tool", "//gormreusex:immutable-input(fn)", nil},
+		{"no directive", "//gormreuse:pure", nil},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := ExtractImmutableInputParams(tt.text); !slices.Equal(got, tt.want) {
+				t.Errorf("ExtractImmutableInputParams(%q) = %q, want %q", tt.text, got, tt.want)
+			}
+		})
 	}
 }

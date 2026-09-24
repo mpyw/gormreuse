@@ -67,6 +67,8 @@ The linter detects when a mutable `*gorm.DB` branches into multiple code paths:
 
 Also: gorm's built-in `Transaction`, `Connection`, and `FindInBatches` are known to pass a fresh (immutable) handle to their callbacks, so reuse inside those callbacks is always allowed.
 
+Only `//gormreuse:name[,name...]` (lowercase, no spaces, line comment) is a directive. It is read by `ast.ParseDirective` with no normalization. Any other comment whose body starts with `gormreuse:` is reported as `malformed gormreuse directive: write it as //gormreuse:name`.
+
 Directives can be combined with commas: `//gormreuse:pure,immutable-return`
 
 Trailing comments use `//`: `//gormreuse:ignore // reason here`

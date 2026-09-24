@@ -5,6 +5,7 @@ import (
 	"go/parser"
 	"go/token"
 	"go/types"
+	"slices"
 	"testing"
 )
 
@@ -17,8 +18,8 @@ func TestIsIgnoreDirective(t *testing.T) {
 		expected bool
 	}{
 		{"exact match", "//gormreuse:ignore", true},
-		{"with space", "// gormreuse:ignore", true},
-		{"with extra spaces", "//  gormreuse:ignore", true},
+		{"with space", "// gormreuse:ignore", false},
+		{"with extra spaces", "//  gormreuse:ignore", false},
 		{"with comment", "//gormreuse:ignore // reason", true},
 		{"wrong directive", "//gormreuse:pure", false},
 		{"random comment", "// some comment", false},
@@ -45,8 +46,8 @@ func TestIsPureDirective(t *testing.T) {
 		expected bool
 	}{
 		{"exact match", "//gormreuse:pure", true},
-		{"with space", "// gormreuse:pure", true},
-		{"with extra spaces", "//  gormreuse:pure", true},
+		{"with space", "// gormreuse:pure", false},
+		{"with extra spaces", "//  gormreuse:pure", false},
 		{"wrong directive", "//gormreuse:ignore", false},
 		{"random comment", "// some comment", false},
 	}
@@ -71,8 +72,8 @@ func TestIsImmutableParamDirective(t *testing.T) {
 		expected bool
 	}{
 		{"exact match", "//gormreuse:immutable-param", true},
-		{"with space", "// gormreuse:immutable-param", true},
-		{"block comment", "/*gormreuse:immutable-param*/", true},
+		{"with space", "// gormreuse:immutable-param", false},
+		{"block comment", "/*gormreuse:immutable-param*/", false},
 		{"combined with pure", "//gormreuse:pure,immutable-param", true},
 		{"combined with immutable-return", "//gormreuse:immutable-return,immutable-param", true},
 		{"trailing comment", "//gormreuse:immutable-param // callers pass root handles", true},
@@ -204,10 +205,10 @@ func TestIgnoreMapMarkUsed(t *testing.T) {
 func TestBuildIgnoreMap(t *testing.T) {
 	t.Parallel()
 
-	src := `// gormreuse:ignore
+	src := `//gormreuse:ignore
 package test
 
-// gormreuse:ignore
+//gormreuse:ignore
 func foo() {}
 `
 	fset := token.NewFileSet()
@@ -225,7 +226,7 @@ func foo() {}
 func TestBuildIgnoreMapWithDocComment(t *testing.T) {
 	t.Parallel()
 
-	src := `// gormreuse:ignore
+	src := `//gormreuse:ignore
 // Package test is a test package.
 package test
 
@@ -257,7 +258,7 @@ func TestBuildFunctionIgnoreSet(t *testing.T) {
 
 	src := `package test
 
-// gormreuse:ignore
+//gormreuse:ignore
 func ignored() {}
 
 func notIgnored() {}
@@ -283,27 +284,27 @@ type Receiver struct{}
 type GenericReceiver[T any] struct{}
 
 // 1. Regular function
-// gormreuse:pure
+//gormreuse:pure
 func pureFunc() {}
 
 // 2. Value receiver method
-// gormreuse:pure
+//gormreuse:pure
 func (r Receiver) pureValueMethod() {}
 
 // 3. Pointer receiver method
-// gormreuse:pure
+//gormreuse:pure
 func (r *Receiver) purePointerMethod() {}
 
 // 4. Generic function
-// gormreuse:pure
+//gormreuse:pure
 func pureGenericFunc[T any]() {}
 
 // 5. Generic value receiver method
-// gormreuse:pure
+//gormreuse:pure
 func (r GenericReceiver[T]) pureGenericValueMethod() {}
 
 // 6. Generic pointer receiver method
-// gormreuse:pure
+//gormreuse:pure
 func (r *GenericReceiver[T]) pureGenericPointerMethod() {}
 
 func notPure() {}
@@ -625,5 +626,141 @@ func TestContainsGormDBCycleDetection(t *testing.T) {
 	got := containsGormDB(recursiveType)
 	if got {
 		t.Error("containsGormDB(Recursive) should return false")
+	}
+}
+
+func TestParseDirective(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		text string
+		want []string
+	}{
+		{"canonical", "//gormreuse:pure", []string{"pure"}},
+		{"comma list", "//gormreuse:pure,immutable-return", []string{"pure", "immutable-return"}},
+		{"comma list with spaces", "//gormreuse:pure, immutable-return , immutable-param", []string{"pure", "immutable-return", "immutable-param"}},
+		{"trailing reason", "//gormreuse:ignore // reason here", []string{"ignore"}},
+		{"trailing reason without space", "//gormreuse:ignore// reason", []string{"ignore"}},
+		{"comma list with trailing reason", "//gormreuse:pure,immutable-return // note", []string{"pure", "immutable-return"}},
+		{"immutable-input combined", "//gormreuse:pure,immutable-input(fn)", []string{"pure", "immutable-input(fn)"}},
+		{"space after marker", "// gormreuse:pure", nil},
+		{"tab after marker", "//\tgormreuse:pure", nil},
+		{"space after colon", "//gormreuse: pure", nil},
+		{"block form", "/*gormreuse:pure*/", nil},
+		{"spaced block form", "/* gormreuse:pure */", nil},
+		{"uppercase name", "//gormreuse:Pure", nil},
+		{"lookalike tool", "//gormreusex:pure", nil},
+		{"tool as suffix", "//xgormreuse:pure", nil},
+		{"other tool", "//nolint:gormreuse", nil},
+		{"no name", "//gormreuse:", nil},
+		{"random comment", "// some comment", nil},
+		{"empty", "//", nil},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := parseDirective(tt.text); !slices.Equal(got, tt.want) {
+				t.Errorf("parseDirective(%q) = %q, want %q", tt.text, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestHasDirectiveForms(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		text  string
+		check func(string) bool
+		want  bool
+	}{
+		{"pure in spaced comma list", "//gormreuse:pure, immutable-return", IsPureDirective, true},
+		{"immutable-return in spaced comma list", "//gormreuse:pure, immutable-return", IsImmutableReturnDirective, true},
+		{"pure next to immutable-input", "//gormreuse:immutable-input(fn),pure // reason", IsPureDirective, true},
+		{"ignore with block form", "/*gormreuse:ignore*/", IsIgnoreDirective, false},
+		{"ignore with space after marker", "// gormreuse:ignore", IsIgnoreDirective, false},
+		{"name in trailing reason does not count", "//gormreuse:ignore // not pure", IsPureDirective, false},
+		{"lookalike tool", "//gormreusex:pure", IsPureDirective, false},
+		{"name prefix does not count", "//gormreuse:pure-ish", IsPureDirective, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := tt.check(tt.text); got != tt.want {
+				t.Errorf("check(%q) = %v, want %v", tt.text, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsMalformedDirective(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		text string
+		want bool
+	}{
+		{"space after marker", "// gormreuse:pure", true},
+		{"tab after marker", "//\tgormreuse:pure", true},
+		{"space after colon", "//gormreuse: pure", true},
+		{"block form", "/*gormreuse:pure*/", true},
+		{"spaced block form", "/* gormreuse:pure */", true},
+		{"uppercase name", "//gormreuse:Pure", true},
+		{"no name", "//gormreuse:", true},
+		{"no name in block form", "/*gormreuse:*/", true},
+		{"canonical", "//gormreuse:pure", false},
+		{"canonical comma list", "//gormreuse:pure,immutable-return", false},
+		{"canonical with reason", "//gormreuse:ignore // reason", false},
+		{"canonical immutable-input", "//gormreuse:immutable-input(fn)", false},
+		{"lookalike tool", "// gormreusex:pure", false},
+		{"prose mentioning the tool", "// see gormreuse:pure for details", false},
+		{"random comment", "// some comment", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := IsMalformedDirective(tt.text); got != tt.want {
+				t.Errorf("IsMalformedDirective(%q) = %v, want %v", tt.text, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFindMalformedDirectives(t *testing.T) {
+	t.Parallel()
+
+	src := `package test
+
+// gormreuse:pure
+func a() {}
+
+//gormreuse:pure
+func b() {}
+
+func c() {
+	_ = 1 /*gormreuse:ignore*/
+}
+`
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "test.go", src, parser.ParseComments)
+	if err != nil {
+		t.Fatalf("Failed to parse: %v", err)
+	}
+
+	var lines []int
+	for _, pos := range FindMalformedDirectives(file) {
+		lines = append(lines, fset.Position(pos).Line)
+	}
+	if want := []int{3, 10}; !slices.Equal(lines, want) {
+		t.Errorf("FindMalformedDirectives lines = %v, want %v", lines, want)
 	}
 }
