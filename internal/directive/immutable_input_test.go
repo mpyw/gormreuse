@@ -138,8 +138,8 @@ func TestExtractImmutableInputParams(t *testing.T) {
 		want []string
 	}{
 		{"canonical", "//gormreuse:immutable-input(fn)", []string{"fn"}},
-		{"space after marker", "// gormreuse:immutable-input(fn)", []string{"fn"}},
-		{"block form", "/*gormreuse:immutable-input(fn)*/", []string{"fn"}},
+		{"space after marker", "// gormreuse:immutable-input(fn)", nil},
+		{"block form", "/*gormreuse:immutable-input(fn)*/", nil},
 		{"combined with others", "//gormreuse:pure,immutable-input(fn),immutable-return", []string{"fn"}},
 		{"several", "//gormreuse:immutable-input(a),immutable-input(b)", []string{"a", "b"}},
 		{"spaced list", "//gormreuse:pure, immutable-input( fn )", []string{"fn"}},

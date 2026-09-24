@@ -1,0 +1,69 @@
+package internal
+
+import "gorm.io/gorm"
+
+// =============================================================================
+// SHOULD REPORT - Comments addressed to gormreuse that are not directives
+// =============================================================================
+
+// gormreuse:pure // want `malformed gormreuse directive: write it as //gormreuse:name`
+func malformedSpaceAfterMarker(db *gorm.DB) *gorm.DB {
+	return db.Session(&gorm.Session{})
+}
+
+//gormreuse: pure // want `malformed gormreuse directive: write it as //gormreuse:name`
+func malformedSpaceAfterColon(db *gorm.DB) *gorm.DB {
+	return db.Session(&gorm.Session{})
+}
+
+/*gormreuse:pure*/ // want `malformed gormreuse directive: write it as //gormreuse:name`
+func malformedBlockForm(db *gorm.DB) *gorm.DB {
+	return db.Session(&gorm.Session{})
+}
+
+//gormreuse:Pure // want `malformed gormreuse directive: write it as //gormreuse:name`
+func malformedUppercaseName(db *gorm.DB) *gorm.DB {
+	return db.Session(&gorm.Session{})
+}
+
+//gormreuse: // want `malformed gormreuse directive: write it as //gormreuse:name`
+func malformedNoName() {}
+
+// A malformed ignore suppresses nothing.
+func malformedIgnoreSuppressesNothing(db *gorm.DB) {
+	q := db.Where("active = ?", true).Session(&gorm.Session{})
+	q.Find(nil)
+	// gormreuse:ignore // want `malformed gormreuse directive: write it as //gormreuse:name`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// =============================================================================
+// SHOULD NOT REPORT - Canonical directives, and comments not addressed to gormreuse
+// =============================================================================
+
+//gormreuse:pure,immutable-return
+func canonicalCommaList(db *gorm.DB) *gorm.DB {
+	return db.Session(&gorm.Session{})
+}
+
+//gormreuse:pure // returns a fresh session
+func canonicalTrailingReason(db *gorm.DB) *gorm.DB {
+	return db.Session(&gorm.Session{})
+}
+
+//gormreuse:immutable-input(cb)
+func canonicalImmutableInput(db *gorm.DB, cb func(tx *gorm.DB)) {
+	cb(db.Session(&gorm.Session{}))
+}
+
+func canonicalIgnore(db *gorm.DB) {
+	q := db.Where("active = ?", true)
+	q.Find(nil)
+	q.Count(nil) //gormreuse:ignore // intentional
+}
+
+// gormreusex:pure
+func lookalikeTool() {}
+
+// The linter reads gormreuse:pure only as a directive, so this prose is fine.
+func proseMentioningTheTool() {}

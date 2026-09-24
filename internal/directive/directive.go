@@ -12,6 +12,14 @@
 //
 //	//gormreuse:pure,immutable-return - Both pure and immutable-return
 //
+// # Syntax
+//
+// Only //gormreuse:name[,name...] is a directive: a line comment, lowercase
+// names, and no space after "//" or after the colon. It is read by
+// [ast.ParseDirective], and a trailing "// reason" is dropped. Any other
+// comment that starts with "gormreuse:" is reported with
+// [MalformedDirectiveMessage].
+//
 // # Directive Placement
 //
 // Directives can be placed:
@@ -73,21 +81,13 @@ type directiveChecker func(text string) bool
 // parseDirective returns the comma-separated parts of a gormreuse directive
 // comment, each trimmed, or nil when the comment is not one.
 //
-// Both line (//gormreuse:...) and block (/*gormreuse:...*/) forms are accepted,
-// with or without spaces after the comment marker. Without the block form,
-// `/*gormreuse:pure*/` was a silent no-op: neither applied nor reported as
-// unused. A trailing comment ("//gormreuse:ignore // reason") is dropped.
+// Only Go's directive form is read, exactly as [ast.ParseDirective] reads it:
+// "//gormreuse:" with no space after "//" or after the colon. A trailing
+// comment ("//gormreuse:ignore // reason") is dropped.
 //
 //declscope:package // immutable_input.go splits its immutable-input(name) parts from the same list
 func parseDirective(text string) []string {
-	// go/ast only recognises the canonical, space-free line form, so strip the
-	// comment markers and re-attach "//" to the trimmed body.
-	if after, ok := strings.CutPrefix(text, "/*"); ok {
-		text = strings.TrimSuffix(after, "*/")
-	} else {
-		text = strings.TrimPrefix(text, "//")
-	}
-	d, ok := ast.ParseDirective(token.NoPos, "//"+strings.TrimSpace(text))
+	d, ok := ast.ParseDirective(token.NoPos, text)
 	if !ok || d.Tool != directiveTool {
 		return nil
 	}
@@ -104,6 +104,45 @@ func parseDirective(text string) []string {
 		parts = append(parts, strings.TrimSpace(part))
 	}
 	return parts
+}
+
+// MalformedDirectiveMessage is reported on every malformed directive.
+const MalformedDirectiveMessage = "malformed gormreuse directive: write it as //gormreuse:name"
+
+// IsMalformedDirective reports whether a comment is addressed to gormreuse but
+// is not a directive.
+//
+// A comment is addressed to gormreuse when its body, after "//" or "/*" and
+// any whitespace, starts with "gormreuse:". Prose that only mentions
+// gormreuse: later in a sentence is not. It is malformed when
+// [ast.ParseDirective] does not read it as a gormreuse directive: a space
+// after "//" or after the colon, a block comment, a name that does not start
+// with [a-z0-9], or no name at all.
+func IsMalformedDirective(text string) bool {
+	if parseDirective(text) != nil {
+		return false
+	}
+	body := text
+	if after, ok := strings.CutPrefix(body, "/*"); ok {
+		body = strings.TrimSuffix(after, "*/")
+	} else {
+		body = strings.TrimPrefix(body, "//")
+	}
+	return strings.HasPrefix(strings.TrimSpace(body), directiveTool+":")
+}
+
+// FindMalformedDirectives returns the position of every comment in file that
+// IsMalformedDirective reports.
+func FindMalformedDirectives(file *ast.File) []token.Pos {
+	var out []token.Pos
+	for _, cg := range file.Comments {
+		for _, c := range cg.List {
+			if IsMalformedDirective(c.Text) {
+				out = append(out, c.Pos())
+			}
+		}
+	}
+	return out
 }
 
 // hasDirective checks if a comment contains the specified directive.

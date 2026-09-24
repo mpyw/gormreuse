@@ -1213,22 +1213,6 @@ func multiAssignPureValidSibling(db *gorm.DB) {
 	_, _ = a, b
 }
 
-// blockCommentPureBad: block-comment directive form is now recognized, so the
-// pure contract is enforced (previously a silent no-op). immutable-param keeps
-// the test focused on the pure contract, not Phase 1b parameter branching.
-/*gormreuse:pure,immutable-param*/
-func blockCommentPureBad(db *gorm.DB) *gorm.DB {
-	db.Find(nil)         // want `pure function pollutes \*gorm\.DB argument by calling Find`
-	return db.Where("x") // want `pure function pollutes \*gorm\.DB argument by calling Where`
-}
-
-// blockCommentPureGood: valid pure via block-comment form — no violation, and
-// not reported as an unused directive.
-/*gormreuse:pure*/
-func blockCommentPureGood(db *gorm.DB) *gorm.DB {
-	return db.Session(&gorm.Session{}).Where("x")
-}
-
 // =============================================================================
 // //gormreuse:immutable-param directive (Phase 1b escape hatch, #61) — Stage 1
 //
