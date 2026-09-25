@@ -40,7 +40,7 @@ Run it in the project root. It pins the version in the project's `mise.toml`, so
 Add `-g` to install it for every project on your machine instead.
 
 > [!IMPORTANT]
-> The `go`-based methods below build gormreuse from source, which requires Go 1.25 or later. `go.mod` pins `toolchain go1.27.0`, so the default `GOTOOLCHAIN=auto` builds the linter with Go 1.27 — a Go 1.27 toolchain is what lets it understand Go 1.27 source (generic methods, promoted struct-literal keys). `go tool` also needs Go 1.24+ on `PATH`, which is where tool directives were introduced.
+> Building gormreuse from source requires Go 1.27 or later.
 
 ### Using [`go tool`](https://pkg.go.dev/cmd/go#hdr-Run_specified_go_tool)
 

@@ -1,8 +1,6 @@
 module github.com/mpyw/gormreuse
 
-go 1.26.0
-
-toolchain go1.27.0
+go 1.27.0
 
 require golang.org/x/tools v0.50.0
 
