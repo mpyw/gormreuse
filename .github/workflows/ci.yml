@@ -25,6 +25,11 @@ jobs:
       - name: Set up mise
         uses: jdx/mise-action@v4
 
+      # shrink goes first: a declaration it would unexport becomes private to
+      # its file, and the analyzer then judges that narrower scope.
+      - name: Run declscope shrink
+        run: declscope shrink ./...
+
       - name: Run declscope
         run: declscope ./...
 
