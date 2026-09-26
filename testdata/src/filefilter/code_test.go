@@ -5,7 +5,7 @@
 // normal package and the test variant, so every diagnostic in a *_test.go
 // fixture is collected twice. This once produced 343 duplicated diagnostics in
 // PR #57. Only name a fixture *_test.go when you are deliberately testing
-// test-file handling (as here); otherwise use a plain .go name. See CLAUDE.md
+// test-file handling (as here); otherwise use a plain .go name. See design/implementation.md
 // "Testing Strategy".
 package filefilter
 
