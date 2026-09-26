@@ -563,7 +563,7 @@ db.Scopes(func(q *gorm.DB) *gorm.DB {
 
 ## Documentation
 
-- [CLAUDE.md](./CLAUDE.md) - AI assistant guidance for development
+- [AGENTS.md](./AGENTS.md) - Repository instructions for contributors and coding agents
 
 ## Development
 
