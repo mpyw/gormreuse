@@ -45,6 +45,8 @@ import (
 
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/analysis/passes/buildssa"
+	"golang.org/x/tools/go/analysis/passes/inspect"
+	"golang.org/x/tools/go/ast/inspector"
 
 	"github.com/mpyw/gormreuse/internal"
 	"github.com/mpyw/gormreuse/internal/directive"
@@ -53,7 +55,9 @@ import (
 // Analyzer is the main analyzer for gormreuse.
 //
 // It requires the buildssa analyzer to build SSA form of the code,
-// then performs reuse detection via pollution tracking.
+// then performs reuse detection via pollution tracking. It also requires the
+// inspect analyzer, which buildssa already depends on, so the directive scans
+// share one AST traversal instead of walking each file again.
 //
 // Usage with go vet:
 //
@@ -65,12 +69,13 @@ import (
 var Analyzer = &analysis.Analyzer{
 	Name:     "gormreuse",
 	Doc:      "detects unsafe *gorm.DB instance reuse after chain methods",
-	Requires: []*analysis.Analyzer{buildssa.Analyzer},
+	Requires: []*analysis.Analyzer{buildssa.Analyzer, inspect.Analyzer},
 	Run:      run,
 }
 
 func run(pass *analysis.Pass) (any, error) {
 	ssaInfo := pass.ResultOf[buildssa.Analyzer].(*buildssa.SSA)
+	insp := pass.ResultOf[inspect.Analyzer].(*inspector.Inspector)
 
 	// Build set of files to skip
 	skipFiles := buildSkipFiles(pass)
@@ -84,7 +89,9 @@ func run(pass *analysis.Pass) (any, error) {
 	immutableInputSet := directive.NewImmutableInputSet(pass.Fset, pass.TypesInfo)
 
 	pkgPath := pass.Pkg.Path()
-	for _, file := range pass.Files {
+	// The inspector's root children are pass.Files, in the same order.
+	for cur := range insp.Root().Children() {
+		file := cur.Node().(*ast.File)
 		filename := pass.Fset.PositionFor(file.Pos(), false).Filename
 		if skipFiles[filename] {
 			continue
@@ -93,23 +100,23 @@ func run(pass *analysis.Pass) (any, error) {
 			pass.Reportf(pos, "%s", directive.MalformedDirectiveMessage)
 		}
 		ignoreMaps[filename] = directive.BuildIgnoreMap(pass.Fset, file)
-		funcIgnores[filename] = directive.BuildFunctionIgnoreSet(pass.Fset, file)
+		funcIgnores[filename] = directive.BuildFunctionIgnoreSet(pass.Fset, cur)
 
 		// Add original file to sets (for position-correct directive detection)
-		pureFuncs.AddFile(file)
-		immutableReturnFuncs.AddFile(file)
-		immutableParamFuncs.AddFile(file)
+		pureFuncs.AddFile(cur)
+		immutableReturnFuncs.AddFile(cur)
+		immutableParamFuncs.AddFile(cur)
 
 		// Build pure function set for this file
-		for key := range directive.BuildPureFuncSet(file, pkgPath) {
+		for key := range directive.BuildPureFuncSet(cur, pkgPath) {
 			pureFuncs.Add(key)
 		}
 		// Build immutable-return function set for this file
-		for key := range directive.BuildImmutableReturnFuncSet(file, pkgPath) {
+		for key := range directive.BuildImmutableReturnFuncSet(cur, pkgPath) {
 			immutableReturnFuncs.Add(key)
 		}
 		// Build immutable-param function set for this file
-		for key := range directive.BuildImmutableParamFuncSet(file, pkgPath) {
+		for key := range directive.BuildImmutableParamFuncSet(cur, pkgPath) {
 			immutableParamFuncs.Add(key)
 		}
 		// Build immutable-input(name) callback declarations for this file

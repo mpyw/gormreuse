@@ -141,14 +141,14 @@ type FunctionIgnoreEntry struct {
 // BuildFunctionIgnoreSet builds a set of functions that should be ignored.
 // Returns a map of function name positions to ignore entry.
 // We use Name.Pos() because SSA's Function.Pos() returns the name position.
-func BuildFunctionIgnoreSet(fset *token.FileSet, file *ast.File) map[token.Pos]FunctionIgnoreEntry {
+// file is the file's cursor in the pass inspector.
+func BuildFunctionIgnoreSet(fset *token.FileSet, file inspector.Cursor) map[token.Pos]FunctionIgnoreEntry {
 	result := make(map[token.Pos]FunctionIgnoreEntry)
 
-	insp := inspector.New([]*ast.File{file})
-	insp.Preorder(funcDeclTypes, func(n ast.Node) {
-		fd := n.(*ast.FuncDecl)
+	for cur := range file.Preorder(funcDeclTypes...) {
+		fd := cur.Node().(*ast.FuncDecl)
 		if fd.Doc == nil {
-			return
+			continue
 		}
 		for _, c := range fd.Doc.List {
 			if IsIgnoreDirective(c.Text) {
@@ -159,7 +159,7 @@ func BuildFunctionIgnoreSet(fset *token.FileSet, file *ast.File) map[token.Pos]F
 				break
 			}
 		}
-	})
+	}
 
 	return result
 }

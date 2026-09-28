@@ -1,0 +1,290 @@
+package main_test
+
+import (
+	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"slices"
+	"strings"
+	"testing"
+)
+
+// TestInspectorPaths runs the built binary over a temporary module that
+// reaches every AST scan driven by the shared pass inspector: the
+// function-level ignore set, the pure / immutable-return / immutable-param
+// sets and their unused-directive checks (closure, same-line,
+// code-before-comment and semicolon cases), the generated-file skip, and the
+// fix generator's statement and call lookups (through -fix -diff).
+func TestInspectorPaths(t *testing.T) {
+	if _, err := exec.LookPath("go"); err != nil {
+		t.Skip("go toolchain not available")
+	}
+
+	bin := filepath.Join(t.TempDir(), "gormreuse")
+	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
+		t.Fatalf("build failed: %v\n%s", err, out)
+	}
+
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	stub, err := os.ReadFile(filepath.Join(filepath.Dir(file), "..", "..", "testdata", "src", "gorm.io", "gorm", "gorm.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(root, "app")
+	writeFiles(t, root, map[string]string{
+		"gorm/go.mod":  "module gorm.io/gorm\n\ngo 1.27\n",
+		"gorm/gorm.go": string(stub),
+		"app/go.mod":   inspectorGoMod,
+		"app/app.go":   inspectorApp,
+		"app/gen.go":   inspectorGen,
+	})
+
+	run := func(args ...string) (string, int) {
+		t.Helper()
+		cmd := exec.Command(bin, args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), "GOPROXY=off", "GOWORK=off", "GOFLAGS=", "GOTOOLCHAIN=local")
+		out, err := cmd.CombinedOutput()
+		code := 0
+		if exitErr, ok := errors.AsType[*exec.ExitError](err); ok {
+			code = exitErr.ExitCode()
+		} else if err != nil {
+			t.Fatalf("run %v: %v", args, err)
+		}
+		return strings.ReplaceAll(string(out), dir, "$DIR"), code
+	}
+
+	t.Run("diagnostics", func(t *testing.T) {
+		out, code := run("./...")
+		if code != 3 {
+			t.Errorf("exit code = %d, want 3", code)
+		}
+		// Unused-directive diagnostics come from a map, so their order varies.
+		lines := strings.Split(strings.TrimSpace(out), "\n")
+		slices.Sort(lines)
+		if got := strings.Join(lines, "\n") + "\n"; got != inspectorDiagnostics {
+			t.Errorf("output mismatch\ngot:\n%s\nwant:\n%s", got, inspectorDiagnostics)
+		}
+	})
+
+	t.Run("fix diff", func(t *testing.T) {
+		out, code := run("-fix", "-diff", "./...")
+		if code != 0 {
+			t.Errorf("exit code = %d, want 0", code)
+		}
+		if out != inspectorDiff {
+			t.Errorf("output mismatch\ngot:\n%s\nwant:\n%s", out, inspectorDiff)
+		}
+	})
+}
+
+func writeFiles(t *testing.T, root string, files map[string]string) {
+	t.Helper()
+	for name, content := range files {
+		path := filepath.Join(root, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+const inspectorGoMod = `module example.com/app
+
+go 1.27
+
+require gorm.io/gorm v0.0.0
+
+replace gorm.io/gorm => ../gorm
+`
+
+const inspectorApp = `package app
+
+import "gorm.io/gorm"
+
+func reuse(db *gorm.DB) {
+	q := db.Where("x")
+	q.Where("a").Find(nil)
+	q.Where("b").Find(nil)
+}
+
+//gormreuse:ignore
+func ignoredFunc(db *gorm.DB) {
+	q := db.Where("x")
+	q.Where("a").Find(nil)
+	q.Where("b").Find(nil)
+}
+
+//gormreuse:ignore
+func unusedIgnore() {}
+
+//gormreuse:pure
+func pureHelper(db *gorm.DB) {}
+
+func notPureHelper(db *gorm.DB) {}
+
+func usesPure(db *gorm.DB) {
+	q := db.Where("x")
+	pureHelper(q)
+	q.Find(nil)
+}
+
+func usesNotPure(db *gorm.DB) {
+	q := db.Where("x")
+	notPureHelper(q)
+	q.Find(nil)
+}
+
+//gormreuse:pure
+func pureWithoutDB(n int) {}
+
+func closures(db *gorm.DB) {
+	//gormreuse:pure
+	f := func(q *gorm.DB) {}
+	g := func(q *gorm.DB) { //gormreuse:pure
+	}
+	//gormreuse:pure
+	a, b := func(q *gorm.DB) {}, 1; c := func(q *gorm.DB) {}
+	h := func(q *gorm.DB) {}
+	_, _ = b, c
+	q := db.Where("x")
+	f(q)
+	g(q)
+	a(q)
+	h(q)
+	q.Find(nil)
+}
+
+func trailing() {
+	x := 1 //gormreuse:pure
+	_ = x
+}
+
+//gormreuse:immutable-return
+func base(db *gorm.DB) *gorm.DB { return db.Where("x").Session(&gorm.Session{}) }
+
+//gormreuse:immutable-return
+func noReturn(db *gorm.DB) {}
+
+func usesBase(db *gorm.DB) {
+	q := base(db)
+	q.Where("a").Find(nil)
+	q.Where("b").Find(nil)
+}
+
+//gormreuse:immutable-param
+func takesImmutable(q *gorm.DB) {
+	q.Where("a").Find(nil)
+	q.Where("b").Find(nil)
+}
+
+func nested(db *gorm.DB, run func(func())) {
+	q := db.Where("x")
+	run(func() { q.Where("a").Find(nil) })
+	q.Where("b").Find(nil)
+}
+
+func reassign(db *gorm.DB) {
+	q := db.Where("x")
+	q.Where("a")
+	q.Where("b").Find(nil)
+}
+
+func paramRoot(q *gorm.DB) {
+	q.Where("a").Find(nil)
+	q.Where("b").Find(nil)
+}
+`
+
+const inspectorGen = `// Code generated by hand for the e2e test. DO NOT EDIT.
+
+package app
+
+import "gorm.io/gorm"
+
+func generatedReuse(db *gorm.DB) {
+	q := db.Where("x")
+	q.Where("a").Find(nil)
+	q.Where("b").Find(nil)
+}
+`
+
+const inspectorDiagnostics = `$DIR/app.go:35:8: *gorm.DB reused: second branch from mutable root (root at app.go:33, first branch at app.go:34); make the root immutable with .Session(&gorm.Session{})
+$DIR/app.go:38:1: unused gormreuse:pure directive
+$DIR/app.go:55:8: *gorm.DB reused: second branch from mutable root (root at app.go:50, first branch at app.go:54); make the root immutable with .Session(&gorm.Session{})
+$DIR/app.go:59:9: unused gormreuse:pure directive
+$DIR/app.go:66:1: unused gormreuse:immutable-return directive
+$DIR/app.go:84:9: *gorm.DB reused: second branch from mutable root (root at app.go:82, first branch at app.go:83); make the root immutable with .Session(&gorm.Session{})
+$DIR/app.go:8:9: *gorm.DB reused: second branch from mutable root (root at app.go:6, first branch at app.go:7); make the root immutable with .Session(&gorm.Session{})
+$DIR/app.go:90:9: *gorm.DB reused: second branch from mutable root (root at app.go:88, first branch at app.go:89); make the root immutable with .Session(&gorm.Session{})
+$DIR/app.go:95:9: *gorm.DB reused: second branch from mutable root (root at app.go:93, first branch at app.go:94); make the root immutable with .Session(&gorm.Session{})
+`
+
+const inspectorDiff = `--- $DIR/app.go (old)
++++ $DIR/app.go (new)
+@@ -3,7 +3,7 @@
+ import "gorm.io/gorm"
+ 
+ func reuse(db *gorm.DB) {
+-	q := db.Where("x")
++	q := db.Where("x").Session(&gorm.Session{})
+ 	q.Where("a").Find(nil)
+ 	q.Where("b").Find(nil)
+ }
+@@ -30,7 +30,7 @@
+ }
+ 
+ func usesNotPure(db *gorm.DB) {
+-	q := db.Where("x")
++	q := db.Where("x").Session(&gorm.Session{})
+ 	notPureHelper(q)
+ 	q.Find(nil)
+ }
+@@ -44,10 +44,11 @@
+ 	g := func(q *gorm.DB) { //gormreuse:pure
+ 	}
+ 	//gormreuse:pure
+-	a, b := func(q *gorm.DB) {}, 1; c := func(q *gorm.DB) {}
++	a, b := func(q *gorm.DB) {}, 1
++	c := func(q *gorm.DB) {}
+ 	h := func(q *gorm.DB) {}
+ 	_, _ = b, c
+-	q := db.Where("x")
++	q := db.Where("x").Session(&gorm.Session{})
+ 	f(q)
+ 	g(q)
+ 	a(q)
+@@ -79,17 +78,18 @@
+ }
+ 
+ func nested(db *gorm.DB, run func(func())) {
+-	q := db.Where("x")
++	q := db.Where("x").Session(&gorm.Session{})
+ 	run(func() { q.Where("a").Find(nil) })
+ 	q.Where("b").Find(nil)
+ }
+ 
+ func reassign(db *gorm.DB) {
+ 	q := db.Where("x")
+-	q.Where("a")
++	q = q.Where("a").Session(&gorm.Session{})
+ 	q.Where("b").Find(nil)
+ }
+ 
++//gormreuse:immutable-param
+ func paramRoot(q *gorm.DB) {
+ 	q.Where("a").Find(nil)
+ 	q.Where("b").Find(nil)
+`
