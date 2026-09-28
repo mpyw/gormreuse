@@ -30,8 +30,9 @@ type DirectiveFuncSet struct {
 	codeBeforeCommentCache map[*ast.File]map[token.Pos]bool
 	// Cache for FuncLit line numbers per file to avoid O(nodes) lookup per line check
 	funcLitLinesCache map[*ast.File]map[int]bool
-	// Cache for ast/inspector to avoid repeated traversal setup
-	inspectorCache map[*ast.File]*inspector.Inspector
+	// File cursors: pass files use the shared pass inspector; a re-parsed
+	// file gets its own inspector on first use.
+	cursors map[*ast.File]inspector.Cursor
 }
 
 // newDirectiveFuncSet creates a new DirectiveFuncSet with the given directive checker and signature validator.
@@ -48,26 +49,30 @@ func newDirectiveFuncSet(fset *token.FileSet, typesInfo *types.Info, isDirective
 		processedDirectives:    make(map[token.Pos]struct{}),
 		codeBeforeCommentCache: make(map[*ast.File]map[token.Pos]bool),
 		funcLitLinesCache:      make(map[*ast.File]map[int]bool),
-		inspectorCache:         make(map[*ast.File]*inspector.Inspector),
+		cursors:                make(map[*ast.File]inspector.Cursor),
 	}
 }
 
-// getInspector returns a cached inspector for the given file.
-func (s *DirectiveFuncSet) getInspector(file *ast.File) *inspector.Inspector {
-	if insp, ok := s.inspectorCache[file]; ok {
-		return insp
+// fileCursor returns the cursor for the given file. A file added with AddFile
+// uses its cursor in the pass inspector; any other file gets its own inspector.
+func (s *DirectiveFuncSet) fileCursor(file *ast.File) inspector.Cursor {
+	if cur, ok := s.cursors[file]; ok {
+		return cur
 	}
-	insp := inspector.New([]*ast.File{file})
-	s.inspectorCache[file] = insp
-	return insp
+	cur, _ := inspector.New([]*ast.File{file}).Root().FirstChild()
+	s.cursors[file] = cur
+	return cur
 }
 
 // AddFile adds an original parsed file to the set and collects all directive positions.
 // This should be called for all files in the current package to avoid re-parsing.
-func (s *DirectiveFuncSet) AddFile(file *ast.File) {
-	if s == nil || s.fset == nil || file == nil {
+// cur is the file's cursor in the pass inspector.
+func (s *DirectiveFuncSet) AddFile(cur inspector.Cursor) {
+	if s == nil || s.fset == nil || !cur.Valid() {
 		return
 	}
+	file := cur.Node().(*ast.File)
+	s.cursors[file] = cur
 	filename := s.fset.PositionFor(file.Pos(), false).Filename
 	if filename != "" {
 		s.files[filename] = file
@@ -84,11 +89,11 @@ func (s *DirectiveFuncSet) collectDirectivePositions(file *ast.File) {
 		return
 	}
 
-	insp := s.getInspector(file)
+	cur := s.fileCursor(file)
 
 	// Check FuncDecl doc comments and same-line comments
-	insp.Preorder(funcDeclTypes, func(n ast.Node) {
-		fd := n.(*ast.FuncDecl)
+	for fdCur := range cur.Preorder(funcDeclTypes...) {
+		fd := fdCur.Node().(*ast.FuncDecl)
 
 		// Check doc comments (next-line pattern)
 		if fd.Doc != nil {
@@ -109,7 +114,7 @@ func (s *DirectiveFuncSet) collectDirectivePositions(file *ast.File) {
 				s.invalidDirectives[pos] = struct{}{}
 			}
 		}
-	})
+	}
 
 	// Check FuncLit directives (next-line and same-line patterns).
 	//
@@ -121,8 +126,8 @@ func (s *DirectiveFuncSet) collectDirectivePositions(file *ast.File) {
 	// would spuriously flag the whole directive unused.)
 	funcLitSeen := make(map[token.Pos]bool)
 	funcLitValid := make(map[token.Pos]bool)
-	insp.Preorder(funcLitTypes, func(n ast.Node) {
-		fl := n.(*ast.FuncLit)
+	for flCur := range cur.Preorder(funcLitTypes...) {
+		fl := flCur.Node().(*ast.FuncLit)
 		if pos := s.findDirectiveForFuncLit(fl); pos.IsValid() {
 			s.processedDirectives[pos] = struct{}{}
 			funcLitSeen[pos] = true
@@ -130,7 +135,7 @@ func (s *DirectiveFuncSet) collectDirectivePositions(file *ast.File) {
 				funcLitValid[pos] = true
 			}
 		}
-	})
+	}
 	for pos := range funcLitSeen {
 		if !funcLitValid[pos] {
 			s.invalidDirectives[pos] = struct{}{}
@@ -142,8 +147,8 @@ func (s *DirectiveFuncSet) collectDirectivePositions(file *ast.File) {
 	associatedDirectives := make(map[token.Pos]bool)
 
 	// Collect all directive positions that are associated with functions
-	insp.Preorder(funcDeclTypes, func(n ast.Node) {
-		fd := n.(*ast.FuncDecl)
+	for fdCur := range cur.Preorder(funcDeclTypes...) {
+		fd := fdCur.Node().(*ast.FuncDecl)
 		if fd.Doc != nil {
 			for _, c := range fd.Doc.List {
 				if s.isDirective(c.Text) {
@@ -154,13 +159,13 @@ func (s *DirectiveFuncSet) collectDirectivePositions(file *ast.File) {
 		if pos := s.findDirectiveAfterFuncDeclBrace(fd); pos.IsValid() {
 			associatedDirectives[pos] = true
 		}
-	})
-	insp.Preorder(funcLitTypes, func(n ast.Node) {
-		fl := n.(*ast.FuncLit)
+	}
+	for flCur := range cur.Preorder(funcLitTypes...) {
+		fl := flCur.Node().(*ast.FuncLit)
 		if pos := s.findDirectiveForFuncLit(fl); pos.IsValid() {
 			associatedDirectives[pos] = true
 		}
-	})
+	}
 
 	// Mark all non-associated directives as invalid
 	for _, cg := range file.Comments {
@@ -692,7 +697,8 @@ func (s *DirectiveFuncSet) isFirstStatementOnLine(file *ast.File, target ast.Stm
 	isFirst := true
 
 	// Check all function bodies in the file for statements on this line
-	ast.Inspect(file, func(n ast.Node) bool {
+	s.fileCursor(file).Inspect(nil, func(c inspector.Cursor) bool {
+		n := c.Node()
 		if !isFirst {
 			return false
 		}
@@ -776,11 +782,10 @@ func (s *DirectiveFuncSet) hasFuncLitOnLine(file *ast.File, line int) bool {
 // buildFuncLitLinesCache pre-computes all FuncLit line numbers for a file.
 func (s *DirectiveFuncSet) buildFuncLitLinesCache(file *ast.File) {
 	lines := make(map[int]bool)
-	insp := s.getInspector(file)
-	insp.Preorder(funcLitTypes, func(n ast.Node) {
-		fl := n.(*ast.FuncLit)
+	for c := range s.fileCursor(file).Preorder(funcLitTypes...) {
+		fl := c.Node().(*ast.FuncLit)
 		lines[s.fset.PositionFor(fl.Pos(), false).Line] = true
-	})
+	}
 	s.funcLitLinesCache[file] = lines
 }
 
@@ -814,7 +819,8 @@ func (s *DirectiveFuncSet) computeCodeBeforeComment(file *ast.File, cg *ast.Comm
 
 	// Check if any AST node ends on the same line before the comment
 	hasCode := false
-	ast.Inspect(file, func(n ast.Node) bool {
+	s.fileCursor(file).Inspect(nil, func(c inspector.Cursor) bool {
+		n := c.Node()
 		if hasCode {
 			return false
 		}
@@ -933,17 +939,18 @@ func NewImmutableParamFuncSet(fset *token.FileSet, typesInfo *types.Info) *Direc
 }
 
 // BuildPureFuncSet builds a set of functions marked with //gormreuse:pure.
-func BuildPureFuncSet(file *ast.File, pkgPath string) map[FuncKey]struct{} {
+// file is the file's cursor in the pass inspector.
+func BuildPureFuncSet(file inspector.Cursor, pkgPath string) map[FuncKey]struct{} {
 	return buildFuncSet(file, pkgPath, IsPureDirective)
 }
 
 // BuildImmutableReturnFuncSet builds a set of functions marked with //gormreuse:immutable-return.
-func BuildImmutableReturnFuncSet(file *ast.File, pkgPath string) map[FuncKey]struct{} {
+func BuildImmutableReturnFuncSet(file inspector.Cursor, pkgPath string) map[FuncKey]struct{} {
 	return buildFuncSet(file, pkgPath, IsImmutableReturnDirective)
 }
 
 // BuildImmutableParamFuncSet builds a set of functions marked with //gormreuse:immutable-param.
-func BuildImmutableParamFuncSet(file *ast.File, pkgPath string) map[FuncKey]struct{} {
+func BuildImmutableParamFuncSet(file inspector.Cursor, pkgPath string) map[FuncKey]struct{} {
 	return buildFuncSet(file, pkgPath, IsImmutableParamDirective)
 }
 
@@ -952,30 +959,27 @@ func BuildImmutableParamFuncSet(file *ast.File, pkgPath string) map[FuncKey]stru
 // =============================================================================
 
 // buildFuncSet builds a set of functions matching the given directive checker.
-func buildFuncSet(file *ast.File, pkgPath string, isDirective func(string) bool) map[FuncKey]struct{} {
+func buildFuncSet(file inspector.Cursor, pkgPath string, isDirective func(string) bool) map[FuncKey]struct{} {
 	result := make(map[FuncKey]struct{})
 
-	ast.Inspect(file, func(n ast.Node) bool {
-		switch node := n.(type) {
-		case *ast.FuncDecl:
-			if node.Doc != nil {
-				for _, c := range node.Doc.List {
-					if isDirective(c.Text) {
-						key := FuncKey{
-							PkgPath:  pkgPath,
-							FuncName: node.Name.Name,
-						}
-						if node.Recv != nil && len(node.Recv.List) > 0 {
-							key.ReceiverType = receiverTypeStringFromExpr(node.Recv.List[0].Type)
-						}
-						result[key] = struct{}{}
-						break
+	for cur := range file.Preorder(funcDeclTypes...) {
+		node := cur.Node().(*ast.FuncDecl)
+		if node.Doc != nil {
+			for _, c := range node.Doc.List {
+				if isDirective(c.Text) {
+					key := FuncKey{
+						PkgPath:  pkgPath,
+						FuncName: node.Name.Name,
 					}
+					if node.Recv != nil && len(node.Recv.List) > 0 {
+						key.ReceiverType = receiverTypeStringFromExpr(node.Recv.List[0].Type)
+					}
+					result[key] = struct{}{}
+					break
 				}
 			}
 		}
-		return true
-	})
+	}
 
 	return result
 }

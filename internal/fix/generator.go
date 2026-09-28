@@ -43,6 +43,7 @@ import (
 	"strconv"
 
 	"golang.org/x/tools/go/analysis"
+	"golang.org/x/tools/go/analysis/passes/inspect"
 	"golang.org/x/tools/go/ast/astutil"
 	"golang.org/x/tools/go/ast/inspector"
 	"golang.org/x/tools/go/ssa"
@@ -55,9 +56,9 @@ import (
 type Generator struct {
 	pass            *analysis.Pass
 	fset            *token.FileSet
-	files           map[*token.File]*ast.File          // token.File -> ast.File mapping
-	inspectors      map[*ast.File]*inspector.Inspector // cached inspectors per file
-	scopesCallbacks map[*ssa.Function]bool             // Scopes/Preload callbacks (no immutable-param fix)
+	files           map[*token.File]*ast.File      // token.File -> ast.File mapping
+	cursors         map[*ast.File]inspector.Cursor // file cursors in the pass inspector
+	scopesCallbacks map[*ssa.Function]bool         // Scopes/Preload callbacks (no immutable-param fix)
 }
 
 // New creates a new fix Generator. scopesCallbacks lists Scopes/Preload callback
@@ -73,23 +74,24 @@ func New(pass *analysis.Pass, scopesCallbacks map[*ssa.Function]bool) *Generator
 		}
 	}
 
+	// Reuse the pass inspector instead of building one per file.
+	cursors := make(map[*ast.File]inspector.Cursor)
+	for cur := range pass.ResultOf[inspect.Analyzer].(*inspector.Inspector).Root().Children() {
+		cursors[cur.Node().(*ast.File)] = cur
+	}
+
 	return &Generator{
 		pass:            pass,
 		fset:            pass.Fset,
 		files:           files,
-		inspectors:      make(map[*ast.File]*inspector.Inspector),
+		cursors:         cursors,
 		scopesCallbacks: scopesCallbacks,
 	}
 }
 
-// getInspector returns a cached inspector for the given file.
-func (g *Generator) getInspector(file *ast.File) *inspector.Inspector {
-	if insp, ok := g.inspectors[file]; ok {
-		return insp
-	}
-	insp := inspector.New([]*ast.File{file})
-	g.inspectors[file] = insp
-	return insp
+// fileCursor returns the cursor for the given file in the pass inspector.
+func (g *Generator) fileCursor(file *ast.File) inspector.Cursor {
+	return g.cursors[file]
 }
 
 // Generate generates SuggestedFix for a violation.
@@ -712,9 +714,8 @@ var stmtNodeTypes = []ast.Node{
 // findStmtAtPos finds the innermost statement at the given position.
 func (g *Generator) findStmtAtPos(file *ast.File, pos token.Pos) ast.Stmt {
 	var result ast.Stmt
-	insp := g.getInspector(file)
-	insp.Preorder(stmtNodeTypes, func(n ast.Node) {
-		stmt := n.(ast.Stmt)
+	for c := range g.fileCursor(file).Preorder(stmtNodeTypes...) {
+		stmt := c.Node().(ast.Stmt)
 		// Check if this statement contains the position
 		if stmt.Pos() <= pos && pos < stmt.End() {
 			// Keep the innermost (narrowest) statement
@@ -722,7 +723,7 @@ func (g *Generator) findStmtAtPos(file *ast.File, pos token.Pos) ast.Stmt {
 				result = stmt
 			}
 		}
-	})
+	}
 	return result
 }
 
@@ -742,9 +743,8 @@ func (g *Generator) getVariableNameAtPos(pos token.Pos) string {
 	// We need outermost because for `base.Or(q.Where("y"))`, we want `base`, not `q`.
 	// We must check for SelectorExpr because FuncLit calls like `func(){}()` are also CallExpr.
 	var result *ast.CallExpr
-	insp := g.getInspector(file)
-	insp.Preorder(callExprNodeTypes, func(n ast.Node) {
-		callExpr := n.(*ast.CallExpr)
+	for c := range g.fileCursor(file).Preorder(callExprNodeTypes...) {
+		callExpr := c.Node().(*ast.CallExpr)
 		if callExpr.Pos() <= pos && pos <= callExpr.End() {
 			// Only consider method calls (SelectorExpr), not FuncLit calls
 			if _, ok := callExpr.Fun.(*ast.SelectorExpr); ok {
@@ -754,7 +754,7 @@ func (g *Generator) getVariableNameAtPos(pos token.Pos) string {
 				}
 			}
 		}
-	})
+	}
 
 	if result == nil {
 		return ""
@@ -859,16 +859,15 @@ func (g *Generator) getCallExprEndPos(pos token.Pos) token.Pos {
 // to find db.Where(...), not the outer t.Run(...) call.
 func (g *Generator) findInnermostCallExpr(file *ast.File, pos token.Pos) *ast.CallExpr {
 	var best *ast.CallExpr
-	insp := g.getInspector(file)
-	insp.Preorder(callExprNodeTypes, func(n ast.Node) {
-		call := n.(*ast.CallExpr)
+	for c := range g.fileCursor(file).Preorder(callExprNodeTypes...) {
+		call := c.Node().(*ast.CallExpr)
 		if call.Pos() <= pos && pos < call.End() {
 			// Found a CallExpr containing pos; keep the narrowest one
 			if best == nil || nodeWidth(call) < nodeWidth(best) {
 				best = call
 			}
 		}
-	})
+	}
 	return best
 }
 

@@ -7,6 +7,8 @@ import (
 	"go/types"
 	"slices"
 	"testing"
+
+	"golang.org/x/tools/go/ast/inspector"
 )
 
 func TestIsIgnoreDirective(t *testing.T) {
@@ -269,7 +271,8 @@ func notIgnored() {}
 		t.Fatalf("Failed to parse: %v", err)
 	}
 
-	set := BuildFunctionIgnoreSet(fset, file)
+	cur, _ := inspector.New([]*ast.File{file}).Root().FirstChild()
+	set := BuildFunctionIgnoreSet(fset, cur)
 	if len(set) != 1 {
 		t.Errorf("Expected 1 ignored function, got %d", len(set))
 	}
@@ -315,7 +318,8 @@ func notPure() {}
 		t.Fatalf("Failed to parse: %v", err)
 	}
 
-	set := BuildPureFuncSet(file, "test/pkg")
+	cur, _ := inspector.New([]*ast.File{file}).Root().FirstChild()
+	set := BuildPureFuncSet(cur, "test/pkg")
 	if len(set) != 6 {
 		t.Errorf("Expected 6 pure functions, got %d", len(set))
 	}
