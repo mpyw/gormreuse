@@ -356,10 +356,8 @@ Only `//gormreuse:name[,name...]` is a directive: a line comment, lowercase name
 
 The names are `ignore`, `pure`, `immutable-return`, `immutable-param` and `immutable-input(name)`.
 
-A directive is matched to code by its place in the `.go` file. A `//line` directive does not change this. Reports still show the `//line` positions.
-
 > [!WARNING]
-> Any other comment that starts with `gormreuse:` has no effect, and is reported with how to write it. One unknown name in a list drops the whole comment: `//gormreuse:pure,imutable-return` does not mark the function pure.
+> Any other comment that starts with `gormreuse:` has no effect, and is reported with how to write it. One unknown name in a list drops the whole comment: `//gormreuse:pure,bogus` does not mark the function pure.
 
 ### `//gormreuse:ignore`
 
