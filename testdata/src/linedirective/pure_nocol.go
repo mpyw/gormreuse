@@ -1,0 +1,37 @@
+package linedirective
+
+import "gorm.io/gorm"
+
+// Every function in this file sits below a //line directive without a column,
+// which keeps the file name but sets every column to 0 (issue #153).
+
+//line pure_nocol.go:100
+func pureSameLineNoColumn(q *gorm.DB) { //gormreuse:pure
+	_ = q
+}
+
+func callPureSameLineNoColumn(db *gorm.DB) {
+	q := db.Where("base")
+	pureSameLineNoColumn(q)
+	q.Find(nil)
+}
+
+func callPureClosureSameLineNoColumn(db *gorm.DB) {
+	helper := func(q *gorm.DB) { //gormreuse:pure
+		_ = q
+	}
+	q := db.Where("base")
+	helper(q)
+	q.Find(nil)
+}
+
+// The directive applies to the first statement on its line only, so b stays
+// unmarked and pollutes q.
+func semicolonNoColumn(db *gorm.DB) {
+	//gormreuse:pure
+	a := func(q *gorm.DB) { _ = q }; b := func(q *gorm.DB) { q.Find(nil) }
+	q := db.Where("base")
+	a(q)
+	b(q)
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root \(root at pure_nocol\.go:124, first branch at pure_nocol\.go:126\)`
+}

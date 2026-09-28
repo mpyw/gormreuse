@@ -282,7 +282,7 @@ func closureInvocationPos(mc *ssa.MakeClosure, fset *token.FileSet) token.Pos {
 	if !ok {
 		return token.NoPos
 	}
-	if fset.Position(found).Line <= fset.Position(lit.End()).Line {
+	if fset.PositionFor(found, false).Line <= fset.PositionFor(lit.End(), false).Line {
 		return token.NoPos // IIFE / same-line invocation: keep body positions
 	}
 	return found

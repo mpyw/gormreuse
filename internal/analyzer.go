@@ -96,7 +96,7 @@ func RunSSA(
 		if !pos.IsValid() {
 			return true
 		}
-		filename := pass.Fset.Position(pos).Filename
+		filename := pass.Fset.PositionFor(pos, false).Filename
 		if skipFiles[filename] {
 			return true
 		}
@@ -205,7 +205,7 @@ func RunSSA(
 			continue
 		}
 
-		chk := newChecker(pass, ignoreMaps[pass.Fset.Position(fn.Pos()).Filename], pureFuncs, immutableReturnFuncs, immutableParamFuncs, failedPure, scopesCallbacks, immutableCallbacks, needsImmutableParam, globalReported, globalSuggestedEdits, fixGen)
+		chk := newChecker(pass, ignoreMaps[pass.Fset.PositionFor(fn.Pos(), false).Filename], pureFuncs, immutableReturnFuncs, immutableParamFuncs, failedPure, scopesCallbacks, immutableCallbacks, needsImmutableParam, globalReported, globalSuggestedEdits, fixGen)
 		recoverPerFunction(fn, func() { chk.checkFunction(fn) })
 	}
 
@@ -486,7 +486,7 @@ func (c *checker) reportViolation(v pollution.Violation) {
 	c.reported[pos] = true
 
 	// Check if line is ignored
-	line := c.pass.Fset.Position(pos).Line
+	line := c.pass.Fset.PositionFor(pos, false).Line
 	if c.ignoreMap != nil && c.ignoreMap.ShouldIgnore(line) {
 		return // Suppressed by ignore directive
 	}
@@ -550,7 +550,7 @@ func (c *checker) reportViolationWithoutFix(v pollution.Violation) {
 	c.reported[pos] = true
 
 	// Check if line is ignored
-	line := c.pass.Fset.Position(pos).Line
+	line := c.pass.Fset.PositionFor(pos, false).Line
 	if c.ignoreMap != nil && c.ignoreMap.ShouldIgnore(line) {
 		return // Suppressed by ignore directive
 	}

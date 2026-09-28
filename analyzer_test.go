@@ -25,6 +25,15 @@ func TestFileFilter(t *testing.T) {
 	analysistest.Run(t, testdata, gormreuse.Analyzer, "filefilter")
 }
 
+// TestLineDirective verifies that //line directives do not move ignore and
+// pure directives, the generated-file skip, or the line keys of ignores
+// (issues #151, #152, #153).
+func TestLineDirective(t *testing.T) {
+	t.Parallel()
+	testdata := analysistest.TestData()
+	analysistest.RunWithSuggestedFixes(t, testdata, gormreuse.Analyzer, "linedirective")
+}
+
 func TestSuggestedFixes(t *testing.T) {
 	t.Parallel()
 	testdata := analysistest.TestData()

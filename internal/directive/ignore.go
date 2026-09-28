@@ -49,12 +49,12 @@ func BuildIgnoreMap(fset *token.FileSet, file *ast.File) IgnoreMap {
 	m := make(IgnoreMap)
 
 	// Get package declaration line for file-level ignore detection
-	packageLine := fset.Position(file.Package).Line
+	packageLine := fset.PositionFor(file.Package, false).Line
 
 	// Check all comments for ignore directives
 	for _, cg := range file.Comments {
 		for _, c := range cg.List {
-			pos := fset.Position(c.Pos())
+			pos := fset.PositionFor(c.Pos(), false)
 			if IsIgnoreDirective(c.Text) {
 				// A directive anywhere BEFORE the package clause is a file-level
 				// ignore, regardless of distance: there is no code above the
@@ -154,7 +154,7 @@ func BuildFunctionIgnoreSet(fset *token.FileSet, file *ast.File) map[token.Pos]F
 			if IsIgnoreDirective(c.Text) {
 				// Use Name.Pos() to match SSA's fn.Pos()
 				result[fd.Name.Pos()] = FunctionIgnoreEntry{
-					DirectiveLine: fset.Position(c.Pos()).Line,
+					DirectiveLine: fset.PositionFor(c.Pos(), false).Line,
 				}
 				break
 			}
