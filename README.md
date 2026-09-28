@@ -359,16 +359,7 @@ The names are `ignore`, `pure`, `immutable-return`, `immutable-param` and `immut
 A directive is matched to code by its place in the `.go` file. A `//line` directive does not change this. Reports still show the `//line` positions.
 
 > [!WARNING]
-> Any other comment that starts with `gormreuse:` has no effect and is reported:
->
-> | Written | Report |
-> | --- | --- |
-> | `// gormreuse:pure`, `//gormreuse: pure`, `//gormreuse:pure, immutable-return`, `/*gormreuse:pure*/` | `malformed gormreuse directive: write it as //gormreuse:name` |
-> | `//gormreuse:ignor`, `//gormreuse:pure,imutable-return` | `unknown directive gormreuse:ignor (want ignore, pure, immutable-return, immutable-param or immutable-input(name))` |
-> | `//gormreuse:immutable-input(cb`, `//gormreuse:immutable-input()` | `malformed gormreuse:immutable-input(cb directive: write it as immutable-input(name)` |
-> | `//gormreuse:ignore - reason`, `//gormreuse:ignore intentional reuse` | `gormreuse:ignore takes no argument; write a reason after //` |
->
-> One unknown name in a list drops the whole comment. `//gormreuse:pure,imutable-return` does not mark the function pure.
+> Any other comment that starts with `gormreuse:` has no effect, and is reported with how to write it. One unknown name in a list drops the whole comment: `//gormreuse:pure,imutable-return` does not mark the function pure.
 
 ### `//gormreuse:ignore`
 
