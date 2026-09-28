@@ -73,6 +73,8 @@ Directives can be combined with commas: `//gormreuse:pure,immutable-return`
 
 Trailing comments use `//`: `//gormreuse:ignore // reason here`
 
+All internal positions (file keys, ignore lines, directive placement, the generated-file skip, the disk fallback in `funcset.go`, fix offsets) use `PositionFor(pos, false)`, so `//line` directives cannot move them (#151, #152, #153). Only the `root at file:line` text in messages stays adjusted, to match the position the driver prints.
+
 **Directive placement for closures:**
 
 ```go

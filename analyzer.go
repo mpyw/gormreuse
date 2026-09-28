@@ -85,7 +85,7 @@ func run(pass *analysis.Pass) (any, error) {
 
 	pkgPath := pass.Pkg.Path()
 	for _, file := range pass.Files {
-		filename := pass.Fset.Position(file.Pos()).Filename
+		filename := pass.Fset.PositionFor(file.Pos(), false).Filename
 		if skipFiles[filename] {
 			continue
 		}
@@ -129,7 +129,7 @@ func buildSkipFiles(pass *analysis.Pass) map[string]bool {
 	skipFiles := make(map[string]bool)
 
 	for _, file := range pass.Files {
-		filename := pass.Fset.Position(file.Pos()).Filename
+		filename := pass.Fset.PositionFor(file.Pos(), false).Filename
 
 		// Always skip generated files
 		if ast.IsGenerated(file) {

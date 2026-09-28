@@ -1,0 +1,48 @@
+package linedirective
+
+import (
+	"gorm.io/gorm"
+
+	"linedirectivedep"
+)
+
+// Pure directives below a //line directive that renames the file (issue #152).
+
+//line pure_file.tmpl:1:1
+func pureSameLineBelowLineDirective(q *gorm.DB) { //gormreuse:pure
+	_ = q
+}
+
+func callPureSameLineBelowLineDirective(db *gorm.DB) {
+	q := db.Where("base")
+	pureSameLineBelowLineDirective(q)
+	q.Find(nil)
+}
+
+func callPureClosureBelowLineDirective(db *gorm.DB) {
+	//gormreuse:pure
+	helper := func(q *gorm.DB) {
+		_ = q
+	}
+	q := db.Where("base")
+	helper(q)
+	q.Find(nil)
+}
+
+// The pure helper lives in another package whose file has a //line directive.
+func callPureDepBelowLineDirective(db *gorm.DB) {
+	q := db.Where("base")
+	linedirectivedep.Helper(q)
+	q.Find(nil)
+}
+
+// Control: an unmarked helper still pollutes its argument.
+func notPureBelowLineDirective(q *gorm.DB) {
+	_ = q
+}
+
+func callNotPureBelowLineDirective(db *gorm.DB) {
+	q := db.Where("base")
+	notPureBelowLineDirective(q)
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root \(root at pure_file\.tmpl:34, first branch at pure_file\.tmpl:35\)`
+}

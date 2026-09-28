@@ -80,8 +80,8 @@ func ApplyFixes(testdata, pkg, srcPath string, a *analysis.Analyzer) (original, 
 						continue
 					}
 					edits = append(edits, offsetEdit{
-						start:   result.Pass.Fset.Position(edit.Pos).Offset,
-						end:     result.Pass.Fset.Position(edit.End).Offset,
+						start:   result.Pass.Fset.PositionFor(edit.Pos, false).Offset,
+						end:     result.Pass.Fset.PositionFor(edit.End, false).Offset,
 						newText: string(edit.NewText),
 					})
 				}

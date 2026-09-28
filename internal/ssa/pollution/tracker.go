@@ -197,6 +197,7 @@ func (t *Tracker) loc(pos token.Pos) string {
 	if t.fset == nil {
 		return ""
 	}
+	// Deliberately adjusted: this text sits next to the driver-printed position.
 	p := t.fset.Position(pos)
 	return filepath.Base(p.Filename) + ":" + strconv.Itoa(p.Line)
 }

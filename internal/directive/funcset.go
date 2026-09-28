@@ -68,7 +68,7 @@ func (s *DirectiveFuncSet) AddFile(file *ast.File) {
 	if s == nil || s.fset == nil || file == nil {
 		return
 	}
-	filename := s.fset.Position(file.Pos()).Filename
+	filename := s.fset.PositionFor(file.Pos(), false).Filename
 	if filename != "" {
 		s.files[filename] = file
 	}
@@ -314,7 +314,7 @@ func (s *DirectiveFuncSet) hasDirective(fn *ssa.Function) bool {
 	if !pos.IsValid() {
 		return false
 	}
-	filename := s.fset.Position(pos).Filename
+	filename := s.fset.PositionFor(pos, false).Filename
 	if filename == "" {
 		return false
 	}
@@ -381,7 +381,7 @@ func (s *DirectiveFuncSet) findDirectiveAfterFuncDeclBrace(funcDecl *ast.FuncDec
 	if s == nil || s.fset == nil || funcDecl.Body == nil {
 		return token.NoPos
 	}
-	bracePos := s.fset.Position(funcDecl.Body.Lbrace)
+	bracePos := s.fset.PositionFor(funcDecl.Body.Lbrace, false)
 	return s.findMatchingDirective(funcDecl, func(_ *ast.File, cg *ast.CommentGroup) bool {
 		return s.isCommentAfterBrace(cg, bracePos)
 	})
@@ -395,7 +395,7 @@ func (s *DirectiveFuncSet) findDirectiveAfterFuncDeclBrace(funcDecl *ast.FuncDec
 //	//comment           ← different line → false
 //	{ //comment         ← brace at column 1, comment at column 3 → true
 func (s *DirectiveFuncSet) isCommentAfterBrace(cg *ast.CommentGroup, bracePos token.Position) bool {
-	cgPos := s.fset.Position(cg.Pos())
+	cgPos := s.fset.PositionFor(cg.Pos(), false)
 	return cgPos.Line == bracePos.Line && cgPos.Column > bracePos.Column
 }
 
@@ -460,7 +460,7 @@ func (s *DirectiveFuncSet) getFileForNode(node ast.Node) *ast.File {
 	if !pos.IsValid() {
 		return nil
 	}
-	filename := s.fset.Position(pos).Filename
+	filename := s.fset.PositionFor(pos, false).Filename
 	if filename == "" {
 		return nil
 	}
@@ -514,8 +514,8 @@ func (s *DirectiveFuncSet) commentGroupHasDirective(cg *ast.CommentGroup) bool {
 //	}, //gormreuse:pure
 //	func(){}  ← does NOT get the directive (directive is not alone on its line)
 func (s *DirectiveFuncSet) matchesNextLineDirective(file *ast.File, funcLit *ast.FuncLit, cg *ast.CommentGroup) bool {
-	cgStartLine := s.fset.Position(cg.Pos()).Line
-	cgEndLine := s.fset.Position(cg.End()).Line
+	cgStartLine := s.fset.PositionFor(cg.Pos(), false).Line
+	cgEndLine := s.fset.PositionFor(cg.End(), false).Line
 
 	// Requirement 1: Directive must be alone on its line (no code before it)
 	if s.hasCodeBeforeComment(file, cg) {
@@ -564,7 +564,7 @@ func (s *DirectiveFuncSet) matchesSameLineDirective(file *ast.File, funcLit *ast
 		return false
 	}
 
-	bracePos := s.fset.Position(funcLit.Body.Lbrace)
+	bracePos := s.fset.PositionFor(funcLit.Body.Lbrace, false)
 
 	// Requirements 1 & 2: Comment must be after brace on same line
 	if !s.isCommentAfterBrace(cg, bracePos) {
@@ -572,7 +572,7 @@ func (s *DirectiveFuncSet) matchesSameLineDirective(file *ast.File, funcLit *ast
 	}
 
 	// Requirement 3: Check there's no nested FuncLit brace between this { and the comment
-	cgColumn := s.fset.Position(cg.Pos()).Column
+	cgColumn := s.fset.PositionFor(cg.Pos(), false).Column
 	return !s.hasNestedFuncLitBetween(funcLit, bracePos.Column, cgColumn, bracePos.Line)
 }
 
@@ -617,8 +617,8 @@ func (s *DirectiveFuncSet) isDirectValueInStatementAfterLine(file *ast.File, fun
 		return s.isDirectValueInValueSpecAfterLine(path, funcLit, directiveLine)
 	}
 
-	stmtLine := s.fset.Position(enclosingStmt.Pos()).Line
-	funcLitLine := s.fset.Position(funcLit.Pos()).Line
+	stmtLine := s.fset.PositionFor(enclosingStmt.Pos(), false).Line
+	funcLitLine := s.fset.PositionFor(funcLit.Pos(), false).Line
 
 	// Case 1: Statement starts on expected line → all direct FuncLits in that statement
 	// Case 2: FuncLit starts on expected line → this specific FuncLit (multi-line assignment)
@@ -670,8 +670,8 @@ func (s *DirectiveFuncSet) isDirectValueInValueSpecAfterLine(path []ast.Node, fu
 		return false
 	}
 
-	specLine := s.fset.Position(spec.Pos()).Line
-	funcLitLine := s.fset.Position(funcLit.Pos()).Line
+	specLine := s.fset.PositionFor(spec.Pos(), false).Line
+	funcLitLine := s.fset.PositionFor(funcLit.Pos(), false).Line
 	if specLine != expectedLine && funcLitLine != expectedLine {
 		return false
 	}
@@ -688,7 +688,7 @@ func (s *DirectiveFuncSet) isDirectValueInValueSpecAfterLine(path []ast.Node, fu
 // isFirstStatementOnLine checks if the given statement is the first (leftmost) one on its line.
 // This is important for semicolon-separated statements: `a := f1(); b := f2()`
 func (s *DirectiveFuncSet) isFirstStatementOnLine(file *ast.File, target ast.Stmt, line int) bool {
-	targetColumn := s.fset.Position(target.Pos()).Column
+	targetColumn := s.fset.PositionFor(target.Pos(), false).Column
 	isFirst := true
 
 	// Check all function bodies in the file for statements on this line
@@ -697,7 +697,7 @@ func (s *DirectiveFuncSet) isFirstStatementOnLine(file *ast.File, target ast.Stm
 			return false
 		}
 		if stmt, ok := n.(ast.Stmt); ok && stmt != target {
-			stmtPos := s.fset.Position(stmt.Pos())
+			stmtPos := s.fset.PositionFor(stmt.Pos(), false)
 			if stmtPos.Line == line && stmtPos.Column < targetColumn {
 				// Found a statement earlier on the same line
 				isFirst = false
@@ -779,7 +779,7 @@ func (s *DirectiveFuncSet) buildFuncLitLinesCache(file *ast.File) {
 	insp := s.getInspector(file)
 	insp.Preorder(funcLitTypes, func(n ast.Node) {
 		fl := n.(*ast.FuncLit)
-		lines[s.fset.Position(fl.Pos()).Line] = true
+		lines[s.fset.PositionFor(fl.Pos(), false).Line] = true
 	})
 	s.funcLitLinesCache[file] = lines
 }
@@ -808,7 +808,7 @@ func (s *DirectiveFuncSet) hasCodeBeforeComment(file *ast.File, cg *ast.CommentG
 
 // computeCodeBeforeComment does the actual computation for hasCodeBeforeComment.
 func (s *DirectiveFuncSet) computeCodeBeforeComment(file *ast.File, cg *ast.CommentGroup) bool {
-	cgPos := s.fset.Position(cg.Pos())
+	cgPos := s.fset.PositionFor(cg.Pos(), false)
 	cgLine := cgPos.Line
 	cgColumn := cgPos.Column
 
@@ -828,8 +828,8 @@ func (s *DirectiveFuncSet) computeCodeBeforeComment(file *ast.File, cg *ast.Comm
 		}
 
 		// Early termination optimization: skip nodes that can't be on the target line
-		nodeStart := s.fset.Position(n.Pos())
-		nodeEnd := s.fset.Position(n.End())
+		nodeStart := s.fset.PositionFor(n.Pos(), false)
+		nodeEnd := s.fset.PositionFor(n.End(), false)
 
 		// If node ends before the comment's line, skip it and its children
 		if nodeEnd.Line < cgLine {
@@ -861,7 +861,7 @@ func (s *DirectiveFuncSet) hasNestedFuncLitBetween(parent *ast.FuncLit, startCol
 		}
 		if nested, ok := n.(*ast.FuncLit); ok && nested != parent {
 			if nested.Body != nil {
-				nestedPos := s.fset.Position(nested.Body.Lbrace)
+				nestedPos := s.fset.PositionFor(nested.Body.Lbrace, false)
 				if nestedPos.Line == line && nestedPos.Column > startColumn && nestedPos.Column < endColumn {
 					found = true
 					return false

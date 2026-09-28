@@ -1,0 +1,20 @@
+package linedirective
+
+import "gorm.io/gorm"
+
+// The //line below maps collideReported onto the lines of collideIgnored. The
+// ignore in collideIgnored must not silence collideReported (issue #151).
+
+func collideIgnored(db *gorm.DB) {
+	q := db.Where("active = ?", true)
+	q.Find(nil)
+	//gormreuse:ignore
+	q.Count(nil)
+}
+
+//line collide.go:8
+func collideReported(db *gorm.DB) {
+	q := db.Where("active = ?", true).Session(&gorm.Session{})
+	q.Find(nil)
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root \(root at collide\.go:9, first branch at collide\.go:10\)`
+}
