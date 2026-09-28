@@ -5,6 +5,7 @@ package scopeswarn
 
 import (
 	"go/token"
+	"slices"
 
 	"golang.org/x/tools/go/ssa"
 
@@ -138,12 +139,10 @@ func allocFlowsToScopes(alloc *ssa.Alloc) bool {
 	if refs == nil {
 		return false
 	}
-	for _, ref := range *refs {
-		if slice, ok := ref.(*ssa.Slice); ok && sliceFlowsToScopes(slice) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(*refs, func(ref ssa.Instruction) bool {
+		slice, ok := ref.(*ssa.Slice)
+		return ok && sliceFlowsToScopes(slice)
+	})
 }
 
 // sliceFlowsToScopes reports whether slice is an argument to a Scopes call.
@@ -152,12 +151,10 @@ func sliceFlowsToScopes(slice *ssa.Slice) bool {
 	if refs == nil {
 		return false
 	}
-	for _, ref := range *refs {
-		if call, ok := ref.(*ssa.Call); ok && getMethodName(call) == "Scopes" && isGormDBMethodCall(call) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(*refs, func(ref ssa.Instruction) bool {
+		call, ok := ref.(*ssa.Call)
+		return ok && getMethodName(call) == "Scopes" && isGormDBMethodCall(call)
+	})
 }
 
 // callPassesFuncToScopes reports whether instr is a Scopes call that receives fn

@@ -1,6 +1,8 @@
 package purity
 
 import (
+	"slices"
+
 	"golang.org/x/tools/go/ssa"
 
 	"github.com/mpyw/gormreuse/internal/directive"
@@ -50,10 +52,7 @@ func ValidateImmutableReturn(fn *ssa.Function, set *directive.DirectiveFuncSet, 
 				if !typeutil.IsGormDB(res.Type()) {
 					continue
 				}
-				for _, root := range rt.FindAllMutableRoots(res, nil) {
-					if !provablyMutableForImmutableReturn(root) {
-						continue // not a provably-mutable root
-					}
+				if slices.ContainsFunc(rt.FindAllMutableRoots(res, nil), provablyMutableForImmutableReturn) {
 					// One diagnostic per function: the directive, not each
 					// return, is what is wrong. Report at the declaration.
 					return []Violation{{

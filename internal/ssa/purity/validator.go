@@ -22,6 +22,8 @@
 package purity
 
 import (
+	"slices"
+
 	"golang.org/x/tools/go/ssa"
 
 	"github.com/mpyw/gormreuse/internal/directive"
@@ -96,11 +98,8 @@ func (v *Validator) Validate() []Violation {
 func (v *Validator) trackDerivation(instr ssa.Instruction) {
 	switch i := instr.(type) {
 	case *ssa.Phi:
-		for _, edge := range i.Edges {
-			if v.paramDerived[edge] {
-				v.paramDerived[i] = true
-				break
-			}
+		if slices.ContainsFunc(i.Edges, func(edge ssa.Value) bool { return v.paramDerived[edge] }) {
+			v.paramDerived[i] = true
 		}
 
 	case *ssa.Call:
@@ -147,14 +146,13 @@ func (v *Validator) trackCallDerivation(call *ssa.Call) {
 	}
 
 	// Regular function call
-	for _, arg := range call.Call.Args {
-		if typeutil.IsGormDB(arg.Type()) && v.paramDerived[arg] {
-			if result := call.Value(); result != nil && typeutil.IsGormDB(result.Type()) {
-				if !v.pureFuncs.Contains(callee) {
-					v.paramDerived[result] = true
-				}
+	if slices.ContainsFunc(call.Call.Args, func(arg ssa.Value) bool {
+		return typeutil.IsGormDB(arg.Type()) && v.paramDerived[arg]
+	}) {
+		if result := call.Value(); result != nil && typeutil.IsGormDB(result.Type()) {
+			if !v.pureFuncs.Contains(callee) {
+				v.paramDerived[result] = true
 			}
-			break
 		}
 	}
 }
