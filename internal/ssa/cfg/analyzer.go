@@ -164,12 +164,10 @@ func (a *Analyzer) DetectLoops(fn *ssa.Function) *LoopInfo {
 	// A back-edge goes from a higher-indexed block to a lower-indexed block
 	for _, block := range fn.Blocks {
 		for _, succ := range block.Succs {
-			if blockIndex[succ] <= blockIndex[block] {
-				// Potential back-edge: verify it creates a cycle
-				if a.CanReach(succ, block) {
-					a.markLoopBlocks(fn, succ, block, loopBlocks)
-					loopHeaders[succ] = true // succ is the loop header
-				}
+			// Potential back-edge: verify it creates a cycle
+			if blockIndex[succ] <= blockIndex[block] && a.CanReach(succ, block) {
+				a.markLoopBlocks(fn, succ, block, loopBlocks)
+				loopHeaders[succ] = true // succ is the loop header
 			}
 		}
 	}
