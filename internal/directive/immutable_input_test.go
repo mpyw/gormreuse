@@ -150,6 +150,10 @@ func TestExtractImmutableInputParams(t *testing.T) {
 		{"only in trailing reason", "//gormreuse:pure // immutable-input(fn)", nil},
 		{"lookalike tool", "//gormreusex:immutable-input(fn)", nil},
 		{"no directive", "//gormreuse:pure", nil},
+		{"next to an unknown name", "//gormreuse:immutable-input(fn),pur", nil},
+		{"misspelled", "//gormreuse:imutable-input(fn)", nil},
+		{"next to an unclosed one", "//gormreuse:immutable-input(a),immutable-input(b", nil},
+		{"dash reason", "//gormreuse:immutable-input(fn) - reason", nil},
 	}
 
 	for _, tt := range tests {

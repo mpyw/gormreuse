@@ -79,21 +79,13 @@ func (s *ImmutableInputSet) AddFile(file *ast.File, pkgPath string) {
 // //gormreuse:immutable-input(name) directives in a comment. A comment may carry
 // several (comma-combinable with other directives), so it returns a slice; nil if
 // none. It reads the comment through the same parseDirective as hasDirective,
-// so only the canonical //gormreuse: form counts and a trailing "//" comment is
-// ignored (#62).
+// so only a valid //gormreuse: directive counts, a trailing "//" comment is
+// ignored (#62), and a malformed immutable-input part drops the comment.
 func ExtractImmutableInputParams(text string) []string {
 	var params []string
 	for _, part := range parseDirective(text) {
-		inner, ok := strings.CutPrefix(part, "immutable-input(")
-		if !ok {
-			continue
-		}
-		inner, ok = strings.CutSuffix(inner, ")")
-		if !ok {
-			continue
-		}
-		if name := strings.TrimSpace(inner); name != "" {
-			params = append(params, name)
+		if inner, ok := strings.CutPrefix(part, "immutable-input("); ok {
+			params = append(params, strings.TrimSuffix(inner, ")"))
 		}
 	}
 	return params

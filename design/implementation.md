@@ -67,11 +67,18 @@ The linter detects when a mutable `*gorm.DB` branches into multiple code paths:
 
 Also: gorm's built-in `Transaction`, `Connection`, and `FindInBatches` are known to pass a fresh (immutable) handle to their callbacks, so reuse inside those callbacks is always allowed.
 
-Only `//gormreuse:name[,name...]` (lowercase, no spaces, line comment) is a directive. It is read by `ast.ParseDirective` with no normalization. Any other comment whose body starts with `gormreuse:` is reported as `malformed gormreuse directive: write it as //gormreuse:name`.
+Only `//gormreuse:name[,name...]` (lowercase, no spaces, line comment) is a directive. `readDirective` in `directive.go` reads every comment once, in this order:
+
+1. Cut the comment at the first `//` after the leading `//`. The rest is a reason: `//gormreuse:ignore // reason`, `//gormreuse:ignore //reason` and `//gormreuse:ignore//reason` are all a bare ignore. `//` is the only reason separator; ` - reason` was never accepted.
+2. Read what is left with `ast.ParseDirective`, with no normalization. A comment whose body starts with `gormreuse:` but is not a gormreuse directive is reported as `malformed gormreuse directive: write it as //gormreuse:name`. So is an empty part in the list (`pure,`, `pure, immutable-return`).
+3. Check every part of the comma list. A part that is not `ignore`, `pure`, `immutable-return`, `immutable-param` or `immutable-input(name)` is reported as `unknown directive gormreuse:<part> (want ...)`. A malformed `immutable-input(...)` part, such as `immutable-input(cb` or `immutable-input()`, is reported as `malformed gormreuse:<part> directive: write it as immutable-input(name)`.
+4. Any text left after the name is reported as `gormreuse:<name> takes no argument; write a reason after //`.
+
+A comment with a problem has no effect at all, even when only one part of its list is wrong (#156). Before #156, `hasDirective` looked for one known name in the list, so `//gormreuse:pure,imutable-return` still marked the function pure and nothing reported the typo. Keeping the valid parts was rejected: the user meant the whole list, and a half-applied list hides the typo.
+
+Problems are reported by `FindDirectiveProblems` through `pass.Reportf`, at the comment. Generated files are skipped with the rest of the analysis.
 
 Directives can be combined with commas: `//gormreuse:pure,immutable-return`
-
-Trailing comments use `//`: `//gormreuse:ignore // reason here`
 
 All internal positions (file keys, ignore lines, directive placement, the generated-file skip, the disk fallback in `funcset.go`, fix offsets) use `PositionFor(pos, false)`, so `//line` directives cannot move them (#151, #152, #153). Only the `root at file:line` text in messages stays adjusted, to match the position the driver prints.
 
@@ -114,7 +121,7 @@ gormreuse/
 │   ├── analyzer.go             # SSA analysis orchestrator (RunSSA entry point)
 │   │
 │   ├── directive/              # Comment directive handling
-│   │   ├── directive.go        # Directive detection (hasDirective, IsIgnore/IsPure)
+│   │   ├── directive.go        # Directive parsing and problems (parse, FindDirectiveProblems, IsIgnore/IsPure)
 │   │   ├── ignore.go           # //gormreuse:ignore - IgnoreMap, unused tracking
 │   │   └── funcset.go          # DirectiveFuncSet - directive-marked function sets
 │   │

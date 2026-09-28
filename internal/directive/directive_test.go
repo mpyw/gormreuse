@@ -1,6 +1,7 @@
 package directive
 
 import (
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -649,6 +650,12 @@ func TestParseDirective(t *testing.T) {
 		{"leading comma", "//gormreuse:,pure", nil},
 		{"empty part", "//gormreuse:pure,,immutable-return", nil},
 		{"words after the name", "//gormreuse:ignore reason here", nil},
+		{"dash reason", "//gormreuse:ignore - reason", nil},
+		{"unknown name", "//gormreuse:ignor", nil},
+		{"unknown part of a list", "//gormreuse:ignore,ignor", nil},
+		{"unknown part of a pure list", "//gormreuse:pure,imutable-return", nil},
+		{"unclosed immutable-input", "//gormreuse:immutable-input(fn", nil},
+		{"reason without space after slashes", "//gormreuse:ignore //reason", []string{"ignore"}},
 		{"trailing reason", "//gormreuse:ignore // reason here", []string{"ignore"}},
 		{"trailing reason without space", "//gormreuse:ignore// reason", []string{"ignore"}},
 		{"comma list with trailing reason", "//gormreuse:pure,immutable-return // note", []string{"pure", "immutable-return"}},
@@ -695,6 +702,12 @@ func TestHasDirectiveForms(t *testing.T) {
 		{"name in trailing reason does not count", "//gormreuse:ignore // not pure", IsPureDirective, false},
 		{"lookalike tool", "//gormreusex:pure", IsPureDirective, false},
 		{"name prefix does not count", "//gormreuse:pure-ish", IsPureDirective, false},
+		{"pure next to a typo", "//gormreuse:pure,imutable-return", IsPureDirective, false},
+		{"ignore next to a typo", "//gormreuse:ignore,ignor", IsIgnoreDirective, false},
+		{"immutable-return next to a typo", "//gormreuse:immutable-return,pur", IsImmutableReturnDirective, false},
+		{"immutable-param next to a typo", "//gormreuse:immutable-param,pur", IsImmutableParamDirective, false},
+		{"ignore with dash reason", "//gormreuse:ignore - reason", IsIgnoreDirective, false},
+		{"ignore with reason without space", "//gormreuse:ignore//reason", IsIgnoreDirective, true},
 	}
 
 	for _, tt := range tests {
@@ -708,47 +721,99 @@ func TestHasDirectiveForms(t *testing.T) {
 	}
 }
 
-func TestIsMalformedDirective(t *testing.T) {
+func TestReadDirective(t *testing.T) {
 	t.Parallel()
 
+	const (
+		malformed = MalformedDirectiveMessage
+		ignoreArg = "gormreuse:ignore takes no argument; write a reason after //"
+		unknown   = " (want ignore, pure, immutable-return, immutable-param or immutable-input(name))"
+		inputFmt  = " directive: write it as immutable-input(name)"
+	)
 	tests := []struct {
-		name string
-		text string
-		want bool
+		name    string
+		text    string
+		parts   []string
+		problem string
 	}{
-		{"space after marker", "// gormreuse:pure", true},
-		{"tab after marker", "//\tgormreuse:pure", true},
-		{"space after colon", "//gormreuse: pure", true},
-		{"block form", "/*gormreuse:pure*/", true},
-		{"spaced block form", "/* gormreuse:pure */", true},
-		{"uppercase name", "//gormreuse:Pure", true},
-		{"no name", "//gormreuse:", true},
-		{"no name in block form", "/*gormreuse:*/", true},
-		{"space after comma", "//gormreuse:pure, immutable-return", true},
-		{"trailing comma", "//gormreuse:pure,", true},
-		{"words after the name", "//gormreuse:ignore reason here", true},
-		{"canonical", "//gormreuse:pure", false},
-		{"canonical with reason and no space", "//gormreuse:ignore// reason", false},
-		{"canonical comma list", "//gormreuse:pure,immutable-return", false},
-		{"canonical with reason", "//gormreuse:ignore // reason", false},
-		{"canonical immutable-input", "//gormreuse:immutable-input(fn)", false},
-		{"lookalike tool", "// gormreusex:pure", false},
-		{"prose mentioning the tool", "// see gormreuse:pure for details", false},
-		{"random comment", "// some comment", false},
+		// Every name gormreuse reads.
+		{"ignore", "//gormreuse:ignore", []string{"ignore"}, ""},
+		{"pure", "//gormreuse:pure", []string{"pure"}, ""},
+		{"immutable-return", "//gormreuse:immutable-return", []string{"immutable-return"}, ""},
+		{"immutable-param", "//gormreuse:immutable-param", []string{"immutable-param"}, ""},
+		{"immutable-input", "//gormreuse:immutable-input(cb)", []string{"immutable-input(cb)"}, ""},
+		{"comma list", "//gormreuse:pure,immutable-return", []string{"pure", "immutable-return"}, ""},
+		{"list with immutable-input", "//gormreuse:immutable-input(a),immutable-input(b),pure", []string{"immutable-input(a)", "immutable-input(b)", "pure"}, ""},
+		{"trailing whitespace", "//gormreuse:ignore \t", []string{"ignore"}, ""},
+
+		// A reason goes after "//".
+		{"reason", "//gormreuse:ignore // reason", []string{"ignore"}, ""},
+		{"reason without space after slashes", "//gormreuse:ignore //reason", []string{"ignore"}, ""},
+		{"reason without space before slashes", "//gormreuse:ignore//reason", []string{"ignore"}, ""},
+		{"want on the line", "//gormreuse:ignore // want `x`", []string{"ignore"}, ""},
+		{"reason after a list", "//gormreuse:pure,immutable-return // note", []string{"pure", "immutable-return"}, ""},
+		{"reason after immutable-input", "//gormreuse:immutable-input(cb) // note", []string{"immutable-input(cb)"}, ""},
+		{"directive only in the reason", "//gormreuse:ignore // gormreuse:pure", []string{"ignore"}, ""},
+
+		// Text after the name that is not a "//" reason.
+		{"dash reason", "//gormreuse:ignore - reason", nil, ignoreArg},
+		{"words", "//gormreuse:ignore intentional reuse", nil, ignoreArg},
+		{"dash reason then want", "//gormreuse:ignore - reason // want `x`", nil, ignoreArg},
+		{"dash reason on a list", "//gormreuse:pure,immutable-return - note", nil, "gormreuse:pure,immutable-return takes no argument; write a reason after //"},
+		{"space before comma", "//gormreuse:pure ,immutable-return", nil, "gormreuse:pure takes no argument; write a reason after //"},
+
+		// Unknown names, alone or in a list.
+		{"misspelled ignore", "//gormreuse:ignor", nil, "unknown directive gormreuse:ignor" + unknown},
+		{"misspelled pure", "//gormreuse:pur", nil, "unknown directive gormreuse:pur" + unknown},
+		{"misspelled immutable-input", "//gormreuse:imutable-input(cb)", nil, "unknown directive gormreuse:imutable-input(cb)" + unknown},
+		{"immutable-input without parentheses", "//gormreuse:immutable-input", nil, "unknown directive gormreuse:immutable-input" + unknown},
+		{"name prefix", "//gormreuse:pure-ish", nil, "unknown directive gormreuse:pure-ish" + unknown},
+		{"typo in an ignore list", "//gormreuse:ignore,ignor", nil, "unknown directive gormreuse:ignor" + unknown},
+		{"typo in a pure list", "//gormreuse:pure,imutable-return", nil, "unknown directive gormreuse:imutable-return" + unknown},
+		{"typo first in a list", "//gormreuse:immutable-return,pur", nil, "unknown directive gormreuse:pur" + unknown},
+		{"unknown name with words", "//gormreuse:ignor intentional", nil, "unknown directive gormreuse:ignor" + unknown},
+		{"unknown name with reason", "//gormreuse:ignor // reason", nil, "unknown directive gormreuse:ignor" + unknown},
+
+		// Malformed immutable-input(name).
+		{"unclosed immutable-input", "//gormreuse:immutable-input(cb", nil, "malformed gormreuse:immutable-input(cb" + inputFmt},
+		{"empty immutable-input", "//gormreuse:immutable-input()", nil, "malformed gormreuse:immutable-input()" + inputFmt},
+		{"space inside immutable-input", "//gormreuse:immutable-input( cb )", nil, "malformed gormreuse:immutable-input(" + inputFmt},
+		{"unclosed immutable-input in a list", "//gormreuse:pure,immutable-input(cb", nil, "malformed gormreuse:immutable-input(cb" + inputFmt},
+
+		// Not in the directive form.
+		{"space after marker", "// gormreuse:pure", nil, malformed},
+		{"space after colon", "//gormreuse: pure", nil, malformed},
+		{"block form", "/*gormreuse:pure*/", nil, malformed},
+		{"uppercase name", "//gormreuse:Pure", nil, malformed},
+		{"no name", "//gormreuse:", nil, malformed},
+		{"no name with reason", "//gormreuse: // reason", nil, malformed},
+		{"space after comma", "//gormreuse:pure, immutable-return", nil, malformed},
+		{"trailing comma", "//gormreuse:pure,", nil, malformed},
+		{"empty part", "//gormreuse:pure,,immutable-return", nil, malformed},
+
+		// Not addressed to gormreuse.
+		{"lookalike tool", "//gormreusex:pure", nil, ""},
+		{"lookalike tool with space", "// gormreusex:pure", nil, ""},
+		{"other tool", "//nolint:gormreuse", nil, ""},
+		{"directive after another tool", "//nolint:foo //gormreuse:ignore", nil, ""},
+		{"prose", "// see gormreuse:pure for details", nil, ""},
+		{"random comment", "// some comment", nil, ""},
+		{"empty", "//", nil, ""},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			if got := IsMalformedDirective(tt.text); got != tt.want {
-				t.Errorf("IsMalformedDirective(%q) = %v, want %v", tt.text, got, tt.want)
+			parts, problem := readDirective(tt.text)
+			if !slices.Equal(parts, tt.parts) || problem != tt.problem {
+				t.Errorf("readDirective(%q) = %q, %q; want %q, %q", tt.text, parts, problem, tt.parts, tt.problem)
 			}
 		})
 	}
 }
 
-func TestFindMalformedDirectives(t *testing.T) {
+func TestFindDirectiveProblems(t *testing.T) {
 	t.Parallel()
 
 	src := `package test
@@ -759,8 +824,11 @@ func a() {}
 //gormreuse:pure
 func b() {}
 
+//gormreuse:pure,imutable-return
 func c() {
 	_ = 1 /*gormreuse:ignore*/
+	_ = 2 //gormreuse:ignore - reason
+	_ = 3 //gormreuse:ignore // reason
 }
 `
 	fset := token.NewFileSet()
@@ -769,11 +837,17 @@ func c() {
 		t.Fatalf("Failed to parse: %v", err)
 	}
 
-	var lines []int
-	for _, pos := range FindMalformedDirectives(file) {
-		lines = append(lines, fset.Position(pos).Line)
+	var got []string
+	for _, p := range FindDirectiveProblems(file) {
+		got = append(got, fmt.Sprintf("%d: %s", fset.Position(p.Pos).Line, p.Message))
 	}
-	if want := []int{3, 10}; !slices.Equal(lines, want) {
-		t.Errorf("FindMalformedDirectives lines = %v, want %v", lines, want)
+	want := []string{
+		"3: " + MalformedDirectiveMessage,
+		"9: unknown directive gormreuse:imutable-return (want ignore, pure, immutable-return, immutable-param or immutable-input(name))",
+		"11: " + MalformedDirectiveMessage,
+		"12: gormreuse:ignore takes no argument; write a reason after //",
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("FindDirectiveProblems = %q, want %q", got, want)
 	}
 }
