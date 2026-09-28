@@ -352,12 +352,12 @@ q.Find(&users)             // OK - first branch from whichever root
 
 ## Directives
 
-Only `//gormreuse:name[,name...]` is a directive: a line comment, lowercase names, and no space anywhere in it, including after a comma. A trailing reason may follow after `//`, as in `//gormreuse:ignore // reason here`.
+Only `//gormreuse:name[,name...]` is a directive: a line comment, lowercase names, and no space anywhere in it, including after a comma. A reason may follow after `//`, as in `//gormreuse:ignore // reason here`. `//` is the only reason separator.
 
-A directive is matched to code by its place in the `.go` file. A `//line` directive does not change this. Reports still show the `//line` positions.
+The names are `ignore`, `pure`, `immutable-return`, `immutable-param` and `immutable-input(name)`.
 
 > [!WARNING]
-> Any other comment that starts with `gormreuse:`, such as `// gormreuse:pure`, `//gormreuse: pure`, `//gormreuse:pure, immutable-return` or `/*gormreuse:pure*/`, has no effect and is reported as `malformed gormreuse directive: write it as //gormreuse:name`.
+> Any other comment that starts with `gormreuse:` has no effect, and is reported with how to write it. One unknown name in a list drops the whole comment: `//gormreuse:pure,bogus` does not mark the function pure.
 
 ### `//gormreuse:ignore`
 

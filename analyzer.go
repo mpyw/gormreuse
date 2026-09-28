@@ -30,13 +30,16 @@
 //
 // Suppress false positives with:
 //
-//	//gormreuse:ignore           - Suppress for next line or same line
-//	//gormreuse:pure             - Mark function as not polluting *gorm.DB args
-//	//gormreuse:immutable-return - Mark function as returning immutable *gorm.DB
+//	//gormreuse:ignore                // Suppress for next line or same line
+//	//gormreuse:pure                  // Mark function as not polluting *gorm.DB args
+//	//gormreuse:immutable-return      // Mark function as returning immutable *gorm.DB
+//	//gormreuse:immutable-param       // Mark *gorm.DB parameters as immutable
+//	//gormreuse:immutable-input(name) // Mark a callback as receiving an immutable *gorm.DB
 //
 // Only //gormreuse:name[,name...] (lowercase, no spaces, line comment) is a
-// directive. Any other comment that starts with "gormreuse:" is reported as
-// malformed.
+// directive. A reason goes after "//". Any other comment that starts with
+// "gormreuse:", or one with a name gormreuse does not read, is reported and
+// has no effect.
 package gormreuse
 
 import (
@@ -96,8 +99,8 @@ func run(pass *analysis.Pass) (any, error) {
 		if skipFiles[filename] {
 			continue
 		}
-		for _, pos := range directive.FindMalformedDirectives(file) {
-			pass.Reportf(pos, "%s", directive.MalformedDirectiveMessage)
+		for _, p := range directive.FindDirectiveProblems(file) {
+			pass.Reportf(p.Pos, "%s", p.Message)
 		}
 		ignoreMaps[filename] = directive.BuildIgnoreMap(pass.Fset, file)
 		funcIgnores[filename] = directive.BuildFunctionIgnoreSet(pass.Fset, cur)
