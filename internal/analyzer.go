@@ -38,6 +38,7 @@ import (
 	"fmt"
 	"go/token"
 	"os"
+	"slices"
 
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/analysis/passes/buildssa"
@@ -297,11 +298,11 @@ func computeNeedsImmutableParam(
 		recoverPerFunction(fn, func() {
 			// Counterfactual: analyze fn with its parameters treated as mutable.
 			cf := ssautil.NewAnalyzer(fn, pureFuncs, immutableReturnFuncs, nil, failedPure, scopesCallbacks, immutableCallbacks, nil)
-			for _, v := range cf.Analyze() {
-				if p, ok := v.Root.(*ssa.Parameter); ok && p.Parent() == fn {
-					needs[fn] = true
-					break
-				}
+			if slices.ContainsFunc(cf.Analyze(), func(v pollution.Violation) bool {
+				p, ok := v.Root.(*ssa.Parameter)
+				return ok && p.Parent() == fn
+			}) {
+				needs[fn] = true
 			}
 		})
 	}
@@ -355,12 +356,9 @@ func reportRedundantImmutableParam(
 // when another set reports that position as used.
 func reportUnusedDirectiveFuncs(pass *analysis.Pass, pureFuncs, immutableReturnFuncs, immutableParamFuncs *directive.DirectiveFuncSet) {
 	usedByOther := func(pos token.Pos, others ...*directive.DirectiveFuncSet) bool {
-		for _, s := range others {
-			if s != nil && s.IsUsed(pos) {
-				return true
-			}
-		}
-		return false
+		return slices.ContainsFunc(others, func(s *directive.DirectiveFuncSet) bool {
+			return s != nil && s.IsUsed(pos)
+		})
 	}
 	report := func(set *directive.DirectiveFuncSet, message string, others ...*directive.DirectiveFuncSet) {
 		if set == nil {

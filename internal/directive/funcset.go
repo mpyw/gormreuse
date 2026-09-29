@@ -5,6 +5,8 @@ import (
 	"go/parser"
 	"go/token"
 	"go/types"
+	"maps"
+	"slices"
 
 	"golang.org/x/tools/go/ast/astutil"
 	"golang.org/x/tools/go/ast/inspector"
@@ -230,11 +232,7 @@ func (s *DirectiveFuncSet) GetUnusedDirectives() []token.Pos {
 		return nil
 	}
 
-	var unused []token.Pos
-	for pos := range s.invalidDirectives {
-		unused = append(unused, pos)
-	}
-	return unused
+	return slices.Collect(maps.Keys(s.invalidDirectives))
 }
 
 // IsUsed returns true if the directive at the given position has a valid signature.
@@ -479,12 +477,7 @@ func (s *DirectiveFuncSet) getFileForNode(node ast.Node) *ast.File {
 
 // commentGroupHasDirective checks if a comment group contains our directive.
 func (s *DirectiveFuncSet) commentGroupHasDirective(cg *ast.CommentGroup) bool {
-	for _, c := range cg.List {
-		if s.isDirective(c.Text) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(cg.List, func(c *ast.Comment) bool { return s.isDirective(c.Text) })
 }
 
 // matchesNextLineDirective checks if a directive comment applies to a FuncLit via
@@ -682,12 +675,7 @@ func (s *DirectiveFuncSet) isDirectValueInValueSpecAfterLine(path []ast.Node, fu
 	}
 
 	// The closure must be a direct value of the spec.
-	for _, v := range spec.Values {
-		if v == funcLit {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(spec.Values, ast.Expr(funcLit))
 }
 
 // isFirstStatementOnLine checks if the given statement is the first (leftmost) one on its line.
@@ -742,12 +730,9 @@ func (s *DirectiveFuncSet) isDirectRHSValue(stmt ast.Stmt, target *ast.FuncLit) 
 	targetEnd := target.End()
 
 	// Check if target is one of the direct RHS expressions
-	for _, rhs := range rhsExprs {
-		if s.isDirectExprOrUnaryByPos(rhs, targetPos, targetEnd) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(rhsExprs, func(rhs ast.Expr) bool {
+		return s.isDirectExprOrUnaryByPos(rhs, targetPos, targetEnd)
+	})
 }
 
 // isDirectExprOrUnaryByPos checks if expr contains a FuncLit at the given position,
@@ -964,21 +949,17 @@ func buildFuncSet(file inspector.Cursor, pkgPath string, isDirective func(string
 
 	for cur := range file.Preorder(funcDeclTypes...) {
 		node := cur.Node().(*ast.FuncDecl)
-		if node.Doc != nil {
-			for _, c := range node.Doc.List {
-				if isDirective(c.Text) {
-					key := FuncKey{
-						PkgPath:  pkgPath,
-						FuncName: node.Name.Name,
-					}
-					if node.Recv != nil && len(node.Recv.List) > 0 {
-						key.ReceiverType = receiverTypeStringFromExpr(node.Recv.List[0].Type)
-					}
-					result[key] = struct{}{}
-					break
-				}
-			}
+		if node.Doc == nil || !slices.ContainsFunc(node.Doc.List, func(c *ast.Comment) bool { return isDirective(c.Text) }) {
+			continue
 		}
+		key := FuncKey{
+			PkgPath:  pkgPath,
+			FuncName: node.Name.Name,
+		}
+		if node.Recv != nil && len(node.Recv.List) > 0 {
+			key.ReceiverType = receiverTypeStringFromExpr(node.Recv.List[0].Type)
+		}
+		result[key] = struct{}{}
 	}
 
 	return result

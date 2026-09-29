@@ -2,6 +2,7 @@ package purity
 
 import (
 	"fmt"
+	"slices"
 
 	"golang.org/x/tools/go/ssa"
 
@@ -65,18 +66,14 @@ func ValidateImmutableInputs(fn *ssa.Function, set *directive.ImmutableInputSet,
 			if !watched {
 				continue
 			}
-			for _, arg := range call.Call.Args {
-				if !typeutil.IsGormDB(arg.Type()) {
-					continue
-				}
-				if rt.FindMutableRoot(arg, nil) == nil {
-					continue // immutable source — fine
-				}
+			// One diagnostic per call site; an immutable source is fine.
+			if slices.ContainsFunc(call.Call.Args, func(arg ssa.Value) bool {
+				return typeutil.IsGormDB(arg.Type()) && rt.FindMutableRoot(arg, nil) != nil
+			}) {
 				violations = append(violations, Violation{
 					Pos:     call.Pos(),
 					Message: fmt.Sprintf("immutable-input(%s) declared but mutable *gorm.DB passed to callback", name),
 				})
-				break // one diagnostic per call site
 			}
 		}
 	}

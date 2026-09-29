@@ -5,6 +5,7 @@ import (
 	"go/ast"
 	"go/token"
 	"go/types"
+	"slices"
 	"strings"
 
 	"golang.org/x/tools/go/ssa"
@@ -195,9 +196,7 @@ func (s *ImmutableInputSet) Callbacks(fn *ssa.Function) []ImmutableInputCallback
 	if sig := fn.Signature; sig != nil && sig.Recv() != nil {
 		key.ReceiverType = receiverTypeString(sig.Recv().Type())
 	}
-	out := make([]ImmutableInputCallback, len(s.known[key]))
-	copy(out, s.known[key])
-	return out
+	return slices.Clone(s.known[key])
 }
 
 // GetUnused returns the diagnostics for directives that don't apply to any usable
@@ -206,7 +205,5 @@ func (s *ImmutableInputSet) GetUnused() []ImmutableInputUnused {
 	if s == nil {
 		return nil
 	}
-	out := make([]ImmutableInputUnused, len(s.unused))
-	copy(out, s.unused)
-	return out
+	return slices.Clone(s.unused)
 }

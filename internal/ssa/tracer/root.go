@@ -730,13 +730,7 @@ func (t *RootTracer) tracePhi(phi *ssa.Phi, visited map[ssa.Value]bool, loopInfo
 	// This ensures we return the loop-internal assignment result, not the pre-loop initial value
 	if loopInfo != nil && loopInfo.IsLoopHeader(phi.Block()) {
 		phiBlock := phi.Block()
-		phiBlockIndex := -1
-		for i, block := range phi.Parent().Blocks {
-			if block == phiBlock {
-				phiBlockIndex = i
-				break
-			}
-		}
+		phiBlockIndex := slices.Index(phi.Parent().Blocks, phiBlock)
 
 		// First pass: try back-edges (predecessors with higher indices)
 		if phiBlockIndex >= 0 {
@@ -745,14 +739,7 @@ func (t *RootTracer) tracePhi(phi *ssa.Phi, visited map[ssa.Value]bool, loopInfo
 					continue
 				}
 				// Check if this is a back-edge (predecessor comes after phi block)
-				pred := phiBlock.Preds[i]
-				predIndex := -1
-				for j, block := range phi.Parent().Blocks {
-					if block == pred {
-						predIndex = j
-						break
-					}
-				}
+				predIndex := slices.Index(phi.Parent().Blocks, phiBlock.Preds[i])
 				// Back-edge: predecessor comes after phi block (loops back)
 				if predIndex > phiBlockIndex {
 					if root := t.trace(edge, visited, loopInfo); root != nil {
@@ -939,13 +926,7 @@ func (t *RootTracer) freeVarBinding(fv *ssa.FreeVar) ssa.Value {
 	}
 
 	// Find the index of this FreeVar in the function's FreeVars list
-	idx := -1
-	for i, v := range fn.FreeVars {
-		if v == fv {
-			idx = i
-			break
-		}
-	}
+	idx := slices.Index(fn.FreeVars, fv)
 	if idx < 0 {
 		return nil
 	}
@@ -1622,12 +1603,9 @@ func cloneVisited(visited map[ssa.Value]bool) map[ssa.Value]bool {
 //
 // Recursively checks pointer chains: *gorm.DB, **gorm.DB, ***gorm.DB, etc.
 func ClosureCapturesGormDB(mc *ssa.MakeClosure) bool {
-	for _, binding := range mc.Bindings {
-		if containsGormDBThroughPointers(binding.Type()) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(mc.Bindings, func(binding ssa.Value) bool {
+		return containsGormDBThroughPointers(binding.Type())
+	})
 }
 
 // CollectScopesCallbacks returns the set of functions passed as callbacks to

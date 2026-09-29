@@ -36,6 +36,7 @@ package pollution
 import (
 	"go/token"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -224,17 +225,8 @@ func (t *Tracker) IsPolluted(root ssa.Value) bool {
 // IsPollutedAt checks if a root has polluting usage that can reach the target block.
 // Includes deferred/goroutine branch uses (see IsPolluted).
 func (t *Tracker) IsPollutedAt(root ssa.Value, targetBlock *ssa.BasicBlock) bool {
-	for _, use := range t.pollutingUses[root] {
-		if t.isReachable(use.Block, targetBlock) {
-			return true
-		}
-	}
-	for _, use := range t.branchUses[root] {
-		if t.isReachable(use.Block, targetBlock) {
-			return true
-		}
-	}
-	return false
+	reaches := func(use UsageInfo) bool { return t.isReachable(use.Block, targetBlock) }
+	return slices.ContainsFunc(t.pollutingUses[root], reaches) || slices.ContainsFunc(t.branchUses[root], reaches)
 }
 
 // MarkPolluted records a polluting usage (for channel send, slice storage, etc).
@@ -260,11 +252,7 @@ func (t *Tracker) AddViolationWithRoot(pos token.Pos, root ssa.Value) {
 
 // getAllUses returns all uses (pure + polluting + assignment) for a root.
 func (t *Tracker) getAllUses(root ssa.Value) []UsageInfo {
-	var allUses []UsageInfo
-	allUses = append(allUses, t.pureUses[root]...)
-	allUses = append(allUses, t.pollutingUses[root]...)
-	allUses = append(allUses, t.assignmentUses[root]...)
-	return allUses
+	return slices.Concat(t.pureUses[root], t.pollutingUses[root], t.assignmentUses[root])
 }
 
 // checkViolationsBetween checks if any source use can reach any target use.

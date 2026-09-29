@@ -89,12 +89,10 @@ func ApplyFixes(testdata, pkg, srcPath string, a *analysis.Analyzer) (original, 
 		}
 	}
 
-	fixed = append([]byte(nil), original...)
-	if len(edits) > 0 {
-		slices.SortFunc(edits, func(a, b offsetEdit) int { return cmp.Compare(b.start, a.start) })
-		for _, e := range edits {
-			fixed = append(fixed[:e.start], append([]byte(e.newText), fixed[e.end:]...)...)
-		}
+	fixed = bytes.Clone(original)
+	slices.SortFunc(edits, func(a, b offsetEdit) int { return cmp.Compare(b.start, a.start) })
+	for _, e := range edits {
+		fixed = slices.Replace(fixed, e.start, e.end, []byte(e.newText)...)
 	}
 	return original, fixed, nil
 }

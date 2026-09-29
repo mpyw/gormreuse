@@ -277,10 +277,8 @@ func (g *Generator) isNonFinisherExprStmt(pos token.Pos) bool {
 	// variable (base) and never address the violation root (q) — issue #71
 	// defect 1. Such a use is not a reassignable non-finisher; the root instead
 	// gets a Session at its own definition (Phase 2).
-	for _, arg := range callExpr.Args {
-		if arg.Pos() <= pos && pos <= arg.End() {
-			return false
-		}
+	if slices.ContainsFunc(callExpr.Args, func(arg ast.Expr) bool { return arg.Pos() <= pos && pos <= arg.End() }) {
+		return false
 	}
 
 	// Check if it's a method call (selector expression)
