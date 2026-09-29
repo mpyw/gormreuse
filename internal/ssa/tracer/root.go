@@ -549,10 +549,8 @@ func isSwapPhiPair(phiA, phiB *ssa.Phi) bool {
 func findSwapPhiSibling(phi *ssa.Phi) *ssa.Phi {
 	block := phi.Block()
 	for _, instr := range block.Instrs {
-		if otherPhi, ok := instr.(*ssa.Phi); ok {
-			if otherPhi != phi && isSwapPhiPair(phi, otherPhi) {
-				return otherPhi
-			}
+		if otherPhi, ok := instr.(*ssa.Phi); ok && otherPhi != phi && isSwapPhiPair(phi, otherPhi) {
+			return otherPhi
 		}
 	}
 	return nil

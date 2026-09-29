@@ -142,13 +142,8 @@ func isAssignmentRecursive(call *ssa.Call, visited map[*ssa.Call]bool) bool {
 
 		// Chain intermediate: check if the next call in chain eventually becomes assignment
 		// Example: q.Where("x").Where("y") - Where("x") is assignment only if Where("y") is
-		if nextCall, ok := user.(*ssa.Call); ok {
-			if isChainedGormMethodCall(call, nextCall) {
-				// Recursively check if the next call is assignment
-				if isAssignmentRecursive(nextCall, visited) {
-					return true
-				}
-			}
+		if nextCall, ok := user.(*ssa.Call); ok && isChainedGormMethodCall(call, nextCall) && isAssignmentRecursive(nextCall, visited) {
+			return true
 		}
 	}
 

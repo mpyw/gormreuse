@@ -733,14 +733,11 @@ func (g *Generator) getVariableNameAtPos(pos token.Pos) string {
 	var result *ast.CallExpr
 	for c := range g.fileCursor(file).Preorder(callExprNodeTypes...) {
 		callExpr := c.Node().(*ast.CallExpr)
-		if callExpr.Pos() <= pos && pos <= callExpr.End() {
-			// Only consider method calls (SelectorExpr), not FuncLit calls
-			if _, ok := callExpr.Fun.(*ast.SelectorExpr); ok {
-				// Keep the outermost (widest) call - first match in preorder is outermost
-				if result == nil {
-					result = callExpr
-				}
-			}
+		// Only consider method calls (SelectorExpr), not FuncLit calls
+		if _, ok := callExpr.Fun.(*ast.SelectorExpr); ok && callExpr.Pos() <= pos && pos <= callExpr.End() {
+			// Keep the outermost (widest) call - first match in preorder is outermost
+			result = callExpr
+			break
 		}
 	}
 
