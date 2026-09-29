@@ -93,6 +93,10 @@ func (s *DirectiveFuncSet) collectDirectivePositions(file *ast.File) {
 
 	cur := s.fileCursor(file)
 
+	// Directive positions associated with a function. Any other directive is an
+	// orphan and is always invalid.
+	associatedDirectives := make(map[token.Pos]bool)
+
 	// Check FuncDecl doc comments and same-line comments
 	for fdCur := range cur.Preorder(funcDeclTypes...) {
 		fd := fdCur.Node().(*ast.FuncDecl)
@@ -101,6 +105,7 @@ func (s *DirectiveFuncSet) collectDirectivePositions(file *ast.File) {
 		if fd.Doc != nil {
 			for _, c := range fd.Doc.List {
 				if s.isDirective(c.Text) {
+					associatedDirectives[c.Pos()] = true
 					s.processedDirectives[c.Pos()] = struct{}{}
 					if !s.validateFuncDeclSignature(fd) {
 						s.invalidDirectives[c.Pos()] = struct{}{}
@@ -111,6 +116,7 @@ func (s *DirectiveFuncSet) collectDirectivePositions(file *ast.File) {
 
 		// Check same-line pattern (after opening brace)
 		if pos := s.findDirectiveAfterFuncDeclBrace(fd); pos.IsValid() {
+			associatedDirectives[pos] = true
 			s.processedDirectives[pos] = struct{}{}
 			if !s.validateFuncDeclSignature(fd) {
 				s.invalidDirectives[pos] = struct{}{}
@@ -131,6 +137,7 @@ func (s *DirectiveFuncSet) collectDirectivePositions(file *ast.File) {
 	for flCur := range cur.Preorder(funcLitTypes...) {
 		fl := flCur.Node().(*ast.FuncLit)
 		if pos := s.findDirectiveForFuncLit(fl); pos.IsValid() {
+			associatedDirectives[pos] = true
 			s.processedDirectives[pos] = struct{}{}
 			funcLitSeen[pos] = true
 			if s.validateFuncLitSignature(fl) {
@@ -144,32 +151,7 @@ func (s *DirectiveFuncSet) collectDirectivePositions(file *ast.File) {
 		}
 	}
 
-	// Find orphan directives (not associated with any function)
-	// These are always invalid
-	associatedDirectives := make(map[token.Pos]bool)
-
-	// Collect all directive positions that are associated with functions
-	for fdCur := range cur.Preorder(funcDeclTypes...) {
-		fd := fdCur.Node().(*ast.FuncDecl)
-		if fd.Doc != nil {
-			for _, c := range fd.Doc.List {
-				if s.isDirective(c.Text) {
-					associatedDirectives[c.Pos()] = true
-				}
-			}
-		}
-		if pos := s.findDirectiveAfterFuncDeclBrace(fd); pos.IsValid() {
-			associatedDirectives[pos] = true
-		}
-	}
-	for flCur := range cur.Preorder(funcLitTypes...) {
-		fl := flCur.Node().(*ast.FuncLit)
-		if pos := s.findDirectiveForFuncLit(fl); pos.IsValid() {
-			associatedDirectives[pos] = true
-		}
-	}
-
-	// Mark all non-associated directives as invalid
+	// Mark all non-associated (orphan) directives as invalid
 	for _, cg := range file.Comments {
 		for _, c := range cg.List {
 			if s.isDirective(c.Text) && !associatedDirectives[c.Pos()] {
