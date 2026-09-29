@@ -108,11 +108,7 @@ func NewAnalyzer(fn *ssa.Function, pureFuncs, immutableReturnFuncs, immutablePar
 // Closures that capture *gorm.DB are processed recursively to detect
 // violations across closure boundaries.
 func (a *Analyzer) Analyze() []Violation {
-	var fset *token.FileSet
-	if a.fn != nil && a.fn.Prog != nil {
-		fset = a.fn.Prog.Fset
-	}
-	tracker := pollution.New(a.cfgAnalyzer, fset)
+	tracker := pollution.New(a.cfgAnalyzer, a.fset())
 
 	// PHASE 1: TRACKING
 	// Process all instructions and record usages

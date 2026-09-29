@@ -286,12 +286,8 @@ func (s *DirectiveFuncSet) hasDirective(fn *ssa.Function) bool {
 	switch syntax := fn.Syntax().(type) {
 	case *ast.FuncDecl:
 		// Check Doc comments (next-line pattern)
-		if syntax.Doc != nil {
-			for _, c := range syntax.Doc.List {
-				if s.isDirective(c.Text) {
-					return true
-				}
-			}
+		if syntax.Doc != nil && s.commentGroupHasDirective(syntax.Doc) {
+			return true
 		}
 		// Check same-line pattern (after opening brace)
 		if pos := s.findDirectiveAfterFuncDeclBrace(syntax); pos.IsValid() {
@@ -892,12 +888,8 @@ func (s *DirectiveFuncSet) hasDirectiveInFile(file *ast.File, funcName, receiver
 		if declReceiverType != receiverType {
 			continue
 		}
-		if funcDecl.Doc != nil {
-			for _, c := range funcDecl.Doc.List {
-				if s.isDirective(c.Text) {
-					return true
-				}
-			}
+		if funcDecl.Doc != nil && s.commentGroupHasDirective(funcDecl.Doc) {
+			return true
 		}
 	}
 	return false

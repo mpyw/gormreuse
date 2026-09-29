@@ -646,17 +646,7 @@ func (g *Generator) traceForImmutable(v ssa.Value, visited map[ssa.Value]bool) b
 	}
 
 	// Check if this call is an immutable-returning method
-	methodName := callee.Name()
-	immutableMethods := map[string]bool{
-		"Session":     true,
-		"WithContext": true,
-		"Debug":       true,
-		"Open":        true,
-		"Begin":       true,
-		"Transaction": true,
-	}
-
-	if immutableMethods[methodName] {
+	if typeutil.IsImmutableReturningBuiltin(callee.Name()) {
 		return true
 	}
 
