@@ -531,62 +531,44 @@ func processGormDBCallCommonWith(callCommon *ssa.CallCommon, pos token.Pos, bloc
 		if len(callCommon.Args) == 0 {
 			return
 		}
-		recv := callCommon.Args[0]
-
-		root := ctx.RootTracer.FindMutableRoot(recv, ctx.LoopInfo)
-		if root == nil {
-			return
-		}
-
-		if isPolluted(root) {
-			ctx.Tracker.AddViolationWithRoot(pos, root)
-		}
-
-		// Check ALL possible roots for phi nodes
-		allRoots := ctx.RootTracer.FindAllMutableRoots(recv, ctx.LoopInfo)
-		for _, r := range allRoots {
-			if r == root {
-				continue
-			}
-			if isPolluted(r) {
-				ctx.Tracker.AddViolationWithRoot(pos, r)
-			}
-		}
-
-		// Record this deferred/spawned use so a later defer/go sees it.
-		ctx.Tracker.RecordBranchUse(root, block, pos)
+		handleBranchUse(callCommon.Args[0], pos, block, ctx, isPolluted)
 		return
 	}
 
 	// Function call with *gorm.DB arguments
 	for _, arg := range callCommon.Args {
-		if !typeutil.IsGormDB(arg.Type()) {
-			continue
+		if typeutil.IsGormDB(arg.Type()) {
+			handleBranchUse(arg, pos, block, ctx, isPolluted)
 		}
-
-		root := ctx.RootTracer.FindMutableRoot(arg, ctx.LoopInfo)
-		if root == nil {
-			continue
-		}
-
-		if isPolluted(root) {
-			ctx.Tracker.AddViolationWithRoot(pos, root)
-		}
-
-		// Check ALL possible roots for phi nodes
-		allRoots := ctx.RootTracer.FindAllMutableRoots(arg, ctx.LoopInfo)
-		for _, r := range allRoots {
-			if r == root {
-				continue
-			}
-			if isPolluted(r) {
-				ctx.Tracker.AddViolationWithRoot(pos, r)
-			}
-		}
-
-		// Record this deferred/spawned use so a later defer/go sees it.
-		ctx.Tracker.RecordBranchUse(root, block, pos)
 	}
+}
+
+// handleBranchUse handles one *gorm.DB value (a receiver or an argument) of a
+// deferred or spawned call. It reports a violation for each of the value's
+// possible roots that is already polluted, then records the use as a branch use.
+func handleBranchUse(v ssa.Value, pos token.Pos, block *ssa.BasicBlock, ctx *Context, isPolluted pollutionChecker) {
+	root := ctx.RootTracer.FindMutableRoot(v, ctx.LoopInfo)
+	if root == nil {
+		return
+	}
+
+	if isPolluted(root) {
+		ctx.Tracker.AddViolationWithRoot(pos, root)
+	}
+
+	// Check ALL possible roots for phi nodes
+	allRoots := ctx.RootTracer.FindAllMutableRoots(v, ctx.LoopInfo)
+	for _, r := range allRoots {
+		if r == root {
+			continue
+		}
+		if isPolluted(r) {
+			ctx.Tracker.AddViolationWithRoot(pos, r)
+		}
+	}
+
+	// Record this deferred/spawned use so a later defer/go sees it.
+	ctx.Tracker.RecordBranchUse(root, block, pos)
 }
 
 // Dispatch routes SSA instructions to their handlers using type switch.
