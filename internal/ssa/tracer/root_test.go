@@ -1,4 +1,4 @@
-package tracer_test
+package tracer
 
 import (
 	"os"
@@ -13,7 +13,6 @@ import (
 
 	"github.com/mpyw/gormreuse/internal/directive"
 	"github.com/mpyw/gormreuse/internal/ssa/cfg"
-	"github.com/mpyw/gormreuse/internal/ssa/tracer"
 	"github.com/mpyw/gormreuse/internal/typeutil"
 )
 
@@ -80,26 +79,26 @@ func gormMethod(allFuncs map[*ssa.Function]bool, name string) *ssa.Function {
 func TestIsImmutableReturningBuiltin(t *testing.T) {
 	t.Parallel()
 	fixtures, all := loadProgram(t)
-	tr := tracer.New(nil, nil, nil, nil, nil, nil)
+	tr := New(nil, nil, nil, nil, nil, nil)
 
 	session := gormMethod(all, "Session")
 	if session == nil {
 		t.Fatal("could not find (*gorm.DB).Session in the program")
 	}
-	if !tr.IsImmutableReturningBuiltin(session) {
+	if !tr.isImmutableReturningBuiltin(session) {
 		t.Error("Session should be an immutable-returning builtin")
 	}
 
 	// A gorm method that is NOT immutable-returning (Where).
-	if where := gormMethod(all, "Where"); where != nil && tr.IsImmutableReturningBuiltin(where) {
+	if where := gormMethod(all, "Where"); where != nil && tr.isImmutableReturningBuiltin(where) {
 		t.Error("Where is not immutable-returning")
 	}
 
 	// A user fixture function that merely shares no builtin name.
-	if fn := fixtures["nonPureHelper"]; fn != nil && tr.IsImmutableReturningBuiltin(fn) {
+	if fn := fixtures["nonPureHelper"]; fn != nil && tr.isImmutableReturningBuiltin(fn) {
 		t.Error("nonPureHelper is not a builtin")
 	}
-	if tr.IsImmutableReturningBuiltin(nil) {
+	if tr.isImmutableReturningBuiltin(nil) {
 		t.Error("nil is not a builtin")
 	}
 }
@@ -108,7 +107,7 @@ func TestIsPureFunction(t *testing.T) {
 	t.Parallel()
 	fixtures, all := loadProgram(t)
 	// Syntax-backed pure set resolves //gormreuse:pure via each function's AST.
-	tr := tracer.New(directive.NewPureFuncSet(nil, nil), nil, nil, nil, nil, nil)
+	tr := New(directive.NewPureFuncSet(nil, nil), nil, nil, nil, nil, nil)
 
 	if session := gormMethod(all, "Session"); session != nil && !tr.IsPureFunction(session) {
 		t.Error("Session (immutable builtin) should count as pure")
@@ -134,7 +133,7 @@ func TestClosureCapturesGormDB(t *testing.T) {
 	for fn := range all {
 		for _, b := range fn.Blocks {
 			for _, instr := range b.Instrs {
-				if mc, ok := instr.(*ssa.MakeClosure); ok && tracer.ClosureCapturesGormDB(mc) {
+				if mc, ok := instr.(*ssa.MakeClosure); ok && ClosureCapturesGormDB(mc) {
 					sawCapturing = true
 				}
 			}
@@ -153,7 +152,7 @@ func TestCollectScopesCallbacks(t *testing.T) {
 	for _, fn := range fixtures {
 		srcFuncs = append(srcFuncs, fn)
 	}
-	set := tracer.CollectScopesCallbacks(srcFuncs)
+	set := CollectScopesCallbacks(srcFuncs)
 
 	// The named function passed to Scopes must be collected.
 	named := fixtures["namedScope"]
@@ -195,7 +194,7 @@ func TestFindMutableRootScopesParam(t *testing.T) {
 	// With namedScope registered as a Scopes callback, its *gorm.DB parameter is
 	// a mutable root.
 	scopes := map[*ssa.Function]bool{named: true}
-	tr := tracer.New(nil, nil, nil, nil, scopes, nil)
+	tr := New(nil, nil, nil, nil, scopes, nil)
 
 	if !tr.IsScopesCallbackFunc(named) {
 		t.Error("namedScope should be recognized as a Scopes callback function")
@@ -218,14 +217,14 @@ func TestFindMutableRootScopesParam(t *testing.T) {
 	if root := tr.FindMutableRoot(ordParam, loops.DetectLoops(ordinary)); root != ordParam {
 		t.Errorf("Phase 1b: ordinary parameter should be a mutable root, got %v", root)
 	}
-	trPlain := tracer.New(nil, nil, nil, nil, nil, nil)
+	trPlain := New(nil, nil, nil, nil, nil, nil)
 	if root := trPlain.FindMutableRoot(namedParam, loops.DetectLoops(named)); root != namedParam {
 		t.Errorf("Phase 1b: unregistered parameter should be a mutable root, got %v", root)
 	}
 
 	// A Transaction callback's tx parameter is exempt (fresh forkable handle):
 	// registering the helper as a transaction callback makes its param immutable.
-	trTx := tracer.New(nil, nil, nil, nil, nil, map[*ssa.Function]bool{ordinary: true})
+	trTx := New(nil, nil, nil, nil, nil, map[*ssa.Function]bool{ordinary: true})
 	if root := trTx.FindMutableRoot(ordParam, loops.DetectLoops(ordinary)); root != nil {
 		t.Errorf("Transaction callback parameter should be immutable (nil root), got %v", root)
 	}
@@ -264,7 +263,7 @@ func TestFindMutableRootThroughStructField(t *testing.T) {
 	t.Parallel()
 	fixtures, _ := loadProgram(t)
 	loops := cfg.New()
-	tr := tracer.New(nil, nil, nil, nil, nil, nil)
+	tr := New(nil, nil, nil, nil, nil, nil)
 
 	for _, name := range []string{
 		"go127PromotedFieldLiteral",
