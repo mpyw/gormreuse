@@ -33,8 +33,8 @@ func TestIsIgnoreDirective(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			if got := IsIgnoreDirective(tt.text); got != tt.expected {
-				t.Errorf("IsIgnoreDirective(%q) = %v, want %v", tt.text, got, tt.expected)
+			if got := isIgnoreDirective(tt.text); got != tt.expected {
+				t.Errorf("isIgnoreDirective(%q) = %v, want %v", tt.text, got, tt.expected)
 			}
 		})
 	}
@@ -59,8 +59,8 @@ func TestIsPureDirective(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			if got := IsPureDirective(tt.text); got != tt.expected {
-				t.Errorf("IsPureDirective(%q) = %v, want %v", tt.text, got, tt.expected)
+			if got := isPureDirective(tt.text); got != tt.expected {
+				t.Errorf("isPureDirective(%q) = %v, want %v", tt.text, got, tt.expected)
 			}
 		})
 	}
@@ -88,8 +88,8 @@ func TestIsImmutableParamDirective(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			if got := IsImmutableParamDirective(tt.text); got != tt.expected {
-				t.Errorf("IsImmutableParamDirective(%q) = %v, want %v", tt.text, got, tt.expected)
+			if got := isImmutableParamDirective(tt.text); got != tt.expected {
+				t.Errorf("isImmutableParamDirective(%q) = %v, want %v", tt.text, got, tt.expected)
 			}
 		})
 	}
@@ -246,7 +246,7 @@ func foo() {}
 	// Check that file has doc and it contains ignore
 	if file.Doc != nil {
 		for _, c := range file.Doc.List {
-			if IsIgnoreDirective(c.Text) {
+			if isIgnoreDirective(c.Text) {
 				// File-level ignore should be present
 				if !m.ShouldIgnore(1) {
 					t.Error("Expected file-level ignore to affect line 1")
@@ -694,20 +694,20 @@ func TestHasDirectiveForms(t *testing.T) {
 		check func(string) bool
 		want  bool
 	}{
-		{"pure in spaced comma list", "//gormreuse:pure, immutable-return", IsPureDirective, false},
-		{"immutable-return in spaced comma list", "//gormreuse:pure, immutable-return", IsImmutableReturnDirective, false},
-		{"pure next to immutable-input", "//gormreuse:immutable-input(fn),pure // reason", IsPureDirective, true},
-		{"ignore with block form", "/*gormreuse:ignore*/", IsIgnoreDirective, false},
-		{"ignore with space after marker", "// gormreuse:ignore", IsIgnoreDirective, false},
-		{"name in trailing reason does not count", "//gormreuse:ignore // not pure", IsPureDirective, false},
-		{"lookalike tool", "//gormreusex:pure", IsPureDirective, false},
-		{"name prefix does not count", "//gormreuse:pure-ish", IsPureDirective, false},
-		{"pure next to a typo", "//gormreuse:pure,imutable-return", IsPureDirective, false},
-		{"ignore next to a typo", "//gormreuse:ignore,ignor", IsIgnoreDirective, false},
-		{"immutable-return next to a typo", "//gormreuse:immutable-return,pur", IsImmutableReturnDirective, false},
-		{"immutable-param next to a typo", "//gormreuse:immutable-param,pur", IsImmutableParamDirective, false},
-		{"ignore with dash reason", "//gormreuse:ignore - reason", IsIgnoreDirective, false},
-		{"ignore with reason without space", "//gormreuse:ignore//reason", IsIgnoreDirective, true},
+		{"pure in spaced comma list", "//gormreuse:pure, immutable-return", isPureDirective, false},
+		{"immutable-return in spaced comma list", "//gormreuse:pure, immutable-return", isImmutableReturnDirective, false},
+		{"pure next to immutable-input", "//gormreuse:immutable-input(fn),pure // reason", isPureDirective, true},
+		{"ignore with block form", "/*gormreuse:ignore*/", isIgnoreDirective, false},
+		{"ignore with space after marker", "// gormreuse:ignore", isIgnoreDirective, false},
+		{"name in trailing reason does not count", "//gormreuse:ignore // not pure", isPureDirective, false},
+		{"lookalike tool", "//gormreusex:pure", isPureDirective, false},
+		{"name prefix does not count", "//gormreuse:pure-ish", isPureDirective, false},
+		{"pure next to a typo", "//gormreuse:pure,imutable-return", isPureDirective, false},
+		{"ignore next to a typo", "//gormreuse:ignore,ignor", isIgnoreDirective, false},
+		{"immutable-return next to a typo", "//gormreuse:immutable-return,pur", isImmutableReturnDirective, false},
+		{"immutable-param next to a typo", "//gormreuse:immutable-param,pur", isImmutableParamDirective, false},
+		{"ignore with dash reason", "//gormreuse:ignore - reason", isIgnoreDirective, false},
+		{"ignore with reason without space", "//gormreuse:ignore//reason", isIgnoreDirective, true},
 	}
 
 	for _, tt := range tests {
@@ -725,7 +725,7 @@ func TestReadDirective(t *testing.T) {
 	t.Parallel()
 
 	const (
-		malformed = MalformedDirectiveMessage
+		malformed = malformedDirectiveMessage
 		ignoreArg = "gormreuse:ignore takes no argument; write a reason after //"
 		unknown   = " (want ignore, pure, immutable-return, immutable-param or immutable-input(name))"
 		inputFmt  = " directive: write it as immutable-input(name)"
@@ -842,9 +842,9 @@ func c() {
 		got = append(got, fmt.Sprintf("%d: %s", fset.Position(p.Pos).Line, p.Message))
 	}
 	want := []string{
-		"3: " + MalformedDirectiveMessage,
+		"3: " + malformedDirectiveMessage,
 		"9: unknown directive gormreuse:imutable-return (want ignore, pure, immutable-return, immutable-param or immutable-input(name))",
-		"11: " + MalformedDirectiveMessage,
+		"11: " + malformedDirectiveMessage,
 		"12: gormreuse:ignore takes no argument; write a reason after //",
 	}
 	if !slices.Equal(got, want) {

@@ -55,7 +55,7 @@ func BuildIgnoreMap(fset *token.FileSet, file *ast.File) IgnoreMap {
 	for _, cg := range file.Comments {
 		for _, c := range cg.List {
 			pos := fset.PositionFor(c.Pos(), false)
-			if IsIgnoreDirective(c.Text) {
+			if isIgnoreDirective(c.Text) {
 				// A directive anywhere BEFORE the package clause is a file-level
 				// ignore, regardless of distance: there is no code above the
 				// package clause for a line-level ignore to attach to, so the only
@@ -77,7 +77,7 @@ func BuildIgnoreMap(fset *token.FileSet, file *ast.File) IgnoreMap {
 	// Also check for file-level ignore in doc comments (package documentation)
 	if file.Doc != nil {
 		for _, c := range file.Doc.List {
-			if IsIgnoreDirective(c.Text) {
+			if isIgnoreDirective(c.Text) {
 				// File-level ignore: mark all lines as ignored
 				// File-level ignores are always considered "used" (no warning for them)
 				m[-1] = &ignoreEntry{pos: c.Pos(), used: true}
@@ -151,7 +151,7 @@ func BuildFunctionIgnoreSet(fset *token.FileSet, file inspector.Cursor) map[toke
 			continue
 		}
 		for _, c := range fd.Doc.List {
-			if IsIgnoreDirective(c.Text) {
+			if isIgnoreDirective(c.Text) {
 				// Use Name.Pos() to match SSA's fn.Pos()
 				result[fd.Name.Pos()] = FunctionIgnoreEntry{
 					DirectiveLine: fset.PositionFor(c.Pos(), false).Line,

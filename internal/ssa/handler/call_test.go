@@ -122,7 +122,7 @@ func TestIsAssignment(t *testing.T) {
 
 func TestIsGormDBMethodCall(t *testing.T) {
 	t.Parallel()
-	h := &CallHandler{}
+	h := &callHandler{}
 	// Every call collected by loadFixtureCalls is, by construction, a gorm
 	// method call; isGormDBMethodCall must agree.
 	for _, c := range loadFixtureCalls(t) {

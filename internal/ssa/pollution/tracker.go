@@ -84,7 +84,7 @@ type Tracker struct {
 	// They are intentionally NOT scanned by DetectViolations: defer/go run at a
 	// different time than their textual position, so position-ordered detection
 	// would misfire. Violations among them are reported inline at record time via
-	// IsPolluted/IsPollutedAt, which do consult this map.
+	// isPolluted/IsPollutedAt, which do consult this map.
 	branchUses map[ssa.Value][]UsageInfo
 
 	// violations tracks detected violations.
@@ -215,15 +215,15 @@ func (t *Tracker) firstBranchPos(root ssa.Value) token.Pos {
 	return best
 }
 
-// IsPolluted checks if a root has been polluted (for defer).
+// isPolluted checks if a root has been polluted (for defer).
 // Includes deferred/goroutine branch uses so multiple defers/goroutines that
 // reuse the same root (with no direct use) are detected.
-func (t *Tracker) IsPolluted(root ssa.Value) bool {
+func (t *Tracker) isPolluted(root ssa.Value) bool {
 	return len(t.pollutingUses[root]) > 0 || len(t.branchUses[root]) > 0
 }
 
 // IsPollutedAt checks if a root has polluting usage that can reach the target block.
-// Includes deferred/goroutine branch uses (see IsPolluted).
+// Includes deferred/goroutine branch uses (see isPolluted).
 func (t *Tracker) IsPollutedAt(root ssa.Value, targetBlock *ssa.BasicBlock) bool {
 	reaches := func(use UsageInfo) bool { return t.isReachable(use.Block, targetBlock) }
 	return slices.ContainsFunc(t.pollutingUses[root], reaches) || slices.ContainsFunc(t.branchUses[root], reaches)
@@ -328,5 +328,5 @@ func (t *Tracker) CollectViolations() []Violation {
 
 // IsPollutedAnywhere checks if root has any usage (for defer).
 func (t *Tracker) IsPollutedAnywhere(root ssa.Value) bool {
-	return t.IsPolluted(root)
+	return t.isPolluted(root)
 }

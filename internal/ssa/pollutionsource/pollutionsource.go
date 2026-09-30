@@ -30,7 +30,7 @@
 //   - A bare *ssa.MakeInterface with no downstream store/use. Interface
 //     conversion alone transfers no ownership; the value is only a leak once
 //     it is stored or passed somewhere, which the cases above already cover.
-//     This matches the main handler's MakeInterfaceHandler (a no-op).
+//     This matches the main handler's makeInterfaceHandler (a no-op).
 package pollutionsource
 
 import (

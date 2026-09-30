@@ -207,6 +207,8 @@ func (t *RootTracer) IsPureFunction(fn *ssa.Function) bool {
 // builtin name — a method named Session, a helper named Open — would be silently
 // trusted as immutable-returning (and, via IsPureFunction, as pure), disabling
 // reuse detection around it.
+//
+//declscope:ignore overexported // root_test.go tests it from package tracer_test
 func (t *RootTracer) IsImmutableReturningBuiltin(fn *ssa.Function) bool {
 	if fn == nil {
 		return false
