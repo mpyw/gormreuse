@@ -160,8 +160,8 @@ func TestExtractImmutableInputParams(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			if got := ExtractImmutableInputParams(tt.text); !slices.Equal(got, tt.want) {
-				t.Errorf("ExtractImmutableInputParams(%q) = %q, want %q", tt.text, got, tt.want)
+			if got := extractImmutableInputParams(tt.text); !slices.Equal(got, tt.want) {
+				t.Errorf("extractImmutableInputParams(%q) = %q, want %q", tt.text, got, tt.want)
 			}
 		})
 	}

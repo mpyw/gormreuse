@@ -187,7 +187,7 @@ func (t *RootTracer) IsPureFunction(fn *ssa.Function) bool {
 	if fn == nil {
 		return false
 	}
-	if t.IsImmutableReturningBuiltin(fn) {
+	if t.isImmutableReturningBuiltin(fn) {
 		return true
 	}
 	// A //gormreuse:pure function that failed its own contract validation is
@@ -198,7 +198,7 @@ func (t *RootTracer) IsPureFunction(fn *ssa.Function) bool {
 	return t.pureFuncs.Contains(fn)
 }
 
-// IsImmutableReturningBuiltin checks if a function is a builtin method that returns immutable *gorm.DB.
+// isImmutableReturningBuiltin checks if a function is a builtin method that returns immutable *gorm.DB.
 // Builtin methods (Session, WithContext, Debug, etc.) return immutable *gorm.DB.
 // This is used for tracing - only builtin methods have immutable return values.
 //
@@ -207,7 +207,7 @@ func (t *RootTracer) IsPureFunction(fn *ssa.Function) bool {
 // builtin name — a method named Session, a helper named Open — would be silently
 // trusted as immutable-returning (and, via IsPureFunction, as pure), disabling
 // reuse detection around it.
-func (t *RootTracer) IsImmutableReturningBuiltin(fn *ssa.Function) bool {
+func (t *RootTracer) isImmutableReturningBuiltin(fn *ssa.Function) bool {
 	if fn == nil {
 		return false
 	}
@@ -1496,7 +1496,7 @@ func (t *RootTracer) isImmutableSource(v ssa.Value) bool {
 // Begin, Transaction) or a function marked //gormreuse:immutable-return. Such
 // results are not mutable roots and can be reused freely. callee may be nil.
 func (t *RootTracer) returnsImmutable(callee *ssa.Function) bool {
-	if t.IsImmutableReturningBuiltin(callee) {
+	if t.isImmutableReturningBuiltin(callee) {
 		return true
 	}
 	return t.immutableReturnFuncs != nil && t.immutableReturnFuncs.Contains(callee)

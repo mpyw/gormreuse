@@ -111,7 +111,7 @@ func readDirective(text string) ([]string, string) {
 	d, ok := ast.ParseDirective(token.NoPos, text)
 	if !ok || d.Tool != directiveTool {
 		if directiveAddressed(text) {
-			return nil, MalformedDirectiveMessage
+			return nil, malformedDirectiveMessage
 		}
 		return nil, ""
 	}
@@ -133,7 +133,7 @@ var directiveNames = []string{"ignore", "pure", "immutable-return", "immutable-p
 // checkDirectivePart returns the problem with one part of a directive's list, or "".
 func checkDirectivePart(part string) string {
 	if part == "" {
-		return MalformedDirectiveMessage
+		return malformedDirectiveMessage
 	}
 	if slices.Contains(directiveNames, part) {
 		return ""
@@ -160,11 +160,11 @@ func directiveAddressed(text string) bool {
 	return strings.HasPrefix(strings.TrimSpace(body), directiveTool+":")
 }
 
-// MalformedDirectiveMessage is reported on a comment addressed to gormreuse
+// malformedDirectiveMessage is reported on a comment addressed to gormreuse
 // that is not in the directive form: a space after "//", after the colon or
 // after a comma, a block comment, a name that does not start with [a-z0-9], an
 // empty part, or no name at all.
-const MalformedDirectiveMessage = "malformed gormreuse directive: write it as //gormreuse:name"
+const malformedDirectiveMessage = "malformed gormreuse directive: write it as //gormreuse:name"
 
 // DirectiveProblem is a comment addressed to gormreuse that has no effect, and why.
 type DirectiveProblem struct {
@@ -194,19 +194,27 @@ func hasDirective(text, name string) bool {
 	return slices.Contains(parseDirective(text), name)
 }
 
-// IsIgnoreDirective checks if a comment is an ignore directive.
-func IsIgnoreDirective(text string) bool { return hasDirective(text, "ignore") }
+// isIgnoreDirective checks if a comment is an ignore directive.
+//
+//declscope:package // ignore.go checks comments with it
+func isIgnoreDirective(text string) bool { return hasDirective(text, "ignore") }
 
-// IsPureDirective checks if a comment contains the pure directive.
+// isPureDirective checks if a comment contains the pure directive.
 // Pure functions don't pollute their *gorm.DB arguments.
-func IsPureDirective(text string) bool { return hasDirective(text, "pure") }
+//
+//declscope:package // funcset.go checks comments with it
+func isPureDirective(text string) bool { return hasDirective(text, "pure") }
 
-// IsImmutableReturnDirective checks if a comment contains the immutable-return directive.
+// isImmutableReturnDirective checks if a comment contains the immutable-return directive.
 // Functions with this directive return immutable *gorm.DB (like Session, WithContext).
-func IsImmutableReturnDirective(text string) bool { return hasDirective(text, "immutable-return") }
+//
+//declscope:package // funcset.go checks comments with it
+func isImmutableReturnDirective(text string) bool { return hasDirective(text, "immutable-return") }
 
-// IsImmutableParamDirective checks if a comment contains the immutable-param directive.
+// isImmutableParamDirective checks if a comment contains the immutable-param directive.
 // Functions with this directive assert that their callers guarantee forkable
 // (clone>0) *gorm.DB arguments, so the parameter can be reused safely. It is the
 // escape hatch for the default-mutable parameter treatment (Phase 1b, #61).
-func IsImmutableParamDirective(text string) bool { return hasDirective(text, "immutable-param") }
+//
+//declscope:package // funcset.go checks comments with it
+func isImmutableParamDirective(text string) bool { return hasDirective(text, "immutable-param") }

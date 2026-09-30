@@ -11,13 +11,13 @@
 //	┌─────────────────────────────────────────────────────────────────────────┐
 //	│  Instruction Type  │  Handler          │  Purpose                       │
 //	├─────────────────────────────────────────────────────────────────────────┤
-//	│  *ssa.Call         │  CallHandler      │  Method calls, function calls  │
-//	│  *ssa.Go           │  GoHandler        │  go func() { ... }             │
-//	│  *ssa.Defer        │  DeferHandler     │  defer func() { ... }          │
-//	│  *ssa.Send         │  SendHandler      │  ch <- db (channel send)       │
-//	│  *ssa.Store        │  StoreHandler     │  slice[i] = db (slice elem)    │
-//	│  *ssa.MapUpdate    │  MapUpdateHandler │  map[k] = db (map storage)     │
-//	│  *ssa.MakeInterface│  MakeInterfaceHandler │ interface{}(db)            │
+//	│  *ssa.Call         │  callHandler      │  Method calls, function calls  │
+//	│  *ssa.Go           │  goHandler        │  go func() { ... }             │
+//	│  *ssa.Defer        │  deferHandler     │  defer func() { ... }          │
+//	│  *ssa.Send         │  sendHandler      │  ch <- db (channel send)       │
+//	│  *ssa.Store        │  storeHandler     │  slice[i] = db (slice elem)    │
+//	│  *ssa.MapUpdate    │  mapUpdateHandler │  map[k] = db (map storage)     │
+//	│  *ssa.MakeInterface│  makeInterfaceHandler │ interface{}(db)            │
 //	└─────────────────────────────────────────────────────────────────────────┘
 //
 // # Type Switch Dispatch
@@ -25,8 +25,8 @@
 // The Dispatch function uses type switch for O(1) dispatch to handlers:
 //
 //	switch i := instr.(type) {
-//	case *ssa.Call:    (&CallHandler{}).Handle(i, ctx)
-//	case *ssa.Go:      (&GoHandler{}).Handle(i, ctx)
+//	case *ssa.Call:    (&callHandler{}).handle(i, ctx)
+//	case *ssa.Go:      (&goHandler{}).handle(i, ctx)
 //	...
 //	}
 //
@@ -82,7 +82,7 @@ func (c *Context) pos(raw token.Pos) token.Pos {
 	return raw
 }
 
-// CallHandler handles *ssa.Call instructions.
+// callHandler handles *ssa.Call instructions.
 //
 // This is the most complex handler, covering:
 //   - Direct gorm method calls: q.Find(nil)
@@ -97,7 +97,7 @@ func (c *Context) pos(raw token.Pos) token.Pos {
 //
 // There's no distinction between "terminal" and "non-terminal" methods.
 // All uses are recorded, and violations are detected via CFG reachability.
-type CallHandler struct{}
+type callHandler struct{}
 
 // isAssignment checks if a call result is assigned to create a new root.
 // Returns true if the call result flows into a Phi node, Store to Alloc,
@@ -176,14 +176,14 @@ func isChainedGormMethodCall(call *ssa.Call, nextCall *ssa.Call) bool {
 	return nextCall.Call.Args[0] == call
 }
 
-// Handle processes a Call instruction and tracks *gorm.DB pollution.
+// handle processes a Call instruction and tracks *gorm.DB pollution.
 //
 // Processing order:
 //  1. Check function calls with *gorm.DB args (mark as polluted)
 //  2. Handle bound method calls (find := q.Find; find(nil))
 //  3. Process gorm method calls: pure/assignment/actual use
 //  4. Check all Phi roots for conditional merges
-func (h *CallHandler) Handle(call *ssa.Call, ctx *Context) {
+func (h *callHandler) handle(call *ssa.Call, ctx *Context) {
 	isInLoop := ctx.LoopInfo.IsInLoop(call.Block())
 
 	// Check function call pollution (non-gorm-method calls with *gorm.DB args)
@@ -265,7 +265,7 @@ func (h *CallHandler) Handle(call *ssa.Call, ctx *Context) {
 //	find := q.Find  // MakeClosure(Find$bound, [q])
 //	find(nil)       // first use - OK
 //	q.Count(nil)    // VIOLATION (q already polluted by find(nil))
-func (h *CallHandler) processBoundMethodCall(call *ssa.Call, mc *ssa.MakeClosure, isInLoop bool, ctx *Context) {
+func (h *callHandler) processBoundMethodCall(call *ssa.Call, mc *ssa.MakeClosure, isInLoop bool, ctx *Context) {
 	if len(mc.Bindings) == 0 {
 		return
 	}
@@ -327,7 +327,7 @@ func (h *CallHandler) processBoundMethodCall(call *ssa.Call, mc *ssa.MakeClosure
 //	q := db.Where("x")
 //	pureHelper(q)  // does NOT pollute
 //	q.Count(nil)   // OK (first use)
-func (h *CallHandler) checkFunctionCallPollution(call *ssa.Call, ctx *Context) {
+func (h *callHandler) checkFunctionCallPollution(call *ssa.Call, ctx *Context) {
 	callee := call.Call.StaticCallee()
 
 	// Check if this is a pure function - pure functions don't pollute args
@@ -391,7 +391,7 @@ func immutableParamContractMessage(callee *ssa.Function) string {
 		"; isolate it with .Session(&gorm.Session{}) before passing"
 }
 
-func (h *CallHandler) isGormDBMethodCall(call *ssa.Call) bool {
+func (h *callHandler) isGormDBMethodCall(call *ssa.Call) bool {
 	callee := call.Call.StaticCallee()
 	if callee == nil {
 		return false
@@ -405,34 +405,34 @@ func (h *CallHandler) isGormDBMethodCall(call *ssa.Call) bool {
 	return typeutil.IsGormDB(sig.Recv().Type())
 }
 
-// GoHandler handles *ssa.Go instructions.
-type GoHandler struct{}
+// goHandler handles *ssa.Go instructions.
+type goHandler struct{}
 
-// Handle processes a Go instruction.
-func (h *GoHandler) Handle(g *ssa.Go, ctx *Context) {
+// handle processes a Go instruction.
+func (h *goHandler) handle(g *ssa.Go, ctx *Context) {
 	block := g.Block()
 	processGormDBCallCommonWith(&g.Call, g.Pos(), block, ctx, func(root ssa.Value) bool {
 		return ctx.Tracker.IsPollutedAt(root, block)
 	})
 }
 
-// DeferHandler handles *ssa.Defer instructions.
-type DeferHandler struct{}
+// deferHandler handles *ssa.Defer instructions.
+type deferHandler struct{}
 
-// Handle processes a Defer instruction.
+// handle processes a Defer instruction.
 // Defer uses IsPollutedAnywhere because it executes at function exit.
-func (h *DeferHandler) Handle(d *ssa.Defer, ctx *Context) {
+func (h *deferHandler) handle(d *ssa.Defer, ctx *Context) {
 	processGormDBCallCommonWith(&d.Call, d.Pos(), d.Block(), ctx, func(root ssa.Value) bool {
 		return ctx.Tracker.IsPollutedAnywhere(root)
 	})
 }
 
-// SendHandler handles *ssa.Send instructions.
-type SendHandler struct{}
+// sendHandler handles *ssa.Send instructions.
+type sendHandler struct{}
 
-// Handle marks *gorm.DB sent to channels as polluted.
+// handle marks *gorm.DB sent to channels as polluted.
 // Handles both direct sends and sends through MakeInterface (chan interface{}).
-func (h *SendHandler) Handle(send *ssa.Send, ctx *Context) {
+func (h *sendHandler) handle(send *ssa.Send, ctx *Context) {
 	gormVal, kind := pollutionsource.Leak(send)
 	if kind == pollutionsource.KindNone {
 		return
@@ -446,15 +446,15 @@ func (h *SendHandler) Handle(send *ssa.Send, ctx *Context) {
 	ctx.Tracker.MarkPolluted(root, send.Block(), ctx.pos(send.Pos()))
 }
 
-// StoreHandler handles *ssa.Store instructions.
-type StoreHandler struct{}
+// storeHandler handles *ssa.Store instructions.
+type storeHandler struct{}
 
-// Handle marks *gorm.DB stored to slice elements as polluted.
+// handle marks *gorm.DB stored to slice elements as polluted.
 // Handles both direct stores and stores through MakeInterface ([]interface{}).
 //
 // The read-only variadic stdlib exemption (fmt.Println(q), log.Printf, t.Logf)
 // lives in pollutionsource.Leak so the purity validator honors it too.
-func (h *StoreHandler) Handle(store *ssa.Store, ctx *Context) {
+func (h *storeHandler) handle(store *ssa.Store, ctx *Context) {
 	gormVal, kind := pollutionsource.Leak(store)
 	if kind == pollutionsource.KindNone {
 		return
@@ -468,12 +468,12 @@ func (h *StoreHandler) Handle(store *ssa.Store, ctx *Context) {
 	ctx.Tracker.MarkPolluted(root, store.Block(), ctx.pos(store.Pos()))
 }
 
-// MapUpdateHandler handles *ssa.MapUpdate instructions.
-type MapUpdateHandler struct{}
+// mapUpdateHandler handles *ssa.MapUpdate instructions.
+type mapUpdateHandler struct{}
 
-// Handle marks *gorm.DB stored in maps as polluted.
+// handle marks *gorm.DB stored in maps as polluted.
 // Handles both direct stores and stores through MakeInterface (map[K]interface{}).
-func (h *MapUpdateHandler) Handle(mapUpdate *ssa.MapUpdate, ctx *Context) {
+func (h *mapUpdateHandler) handle(mapUpdate *ssa.MapUpdate, ctx *Context) {
 	gormVal, kind := pollutionsource.Leak(mapUpdate)
 	if kind == pollutionsource.KindNone {
 		return
@@ -487,17 +487,17 @@ func (h *MapUpdateHandler) Handle(mapUpdate *ssa.MapUpdate, ctx *Context) {
 	ctx.Tracker.MarkPolluted(root, mapUpdate.Block(), ctx.pos(mapUpdate.Pos()))
 }
 
-// MakeInterfaceHandler handles *ssa.MakeInterface instructions.
-type MakeInterfaceHandler struct{}
+// makeInterfaceHandler handles *ssa.MakeInterface instructions.
+type makeInterfaceHandler struct{}
 
-// Handle processes *gorm.DB to interface{} conversion.
+// handle processes *gorm.DB to interface{} conversion.
 // NOTE: Interface conversion itself does NOT pollute the source.
 // It's just a type conversion (ownership transfer), similar to assignment.
 // The source *gorm.DB is only polluted when actually used via:
 // - Type assertion extraction followed by gorm method calls
 // - Function calls that receive the interface{} value
 // Those are handled by their respective handlers.
-func (h *MakeInterfaceHandler) Handle(mi *ssa.MakeInterface, ctx *Context) {
+func (h *makeInterfaceHandler) handle(mi *ssa.MakeInterface, ctx *Context) {
 	// No-op: interface conversion doesn't pollute the source
 	// The value is just wrapped in interface{}, not used.
 }
@@ -569,28 +569,28 @@ func handleBranchUse(v ssa.Value, pos token.Pos, block *ssa.BasicBlock, ctx *Con
 // Dispatch routes SSA instructions to their handlers using type switch.
 //
 // Handler mapping:
-//   - *ssa.Call         → CallHandler (method/function calls)
-//   - *ssa.Go           → GoHandler (goroutine launches)
-//   - *ssa.Send         → SendHandler (channel send: ch <- db)
-//   - *ssa.Store        → StoreHandler (slice store: slice[i] = db)
-//   - *ssa.MapUpdate    → MapUpdateHandler (map store: m[k] = db)
-//   - *ssa.MakeInterface → MakeInterfaceHandler (interface conversion)
+//   - *ssa.Call         → callHandler (method/function calls)
+//   - *ssa.Go           → goHandler (goroutine launches)
+//   - *ssa.Send         → sendHandler (channel send: ch <- db)
+//   - *ssa.Store        → storeHandler (slice store: slice[i] = db)
+//   - *ssa.MapUpdate    → mapUpdateHandler (map store: m[k] = db)
+//   - *ssa.MakeInterface → makeInterfaceHandler (interface conversion)
 //
 // Note: *ssa.Defer uses DispatchDefer (different pollution semantics).
 func Dispatch(instr ssa.Instruction, ctx *Context) {
 	switch i := instr.(type) {
 	case *ssa.Call:
-		(&CallHandler{}).Handle(i, ctx)
+		(&callHandler{}).handle(i, ctx)
 	case *ssa.Go:
-		(&GoHandler{}).Handle(i, ctx)
+		(&goHandler{}).handle(i, ctx)
 	case *ssa.Send:
-		(&SendHandler{}).Handle(i, ctx)
+		(&sendHandler{}).handle(i, ctx)
 	case *ssa.Store:
-		(&StoreHandler{}).Handle(i, ctx)
+		(&storeHandler{}).handle(i, ctx)
 	case *ssa.MapUpdate:
-		(&MapUpdateHandler{}).Handle(i, ctx)
+		(&mapUpdateHandler{}).handle(i, ctx)
 	case *ssa.MakeInterface:
-		(&MakeInterfaceHandler{}).Handle(i, ctx)
+		(&makeInterfaceHandler{}).handle(i, ctx)
 	}
 }
 
@@ -607,7 +607,7 @@ func Dispatch(instr ssa.Instruction, ctx *Context) {
 //	q.Count(nil)       // executes BEFORE defer, pollutes q
 //	// function exits → defer q.Find(nil) → VIOLATION!
 func DispatchDefer(d *ssa.Defer, ctx *Context) {
-	(&DeferHandler{}).Handle(d, ctx)
+	(&deferHandler{}).handle(d, ctx)
 }
 
 // DispatchGo handles go instructions separately from regular Dispatch.
@@ -627,5 +627,5 @@ func DispatchDefer(d *ssa.Defer, ctx *Context) {
 //	}
 //	go q.Count(nil)  // needs to see pollution from else branch
 func DispatchGo(g *ssa.Go, ctx *Context) {
-	(&GoHandler{}).Handle(g, ctx)
+	(&goHandler{}).handle(g, ctx)
 }

@@ -76,13 +76,13 @@ func (s *ImmutableInputSet) AddFile(file *ast.File, pkgPath string) {
 	}
 }
 
-// ExtractImmutableInputParams returns the callback parameter names declared by
+// extractImmutableInputParams returns the callback parameter names declared by
 // //gormreuse:immutable-input(name) directives in a comment. A comment may carry
 // several (comma-combinable with other directives), so it returns a slice; nil if
 // none. It reads the comment through the same parseDirective as hasDirective,
 // so only a valid //gormreuse: directive counts, a trailing "//" comment is
 // ignored (#62), and a malformed immutable-input part drops the comment.
-func ExtractImmutableInputParams(text string) []string {
+func extractImmutableInputParams(text string) []string {
 	var params []string
 	for _, part := range parseDirective(text) {
 		if inner, ok := strings.CutPrefix(part, "immutable-input("); ok {
@@ -104,7 +104,7 @@ type immutableInputRef struct {
 func (s *ImmutableInputSet) extractParamsFromComments(list []*ast.Comment) []immutableInputRef {
 	var refs []immutableInputRef
 	for _, c := range list {
-		for _, name := range ExtractImmutableInputParams(c.Text) {
+		for _, name := range extractImmutableInputParams(c.Text) {
 			refs = append(refs, immutableInputRef{commentPos: c.Pos(), name: name})
 		}
 	}
