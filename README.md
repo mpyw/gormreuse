@@ -26,7 +26,7 @@ q.Find(&admins) // Bug: Conditions accumulate unexpectedly
 **Recommended.** gormreuse is installable directly from GitHub Releases via mise's `github` backend — no extra registry required, and no Go toolchain needed because the binaries are prebuilt:
 
 ```bash
-mise use "github:mpyw/gormreuse@0.21.0"
+mise use "github:mpyw/gormreuse@0.22.0"
 gormreuse ./...
 ```
 
@@ -34,7 +34,7 @@ Run it in the project root. It pins the version in the project's `mise.toml`, so
 
 ```toml
 [tools]
-"github:mpyw/gormreuse" = "0.21.0"
+"github:mpyw/gormreuse" = "0.22.0"
 ```
 
 Add `-g` to install it for every project on your machine instead.
@@ -75,7 +75,7 @@ go run github.com/mpyw/gormreuse/cmd/gormreuse@latest ./...
 ```
 
 > [!CAUTION]
-> To prevent supply chain attacks, pin to a specific version tag instead of `@latest` in CI/CD pipelines (e.g., `@v0.17.0`).
+> To prevent supply chain attacks, pin to a specific version tag instead of `@latest` in CI/CD pipelines (e.g., `@v0.22.0`).
 
 <details>
 <summary><a href="https://curl.se/"><img src="https://cdn.simpleicons.org/curl" height="20" alt=""></a> Downloading the tarball directly (macOS/Linux/Windows)</summary>
@@ -100,6 +100,44 @@ sudo mv gormreuse /usr/local/bin/
 ```
 
 On Windows, download `gormreuse_${VERSION}_windows_${ARCH}.zip` and extract `gormreuse.exe` somewhere on your `PATH`.
+
+</details>
+
+<details>
+<summary><a href="https://golangci-lint.run/"><img src="https://cdn.simpleicons.org/go" height="20" alt=""></a> Running inside golangci-lint (custom build)</summary>
+
+gormreuse is not bundled with golangci-lint, but it ships a [module plugin](https://golangci-lint.run/plugins/module-plugins/), so you can build a golangci-lint binary that holds it. Write `.custom-gcl.yml`:
+
+```yaml
+version: v2.13.1  # the golangci-lint release to build
+plugins:
+  - module: github.com/mpyw/gormreuse
+    import: github.com/mpyw/gormreuse/plugin
+    version: v0.22.0
+```
+
+Turn it on in `.golangci.yml`. gormreuse has no settings, and any key under `settings` is an error:
+
+```yaml
+version: "2"
+linters:
+  enable:
+    - gormreuse
+  settings:
+    custom:
+      gormreuse:
+        type: module
+        description: Detects unsafe *gorm.DB reuse.
+```
+
+Then build and run it:
+
+```bash
+golangci-lint custom  # writes ./custom-gcl
+./custom-gcl run ./...
+```
+
+Use golangci-lint's own options in place of the driver flags below: `run.tests: false` for `-test=false`, and `--fix` for `-fix`.
 
 </details>
 

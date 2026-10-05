@@ -2,7 +2,10 @@ module github.com/mpyw/gormreuse
 
 go 1.27.0
 
-require golang.org/x/tools v0.50.0
+require (
+	github.com/golangci/plugin-module-register v0.1.2
+	golang.org/x/tools v0.50.0
+)
 
 require (
 	golang.org/x/mod v0.41.0 // indirect
