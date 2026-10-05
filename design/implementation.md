@@ -116,6 +116,7 @@ gormreuse/
 ├── analyzer.go                 # Public analyzer definition (go/analysis entry point)
 ├── analyzer_test.go            # Integration tests using analysistest
 ├── cmd/gormreuse/main.go       # CLI entry point (singlechecker)
+├── plugin/plugin.go            # golangci-lint module plugin (no settings; shares Analyzer)
 │
 ├── internal/                   # Internal implementation
 │   ├── analyzer.go             # SSA analysis orchestrator (RunSSA entry point)
@@ -161,6 +162,8 @@ gormreuse/
     ├── cmd/gengolden/          # Golden file generator
     └── e2e/                    # SQL behavior verification (separate module)
 ```
+
+The `plugin` package registers `Analyzer` with golangci-lint's module plugin system. `Analyzer` reads no flags, so the plugin hands it over as it is and rejects any settings. It lives in the main module: `plugin-module-register` adds nothing beyond `golang.org/x/tools`, and a nested module would need its own tag per release.
 
 ### Analysis Pipeline
 
