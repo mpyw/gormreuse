@@ -14,7 +14,7 @@ import (
 // expression, without the pointer marker (e.g., "Orm" for both *Orm and Orm) —
 // the AST-side counterpart of receiverTypeString.
 //
-//declscope:package // immutable_input.go compares receiver type strings too
+//declscope:shared // immutable_input.go compares receiver type strings too
 func receiverTypeStringFromExpr(expr ast.Expr) string {
 	return strings.TrimPrefix(exprToTypeString(expr), "*")
 }
@@ -22,7 +22,7 @@ func receiverTypeStringFromExpr(expr ast.Expr) string {
 // exprToTypeString converts a type ast.Expr to a string representation.
 // For generic types like GenericReceiver[T], returns just the base type name.
 //
-//declscope:package // immutable_input.go compares receiver type strings too
+//declscope:shared // immutable_input.go compares receiver type strings too
 func exprToTypeString(expr ast.Expr) string {
 	switch e := expr.(type) {
 	case *ast.Ident:
@@ -47,7 +47,7 @@ func exprToTypeString(expr ast.Expr) string {
 // Go doesn't allow both pointer and value receivers with the same method name,
 // so the pointer is irrelevant for matching.
 //
-//declscope:package // immutable_input.go compares receiver type strings too
+//declscope:shared // immutable_input.go compares receiver type strings too
 func receiverTypeString(t types.Type) string {
 	// Unwrap pointer if present
 	if ptr, ok := types.Unalias(t).(*types.Pointer); ok {

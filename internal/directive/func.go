@@ -15,8 +15,8 @@ type FuncKey struct {
 
 // Node type filters for inspector
 var (
-	//declscope:package // funcset.go and ignore.go walk function declarations with the same filter
+	//declscope:shared // funcset.go and ignore.go walk function declarations with the same filter
 	funcDeclTypes = []ast.Node{(*ast.FuncDecl)(nil)}
-	//declscope:package // funcset.go filters function literals with it
+	//declscope:shared // funcset.go filters function literals with it
 	funcLitTypes = []ast.Node{(*ast.FuncLit)(nil)}
 )
