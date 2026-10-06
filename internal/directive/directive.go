@@ -79,13 +79,13 @@ const directiveTool = "gormreuse"
 
 // directiveChecker is a function that checks if a comment is a specific directive.
 //
-//declscope:package // funcset.go keys each DirectiveFuncSet on one
+//declscope:shared // funcset.go keys each DirectiveFuncSet on one
 type directiveChecker func(text string) bool
 
 // parseDirective returns the comma-separated parts of a gormreuse directive
 // comment, or nil when the comment is not a valid one.
 //
-//declscope:package // immutable_input.go splits its immutable-input(name) parts from the same list
+//declscope:shared // immutable_input.go splits its immutable-input(name) parts from the same list
 func parseDirective(text string) []string {
 	parts, _ := readDirective(text)
 	return parts
@@ -196,19 +196,19 @@ func hasDirective(text, name string) bool {
 
 // isIgnoreDirective checks if a comment is an ignore directive.
 //
-//declscope:package // ignore.go checks comments with it
+//declscope:shared // ignore.go checks comments with it
 func isIgnoreDirective(text string) bool { return hasDirective(text, "ignore") }
 
 // isPureDirective checks if a comment contains the pure directive.
 // Pure functions don't pollute their *gorm.DB arguments.
 //
-//declscope:package // funcset.go checks comments with it
+//declscope:shared // funcset.go checks comments with it
 func isPureDirective(text string) bool { return hasDirective(text, "pure") }
 
 // isImmutableReturnDirective checks if a comment contains the immutable-return directive.
 // Functions with this directive return immutable *gorm.DB (like Session, WithContext).
 //
-//declscope:package // funcset.go checks comments with it
+//declscope:shared // funcset.go checks comments with it
 func isImmutableReturnDirective(text string) bool { return hasDirective(text, "immutable-return") }
 
 // isImmutableParamDirective checks if a comment contains the immutable-param directive.
@@ -216,5 +216,5 @@ func isImmutableReturnDirective(text string) bool { return hasDirective(text, "i
 // (clone>0) *gorm.DB arguments, so the parameter can be reused safely. It is the
 // escape hatch for the default-mutable parameter treatment (Phase 1b, #61).
 //
-//declscope:package // funcset.go checks comments with it
+//declscope:shared // funcset.go checks comments with it
 func isImmutableParamDirective(text string) bool { return hasDirective(text, "immutable-param") }

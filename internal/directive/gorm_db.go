@@ -20,7 +20,7 @@ func HasGormDBParameter(sig *types.Signature) bool { return hasGormDBParameter(s
 // hasGormDBParameter checks if a function signature has any parameter
 // containing *gorm.DB (directly or in struct fields).
 //
-//declscope:package // immutable_input.go and funcset.go both gate on the signature
+//declscope:shared // immutable_input.go and funcset.go both gate on the signature
 func hasGormDBParameter(sig *types.Signature) bool {
 	params := sig.Params()
 	for v := range params.Variables() {
@@ -34,7 +34,7 @@ func hasGormDBParameter(sig *types.Signature) bool {
 // hasGormDBReturn checks if a function signature has any return value
 // containing *gorm.DB (directly or in struct fields).
 //
-//declscope:package // funcset.go gates on the signature too
+//declscope:shared // funcset.go gates on the signature too
 func hasGormDBReturn(sig *types.Signature) bool {
 	results := sig.Results()
 	for v := range results.Variables() {
@@ -48,7 +48,7 @@ func hasGormDBReturn(sig *types.Signature) bool {
 // containsGormDB checks if a type contains *gorm.DB anywhere in its structure.
 // It recursively checks struct fields, slices, arrays, maps, and channels.
 //
-//declscope:package // directive_test.go exercises it directly
+//declscope:shared // directive_test.go exercises it directly
 func containsGormDB(t types.Type) bool {
 	cache := make(map[types.Type]*gormDBCacheEntry)
 	return containsGormDBWithCache(t, cache)
