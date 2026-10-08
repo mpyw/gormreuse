@@ -187,13 +187,6 @@ func FindDirectiveProblems(file *ast.File) []DirectiveProblem {
 	return out
 }
 
-// hasDirective checks if a comment contains the specified directive.
-// Supports comma-separated directives: "//gormreuse:pure,immutable-return".
-// Trailing comments use "//": "//gormreuse:ignore // reason here".
-func hasDirective(text, name string) bool {
-	return slices.Contains(parseDirective(text), name)
-}
-
 // isIgnoreDirective checks if a comment is an ignore directive.
 //
 //declscope:shared // ignore.go checks comments with it
@@ -218,3 +211,10 @@ func isImmutableReturnDirective(text string) bool { return hasDirective(text, "i
 //
 //declscope:shared // funcset.go checks comments with it
 func isImmutableParamDirective(text string) bool { return hasDirective(text, "immutable-param") }
+
+// hasDirective checks if a comment contains the specified directive.
+// Supports comma-separated directives: "//gormreuse:pure,immutable-return".
+// Trailing comments use "//": "//gormreuse:ignore // reason here".
+func hasDirective(text, name string) bool {
+	return slices.Contains(parseDirective(text), name)
+}

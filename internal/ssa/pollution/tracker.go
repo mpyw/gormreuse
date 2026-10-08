@@ -146,6 +146,79 @@ func (t *Tracker) RecordBranchUse(root ssa.Value, block *ssa.BasicBlock, pos tok
 	t.branchUses[root] = append(t.branchUses[root], UsageInfo{Block: block, Pos: pos})
 }
 
+// IsPollutedAt checks if a root has polluting usage that can reach the target block.
+// Includes deferred/goroutine branch uses (see isPolluted).
+func (t *Tracker) IsPollutedAt(root ssa.Value, targetBlock *ssa.BasicBlock) bool {
+	reaches := func(use UsageInfo) bool { return t.isReachable(use.Block, targetBlock) }
+	return slices.ContainsFunc(t.pollutingUses[root], reaches) || slices.ContainsFunc(t.branchUses[root], reaches)
+}
+
+// MarkPolluted records a polluting usage (for channel send, slice storage, etc).
+// Caller must ensure root is not nil.
+func (t *Tracker) MarkPolluted(root ssa.Value, block *ssa.BasicBlock, pos token.Pos) {
+	t.pollutingUses[root] = append(t.pollutingUses[root], UsageInfo{Block: block, Pos: pos})
+}
+
+// AddMessageViolation records a violation with a fixed message and no root, so it
+// carries no suggested fix. Used for contract violations that are not root-reuse
+// violations — e.g. passing a mutable *gorm.DB to a //gormreuse:immutable-param
+// parameter (Phase 1b stage 2b). It still flows through the normal reporting path,
+// so //gormreuse:ignore and position dedup apply.
+func (t *Tracker) AddMessageViolation(pos token.Pos, message string) {
+	t.violations = append(t.violations, Violation{Pos: pos, Message: message})
+}
+
+// AddViolationWithRoot adds a violation with root information for fix generation.
+func (t *Tracker) AddViolationWithRoot(pos token.Pos, root ssa.Value) {
+	allUses := t.getAllUses(root)
+	t.addViolationWithContext(pos, root, allUses)
+}
+
+// DetectViolations performs violation detection after all uses are recorded.
+// For each root with multiple uses, check if an earlier use can reach a later one.
+func (t *Tracker) DetectViolations() {
+	// Check violations between polluting uses (non-pure methods)
+	for root, uses := range t.pollutingUses {
+		if len(uses) <= 1 {
+			continue // Need at least 2 polluting uses for a violation
+		}
+		allUses := t.getAllUses(root)
+		t.checkViolationsBetween(uses, uses, root, allUses)
+	}
+
+	// Check pure uses against polluting uses
+	// A pure use after a polluting use is a violation
+	for root, pureUses := range t.pureUses {
+		pollutingUses := t.pollutingUses[root]
+		if len(pollutingUses) == 0 {
+			continue
+		}
+		allUses := t.getAllUses(root)
+		t.checkViolationsBetween(pureUses, pollutingUses, root, allUses)
+	}
+
+	// Check assignment uses against polluting uses
+	// An assignment use after a polluting use is a violation (using polluted root)
+	for root, assignmentUses := range t.assignmentUses {
+		pollutingUses := t.pollutingUses[root]
+		if len(pollutingUses) == 0 {
+			continue
+		}
+		allUses := t.getAllUses(root)
+		t.checkViolationsBetween(assignmentUses, pollutingUses, root, allUses)
+	}
+}
+
+// CollectViolations returns all detected violations.
+func (t *Tracker) CollectViolations() []Violation {
+	return t.violations
+}
+
+// IsPollutedAnywhere checks if root has any usage (for defer).
+func (t *Tracker) IsPollutedAnywhere(root ssa.Value) bool {
+	return t.isPolluted(root)
+}
+
 // isReachable checks if pollution can reach the target block.
 func (t *Tracker) isReachable(pollutedBlock, targetBlock *ssa.BasicBlock) bool {
 	if pollutedBlock == nil || targetBlock == nil {
@@ -222,34 +295,6 @@ func (t *Tracker) isPolluted(root ssa.Value) bool {
 	return len(t.pollutingUses[root]) > 0 || len(t.branchUses[root]) > 0
 }
 
-// IsPollutedAt checks if a root has polluting usage that can reach the target block.
-// Includes deferred/goroutine branch uses (see isPolluted).
-func (t *Tracker) IsPollutedAt(root ssa.Value, targetBlock *ssa.BasicBlock) bool {
-	reaches := func(use UsageInfo) bool { return t.isReachable(use.Block, targetBlock) }
-	return slices.ContainsFunc(t.pollutingUses[root], reaches) || slices.ContainsFunc(t.branchUses[root], reaches)
-}
-
-// MarkPolluted records a polluting usage (for channel send, slice storage, etc).
-// Caller must ensure root is not nil.
-func (t *Tracker) MarkPolluted(root ssa.Value, block *ssa.BasicBlock, pos token.Pos) {
-	t.pollutingUses[root] = append(t.pollutingUses[root], UsageInfo{Block: block, Pos: pos})
-}
-
-// AddMessageViolation records a violation with a fixed message and no root, so it
-// carries no suggested fix. Used for contract violations that are not root-reuse
-// violations — e.g. passing a mutable *gorm.DB to a //gormreuse:immutable-param
-// parameter (Phase 1b stage 2b). It still flows through the normal reporting path,
-// so //gormreuse:ignore and position dedup apply.
-func (t *Tracker) AddMessageViolation(pos token.Pos, message string) {
-	t.violations = append(t.violations, Violation{Pos: pos, Message: message})
-}
-
-// AddViolationWithRoot adds a violation with root information for fix generation.
-func (t *Tracker) AddViolationWithRoot(pos token.Pos, root ssa.Value) {
-	allUses := t.getAllUses(root)
-	t.addViolationWithContext(pos, root, allUses)
-}
-
 // getAllUses returns all uses (pure + polluting + assignment) for a root.
 func (t *Tracker) getAllUses(root ssa.Value) []UsageInfo {
 	return slices.Concat(t.pureUses[root], t.pollutingUses[root], t.assignmentUses[root])
@@ -284,49 +329,4 @@ func (t *Tracker) checkViolationsBetween(targets, sources []UsageInfo, root ssa.
 			}
 		}
 	}
-}
-
-// DetectViolations performs violation detection after all uses are recorded.
-// For each root with multiple uses, check if an earlier use can reach a later one.
-func (t *Tracker) DetectViolations() {
-	// Check violations between polluting uses (non-pure methods)
-	for root, uses := range t.pollutingUses {
-		if len(uses) <= 1 {
-			continue // Need at least 2 polluting uses for a violation
-		}
-		allUses := t.getAllUses(root)
-		t.checkViolationsBetween(uses, uses, root, allUses)
-	}
-
-	// Check pure uses against polluting uses
-	// A pure use after a polluting use is a violation
-	for root, pureUses := range t.pureUses {
-		pollutingUses := t.pollutingUses[root]
-		if len(pollutingUses) == 0 {
-			continue
-		}
-		allUses := t.getAllUses(root)
-		t.checkViolationsBetween(pureUses, pollutingUses, root, allUses)
-	}
-
-	// Check assignment uses against polluting uses
-	// An assignment use after a polluting use is a violation (using polluted root)
-	for root, assignmentUses := range t.assignmentUses {
-		pollutingUses := t.pollutingUses[root]
-		if len(pollutingUses) == 0 {
-			continue
-		}
-		allUses := t.getAllUses(root)
-		t.checkViolationsBetween(assignmentUses, pollutingUses, root, allUses)
-	}
-}
-
-// CollectViolations returns all detected violations.
-func (t *Tracker) CollectViolations() []Violation {
-	return t.violations
-}
-
-// IsPollutedAnywhere checks if root has any usage (for defer).
-func (t *Tracker) IsPollutedAnywhere(root ssa.Value) bool {
-	return t.isPolluted(root)
 }

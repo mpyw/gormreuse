@@ -1105,6 +1105,14 @@ func fieldStoredValuesFrom(fn *ssa.Function, root ssa.Value, path []int, seen ma
 	return vals
 }
 
+// IsScopesCallbackFunc reports whether fn is a Scopes/Preload callback. The
+// analyzer uses this to recurse into such callbacks even when they capture no
+// *gorm.DB (they operate on their parameter, not a captured variable), so reuse
+// of the mutable parameter inside them is still detected (#60).
+func (t *RootTracer) IsScopesCallbackFunc(fn *ssa.Function) bool {
+	return t.scopesCallbacks[fn]
+}
+
 // traceIIFEReturns traces through an immediately invoked function expression.
 //
 // IIFE pattern:
@@ -1453,14 +1461,6 @@ func (t *RootTracer) isMutableParam(p *ssa.Parameter) bool {
 	return true
 }
 
-// IsScopesCallbackFunc reports whether fn is a Scopes/Preload callback. The
-// analyzer uses this to recurse into such callbacks even when they capture no
-// *gorm.DB (they operate on their parameter, not a captured variable), so reuse
-// of the mutable parameter inside them is still detected (#60).
-func (t *RootTracer) IsScopesCallbackFunc(fn *ssa.Function) bool {
-	return t.scopesCallbacks[fn]
-}
-
 // isImmutableSource checks if a value is an immutable source (no mutable root).
 //
 // Immutable sources:
@@ -1505,6 +1505,93 @@ func (t *RootTracer) returnsImmutable(callee *ssa.Function) bool {
 // =============================================================================
 // Helper Functions
 // =============================================================================
+
+// ClosureCapturesGormDB checks if a closure captures *gorm.DB values.
+//
+// Used to determine if a closure needs recursive analysis. A closure
+// that doesn't capture *gorm.DB can be skipped for efficiency.
+//
+// Recursively checks pointer chains: *gorm.DB, **gorm.DB, ***gorm.DB, etc.
+func ClosureCapturesGormDB(mc *ssa.MakeClosure) bool {
+	return slices.ContainsFunc(mc.Bindings, func(binding ssa.Value) bool {
+		return containsGormDBThroughPointers(binding.Type())
+	})
+}
+
+// CollectScopesCallbacks returns the set of functions passed as callbacks to
+// gorm's Scopes / Preload across all given functions and their nested closures.
+//
+// Such callbacks receive a mid-chain (clone==0) *gorm.DB at runtime, so their
+// *gorm.DB parameter is a mutable root and reuse inside them interferes (#60).
+// This is deliberately narrow — only functions actually handed to Scopes/Preload
+// qualify, NOT every func(*gorm.DB) *gorm.DB (that broader treatment is Phase
+// 1b, not 1a).
+//
+// Scopes(funcs ...func(*DB) *DB) and Preload(query, args ...interface{}) are
+// variadic, so the callbacks are packed into a varargs array (the last call
+// argument is a slice of it); Preload additionally boxes them in interface{}.
+func CollectScopesCallbacks(funcs []*ssa.Function) map[*ssa.Function]bool {
+	set := make(map[*ssa.Function]bool)
+	walkCalls(funcs, func(call *ssa.Call) {
+		collectScopesCallbacksFromCall(call, set)
+	})
+	return set
+}
+
+// CollectImmutableCallbacks returns the set of function literals passed as the
+// callback to gorm's Transaction, Connection, or FindInBatches across all given
+// functions and their nested closures.
+//
+// Each of these methods hands the callback a FRESH, forkable (clone>0) handle
+// (they route through Session()/Begin at runtime), so — unlike an ordinary Phase
+// 1b parameter — the callback's *gorm.DB parameter is NOT a mutable root and
+// reuse inside the callback is safe (verified against gorm's clone semantics; see
+// the epic's pivotal finding). It must be exempted from the mutable-by-default
+// treatment (#60 SC103, #62).
+func CollectImmutableCallbacks(funcs []*ssa.Function) map[*ssa.Function]bool {
+	set := make(map[*ssa.Function]bool)
+	walkCalls(funcs, func(call *ssa.Call) {
+		collectImmutableCallbacksFromCall(call, set)
+	})
+	return set
+}
+
+// CollectImmutableInputCallbacks adds, to into, every closure passed as the
+// callback argument declared by a //gormreuse:immutable-input(name) function.
+// Such a callback receives an immutable *gorm.DB (the declaring function promised
+// to hand it one), so — like a Transaction callback — its *gorm.DB parameter is
+// exempt from the Phase 1b mutable-by-default treatment (#62 case 2.2).
+func CollectImmutableInputCallbacks(funcs []*ssa.Function, set *directive.ImmutableInputSet, into map[*ssa.Function]bool) {
+	if set == nil || into == nil {
+		return
+	}
+	walkCalls(funcs, func(call *ssa.Call) {
+		callee := call.Call.StaticCallee()
+		if callee == nil {
+			return
+		}
+		cbs := set.Callbacks(callee)
+		if len(cbs) == 0 {
+			return
+		}
+		// A method call carries its receiver as Args[0]; ParamIdx counts from the
+		// first non-receiver parameter, so shift when the callee has a receiver.
+		shift := 0
+		if callee.Signature != nil && callee.Signature.Recv() != nil {
+			shift = 1
+		}
+		args := call.Call.Args
+		for _, cb := range cbs {
+			idx := cb.ParamIdx + shift
+			if idx < 0 || idx >= len(args) {
+				continue
+			}
+			if fn := callbackFuncValue(args[idx]); fn != nil {
+				into[fn] = true
+			}
+		}
+	})
+}
 
 // isNilConst checks if a value is a nil constant.
 func isNilConst(v ssa.Value) bool {
@@ -1592,93 +1679,6 @@ func cloneVisited(visited map[ssa.Value]bool) map[ssa.Value]bool {
 	clone := make(map[ssa.Value]bool, len(visited))
 	maps.Copy(clone, visited)
 	return clone
-}
-
-// ClosureCapturesGormDB checks if a closure captures *gorm.DB values.
-//
-// Used to determine if a closure needs recursive analysis. A closure
-// that doesn't capture *gorm.DB can be skipped for efficiency.
-//
-// Recursively checks pointer chains: *gorm.DB, **gorm.DB, ***gorm.DB, etc.
-func ClosureCapturesGormDB(mc *ssa.MakeClosure) bool {
-	return slices.ContainsFunc(mc.Bindings, func(binding ssa.Value) bool {
-		return containsGormDBThroughPointers(binding.Type())
-	})
-}
-
-// CollectScopesCallbacks returns the set of functions passed as callbacks to
-// gorm's Scopes / Preload across all given functions and their nested closures.
-//
-// Such callbacks receive a mid-chain (clone==0) *gorm.DB at runtime, so their
-// *gorm.DB parameter is a mutable root and reuse inside them interferes (#60).
-// This is deliberately narrow — only functions actually handed to Scopes/Preload
-// qualify, NOT every func(*gorm.DB) *gorm.DB (that broader treatment is Phase
-// 1b, not 1a).
-//
-// Scopes(funcs ...func(*DB) *DB) and Preload(query, args ...interface{}) are
-// variadic, so the callbacks are packed into a varargs array (the last call
-// argument is a slice of it); Preload additionally boxes them in interface{}.
-func CollectScopesCallbacks(funcs []*ssa.Function) map[*ssa.Function]bool {
-	set := make(map[*ssa.Function]bool)
-	walkCalls(funcs, func(call *ssa.Call) {
-		collectScopesCallbacksFromCall(call, set)
-	})
-	return set
-}
-
-// CollectImmutableCallbacks returns the set of function literals passed as the
-// callback to gorm's Transaction, Connection, or FindInBatches across all given
-// functions and their nested closures.
-//
-// Each of these methods hands the callback a FRESH, forkable (clone>0) handle
-// (they route through Session()/Begin at runtime), so — unlike an ordinary Phase
-// 1b parameter — the callback's *gorm.DB parameter is NOT a mutable root and
-// reuse inside the callback is safe (verified against gorm's clone semantics; see
-// the epic's pivotal finding). It must be exempted from the mutable-by-default
-// treatment (#60 SC103, #62).
-func CollectImmutableCallbacks(funcs []*ssa.Function) map[*ssa.Function]bool {
-	set := make(map[*ssa.Function]bool)
-	walkCalls(funcs, func(call *ssa.Call) {
-		collectImmutableCallbacksFromCall(call, set)
-	})
-	return set
-}
-
-// CollectImmutableInputCallbacks adds, to into, every closure passed as the
-// callback argument declared by a //gormreuse:immutable-input(name) function.
-// Such a callback receives an immutable *gorm.DB (the declaring function promised
-// to hand it one), so — like a Transaction callback — its *gorm.DB parameter is
-// exempt from the Phase 1b mutable-by-default treatment (#62 case 2.2).
-func CollectImmutableInputCallbacks(funcs []*ssa.Function, set *directive.ImmutableInputSet, into map[*ssa.Function]bool) {
-	if set == nil || into == nil {
-		return
-	}
-	walkCalls(funcs, func(call *ssa.Call) {
-		callee := call.Call.StaticCallee()
-		if callee == nil {
-			return
-		}
-		cbs := set.Callbacks(callee)
-		if len(cbs) == 0 {
-			return
-		}
-		// A method call carries its receiver as Args[0]; ParamIdx counts from the
-		// first non-receiver parameter, so shift when the callee has a receiver.
-		shift := 0
-		if callee.Signature != nil && callee.Signature.Recv() != nil {
-			shift = 1
-		}
-		args := call.Call.Args
-		for _, cb := range cbs {
-			idx := cb.ParamIdx + shift
-			if idx < 0 || idx >= len(args) {
-				continue
-			}
-			if fn := callbackFuncValue(args[idx]); fn != nil {
-				into[fn] = true
-			}
-		}
-	})
 }
 
 // walkCalls visits every *ssa.Call in funcs and their nested anonymous functions

@@ -99,6 +99,32 @@ type immutableInputRef struct {
 	name       string
 }
 
+// Callbacks returns the registered immutable-input callbacks for fn, used to
+// exempt callback arguments (case 2.2) and to validate the declaring function's
+// body contract (cases 2.3/2.4).
+func (s *ImmutableInputSet) Callbacks(fn *ssa.Function) []ImmutableInputCallback {
+	if s == nil || fn == nil {
+		return nil
+	}
+	key := FuncKey{FuncName: fn.Name()}
+	if fn.Pkg != nil && fn.Pkg.Pkg != nil {
+		key.PkgPath = fn.Pkg.Pkg.Path()
+	}
+	if sig := fn.Signature; sig != nil && sig.Recv() != nil {
+		key.ReceiverType = receiverTypeString(sig.Recv().Type())
+	}
+	return slices.Clone(s.known[key])
+}
+
+// GetUnused returns the diagnostics for directives that don't apply to any usable
+// callback (U1–U3). U4 is the success path: nothing to report.
+func (s *ImmutableInputSet) GetUnused() []ImmutableInputUnused {
+	if s == nil {
+		return nil
+	}
+	return slices.Clone(s.unused)
+}
+
 // extractParamsFromComments collects (commentPos, paramName) tuples for every
 // immutable-input(name) directive in the comment list.
 func (s *ImmutableInputSet) extractParamsFromComments(list []*ast.Comment) []immutableInputRef {
@@ -180,30 +206,4 @@ func (s *ImmutableInputSet) buildFuncKey(fd *ast.FuncDecl, pkgPath string) FuncK
 		key.ReceiverType = receiverTypeStringFromExpr(fd.Recv.List[0].Type)
 	}
 	return key
-}
-
-// Callbacks returns the registered immutable-input callbacks for fn, used to
-// exempt callback arguments (case 2.2) and to validate the declaring function's
-// body contract (cases 2.3/2.4).
-func (s *ImmutableInputSet) Callbacks(fn *ssa.Function) []ImmutableInputCallback {
-	if s == nil || fn == nil {
-		return nil
-	}
-	key := FuncKey{FuncName: fn.Name()}
-	if fn.Pkg != nil && fn.Pkg.Pkg != nil {
-		key.PkgPath = fn.Pkg.Pkg.Path()
-	}
-	if sig := fn.Signature; sig != nil && sig.Recv() != nil {
-		key.ReceiverType = receiverTypeString(sig.Recv().Type())
-	}
-	return slices.Clone(s.known[key])
-}
-
-// GetUnused returns the diagnostics for directives that don't apply to any usable
-// callback (U1–U3). U4 is the success path: nothing to report.
-func (s *ImmutableInputSet) GetUnused() []ImmutableInputUnused {
-	if s == nil {
-		return nil
-	}
-	return slices.Clone(s.unused)
 }

@@ -11,15 +11,6 @@ import (
 // Ignore Directive Handling
 // =============================================================================
 
-// ignoreEntry tracks an ignore directive and whether it was used.
-// Used to report "unused ignore directive" warnings.
-//
-//declscope:shared // directive_test.go builds these directly
-type ignoreEntry struct {
-	pos  token.Pos // Position of the ignore comment (for reporting unused)
-	used bool      // Whether this ignore was actually used to suppress a warning
-}
-
 // IgnoreMap tracks line numbers that have ignore comments.
 //
 // Keys:
@@ -29,6 +20,15 @@ type ignoreEntry struct {
 // The map is built during AST scanning and used during violation reporting
 // to determine if a violation should be suppressed.
 type IgnoreMap map[int]*ignoreEntry
+
+// ignoreEntry tracks an ignore directive and whether it was used.
+// Used to report "unused ignore directive" warnings.
+//
+//declscope:shared // directive_test.go builds these directly
+type ignoreEntry struct {
+	pos  token.Pos // Position of the ignore comment (for reporting unused)
+	used bool      // Whether this ignore was actually used to suppress a warning
+}
 
 // BuildIgnoreMap scans a file for ignore comments and returns a map.
 // It also handles file-level and function-level ignore directives.
