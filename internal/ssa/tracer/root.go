@@ -198,6 +198,14 @@ func (t *RootTracer) IsPureFunction(fn *ssa.Function) bool {
 	return t.pureFuncs.Contains(fn)
 }
 
+// IsScopesCallbackFunc reports whether fn is a Scopes/Preload callback. The
+// analyzer uses this to recurse into such callbacks even when they capture no
+// *gorm.DB (they operate on their parameter, not a captured variable), so reuse
+// of the mutable parameter inside them is still detected (#60).
+func (t *RootTracer) IsScopesCallbackFunc(fn *ssa.Function) bool {
+	return t.scopesCallbacks[fn]
+}
+
 // isImmutableReturningBuiltin checks if a function is a builtin method that returns immutable *gorm.DB.
 // Builtin methods (Session, WithContext, Debug, etc.) return immutable *gorm.DB.
 // This is used for tracing - only builtin methods have immutable return values.
@@ -1103,14 +1111,6 @@ func fieldStoredValuesFrom(fn *ssa.Function, root ssa.Value, path []int, seen ma
 		}
 	}
 	return vals
-}
-
-// IsScopesCallbackFunc reports whether fn is a Scopes/Preload callback. The
-// analyzer uses this to recurse into such callbacks even when they capture no
-// *gorm.DB (they operate on their parameter, not a captured variable), so reuse
-// of the mutable parameter inside them is still detected (#60).
-func (t *RootTracer) IsScopesCallbackFunc(fn *ssa.Function) bool {
-	return t.scopesCallbacks[fn]
 }
 
 // traceIIFEReturns traces through an immediately invoked function expression.
