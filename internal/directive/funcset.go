@@ -37,6 +37,26 @@ type DirectiveFuncSet struct {
 	cursors map[*ast.File]inspector.Cursor
 }
 
+// NewPureFuncSet creates a DirectiveFuncSet for //gormreuse:pure.
+// The typesInfo parameter is used to validate that functions have *gorm.DB parameters.
+func NewPureFuncSet(fset *token.FileSet, typesInfo *types.Info) *DirectiveFuncSet {
+	return newDirectiveFuncSet(fset, typesInfo, isPureDirective, hasGormDBParameter)
+}
+
+// NewImmutableReturnFuncSet creates a DirectiveFuncSet for //gormreuse:immutable-return.
+// The typesInfo parameter is used to validate that functions return *gorm.DB.
+func NewImmutableReturnFuncSet(fset *token.FileSet, typesInfo *types.Info) *DirectiveFuncSet {
+	return newDirectiveFuncSet(fset, typesInfo, isImmutableReturnDirective, hasGormDBReturn)
+}
+
+// NewImmutableParamFuncSet creates a DirectiveFuncSet for //gormreuse:immutable-param.
+// Like pure, the directive is only meaningful on a function with a *gorm.DB
+// parameter, so it reuses hasGormDBParameter for signature validation (an
+// immutable-param directive on a parameter-less function is reported unused).
+func NewImmutableParamFuncSet(fset *token.FileSet, typesInfo *types.Info) *DirectiveFuncSet {
+	return newDirectiveFuncSet(fset, typesInfo, isImmutableParamDirective, hasGormDBParameter)
+}
+
 // newDirectiveFuncSet creates a new DirectiveFuncSet with the given directive checker and signature validator.
 func newDirectiveFuncSet(fset *token.FileSet, typesInfo *types.Info, isDirective directiveChecker, validateSignature signatureValidator) *DirectiveFuncSet {
 	return &DirectiveFuncSet{
@@ -875,26 +895,6 @@ func (s *DirectiveFuncSet) hasDirectiveInFile(file *ast.File, funcName, receiver
 		}
 	}
 	return false
-}
-
-// NewPureFuncSet creates a DirectiveFuncSet for //gormreuse:pure.
-// The typesInfo parameter is used to validate that functions have *gorm.DB parameters.
-func NewPureFuncSet(fset *token.FileSet, typesInfo *types.Info) *DirectiveFuncSet {
-	return newDirectiveFuncSet(fset, typesInfo, isPureDirective, hasGormDBParameter)
-}
-
-// NewImmutableReturnFuncSet creates a DirectiveFuncSet for //gormreuse:immutable-return.
-// The typesInfo parameter is used to validate that functions return *gorm.DB.
-func NewImmutableReturnFuncSet(fset *token.FileSet, typesInfo *types.Info) *DirectiveFuncSet {
-	return newDirectiveFuncSet(fset, typesInfo, isImmutableReturnDirective, hasGormDBReturn)
-}
-
-// NewImmutableParamFuncSet creates a DirectiveFuncSet for //gormreuse:immutable-param.
-// Like pure, the directive is only meaningful on a function with a *gorm.DB
-// parameter, so it reuses hasGormDBParameter for signature validation (an
-// immutable-param directive on a parameter-less function is reported unused).
-func NewImmutableParamFuncSet(fset *token.FileSet, typesInfo *types.Info) *DirectiveFuncSet {
-	return newDirectiveFuncSet(fset, typesInfo, isImmutableParamDirective, hasGormDBParameter)
 }
 
 // BuildPureFuncSet builds a set of functions marked with //gormreuse:pure.

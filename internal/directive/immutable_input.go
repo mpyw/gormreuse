@@ -76,29 +76,6 @@ func (s *ImmutableInputSet) AddFile(file *ast.File, pkgPath string) {
 	}
 }
 
-// extractImmutableInputParams returns the callback parameter names declared by
-// //gormreuse:immutable-input(name) directives in a comment. A comment may carry
-// several (comma-combinable with other directives), so it returns a slice; nil if
-// none. It reads the comment through the same parseDirective as hasDirective,
-// so only a valid //gormreuse: directive counts, a trailing "//" comment is
-// ignored (#62), and a malformed immutable-input part drops the comment.
-func extractImmutableInputParams(text string) []string {
-	var params []string
-	for _, part := range parseDirective(text) {
-		if inner, ok := strings.CutPrefix(part, "immutable-input("); ok {
-			params = append(params, strings.TrimSuffix(inner, ")"))
-		}
-	}
-	return params
-}
-
-// immutableInputRef is one occurrence of an immutable-input(name) directive:
-// the comment position and the parameter name it declares.
-type immutableInputRef struct {
-	commentPos token.Pos
-	name       string
-}
-
 // Callbacks returns the registered immutable-input callbacks for fn, used to
 // exempt callback arguments (case 2.2) and to validate the declaring function's
 // body contract (cases 2.3/2.4).
@@ -123,6 +100,29 @@ func (s *ImmutableInputSet) GetUnused() []ImmutableInputUnused {
 		return nil
 	}
 	return slices.Clone(s.unused)
+}
+
+// extractImmutableInputParams returns the callback parameter names declared by
+// //gormreuse:immutable-input(name) directives in a comment. A comment may carry
+// several (comma-combinable with other directives), so it returns a slice; nil if
+// none. It reads the comment through the same parseDirective as hasDirective,
+// so only a valid //gormreuse: directive counts, a trailing "//" comment is
+// ignored (#62), and a malformed immutable-input part drops the comment.
+func extractImmutableInputParams(text string) []string {
+	var params []string
+	for _, part := range parseDirective(text) {
+		if inner, ok := strings.CutPrefix(part, "immutable-input("); ok {
+			params = append(params, strings.TrimSuffix(inner, ")"))
+		}
+	}
+	return params
+}
+
+// immutableInputRef is one occurrence of an immutable-input(name) directive:
+// the comment position and the parameter name it declares.
+type immutableInputRef struct {
+	commentPos token.Pos
+	name       string
 }
 
 // extractParamsFromComments collects (commentPos, paramName) tuples for every
