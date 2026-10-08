@@ -55,17 +55,6 @@ func newDirectiveFuncSet(fset *token.FileSet, typesInfo *types.Info, isDirective
 	}
 }
 
-// fileCursor returns the cursor for the given file. A file added with AddFile
-// uses its cursor in the pass inspector; any other file gets its own inspector.
-func (s *DirectiveFuncSet) fileCursor(file *ast.File) inspector.Cursor {
-	if cur, ok := s.cursors[file]; ok {
-		return cur
-	}
-	cur, _ := inspector.New([]*ast.File{file}).Root().FirstChild()
-	s.cursors[file] = cur
-	return cur
-}
-
 // AddFile adds an original parsed file to the set and collects all directive positions.
 // This should be called for all files in the current package to avoid re-parsing.
 // cur is the file's cursor in the pass inspector.
@@ -82,6 +71,77 @@ func (s *DirectiveFuncSet) AddFile(cur inspector.Cursor) {
 
 	// Collect all directive positions in this file for unused detection
 	s.collectDirectivePositions(file)
+}
+
+// Add adds a function key to the set.
+func (s *DirectiveFuncSet) Add(key FuncKey) {
+	if s != nil && s.known != nil {
+		s.known[key] = struct{}{}
+	}
+}
+
+// GetUnusedDirectives returns the positions of directives on functions with invalid signatures.
+// A directive is "unused" if:
+//   - For pure: the function has no *gorm.DB in its parameters
+//   - For immutable-return: the function has no *gorm.DB in its return values
+func (s *DirectiveFuncSet) GetUnusedDirectives() []token.Pos {
+	if s == nil || s.invalidDirectives == nil {
+		return nil
+	}
+
+	return slices.Collect(maps.Keys(s.invalidDirectives))
+}
+
+// IsUsed returns true if the directive at the given position has a valid signature.
+// This is used for combined directive handling (e.g., //gormreuse:pure,immutable-return)
+// where if one directive type is valid, the other shouldn't report it as unused.
+func (s *DirectiveFuncSet) IsUsed(pos token.Pos) bool {
+	if s == nil || s.processedDirectives == nil {
+		return false
+	}
+	// First check if this directive was processed by this set
+	// (i.e., it matches our isDirective check)
+	if _, processed := s.processedDirectives[pos]; !processed {
+		return false
+	}
+	// Directive is "used" (valid) if it's NOT in invalidDirectives
+	_, invalid := s.invalidDirectives[pos]
+	return !invalid
+}
+
+// Contains checks if the given SSA function is in the set or has the directive.
+func (s *DirectiveFuncSet) Contains(fn *ssa.Function) bool {
+	if fn == nil {
+		return false
+	}
+
+	// First, check the pre-built set (for current package)
+	if s != nil && s.known != nil {
+		key := FuncKey{FuncName: fn.Name()}
+		if fn.Pkg != nil && fn.Pkg.Pkg != nil {
+			key.PkgPath = fn.Pkg.Pkg.Path()
+		}
+		if sig := fn.Signature; sig != nil && sig.Recv() != nil {
+			key.ReceiverType = receiverTypeString(sig.Recv().Type())
+		}
+		if _, exists := s.known[key]; exists {
+			return true
+		}
+	}
+
+	// Second, check the SSA function's syntax for directive (for external packages)
+	return s.hasDirective(fn)
+}
+
+// fileCursor returns the cursor for the given file. A file added with AddFile
+// uses its cursor in the pass inspector; any other file gets its own inspector.
+func (s *DirectiveFuncSet) fileCursor(file *ast.File) inspector.Cursor {
+	if cur, ok := s.cursors[file]; ok {
+		return cur
+	}
+	cur, _ := inspector.New([]*ast.File{file}).Root().FirstChild()
+	s.cursors[file] = cur
+	return cur
 }
 
 // collectDirectivePositions scans a file for all directives and validates their signatures.
@@ -196,66 +256,6 @@ func (s *DirectiveFuncSet) validateFuncLitSignature(fl *ast.FuncLit) bool {
 		return true
 	}
 	return s.validateSignature(sig)
-}
-
-// Add adds a function key to the set.
-func (s *DirectiveFuncSet) Add(key FuncKey) {
-	if s != nil && s.known != nil {
-		s.known[key] = struct{}{}
-	}
-}
-
-// GetUnusedDirectives returns the positions of directives on functions with invalid signatures.
-// A directive is "unused" if:
-//   - For pure: the function has no *gorm.DB in its parameters
-//   - For immutable-return: the function has no *gorm.DB in its return values
-func (s *DirectiveFuncSet) GetUnusedDirectives() []token.Pos {
-	if s == nil || s.invalidDirectives == nil {
-		return nil
-	}
-
-	return slices.Collect(maps.Keys(s.invalidDirectives))
-}
-
-// IsUsed returns true if the directive at the given position has a valid signature.
-// This is used for combined directive handling (e.g., //gormreuse:pure,immutable-return)
-// where if one directive type is valid, the other shouldn't report it as unused.
-func (s *DirectiveFuncSet) IsUsed(pos token.Pos) bool {
-	if s == nil || s.processedDirectives == nil {
-		return false
-	}
-	// First check if this directive was processed by this set
-	// (i.e., it matches our isDirective check)
-	if _, processed := s.processedDirectives[pos]; !processed {
-		return false
-	}
-	// Directive is "used" (valid) if it's NOT in invalidDirectives
-	_, invalid := s.invalidDirectives[pos]
-	return !invalid
-}
-
-// Contains checks if the given SSA function is in the set or has the directive.
-func (s *DirectiveFuncSet) Contains(fn *ssa.Function) bool {
-	if fn == nil {
-		return false
-	}
-
-	// First, check the pre-built set (for current package)
-	if s != nil && s.known != nil {
-		key := FuncKey{FuncName: fn.Name()}
-		if fn.Pkg != nil && fn.Pkg.Pkg != nil {
-			key.PkgPath = fn.Pkg.Pkg.Path()
-		}
-		if sig := fn.Signature; sig != nil && sig.Recv() != nil {
-			key.ReceiverType = receiverTypeString(sig.Recv().Type())
-		}
-		if _, exists := s.known[key]; exists {
-			return true
-		}
-	}
-
-	// Second, check the SSA function's syntax for directive (for external packages)
-	return s.hasDirective(fn)
 }
 
 // hasDirective checks if an SSA function has the directive.

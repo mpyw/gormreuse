@@ -505,67 +505,6 @@ func (h *makeInterfaceHandler) handle(mi *ssa.MakeInterface, ctx *Context) {
 // pollutionChecker is a function that checks if a root is polluted.
 type pollutionChecker func(root ssa.Value) bool
 
-// processGormDBCallCommonWith processes gorm calls with a custom pollution checker.
-//
-// Used by the defer and goroutine handlers. In addition to CHECKING whether the
-// receiver/argument root is already polluted (and reporting a violation if so),
-// it RECORDS each use as a branch use. Recording lets a later defer/goroutine
-// observe an earlier one, so patterns whose ONLY uses are deferred/spawned —
-// e.g. `defer q.Find(nil); defer q.Count(nil)` — are detected. Branch uses are
-// excluded from position-ordered detection (see pollution.Tracker.branchUses).
-func processGormDBCallCommonWith(callCommon *ssa.CallCommon, pos token.Pos, block *ssa.BasicBlock, ctx *Context, isPolluted pollutionChecker) {
-	callee := callCommon.StaticCallee()
-	if callee == nil {
-		return
-	}
-
-	sig := callee.Signature
-
-	// Method call on *gorm.DB
-	if sig != nil && sig.Recv() != nil && typeutil.IsGormDB(sig.Recv().Type()) {
-		if len(callCommon.Args) == 0 {
-			return
-		}
-		handleBranchUse(callCommon.Args[0], pos, block, ctx, isPolluted)
-		return
-	}
-
-	// Function call with *gorm.DB arguments
-	for _, arg := range callCommon.Args {
-		if typeutil.IsGormDB(arg.Type()) {
-			handleBranchUse(arg, pos, block, ctx, isPolluted)
-		}
-	}
-}
-
-// handleBranchUse handles one *gorm.DB value (a receiver or an argument) of a
-// deferred or spawned call. It reports a violation for each of the value's
-// possible roots that is already polluted, then records the use as a branch use.
-func handleBranchUse(v ssa.Value, pos token.Pos, block *ssa.BasicBlock, ctx *Context, isPolluted pollutionChecker) {
-	root := ctx.RootTracer.FindMutableRoot(v, ctx.LoopInfo)
-	if root == nil {
-		return
-	}
-
-	if isPolluted(root) {
-		ctx.Tracker.AddViolationWithRoot(pos, root)
-	}
-
-	// Check ALL possible roots for phi nodes
-	allRoots := ctx.RootTracer.FindAllMutableRoots(v, ctx.LoopInfo)
-	for _, r := range allRoots {
-		if r == root {
-			continue
-		}
-		if isPolluted(r) {
-			ctx.Tracker.AddViolationWithRoot(pos, r)
-		}
-	}
-
-	// Record this deferred/spawned use so a later defer/go sees it.
-	ctx.Tracker.RecordBranchUse(root, block, pos)
-}
-
 // Dispatch routes SSA instructions to their handlers using type switch.
 //
 // Handler mapping:
@@ -628,4 +567,65 @@ func DispatchDefer(d *ssa.Defer, ctx *Context) {
 //	go q.Count(nil)  // needs to see pollution from else branch
 func DispatchGo(g *ssa.Go, ctx *Context) {
 	(&goHandler{}).handle(g, ctx)
+}
+
+// processGormDBCallCommonWith processes gorm calls with a custom pollution checker.
+//
+// Used by the defer and goroutine handlers. In addition to CHECKING whether the
+// receiver/argument root is already polluted (and reporting a violation if so),
+// it RECORDS each use as a branch use. Recording lets a later defer/goroutine
+// observe an earlier one, so patterns whose ONLY uses are deferred/spawned —
+// e.g. `defer q.Find(nil); defer q.Count(nil)` — are detected. Branch uses are
+// excluded from position-ordered detection (see pollution.Tracker.branchUses).
+func processGormDBCallCommonWith(callCommon *ssa.CallCommon, pos token.Pos, block *ssa.BasicBlock, ctx *Context, isPolluted pollutionChecker) {
+	callee := callCommon.StaticCallee()
+	if callee == nil {
+		return
+	}
+
+	sig := callee.Signature
+
+	// Method call on *gorm.DB
+	if sig != nil && sig.Recv() != nil && typeutil.IsGormDB(sig.Recv().Type()) {
+		if len(callCommon.Args) == 0 {
+			return
+		}
+		handleBranchUse(callCommon.Args[0], pos, block, ctx, isPolluted)
+		return
+	}
+
+	// Function call with *gorm.DB arguments
+	for _, arg := range callCommon.Args {
+		if typeutil.IsGormDB(arg.Type()) {
+			handleBranchUse(arg, pos, block, ctx, isPolluted)
+		}
+	}
+}
+
+// handleBranchUse handles one *gorm.DB value (a receiver or an argument) of a
+// deferred or spawned call. It reports a violation for each of the value's
+// possible roots that is already polluted, then records the use as a branch use.
+func handleBranchUse(v ssa.Value, pos token.Pos, block *ssa.BasicBlock, ctx *Context, isPolluted pollutionChecker) {
+	root := ctx.RootTracer.FindMutableRoot(v, ctx.LoopInfo)
+	if root == nil {
+		return
+	}
+
+	if isPolluted(root) {
+		ctx.Tracker.AddViolationWithRoot(pos, root)
+	}
+
+	// Check ALL possible roots for phi nodes
+	allRoots := ctx.RootTracer.FindAllMutableRoots(v, ctx.LoopInfo)
+	for _, r := range allRoots {
+		if r == root {
+			continue
+		}
+		if isPolluted(r) {
+			ctx.Tracker.AddViolationWithRoot(pos, r)
+		}
+	}
+
+	// Record this deferred/spawned use so a later defer/go sees it.
+	ctx.Tracker.RecordBranchUse(root, block, pos)
 }

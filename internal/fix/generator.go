@@ -89,11 +89,6 @@ func New(pass *analysis.Pass, scopesCallbacks map[*ssa.Function]bool) *Generator
 	}
 }
 
-// fileCursor returns the cursor for the given file in the pass inspector.
-func (g *Generator) fileCursor(file *ast.File) inspector.Cursor {
-	return g.cursors[file]
-}
-
 // Generate generates SuggestedFix for a violation.
 // Returns nil if the violation cannot be auto-fixed.
 func (g *Generator) Generate(v pollution.Violation) []analysis.SuggestedFix {
@@ -182,6 +177,11 @@ func (g *Generator) Generate(v pollution.Violation) []analysis.SuggestedFix {
 			TextEdits: edits,
 		},
 	}
+}
+
+// fileCursor returns the cursor for the given file in the pass inspector.
+func (g *Generator) fileCursor(file *ast.File) inspector.Cursor {
+	return g.cursors[file]
 }
 
 // generateImmutableParamFix suggests annotating the enclosing function with
