@@ -67,7 +67,7 @@ func TestCollectScopesCallbacks(t *testing.T) {
 	for _, fn := range fixtures {
 		srcFuncs = append(srcFuncs, fn)
 	}
-	set := CollectScopesCallbacks(srcFuncs)
+	set := CollectScopesCallbacks(srcFuncs, nil)
 
 	// The named function passed to Scopes must be collected.
 	named := fixtures["namedScope"]
@@ -109,7 +109,7 @@ func TestCollectScopesOnlyCallbacks(t *testing.T) {
 			srcFuncs = append(srcFuncs, fn)
 		}
 	}
-	set := CollectScopesOnlyCallbacks(srcFuncs)
+	set := CollectScopesOnlyCallbacks(srcFuncs, nil)
 	names := make(map[string]bool)
 	for fn := range set {
 		names[fn.String()] = true
@@ -148,7 +148,7 @@ func TestCollectScopesOnlyCallbacks(t *testing.T) {
 			preload = fn
 		}
 	}
-	if preload == nil || !CollectScopesCallbacks(srcFuncs)[preload] {
+	if preload == nil || !CollectScopesCallbacks(srcFuncs, nil)[preload] {
 		t.Error("preloadCallbackSessionClean$1 should be in CollectScopesCallbacks")
 	}
 }
@@ -163,8 +163,8 @@ func TestCollectImmutableInputCallbacksNil(t *testing.T) {
 		srcFuncs = append(srcFuncs, fn)
 	}
 	into := make(map[*ssa.Function]bool)
-	CollectImmutableInputCallbacks(srcFuncs, nil, into)
-	CollectImmutableInputCallbacks(srcFuncs, nil, nil)
+	CollectImmutableInputCallbacks(srcFuncs, nil, nil, into)
+	CollectImmutableInputCallbacks(srcFuncs, nil, nil, nil)
 	if len(into) != 0 {
 		t.Errorf("want nothing collected, got %v", into)
 	}

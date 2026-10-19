@@ -452,7 +452,7 @@ func (v *Validator) checkStoreEscape(store *ssa.Store) []Violation {
 // checkLeak reports a contract violation when a param-derived *gorm.DB escapes
 // via a non-call pollution source (channel send, slice/array store, map store).
 func (v *Validator) checkLeak(instr ssa.Instruction) []Violation {
-	val, kind := pollutionsource.Leak(instr)
+	val, kind := pollutionsource.Leak(instr, v.funcVars)
 	if kind == pollutionsource.KindNone || !v.paramDerived[val] {
 		return nil
 	}

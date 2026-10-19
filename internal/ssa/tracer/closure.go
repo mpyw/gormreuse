@@ -37,11 +37,11 @@ func ClosureCapturesGormDB(mc *ssa.MakeClosure) bool {
 //   - `closureFunc().Find(nil)` (chain ends with terminal, never stored)
 //
 //declscope:shared // root.go's traceCall and traceAll keep a stored closure result as its own root
-func isClosureResultStored(call *ssa.Call) bool {
-	return isClosureResultStoredRecursive(call, make(map[*ssa.Call]bool))
+func (t *RootTracer) isClosureResultStored(call *ssa.Call) bool {
+	return t.isClosureResultStoredRecursive(call, make(map[*ssa.Call]bool))
 }
 
-func isClosureResultStoredRecursive(call *ssa.Call, visited map[*ssa.Call]bool) bool {
+func (t *RootTracer) isClosureResultStoredRecursive(call *ssa.Call, visited map[*ssa.Call]bool) bool {
 	if visited[call] {
 		return false
 	}
@@ -74,19 +74,16 @@ func isClosureResultStoredRecursive(call *ssa.Call, visited map[*ssa.Call]bool) 
 			return true
 
 		case *ssa.Call:
-			callee := user.Call.StaticCallee()
-			if callee == nil {
-				continue
-			}
-			sig := callee.Signature
-			if sig == nil || sig.Recv() == nil || !typeutil.IsGormDB(sig.Recv().Type()) {
+			// A method value call is the call of its method.
+			site := t.Site(user)
+			if !site.IsGormMethod() {
 				continue
 			}
 
 			// Check if our result is receiver of this gorm method
-			if len(user.Call.Args) > 0 && user.Call.Args[0] == call {
+			if site.Recv == call {
 				// Our result is receiver - check if THAT call is stored
-				if isClosureResultStoredRecursive(user, visited) {
+				if t.isClosureResultStoredRecursive(user, visited) {
 					return true
 				}
 			} else {

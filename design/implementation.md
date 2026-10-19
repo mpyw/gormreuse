@@ -170,6 +170,23 @@ Also: gorm's built-in `Transaction` (via `Begin`) and `FindInBatches` (via `Sess
 
 A reference counts as a callback position when it is the Transaction/FindInBatches callback argument or an `immutable-input(name)` argument. `callback.CollectedCallbackArgs` lists these positions for a call, and the collectors use the same function. A closure (`MakeClosure`, including a bound method value `r.m`) is followed: it counts only when all its uses are callback positions. Any other wrapper, such as an interface conversion, counts as a non-callback reference, because both callback positions are func-typed. The scan covers the source functions, their nested literals and the package `init` (package-level variable initializers). A function that is dropped falls back to the rules for an ordinary parameter, so it can opt in with `immutable-param`, whose caller-side check then covers the direct calls. A capture of a local variable holding the function (`cb := f; go func() { _ = db.Transaction(cb) }()`) is treated as a non-callback reference, which may report a callback that is only ever passed to Transaction. That direction is the conservative one.
 
+**Callbacks held in a variable or a field (#257).** Before #257 the collectors and `DropReachableCallbacks` read each call through its static callee alone (`Site.StaticSite()`, now deleted), and `resolveExactFunc` resolved only a function, a closure and an interface conversion. So `db.Transaction(txBody)` with `var txBody = func(tx *gorm.DB) error {...}`, `db.Transaction(s.cb)` with a struct field, a call of an `immutable-input` closure held by a package-level variable, and `tx := db.Transaction; tx(cb)` all reported reuse inside the callback, and forwarding an `immutable-input` callback to such a variable reported `callback cb escapes (passed to a function value)`. Now every reader takes the full `Site` with `FuncVars`, and `callback/holder.go` finds the holders of the package:
+
+| Holder | Condition | A read is |
+| --- | --- | --- |
+| Package-level variable | In `callsite.FuncVars`: unexported, stored once, its address only loaded and stored | `*g` |
+| Struct field (keyed by its `*types.Var`, generic instances by their origin) | Unexported, exactly one `Store` to it in the source functions and the package `init`, every `FieldAddr` of it only loaded or stored, and no `ChangeType`/`Convert` of its struct (or a pointer to it) anywhere in the package | `*(&x.f)`, or `x.f` on a struct in a register |
+
+The single store may run many times, but every value it stores is the same function or a closure of it, so every read of the holder is that function or nil. `resolveExactFunc` follows a read of a holder to the stored value. `DropReachableCallbacks` accepts a store into a holder as a callback reference when every read of the holder is itself used only as a callback argument (`holders.feedsOnlyCallbacks`, through the same `refReachesOnlyCallback`). A read that calls the function, passes it to an ordinary parameter or stores it elsewhere drops it, as a direct reference does. A cycle of holders feeding each other is dropped.
+
+The Transaction/FindInBatches callback positions now come from the declared parameter types (a parameter of a function type with a `*gorm.DB` parameter), not from resolving each argument. Resolving decided the position from what the value is, so a function boxed in FindInBatches's `dest interface{}` counted, and a callback read from a holder did not.
+
+Decisions and limitations:
+
+- **Exactness rests on `DropReachableCallbacks`, not on the resolver.** The exemption only claims that the function's parameter receives fresh values. That holds when every reference reaches only callback positions, whatever the resolver found. A wrong resolution can only exempt a function whose every reference is a callback position, or miss one, which reports more.
+- **Field holders are per field, not per object.** Two `svc` values share the field's holder. That is why one store in the whole package is required: with two stores, a read may hold either function.
+- **Not followed:** a local struct field stored twice, a field assigned by reflection or through `unsafe` arithmetic beyond a plain `unsafe.Pointer` conversion of the struct, an exported field or variable, and a variable or field that holds a method value (`var f = r.m`), which `FuncVars` does not resolve. Each keeps its callback's parameter mutable.
+
 Only `//gormreuse:name[,name...]` (lowercase, no spaces, line comment) is a directive. `readDirective` in `directive.go` reads every comment once, in this order:
 
 1. Cut the comment at the first `//` after the leading `//`. The rest is a reason: `//gormreuse:ignore // reason`, `//gormreuse:ignore //reason` and `//gormreuse:ignore//reason` are all a bare ignore. `//` is the only reason separator; ` - reason` was never accepted.
@@ -256,6 +273,7 @@ gormreuse/
 │       ├── callback/            # Functions that gorm or an immutable-input function calls back
 │       │   ├── resolve.go       # resolveMayFuncs (may-hold), resolveExactFunc (exact): what a func value is
 │       │   ├── collect.go       # Scopes/Preload, Transaction/FindInBatches, immutable-input collectors; CollectedCallbackArgs
+│       │   ├── holder.go        # variables and struct fields that hold one callback (#257)
 │       │   └── reach.go         # DropReachableCallbacks: drop callbacks that something else calls (#191)
 │       ├── tracer/              # Where a *gorm.DB value's mutable root is
 │       │   ├── root.go          # RootTracer, NewRootTracer, RootBlock: trace dispatch, calls, immutable sources
@@ -514,7 +532,7 @@ Limitation: every `*gorm.DB` element of one tuple shares the call as its root. `
 
 ### Calls through a method value (#178)
 
-The tracer resolves a call `w(x)` through a method value `w := r.m` as the call `r.m(x)`. `callsite.SiteOf` reads it as a `SiteBound` site: `Declared` is the declared method (`directive.DeclaredFunc` of the `m$bound` wrapper), `Recv` the receiver (`MakeClosure.Bindings[0]`), and `Args` the other arguments. `traceCall`, `traceAll`, `isImmutableSource`, `pureReturnedArgs` and the Session/Debug copy checks (`aliasSharesStatement`, `Site.SessionEffect`, `collectAliasedRoots`) all read the call through it. The call handler (for a plain call, `go` and `defer`), the pure validator and `pollutionsource.CallReadOnlyArgs` read it the same way. Code that still reads the `m$bound` wrapper as a plain function calls `Site.StaticSite()` (#266). So:
+The tracer resolves a call `w(x)` through a method value `w := r.m` as the call `r.m(x)`. `callsite.SiteOf` reads it as a `SiteBound` site: `Declared` is the declared method (`directive.DeclaredFunc` of the `m$bound` wrapper), `Recv` the receiver (`MakeClosure.Bindings[0]`), and `Args` the other arguments. `traceCall`, `traceAll`, `isImmutableSource`, `pureReturnedArgs` and the Session/Debug copy checks (`aliasSharesStatement`, `Site.SessionEffect`, `collectAliasedRoots`) all read the call through it. The call handler (for a plain call, `go` and `defer`), the pure validator and `pollutionsource.CallReadOnlyArgs` read it the same way. Since #257 so does every other reader: the immutable-input body check, the immutable-return body check, the callback collectors and `DropReachableCallbacks`, the Scopes warning, the read-only stdlib check, the closure-result check and the fix generator. `Site.StaticSite()`, which read the wrapper as a plain function, is deleted. So:
 
 | Code | Result |
 | --- | --- |
@@ -538,7 +556,7 @@ Suggested fixes: a second branch made through a method value (`w := q.Where; w("
 
 ### Calls through a method expression (#258)
 
-A method expression `T.m(r, x)`, or `(*T).m`, is a call of a synthetic `m$thunk` function whose first parameter is the receiver. `callsite.SiteOf` reads it as a `SiteThunk` site: `Declared` is the declared method (`directive.DeclaredFunc`), `Recv` the first argument and `Args` the rest, as for the static call `r.m(x)`. `Site.StaticSite()` keeps it that way, because the instruction's arguments already line up with a static method call. So every directive of `m` applies (pure, immutable-return, immutable-param, immutable-input, the returned arguments of a pure method), also for a method of another package, and `(*gorm.DB).Find(q, nil)` is a gorm method call on `q`. The immutable-param isolation fix counts the receiver argument of a method expression (`receiverArgs`). `callback.DropReachableCallbacks` reads a thunk through `DeclaredFunc` too.
+A method expression `T.m(r, x)`, or `(*T).m`, is a call of a synthetic `m$thunk` function whose first parameter is the receiver. `callsite.SiteOf` reads it as a `SiteThunk` site: `Declared` is the declared method (`directive.DeclaredFunc`), `Recv` the first argument and `Args` the rest, as for the static call `r.m(x)`. A package-level variable that holds a method expression (`var find = (*Repo).find`) is read the same way (#257). So every directive of `m` applies (pure, immutable-return, immutable-param, immutable-input, the returned arguments of a pure method), also for a method of another package, and `(*gorm.DB).Find(q, nil)` is a gorm method call on `q`. The immutable-param isolation fix counts the receiver argument of a method expression (`receiverArgs`). `callback.DropReachableCallbacks` reads a thunk through `DeclaredFunc` too.
 
 The thunk of a method promoted through an embedded field (`type W struct{ *gorm.DB }; W.Find(w, nil)`) selects the field inside its body. `Recv` is then `w`, not `w.DB`, and the tracer does not follow it to the field, so reuse through it is missed (`exprPromoted`). An interface method expression has no declared method, so it is a call of an unknown function.
 
@@ -663,7 +681,7 @@ Limitations:
 
 - `analyzedFuncs` adds the anonymous functions of `init`, nested ones included, to every pass. Their bodies get reuse detection and directive validation like any closure.
 - A diagnostic names the closure by its variable, not `init$1` (#259). Every message that names a called function goes through `callsite.FuncVars.FuncName`, which also names a method value or method expression wrapper (`m$bound`, `m$thunk`) by its method, and a generic instance by its generic function. A closure held by a variable that is not resolved (see below) keeps its SSA name.
-- `callsite.CollectFuncVars` maps a variable to its closure, and `callsite.SiteOf` reads a call through it as a `SiteFuncVar` site. The tracer, the call handler (plain, `go` and `defer` calls) and the pure validator use it, so `pure`, `immutable-return` and the `immutable-param` caller contract apply at the call site.
+- `callsite.CollectFuncVars` maps a variable to its closure, and `callsite.SiteOf` reads a call through it as a `SiteFuncVar` site. Every reader of a call uses it, so every directive applies at the call site: `pure`, `immutable-return`, the `immutable-param` caller contract, and since #257 `immutable-input` (its callbacks are collected, and forwarding a callback to the variable keeps the promise). A Transaction callback or an `immutable-input` callback can also be held by such a variable (see "Callbacks held in a variable or a field (#257)" under [Directives](#directives)).
 
 A variable is resolved only when the package stores to it once, the stored value is a function, its address is used only to load and store it, and it is unexported. Otherwise the call may run another function: a second assignment, a write through a pointer, or an assignment in another package. An unresolved call stays a dynamic call: it pollutes its arguments, and its result is a mutable root (#176).
 

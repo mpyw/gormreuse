@@ -235,6 +235,12 @@ func (t *RootTracer) FuncName(fn *ssa.Function) string {
 	return t.funcVars.FuncName(fn)
 }
 
+// FuncVars returns the package-level function variables the tracer resolves
+// calls through. It may be nil.
+func (t *RootTracer) FuncVars() callsite.FuncVars {
+	return t.funcVars
+}
+
 // IsScopesCallbackFunc reports whether fn is a Scopes/Preload callback. The
 // analyzer uses this to recurse into such callbacks even when they capture no
 // *gorm.DB (they operate on their parameter, not a captured variable), so reuse
@@ -373,7 +379,7 @@ func (t *RootTracer) traceCall(call *ssa.Call, visited map[ssa.Value]bool, loopI
 			// If closure result is stored in a variable (Extract instruction),
 			// treat each call as independent root.
 			// Only trace through IIFE when result is directly chained.
-			if isClosureResultStored(call) {
+			if t.isClosureResultStored(call) {
 				return call
 			}
 			return root
@@ -675,7 +681,7 @@ func (t *RootTracer) traceAll(v ssa.Value, visited map[ssa.Value]bool, loopInfo 
 		if site.Kind == callsite.SiteClosure {
 			if roots := t.traceAllClosureReturns(site.Callee, visited, loopInfo); len(roots) > 0 {
 				// If closure result is stored, treat call itself as root
-				if isClosureResultStored(val) {
+				if t.isClosureResultStored(val) {
 					return []ssa.Value{val}
 				}
 				return roots

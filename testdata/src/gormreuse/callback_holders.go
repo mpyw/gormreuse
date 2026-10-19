@@ -1,0 +1,313 @@
+package internal
+
+import (
+	"fmt"
+	"log"
+
+	"gorm.io/gorm"
+)
+
+// =============================================================================
+// Callbacks and callees held in variables, fields and method values (#257)
+//
+// A call through a package-level variable that holds one function, or through
+// a method value, honours every directive of the function it runs. A callback
+// held in such a variable, or in an unexported struct field that the package
+// assigns once, is resolved like a callback named in place. It stays exempt
+// only while every read of the variable or field hands it to a callback
+// position.
+// =============================================================================
+
+// --- immutable-input on a package-level variable ---
+
+//gormreuse:immutable-input(cb)
+var cbHolderWithFresh = func(db *gorm.DB, cb func(*gorm.DB)) { cb(db.Session(&gorm.Session{})) }
+
+func cbHolderUseWithFresh(db *gorm.DB) {
+	cbHolderWithFresh(db, func(q *gorm.DB) {
+		q.Find(nil)
+		q.Find(nil) // OK: the variable's closure promises an immutable value
+	})
+}
+
+// cbHolderForward hands its own callback to the variable, which keeps the
+// promise.
+//
+//gormreuse:immutable-input(cb)
+func cbHolderForward(db *gorm.DB, cb func(*gorm.DB)) { cbHolderWithFresh(db, cb) }
+
+func cbHolderUseForward(db *gorm.DB) {
+	cbHolderForward(db, func(q *gorm.DB) {
+		q.Find(nil)
+		q.Find(nil) // OK: forwarded to an immutable-input position
+	})
+}
+
+// --- immutable-input through a method value ---
+
+type cbHolderRunner struct{}
+
+//gormreuse:immutable-input(cb)
+func (cbHolderRunner) withFresh(db *gorm.DB, cb func(*gorm.DB)) {
+	cb(db.Session(&gorm.Session{}))
+}
+
+func cbHolderUseMethodValue(db *gorm.DB, r cbHolderRunner) {
+	run := r.withFresh
+	run(db, func(q *gorm.DB) {
+		q.Find(nil)
+		q.Find(nil) // OK: a method value call is the call of the method
+	})
+}
+
+//gormreuse:immutable-input(cb)
+func cbHolderForwardMethodValue(db *gorm.DB, r cbHolderRunner, cb func(*gorm.DB)) {
+	run := r.withFresh
+	run(db, cb)
+}
+
+// --- Transaction callbacks held in a package-level variable ---
+
+var cbHolderTxBody = func(tx *gorm.DB) error {
+	tx.Find(nil)
+	tx.Count(nil) // OK: every read of the variable is a Transaction callback
+	return nil
+}
+
+func cbHolderUseTxBody(db *gorm.DB) error {
+	return db.Transaction(cbHolderTxBody)
+}
+
+var cbHolderTxNamed = cbHolderTxNamedBody
+
+func cbHolderTxNamedBody(tx *gorm.DB) error {
+	tx.Find(nil)
+	tx.Count(nil) // OK: only handed to Transaction, through the variable
+	return nil
+}
+
+func cbHolderUseTxNamed(db *gorm.DB) error {
+	return db.Transaction(cbHolderTxNamed)
+}
+
+// cbHolderTxAndCalled is also called directly with a mutable value.
+var cbHolderTxAndCalled = func(tx *gorm.DB) error {
+	tx.Find(nil)
+	tx.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	return nil
+}
+
+func cbHolderUseTxAndCalled(db *gorm.DB) error {
+	db = db.Session(&gorm.Session{})
+	_ = cbHolderTxAndCalled(db.Where("x"))
+	return db.Transaction(cbHolderTxAndCalled)
+}
+
+// cbHolderTxAndPassed is also handed to a function that may call it with
+// anything.
+var cbHolderTxAndPassed = func(tx *gorm.DB) error {
+	tx.Find(nil)
+	tx.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	return nil
+}
+
+func cbHolderUseTxAndPassed(db *gorm.DB, apply func(func(*gorm.DB) error) error) error {
+	_ = apply(cbHolderTxAndPassed)
+	return db.Transaction(cbHolderTxAndPassed)
+}
+
+// cbHolderTxReassigned is assigned twice, so a read may hold another function.
+var cbHolderTxReassigned = func(tx *gorm.DB) error {
+	tx.Find(nil)
+	tx.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	return nil
+}
+
+func cbHolderReassignTx() {
+	cbHolderTxReassigned = func(tx *gorm.DB) error { return nil }
+}
+
+func cbHolderUseTxReassigned(db *gorm.DB) error {
+	return db.Transaction(cbHolderTxReassigned)
+}
+
+// CbHolderTxExported may be assigned or read by another package.
+var CbHolderTxExported = func(tx *gorm.DB) error {
+	tx.Find(nil)
+	tx.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	return nil
+}
+
+func cbHolderUseTxExported(db *gorm.DB) error {
+	return db.Transaction(CbHolderTxExported)
+}
+
+// --- Transaction callbacks held in a struct field ---
+
+type cbHolderService struct {
+	cb func(tx *gorm.DB) error
+}
+
+func newCbHolderService() *cbHolderService {
+	return &cbHolderService{cb: func(tx *gorm.DB) error {
+		tx.Find(nil)
+		tx.Count(nil) // OK: every read of the field is a Transaction callback
+		return nil
+	}}
+}
+
+func (s *cbHolderService) run(db *gorm.DB) error {
+	return db.Transaction(s.cb)
+}
+
+func (s cbHolderService) runByValue(db *gorm.DB) error {
+	return db.Transaction(s.cb)
+}
+
+type cbHolderCalledService struct {
+	cb func(tx *gorm.DB) error
+}
+
+func newCbHolderCalledService() *cbHolderCalledService {
+	return &cbHolderCalledService{cb: func(tx *gorm.DB) error {
+		tx.Find(nil)
+		tx.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+		return nil
+	}}
+}
+
+func (s *cbHolderCalledService) run(db *gorm.DB) error {
+	db = db.Session(&gorm.Session{})
+	_ = s.cb(db.Where("x"))
+	return db.Transaction(s.cb)
+}
+
+type cbHolderTwiceService struct {
+	cb func(tx *gorm.DB) error
+}
+
+func cbHolderTwiceBody(tx *gorm.DB) error {
+	tx.Find(nil)
+	tx.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	return nil
+}
+
+func cbHolderTwiceCalled(tx *gorm.DB) error { return nil }
+
+func newCbHolderTwiceService(cond bool) *cbHolderTwiceService {
+	if cond {
+		return &cbHolderTwiceService{cb: cbHolderTwiceBody}
+	}
+	return &cbHolderTwiceService{cb: cbHolderTwiceCalled}
+}
+
+func (s *cbHolderTwiceService) run(db *gorm.DB) error {
+	db = db.Session(&gorm.Session{})
+	_ = cbHolderTwiceBody(db.Where("x"))
+	return db.Transaction(s.cb)
+}
+
+type cbHolderAddrService struct {
+	cb func(tx *gorm.DB) error
+}
+
+func newCbHolderAddrService() *cbHolderAddrService {
+	return &cbHolderAddrService{cb: func(tx *gorm.DB) error {
+		tx.Find(nil)
+		tx.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+		return nil
+	}}
+}
+
+func (s *cbHolderAddrService) cbAddr() *func(tx *gorm.DB) error { return &s.cb }
+
+func (s *cbHolderAddrService) run(db *gorm.DB) error {
+	return db.Transaction(s.cb)
+}
+
+// --- Transaction through a method value ---
+
+func cbHolderTxMethodValue(db *gorm.DB) error {
+	tx := db.Transaction
+	return tx(func(q *gorm.DB) error {
+		q.Find(nil)
+		q.Count(nil) // OK: a method value call of Transaction
+		return nil
+	})
+}
+
+// --- Read-only stdlib callees through a variable or a method value ---
+
+var cbHolderPrintln = fmt.Println
+
+func cbHolderPrintThroughVar(db *gorm.DB) {
+	q := db.Where("x")
+	cbHolderPrintln(q)
+	q.Find(nil) // OK: fmt.Println only reads its arguments
+}
+
+func cbHolderPrintThroughMethodValue(db *gorm.DB, l *log.Logger) {
+	q := db.Where("x")
+	printf := l.Printf
+	printf("%v", q)
+	q.Find(nil) // OK: (*log.Logger).Printf only reads its arguments
+}
+
+// --- immutable-return through a method value ---
+
+var cbHolderBase *gorm.DB
+
+//gormreuse:immutable-return
+func cbHolderReturnsMethodValueChain() *gorm.DB { // want `immutable-return declared but function returns mutable \*gorm\.DB`
+	where := cbHolderBase.Where
+	return where("x")
+}
+
+// --- Scopes Session warning through a method value or a variable ---
+
+func cbHolderScopesSessionMethodValue(db *gorm.DB) {
+	db.Scopes(func(q *gorm.DB) *gorm.DB {
+		session := q.Session
+		return session(&gorm.Session{}) // want `Session\(\) result returned from Scopes callback causes transaction leak`
+	}).Find(nil)
+}
+
+func cbHolderScopesThroughMethodValue(db *gorm.DB) {
+	scopes := db.Scopes
+	scopes(func(q *gorm.DB) *gorm.DB {
+		return q.Debug() // want `Debug\(\) result returned from Scopes callback causes transaction leak`
+	}).Find(nil)
+}
+
+var cbHolderSessionHelper = func(q *gorm.DB) *gorm.DB {
+	return q.Session(&gorm.Session{}) // want `Session\(\) result returned from Scopes callback causes transaction leak`
+}
+
+func cbHolderScopesThroughVar(db *gorm.DB) {
+	db.Scopes(func(q *gorm.DB) *gorm.DB {
+		return cbHolderSessionHelper(q)
+	}).Find(nil)
+}
+
+// --- A package-level variable that holds a method expression ---
+
+type cbHolderRepo struct{}
+
+//gormreuse:pure
+func (cbHolderRepo) peek(q *gorm.DB) { _ = q }
+
+var cbHolderPeek = cbHolderRepo.peek
+
+func cbHolderCallThunkVar(db *gorm.DB) {
+	q := db.Where("x")
+	cbHolderPeek(cbHolderRepo{}, q)
+	q.Find(nil) // OK: peek is pure, also through the variable
+}
+
+var cbHolderWhere = (*gorm.DB).Where
+
+func cbHolderGormThunkVar(db *gorm.DB) {
+	q := db.Where("x")
+	cbHolderWhere(q, "a").Find(nil)
+	cbHolderWhere(q, "b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}

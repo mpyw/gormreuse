@@ -573,7 +573,7 @@ type sendHandler struct{}
 // handle marks *gorm.DB sent to channels as polluted.
 // Handles both direct sends and sends through MakeInterface (chan interface{}).
 func (h *sendHandler) handle(send *ssa.Send, ctx *Context) {
-	gormVal, kind := pollutionsource.Leak(send)
+	gormVal, kind := pollutionsource.Leak(send, ctx.RootTracer.FuncVars())
 	if kind == pollutionsource.KindNone {
 		return
 	}
@@ -595,7 +595,7 @@ type storeHandler struct{}
 // The read-only variadic stdlib exemption (fmt.Println(q), log.Printf, t.Logf)
 // lives in pollutionsource.Leak so the purity validator honors it too.
 func (h *storeHandler) handle(store *ssa.Store, ctx *Context) {
-	gormVal, kind := pollutionsource.Leak(store)
+	gormVal, kind := pollutionsource.Leak(store, ctx.RootTracer.FuncVars())
 	if kind == pollutionsource.KindNone {
 		return
 	}
@@ -614,7 +614,7 @@ type mapUpdateHandler struct{}
 // handle marks *gorm.DB stored in maps as polluted.
 // Handles both direct stores and stores through MakeInterface (map[K]interface{}).
 func (h *mapUpdateHandler) handle(mapUpdate *ssa.MapUpdate, ctx *Context) {
-	gormVal, kind := pollutionsource.Leak(mapUpdate)
+	gormVal, kind := pollutionsource.Leak(mapUpdate, ctx.RootTracer.FuncVars())
 	if kind == pollutionsource.KindNone {
 		return
 	}

@@ -87,8 +87,9 @@ func UnwrapGormDB(v ssa.Value) (ssa.Value, bool) {
 // otherwise. Read-only variadic stdlib packing is excluded (see the package
 // doc). Callers still decide what a leak means for them (the main handler
 // marks the value polluted; the purity validator reports a contract
-// violation).
-func Leak(instr ssa.Instruction) (ssa.Value, Kind) {
+// violation). vars resolves calls through package-level function variables;
+// it may be nil.
+func Leak(instr ssa.Instruction, vars callsite.FuncVars) (ssa.Value, Kind) {
 	switch i := instr.(type) {
 	case *ssa.Send:
 		if v, ok := UnwrapGormDB(i.X); ok {
@@ -105,7 +106,7 @@ func Leak(instr ssa.Instruction) (ssa.Value, Kind) {
 		if !ok {
 			return nil, KindNone
 		}
-		if isReadOnlyVariadicArg(idx, i.Val) || isReadOnlyArray(idx.X) {
+		if isReadOnlyVariadicArg(idx, i.Val, vars) || isReadOnlyArray(idx.X) {
 			return nil, KindNone
 		}
 		return v, KindSliceStore
@@ -150,7 +151,7 @@ var readOnlyVariadicPkgs = map[string]bool{
 //   - user-defined variadic ...interface{} functions (may branch the value),
 //
 // all of which stay conservatively polluting.
-func isReadOnlyVariadicArg(idx *ssa.IndexAddr, val ssa.Value) bool {
+func isReadOnlyVariadicArg(idx *ssa.IndexAddr, val ssa.Value, vars callsite.FuncVars) bool {
 	if _, ok := val.(*ssa.MakeInterface); !ok {
 		return false
 	}
@@ -170,7 +171,7 @@ func isReadOnlyVariadicArg(idx *ssa.IndexAddr, val ssa.Value) bool {
 			}
 			sig := call.Call.Signature()
 			args := call.Call.Args
-			if sig != nil && sig.Variadic() && len(args) > 0 && args[len(args)-1] == slice && isReadOnlyStdlibCallee(call) {
+			if sig != nil && sig.Variadic() && len(args) > 0 && args[len(args)-1] == slice && isReadOnlyStdlibCallee(call, vars) {
 				return true
 			}
 		}
@@ -179,9 +180,10 @@ func isReadOnlyVariadicArg(idx *ssa.IndexAddr, val ssa.Value) bool {
 }
 
 // isReadOnlyStdlibCallee reports whether call targets a function in an
-// allow-listed read-only package (see readOnlyVariadicPkgs).
-func isReadOnlyStdlibCallee(call *ssa.Call) bool {
-	callee := callsite.SiteOf(call, nil).StaticSite().Callee
+// allow-listed read-only package (see readOnlyVariadicPkgs): by name, as a
+// method value, or through a package-level variable that holds it (#257).
+func isReadOnlyStdlibCallee(call *ssa.Call, vars callsite.FuncVars) bool {
+	callee := callsite.SiteOf(call, vars).Declared
 	if callee == nil || callee.Object() == nil || callee.Object().Pkg() == nil {
 		return false
 	}

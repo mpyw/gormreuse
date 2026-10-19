@@ -19,13 +19,18 @@ import (
 // A function stays in set only when every reference to it in funcs (and in the
 // package initializers) is an argument in an immutable callback position: a
 // Transaction/FindInBatches callback or an immutable-input(name) argument,
-// directly or as a closure or method value. It is dropped when:
+// directly or as a closure or method value, or the store into a holder whose
+// every read is such an argument (#257). It is dropped when:
 //   - any other reference exists: a direct call (also under go and defer, and
-//     recursion), a method expression, a store, a Phi, a capture, a return
+//     recursion), a method expression, any other store, a Phi, a capture, a
+//     return
 //   - it is exported, so another package may call it directly (#195)
 //   - it is a method and an interface call, method value or method expression
 //     in the package names a method of the same name, which may dispatch to it
-func DropReachableCallbacks(funcs []*ssa.Function, inputs *directive.ImmutableInputSet, set map[*ssa.Function]bool) {
+//
+// vars resolves calls through package-level function variables and names the
+// variables that can hold a callback; it may be nil.
+func DropReachableCallbacks(funcs []*ssa.Function, vars callsite.FuncVars, inputs *directive.ImmutableInputSet, set map[*ssa.Function]bool) {
 	for fn := range set {
 		if obj := fn.Object(); obj != nil && obj.Exported() {
 			delete(set, fn)
@@ -34,18 +39,9 @@ func DropReachableCallbacks(funcs []*ssa.Function, inputs *directive.ImmutableIn
 	if len(set) == 0 {
 		return
 	}
-	scan := slices.Clone(funcs)
-	seenPkg := make(map[*ssa.Package]bool)
-	for _, fn := range funcs {
-		if fn.Pkg != nil && !seenPkg[fn.Pkg] {
-			seenPkg[fn.Pkg] = true
-			if init := fn.Pkg.Func("init"); init != nil {
-				scan = append(scan, init)
-			}
-		}
-	}
+	h := collectHolders(funcs, vars)
 	var invoked []string
-	callsite.WalkInstrs(scan, func(instr ssa.Instruction) {
+	callsite.WalkInstrs(withHolderInits(funcs), func(instr ssa.Instruction) {
 		if call, ok := instr.(ssa.CallInstruction); ok && call.Common().IsInvoke() {
 			invoked = append(invoked, call.Common().Method.Name())
 		}
@@ -57,7 +53,7 @@ func DropReachableCallbacks(funcs []*ssa.Function, inputs *directive.ImmutableIn
 			if name, ok := reachedInterfaceMethod(ref); ok {
 				invoked = append(invoked, name)
 			}
-			if fn := directive.DeclaredFunc(ref); set[fn] && !refReachesOnlyCallback(instr, ref, inputs) {
+			if fn := directive.DeclaredFunc(ref); set[fn] && !refReachesOnlyCallback(instr, ref, inputs, h) {
 				delete(set, fn)
 			}
 		}
@@ -86,21 +82,26 @@ func reachedInterfaceMethod(fn *ssa.Function) (string, bool) {
 }
 
 // refReachesOnlyCallback reports whether instr uses v only to hand it to an
-// immutable callback position: v is a call argument in such a position, or it
+// immutable callback position: v is a call argument in such a position, it
 // is the function of a closure (a capturing literal or a bound method value)
-// that is itself used only that way. Any other use, such as an interface
-// conversion, a store or a Phi, is not: Transaction and immutable-input take a
-// func-typed argument, so such a value never reaches one directly.
-func refReachesOnlyCallback(instr ssa.Instruction, v ssa.Value, inputs *directive.ImmutableInputSet) bool {
+// that is itself used only that way, or it is stored into a holder whose
+// every read is used only that way. Any other use, such as an interface
+// conversion, another store or a Phi, is not: Transaction and immutable-input
+// take a func-typed argument, so such a value never reaches one directly.
+//
+//declscope:shared // holder.go checks the reads of a holder with it
+func refReachesOnlyCallback(instr ssa.Instruction, v ssa.Value, inputs *directive.ImmutableInputSet, h *holders) bool {
 	switch x := instr.(type) {
 	case *ssa.MakeClosure:
-		return x.Fn == v && closureReachesOnlyCallback(x, inputs)
+		return x.Fn == v && closureReachesOnlyCallback(x, inputs, h)
+	case *ssa.Store:
+		return x.Val == v && h.feedsOnlyCallbacks(x.Addr, inputs)
 	case ssa.CallInstruction:
 		common := x.Common()
 		if common.Value == v {
 			return false
 		}
-		positions := CollectedCallbackArgs(callsite.SiteOf(x, nil).StaticSite(), inputs)
+		positions := CollectedCallbackArgs(callsite.SiteOf(x, h.vars), inputs)
 		for i, arg := range common.Args {
 			if arg == v && !slices.Contains(positions, i) {
 				return false
@@ -113,9 +114,9 @@ func refReachesOnlyCallback(instr ssa.Instruction, v ssa.Value, inputs *directiv
 
 // closureReachesOnlyCallback reports whether every use of the closure c hands
 // it to an immutable callback position.
-func closureReachesOnlyCallback(c *ssa.MakeClosure, inputs *directive.ImmutableInputSet) bool {
+func closureReachesOnlyCallback(c *ssa.MakeClosure, inputs *directive.ImmutableInputSet, h *holders) bool {
 	for _, ref := range *c.Referrers() {
-		if !refReachesOnlyCallback(ref, c, inputs) {
+		if !refReachesOnlyCallback(ref, c, inputs, h) {
 			return false
 		}
 	}
