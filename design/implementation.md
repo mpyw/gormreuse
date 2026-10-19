@@ -82,7 +82,7 @@ Limitations:
 - A copy taken through a method value (`s := q.Session; c := s(cfg)`) is not recognized as a copy; `c` is treated as a mutable root of its own, as before.
 - `go`/`defer` uses of a copy are not alias uses.
 - A copy returned from a function, or stored in a struct field and read in another function, is not followed. A `//gormreuse:pure` function that returns a copy of its argument hides the sharing from its caller. The copy is not the argument itself, so it is not in `PureVerdicts.Returned` (see [Returned arguments](#returned-arguments-188)). Treating it as the argument would count each use of the copy as a branch, which the rejected approach above shows is wrong.
-- The `//gormreuse:immutable-return` body check still trusts `Session(&gorm.Session{Initialized: true})` as immutable (related: #194), and the fix generator's Phi-edge check treats it as already immutable.
+- The fix generator's Phi-edge check treats `Session(&gorm.Session{Initialized: true})` as already immutable. The `//gormreuse:immutable-return` body check reports it (see [Immutable-return body contract](#immutable-return-body-contract-194)).
 
 ### Directives
 
@@ -98,7 +98,7 @@ Limitations:
 
   An ignore only suppresses reports. Before #190 a function-level ignore skipped the function in every pass. That hid contract violations while the directive stayed trusted (a leaking `pure` function was trusted at call sites), never covered closures, and marked the ignore used even when nothing was suppressed. Now every pass runs, so `failedPure` and `needsImmutableParam` see ignored functions, and an ignore is used only when it suppressed a report. Unused-ignore reports go straight to `pass.Reportf`: an ignore never silences another ignore's staleness. So do `panicGuard` internal-error reports, which can now come from an ignored function too, since it is analyzed.
 - `//gormreuse:pure` - Mark function/method/closure as not polluting its `*gorm.DB` argument
-- `//gormreuse:immutable-return` - Mark function/method/closure as returning immutable `*gorm.DB` (like Session/WithContext). **Body contract**: when the function actually returns a provably-mutable value — one whose root is a gorm chain-method call, e.g. `db.Where(...)` or `Session().Where(...)` (the trailing chain re-forks a fresh `clone==0` Statement) — the directive is reported at the declaration, since the linter would otherwise trust it and silently allow unsafe reuse of the return value at call sites. Roots the tracer treats as mutable only conservatively (a bare `*gorm.DB` parameter, or a call into an unmarked user function/closure) are given the benefit of the doubt and not reported.
+- `//gormreuse:immutable-return` - Mark function/method/closure as returning immutable `*gorm.DB` (like Session/WithContext). **Body contract**: when the function actually returns a provably-mutable value — one whose root is a gorm chain-method call, e.g. `db.Where(...)` or `Session().Where(...)` (the trailing chain re-forks a fresh `clone==0` Statement), or `Session(&gorm.Session{Initialized: true})` — the directive is reported at the declaration, since the linter would otherwise trust it and silently allow unsafe reuse of the return value at call sites. Closures, deferred writes to named results and some package-level variables are followed; see [Immutable-return body contract](#immutable-return-body-contract-194). Roots the tracer treats as mutable only conservatively (a bare `*gorm.DB` parameter, or a call into an unmarked named function) are given the benefit of the doubt and not reported.
 - `//gormreuse:immutable-param` - Opt a function's `*gorm.DB` parameters out of the Phase 1b mutable-by-default treatment: they are treated as immutable inside the function (the caller is responsible for passing an isolated value). **Caller-side contract**: when the function actually branches such a parameter, passing a mutable `*gorm.DB` at a call site is reported (isolate with `.Session(&gorm.Session{})` first, or make the caller `immutable-param` too so the contract propagates). The check runs wherever the callee is known statically: a direct call, a function or method value, a generic instance, and the same calls under `go` and `defer` (#192). The `go`/`defer` path (`processGormDBCallCommonWith`) shares `checksImmutableParamArg` with the call path. An interface method call or a call through a func-typed parameter has no static callee, so its contract cannot be checked. A callee in another package is not checked either (#195).
 - `//gormreuse:immutable-input(name)` - Declare that the function passes an **immutable** `*gorm.DB` to its callback parameter `name` (a user-defined equivalent of gorm's `Transaction`/`FindInBatches`). The named callback's `*gorm.DB` parameter is then treated as immutable, so reuse inside the callback is allowed. **Body contract**: if the function actually passes a mutable value to the callback, it is reported. Reported unused when `name` isn't a parameter, isn't a function type, or the callback has no `*gorm.DB` parameter.
 
@@ -466,6 +466,27 @@ Decisions and limitations:
 - **Only a `*gorm.DB` result is traced.** A tuple result (`(*gorm.DB, error)`) is still not followed by the tracer (#176), although the validator follows it.
 - **Across packages.** `ReturnedParams` needs the callee's body, so a pure function in another package is still trusted to return a fresh value (#195, `pureReturnedArgUnknown` in `testdata/src/externalpure/use.go`).
 - **The receiver.** The receiver is not seeded, so a pure method that returns `r.db` is not an alias of anything.
+
+## Immutable-return body contract (#194)
+
+`purity.ImmutableReturnValidator` checks the body of every `//gormreuse:immutable-return` function. It reports the function when some `*gorm.DB` it returns is **provably** mutable. Anything it cannot prove gets the benefit of the doubt, because the directive exists to assert what the analyzer cannot see.
+
+| Returned value | Provably mutable when |
+| --- | --- |
+| A gorm chain-method call (`Where`, `Order`, …) | Always |
+| `Session(cfg)` | `cfg` is a `&gorm.Session{...}` literal that sets `Initialized: true` (`typeutil.SessionSetsInitialized`). It returns `tx.getInstance()`, a `clone == 0` handle (#174). An unreadable config is not reported |
+| A Phi | Any edge is |
+| A call to a closure: an IIFE, a `MakeClosure`, or a captured local assigned exactly once (`f := func() ...; return f()`) | One of the closure's returns is, checked the same way. A closure marked `immutable-return` is trusted here and checked on its own |
+| A load of a named result that a deferred closure stores to | Any value the closure stores is. When a deferred closure stores on every path through it and its `defer` dominates the return (or the return is in the recover block), the values stored before it are hidden and not checked |
+| A load of a package-level variable | It is unexported, its address is used only to load and store it, it is assigned at least once in the package (the `init` function included), and **every** assigned value is |
+| Anything else the tracer returns (a parameter, a named user function's result) | Never |
+
+Decisions and limitations:
+
+- **Globals: check the package, not the benefit of the doubt.** The issue allowed either. An unexported variable can only be assigned in its package, so when every store there is mutable, every read is. One immutable store gives the benefit of the doubt, since a read may run after it (`var db = x.Where(...)`, then `func init() { db = db.Session(...) }`). An exported variable may be assigned by another package, and a variable whose address escapes may be assigned through a pointer, so neither is reported.
+- **Named functions are not followed.** A call into an unmarked named helper stays the benefit of the doubt, as the README says. Only closures, whose body belongs to the function, are followed.
+- **Deferred writes are direct stores only.** A store made by a closure that the deferred closure calls, or by a non-deferred closure (`f := func() { r = r.Where("x") }; f(); return`), is not seen.
+- **A captured closure variable** is followed only when it is assigned once and no closure assigns it.
 
 ## Reassignment Fix Target
 

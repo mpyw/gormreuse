@@ -287,12 +287,13 @@ func reportImmutableReturnViolations(
 	report func(token.Pos, string),
 	guard *panicGuard,
 ) {
+	validator := purity.NewImmutableReturnValidator(ssaInfo.SrcFuncs, immutableReturnFuncs, rt)
 	for _, fn := range ssaInfo.SrcFuncs {
 		if skip(fn) {
 			continue
 		}
 		guard.run(fn, func() {
-			for _, v := range purity.ValidateImmutableReturn(fn, immutableReturnFuncs, rt) {
+			for _, v := range validator.Validate(fn) {
 				report(v.Pos, v.Message)
 			}
 		})

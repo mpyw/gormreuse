@@ -184,6 +184,15 @@ func ImmutableBuiltinEffect(name string, sessionConfig ssa.Value) BuiltinEffect 
 	}
 }
 
+// SessionSetsInitialized reports whether sessionConfig is a &gorm.Session{...}
+// literal that certainly sets Initialized to true. Such a Session call returns
+// a clone==0 handle. Unlike ImmutableBuiltinEffect, an unknown config gives
+// false: this is for checks that report only what they can prove.
+func SessionSetsInitialized(sessionConfig ssa.Value) bool {
+	fields, ok := readSessionLiteral(sessionConfig)
+	return ok && fields["Initialized"] == sessionFieldTrue
+}
+
 // sessionFieldState is what readSessionLiteral knows about one field. The
 // zero value is false, which is also the value of a field the literal omits.
 type sessionFieldState uint8

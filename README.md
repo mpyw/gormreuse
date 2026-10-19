@@ -618,7 +618,7 @@ func useIt() {
 >     return globalDB.Session(&gorm.Session{}).Where("x") // trailing Where re-forks a fresh clone==0 Statement
 > }
 > ```
-> Put [`Session`](https://pkg.go.dev/gorm.io/gorm#DB.Session) at the **end** of the chain (`globalDB.Where("x").Session(&gorm.Session{})`) so the returned value is isolated. Only provably-mutable returns (whose root is a gorm chain method like `Where`) are reported; a bare parameter or a value from an unmarked helper the linter can't see through is given the benefit of the doubt.
+> Put [`Session`](https://pkg.go.dev/gorm.io/gorm#DB.Session) at the **end** of the chain (`globalDB.Where("x").Session(&gorm.Session{})`) so the returned value is isolated. Only provably-mutable returns are reported: a value whose root is a gorm chain method like `Where`, or `Session(&gorm.Session{Initialized: true})`. The check follows IIFEs and local closures, values that a deferred closure writes to a named result, and unexported package-level variables whose every assignment in the package is mutable. A bare parameter, a value from an unmarked named helper, an exported or address-taken package-level variable, or a `Session` config the linter can't read is given the benefit of the doubt.
 
 ### `//gormreuse:immutable-param`
 
