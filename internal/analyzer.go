@@ -224,9 +224,6 @@ func validatePureFuncs(
 	skip func(*ssa.Function, bool) bool,
 ) map[*ssa.Function]bool {
 	failedPure := make(map[*ssa.Function]bool)
-	if pureFuncs == nil {
-		return failedPure
-	}
 	var targets []*ssa.Function
 	for _, fn := range ssaInfo.SrcFuncs {
 		if !skip(fn, false) && pureFuncs.Contains(fn) {

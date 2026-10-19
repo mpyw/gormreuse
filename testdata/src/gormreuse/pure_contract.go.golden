@@ -148,6 +148,85 @@ func pcLoopPhi(db *gorm.DB, n int) {
 	}
 }
 
+//gormreuse:pure
+func pcMapRange(m map[string]*gorm.DB) {
+	for _, d := range m {
+		d.Find(nil) // want `pure function pollutes \*gorm\.DB argument by calling Find`
+	}
+}
+
+//gormreuse:pure
+func pcRecv(ch chan *gorm.DB) {
+	(<-ch).Find(nil) // want `pure function pollutes \*gorm\.DB argument by calling Find`
+}
+
+//gormreuse:pure
+func pcSliceToArray(dbs []*gorm.DB) {
+	p := (*[1]*gorm.DB)(dbs)
+	p[0].Find(nil) // want `pure function pollutes \*gorm\.DB argument by calling Find`
+}
+
+//gormreuse:pure
+func pcLocalArray(db *gorm.DB) {
+	var arr [1]pcHolder
+	arr[0].db = db
+	arr[0].db.Find(nil) // want `pure function pollutes \*gorm\.DB argument by calling Find`
+}
+
+// pcTuple, pcHolderOf and pcArrayOf are not pure, so their results still
+// share the argument.
+func pcTuple(db *gorm.DB) (*gorm.DB, error) { return db, nil }
+
+func pcHolderOf(db *gorm.DB) pcHolder { return pcHolder{db: db} }
+
+func pcArrayOf(db *gorm.DB) [1]*gorm.DB { return [1]*gorm.DB{db} }
+
+//gormreuse:pure
+func pcTupleResult(db *gorm.DB) {
+	d, _ := pcTuple(db) // want `pure function passes \*gorm\.DB argument to non-pure function pcTuple`
+	d.Find(nil)         // want `pure function pollutes \*gorm\.DB argument by calling Find`
+}
+
+//gormreuse:pure
+func pcFieldOfResult(db *gorm.DB) {
+	pcHolderOf(db).db.Find(nil) // want `pure function passes \*gorm\.DB argument to non-pure function pcHolderOf` `pure function pollutes \*gorm\.DB argument by calling Find`
+}
+
+//gormreuse:pure
+func pcIndexOfResult(db *gorm.DB) {
+	pcArrayOf(db)[0].Find(nil) // want `pure function passes \*gorm\.DB argument to non-pure function pcArrayOf` `pure function pollutes \*gorm\.DB argument by calling Find`
+}
+
+//gormreuse:pure
+func pcAppendSlice(dbs, dst []*gorm.DB) []*gorm.DB {
+	return append(dst, dbs...) // want `pure function passes \*gorm\.DB argument to non-pure function append`
+}
+
+//gormreuse:pure
+func pcFuncParam(db *gorm.DB, f func(*gorm.DB)) {
+	f(db) // want `pure function passes \*gorm\.DB argument to non-pure function \(closure\)`
+}
+
+// pcSinkTwo is not pure. Passing two arguments to it reports once.
+func pcSinkTwo(a, b *gorm.DB) {}
+
+//gormreuse:pure
+func pcTwoArgs(a, b *gorm.DB) {
+	pcSinkTwo(a, b) // want `pure function passes \*gorm\.DB argument to non-pure function pcSinkTwo`
+}
+
+// A pure closure inside a pure function is checked both on its own and as
+// part of the outer function; the shared call is reported once.
+
+//gormreuse:pure
+func pcPureClosureInPure(db, other *gorm.DB) {
+	//gormreuse:pure
+	inner := func(q *gorm.DB) {
+		pcSinkTwo(q, db) // want `pure function passes \*gorm\.DB argument to non-pure function pcSinkTwo`
+	}
+	inner(other)
+}
+
 // A //gormreuse:pure function that fails validation is not trusted when another
 // pure function calls it: the failure propagates to the caller.
 
@@ -232,6 +311,11 @@ func pcVariadicSession(dbs ...*gorm.DB) {
 	for _, d := range dbs {
 		d.Session(&gorm.Session{}).Find(nil)
 	}
+}
+
+//gormreuse:pure
+func pcClosureCapturesOther(db *gorm.DB, n int) int {
+	return func() int { return n }()
 }
 
 //gormreuse:pure

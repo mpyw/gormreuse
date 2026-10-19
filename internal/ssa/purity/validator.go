@@ -60,7 +60,6 @@ type Validator struct {
 	failedPure   map[*ssa.Function]bool
 	paramDerived map[ssa.Value]bool
 	holdsCache   map[types.Type]bool
-	visited      map[*ssa.Function]bool
 }
 
 // NewValidator creates a Validator for a function marked as pure.
@@ -71,7 +70,6 @@ func NewValidator(fn *ssa.Function, pureFuncs *directive.DirectiveFuncSet, faile
 		failedPure:   failedPure,
 		paramDerived: make(map[ssa.Value]bool),
 		holdsCache:   make(map[types.Type]bool),
-		visited:      make(map[*ssa.Function]bool),
 	}
 }
 
@@ -103,8 +101,8 @@ func (v *Validator) Validate() []Violation {
 
 	violations := v.validateBody(fn)
 
-	// A closure body can be reached twice (e.g. from nested closures), so drop
-	// exact duplicates.
+	// A call that passes several derived arguments reports each one at the
+	// same position, so drop exact duplicates.
 	seen := make(map[Violation]bool)
 	return slices.DeleteFunc(violations, func(viol Violation) bool {
 		if seen[viol] {
@@ -117,13 +115,9 @@ func (v *Validator) Validate() []Violation {
 
 // validateBody propagates derivation through fn to a fixed point, then checks
 // every instruction. Closures created from parameter-derived values are
-// validated recursively with their captured variables seeded.
+// validated recursively with their captured variables seeded; each closure
+// has exactly one MakeClosure, so no body is visited twice.
 func (v *Validator) validateBody(fn *ssa.Function) []Violation {
-	if fn == nil || fn.Blocks == nil || v.visited[fn] {
-		return nil
-	}
-	v.visited[fn] = true
-
 	// Loops feed values back through Phi edges and local variables, so a
 	// single forward pass can miss them.
 	for changed := true; changed; {
@@ -212,8 +206,9 @@ func (v *Validator) trackDerivation(instr ssa.Instruction) bool {
 
 // derivationOperand returns the operand a value is read from when the value
 // carries what the operand holds: a load (*p) or channel receive (<-ch), a
-// field or element (address), a map lookup, a slice, a conversion, or the next
-// range element. It returns nil for any other value.
+// field or element (address), a map lookup, a slice, a type change, or the
+// next range element. A Convert is not listed: it only converts to basic types
+// and unsafe.Pointer, which cannot hold a *gorm.DB. It returns nil for any other value.
 func (v *Validator) derivationOperand(val ssa.Value) ssa.Value {
 	switch i := val.(type) {
 	case *ssa.UnOp:
@@ -231,8 +226,6 @@ func (v *Validator) derivationOperand(val ssa.Value) ssa.Value {
 	case *ssa.Slice:
 		return i.X
 	case *ssa.ChangeType:
-		return i.X
-	case *ssa.Convert:
 		return i.X
 	case *ssa.SliceToArrayPointer:
 		return i.X
@@ -264,12 +257,8 @@ func (v *Validator) markHolding(val ssa.Value) bool {
 // argument's Statement: a non-immutable gorm method on a derived receiver, or
 // a call that is not trusted as pure with a derived argument.
 func (v *Validator) callResultDerived(common *ssa.CallCommon) bool {
-	// Interface method call
-	if common.Method != nil {
-		recv := common.Value
-		return typeutil.IsGormDB(recv.Type()) && v.paramDerived[recv] &&
-			!typeutil.IsImmutableReturningBuiltin(common.Method.Name())
-	}
+	// An interface method call never has a *gorm.DB receiver (it is a
+	// concrete type), so it falls through to the regular-call rule below.
 
 	// Method value: f := db.Find; f(nil)
 	if method, recv, ok := v.boundGormMethod(common.Value); ok {
@@ -341,13 +330,11 @@ func (v *Validator) checkClosure(mc *ssa.MakeClosure) []Violation {
 		return nil
 	}
 
-	closure, ok := mc.Fn.(*ssa.Function)
-	if !ok {
-		return nil
-	}
+	// MakeClosure.Fn is always a *ssa.Function, with one FreeVar per binding.
+	closure, _ := mc.Fn.(*ssa.Function)
 	captured := false
 	for i, binding := range mc.Bindings {
-		if v.paramDerived[binding] && i < len(closure.FreeVars) {
+		if v.paramDerived[binding] {
 			v.paramDerived[closure.FreeVars[i]] = true
 			captured = true
 		}
@@ -490,9 +477,6 @@ func (v *Validator) calleeName(common *ssa.CallCommon, callee *ssa.Function) str
 // going through an interface: *gorm.DB itself, a pointer to one, or a
 // struct, slice, array, map, channel or tuple containing one.
 func (v *Validator) holdsGormDB(t types.Type) bool {
-	if t == nil {
-		return false
-	}
 	if result, ok := v.holdsCache[t]; ok {
 		return result
 	}
