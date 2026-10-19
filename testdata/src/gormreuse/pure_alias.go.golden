@@ -1,0 +1,313 @@
+package internal
+
+import (
+	"gorm.io/gorm"
+)
+
+// =============================================================================
+// A //gormreuse:pure function whose result may be its argument (issue #188)
+//
+// A pure function does not pollute its argument, but it may return it. The
+// result is then the same *gorm.DB as the argument, so a branch from the result
+// is a branch from the argument's root. A result built only from immutable
+// values (db.Session(...).Where(...)) is a fresh chain and stays its own root.
+// =============================================================================
+
+type paHolder struct {
+	db *gorm.DB
+}
+
+//gormreuse:pure
+func paReturn(db *gorm.DB) *gorm.DB { return db }
+
+//gormreuse:pure
+func paReturnVar(db *gorm.DB) *gorm.DB {
+	q := db
+	return q
+}
+
+//gormreuse:pure
+func paMaybe(db *gorm.DB, fresh bool) *gorm.DB {
+	if fresh {
+		return db.Session(&gorm.Session{}).Where("fresh")
+	}
+	return db
+}
+
+//gormreuse:pure
+func paThroughHolder(db *gorm.DB) *gorm.DB {
+	h := paHolder{db: db}
+	return h.db
+}
+
+//gormreuse:pure
+func paThroughIIFE(db *gorm.DB) *gorm.DB {
+	return func() *gorm.DB { return db }()
+}
+
+//gormreuse:pure
+func paDeref(pp **gorm.DB) *gorm.DB { return *pp }
+
+//gormreuse:pure
+func paWrapper(db *gorm.DB) *gorm.DB { return paReturn(db) }
+
+//gormreuse:pure
+func paFirst(a, b *gorm.DB) *gorm.DB { return a }
+
+//gormreuse:pure
+func paTenant(db *gorm.DB, id int) *gorm.DB {
+	return db.Session(&gorm.Session{}).Where("tenant_id = ?", id)
+}
+
+//gormreuse:pure
+func paIIFEFresh(db *gorm.DB) *gorm.DB {
+	return func() *gorm.DB { return db.Session(&gorm.Session{}) }()
+}
+
+// =============================================================================
+// SHOULD REPORT: the result is the argument
+// =============================================================================
+
+// The issue's reproduction.
+func paIssueRepro(db *gorm.DB) {
+	db = db.Session(&gorm.Session{})
+	q := db.Where("x").Session(&gorm.Session{})
+	r := paReturn(q)
+	r.Where("a").Find(nil)
+	q.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+func paReturnVarUse(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x").Session(&gorm.Session{})
+	paReturnVar(q).Find(nil)
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// The result may be the argument, so it is treated as one.
+func paMaybeUse(db *gorm.DB, fresh bool) {
+	q := db.Session(&gorm.Session{}).Where("x").Session(&gorm.Session{})
+	paMaybe(q, fresh).Find(nil)
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// The argument is immutable, but the other result is a fresh mutable chain.
+func paMaybeImmutableArg(db *gorm.DB, fresh bool) {
+	r := paMaybe(db.Session(&gorm.Session{}), fresh).Session(&gorm.Session{})
+	r.Find(nil)
+	r.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+func paThroughHolderUse(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x").Session(&gorm.Session{})
+	paThroughHolder(q).Find(nil)
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+func paThroughIIFEUse(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x").Session(&gorm.Session{})
+	paThroughIIFE(q).Find(nil)
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+func paDerefUse(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x").Session(&gorm.Session{})
+	paDeref(&q).Find(nil)
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// A pure function that returns another pure function's argument-returning
+// result returns its own argument.
+func paWrapperUse(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x").Session(&gorm.Session{})
+	paWrapper(q).Find(nil)
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// Reuse through the result after the argument was branched.
+func paResultAfterArg(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x").Session(&gorm.Session{})
+	r := paReturn(q)
+	q.Find(nil)
+	r.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// Two results of the same argument are one root.
+func paTwoResults(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x").Session(&gorm.Session{})
+	paReturn(q).Find(nil)
+	paReturn(q).Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// A mutable parameter returned through a pure function is still that parameter.
+//gormreuse:immutable-param
+func paParamArg(db *gorm.DB) {
+	paReturn(db).Find(nil)
+	db.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+func paFirstUse(db *gorm.DB) {
+	q1 := db.Session(&gorm.Session{}).Where("a").Session(&gorm.Session{})
+	q2 := db.Session(&gorm.Session{}).Where("b")
+	paFirst(q1, q2).Find(nil)
+	q1.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// Inside a pure function, branching a pure function's argument-returning result
+// branches the argument.
+//
+//gormreuse:pure
+func paPureBranchesResult(db *gorm.DB) {
+	paReturn(db).Find(nil) // want `pure function pollutes \*gorm\.DB argument by calling Find`
+}
+
+// Returning the result of an IIFE that returns the argument, then branching it.
+//
+//gormreuse:pure
+func paPureBranchesIIFE(db *gorm.DB) {
+	r := func() *gorm.DB { return db }()
+	r.Find(nil) // want `pure function pollutes \*gorm\.DB argument by calling Find`
+}
+
+// A pure function that branches another pure function's result breaks its own
+// contract, so its callers no longer trust it.
+func paCallsBrokenPure(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x").Session(&gorm.Session{})
+	paPureBranchesResult(q)
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+type paRepo struct{}
+
+//gormreuse:pure
+func (paRepo) Same(db *gorm.DB) *gorm.DB { return db }
+
+//gormreuse:pure
+func paGeneric[T any](db *gorm.DB, _ T) *gorm.DB { return db }
+
+// A method value of a pure method takes no receiver argument.
+func paBoundUse(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x").Session(&gorm.Session{})
+	same := paRepo{}.Same
+	same(q).Find(nil)
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+func paMethodUse(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x").Session(&gorm.Session{})
+	paRepo{}.Same(q).Find(nil)
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// A generic instance runs the declared body.
+func paGenericUse(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x").Session(&gorm.Session{})
+	paGeneric(q, 1).Find(nil)
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+func paGenericImmutableArg(db *gorm.DB) {
+	r := paGeneric(db.Session(&gorm.Session{}), "x")
+	r.Find(nil)
+	r.Count(nil) // OK
+}
+
+// =============================================================================
+// SHOULD NOT REPORT
+// =============================================================================
+
+// A function that returns only its argument returns an immutable value when
+// the argument is immutable.
+func paImmutableArg(db *gorm.DB) {
+	r := paReturn(db.Session(&gorm.Session{}))
+	r.Find(nil)
+	r.Count(nil) // OK
+}
+
+func paImmutableArgPhi(db *gorm.DB, c bool) {
+	var r *gorm.DB
+	if c {
+		r = paReturn(db.Session(&gorm.Session{}))
+	} else {
+		r = paReturnVar(db.WithContext(nil))
+	}
+	r.Find(nil)
+	r.Count(nil) // OK
+}
+
+// Only the mutable edge is a root.
+func paImmutableArgPhiMixed(db *gorm.DB, c bool) {
+	base := db.Session(&gorm.Session{})
+	r := base.Where("x")
+	if c {
+		r = paReturn(base)
+	}
+	r.Find(nil)
+}
+
+func paImmutableArgWrapper(db *gorm.DB) {
+	r := paWrapper(db.Session(&gorm.Session{}))
+	r.Find(nil)
+	r.Count(nil) // OK
+}
+
+// The documented withTenant pattern: Session isolates the result.
+func paTenantUse(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x")
+	r := paTenant(q, 1)
+	r.Find(nil)
+	q.Count(nil) // OK: r is a fresh chain
+}
+
+// The result of a pure function is still mutable (README: withTenant).
+func paTenantResultReuse(db *gorm.DB) {
+	r := paTenant(db, 1).Session(&gorm.Session{})
+	r.Find(nil)
+	r.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// Only the parameter the result can be is aliased.
+func paFirstOtherArg(db *gorm.DB) {
+	q1 := db.Session(&gorm.Session{}).Where("a")
+	q2 := db.Session(&gorm.Session{}).Where("b")
+	paFirst(q1, q2).Find(nil)
+	q2.Count(nil) // OK: paFirst never returns b
+}
+
+// Reassigning the result is one chain.
+func paReassign(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x")
+	q = paReturn(q)
+	q.Find(nil)
+}
+
+// An IIFE that returns an immutable value does not return the argument.
+func paIIFEFreshUse(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x")
+	r := paIIFEFresh(q)
+	r.Find(nil)
+	q.Count(nil) // OK
+}
+
+//gormreuse:pure
+func paPureUsesFreshIIFE(db *gorm.DB) {
+	r := func() *gorm.DB { return db.Session(&gorm.Session{}) }()
+	r.Find(nil) // OK: r is a fresh handle
+}
+
+// =============================================================================
+// [LIMITATION]
+// =============================================================================
+
+//gormreuse:pure
+func paCopy(db *gorm.DB) *gorm.DB { return db.Session(&gorm.Session{}) }
+
+// [LIMITATION] #174: a Session copy of a mid-chain value reads its Statement,
+// but a copy returned from a pure function is not the argument itself, so the
+// sharing is hidden from the caller.
+// Expected: violation on c.Count(nil). Actual: not reported.
+func paCopyHidden(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x")
+	c := paCopy(q)
+	q.Where("y").Find(nil)
+	c.Count(nil)
+}

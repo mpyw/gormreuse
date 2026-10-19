@@ -114,11 +114,12 @@ func RunSSA(
 	}
 
 	// PASS 1: validate pure function contracts and collect the functions that
-	// definitively broke them. Such a //gormreuse:pure function must not be
-	// trusted as pure at its call sites (issue #66), so this must complete for
-	// ALL functions before the analysis pass runs — a caller may be visited
-	// before its callee.
-	failedPure := validatePureFuncs(ssaInfo, pureFuncs, skip, report, guard)
+	// definitively broke them, and the parameters each trusted one may return.
+	// A //gormreuse:pure function that broke the contract must not be trusted
+	// as pure at its call sites (issue #66), and the result of one that keeps
+	// it may be its argument (#188), so this must complete for ALL functions
+	// before the analysis pass runs — a caller may be visited before its callee.
+	pureVerdicts := validatePureFuncs(ssaInfo, pureFuncs, immutableReturnFuncs, skip, report, guard)
 
 	// Collect Scopes/Preload callbacks once: their *gorm.DB parameter receives a
 	// mid-chain (clone==0) value, so reuse inside them must be detected (#60).
@@ -135,7 +136,7 @@ func RunSSA(
 	// Enforce the body-side immutable-input contract (#62 cases 2.3/2.4) and
 	// report unused immutable-input directives (U1-U3). Uses a tracer with the
 	// full context so FindMutableRoot classifies immutable sources correctly.
-	inputTracer := tracer.New(pureFuncs, immutableReturnFuncs, immutableParamFuncs, failedPure, scopesCallbacks, immutableCallbacks)
+	inputTracer := tracer.New(pureFuncs, immutableReturnFuncs, immutableParamFuncs, pureVerdicts, scopesCallbacks, immutableCallbacks)
 	for _, fn := range ssaInfo.SrcFuncs {
 		if skip(fn) {
 			continue
@@ -176,7 +177,7 @@ func RunSSA(
 	// contract check (stage 2b, passed into the checker below) and, by its
 	// complement, redundant-directive detection (a directive whose function does
 	// NOT reuse a param suppresses nothing).
-	needsImmutableParam := computeNeedsImmutableParam(ssaInfo, immutableParamFuncs, pureFuncs, immutableReturnFuncs, failedPure, scopesCallbacks, immutableCallbacks, skip, guard)
+	needsImmutableParam := computeNeedsImmutableParam(ssaInfo, immutableParamFuncs, pureFuncs, immutableReturnFuncs, pureVerdicts, scopesCallbacks, immutableCallbacks, skip, guard)
 
 	// PASS 2: run SSA reuse analysis.
 	for _, fn := range ssaInfo.SrcFuncs {
@@ -184,7 +185,7 @@ func RunSSA(
 			continue
 		}
 
-		chk := newChecker(pass, ignores, pureFuncs, immutableReturnFuncs, immutableParamFuncs, failedPure, scopesCallbacks, immutableCallbacks, needsImmutableParam, globalReported, globalSuggestedEdits, fixGen)
+		chk := newChecker(pass, ignores, pureFuncs, immutableReturnFuncs, immutableParamFuncs, pureVerdicts, scopesCallbacks, immutableCallbacks, needsImmutableParam, globalReported, globalSuggestedEdits, fixGen)
 		guard.run(fn, func() { chk.checkFunction(fn) })
 	}
 
@@ -202,20 +203,27 @@ func RunSSA(
 }
 
 // validatePureFuncs reports every //gormreuse:pure contract violation and
-// returns the pure functions that definitively broke the contract.
+// returns the pure functions that definitively broke the contract, with the
+// parameters each of the others may return.
 //
 // Failure is transitive: a pure function that passes its argument to a failed
-// pure function fails too (issue #187). Validation therefore repeats until no
-// new function fails, and violations are reported only from the final round,
-// so each is reported once and sees the complete failed set.
+// pure function fails too (issue #187). So is returning an argument: a pure
+// function that returns what another one returns of its argument returns its
+// own argument, and one that branches that result fails (#188). Validation
+// therefore repeats until nothing changes, and violations are reported only
+// from the final round, so each is reported once and sees the complete
+// verdicts.
 func validatePureFuncs(
 	ssaInfo *buildssa.SSA,
-	pureFuncs *directive.DirectiveFuncSet,
+	pureFuncs, immutableReturnFuncs *directive.DirectiveFuncSet,
 	skip func(*ssa.Function) bool,
 	report func(token.Pos, string),
 	guard *panicGuard,
-) map[*ssa.Function]bool {
-	failedPure := make(map[*ssa.Function]bool)
+) *tracer.PureVerdicts {
+	verdicts := &tracer.PureVerdicts{
+		Failed:   make(map[*ssa.Function]bool),
+		Returned: make(map[*ssa.Function][]int),
+	}
 	var targets []*ssa.Function
 	for _, fn := range ssaInfo.SrcFuncs {
 		if !skip(fn) && pureFuncs.Contains(fn) {
@@ -223,19 +231,26 @@ func validatePureFuncs(
 		}
 	}
 
-	// The failed set only grows, and a larger set only adds violations, so
-	// this reaches a fixed point in at most len(targets) rounds.
+	// The failed set and each returned set only grow, and larger ones only
+	// add violations and returned parameters, so this reaches a fixed point.
 	for grew := true; grew; {
 		grew = false
 		for _, fn := range targets {
-			if failedPure[fn] {
+			if verdicts.Failed[fn] {
 				continue
 			}
 			guard.run(fn, func() {
+				validator := purity.NewValidator(fn, pureFuncs, immutableReturnFuncs, verdicts)
 				// Only a definitive violation revokes pure-trust at call sites;
 				// conservative func-arg violations do not (avoids FP cascades).
-				if slices.ContainsFunc(purity.NewValidator(fn, pureFuncs, failedPure).Validate(), func(v purity.Violation) bool { return v.Definitive }) {
-					failedPure[fn] = true
+				if slices.ContainsFunc(validator.Validate(), func(v purity.Violation) bool { return v.Definitive }) {
+					verdicts.Failed[fn] = true
+					delete(verdicts.Returned, fn)
+					grew = true
+					return
+				}
+				if returned := validator.ReturnedParams(); !slices.Equal(returned, verdicts.Returned[fn]) {
+					verdicts.Returned[fn] = returned
 					grew = true
 				}
 			})
@@ -247,7 +262,7 @@ func validatePureFuncs(
 	reported := make(map[purity.Violation]bool)
 	for _, fn := range targets {
 		guard.run(fn, func() {
-			for _, v := range purity.NewValidator(fn, pureFuncs, failedPure).Validate() {
+			for _, v := range purity.NewValidator(fn, pureFuncs, immutableReturnFuncs, verdicts).Validate() {
 				if reported[v] {
 					continue
 				}
@@ -256,7 +271,7 @@ func validatePureFuncs(
 			}
 		})
 	}
-	return failedPure
+	return verdicts
 }
 
 // reportImmutableReturnViolations enforces the body-side immutable-return
@@ -311,7 +326,8 @@ func reportImmutableReturnViolations(
 func computeNeedsImmutableParam(
 	ssaInfo *buildssa.SSA,
 	immutableParamFuncs, pureFuncs, immutableReturnFuncs *directive.DirectiveFuncSet,
-	failedPure, scopesCallbacks, immutableCallbacks map[*ssa.Function]bool,
+	pureVerdicts *tracer.PureVerdicts,
+	scopesCallbacks, immutableCallbacks map[*ssa.Function]bool,
 	skip func(*ssa.Function) bool,
 	guard *panicGuard,
 ) map[*ssa.Function]bool {
@@ -331,7 +347,7 @@ func computeNeedsImmutableParam(
 		}
 		guard.run(fn, func() {
 			// Counterfactual: analyze fn with its parameters treated as mutable.
-			cf := ssautil.NewAnalyzer(fn, pureFuncs, immutableReturnFuncs, nil, failedPure, scopesCallbacks, immutableCallbacks, nil)
+			cf := ssautil.NewAnalyzer(fn, pureFuncs, immutableReturnFuncs, nil, pureVerdicts, scopesCallbacks, immutableCallbacks, nil)
 			if slices.ContainsFunc(cf.Analyze(), func(v pollution.Violation) bool {
 				p, ok := v.Root.(*ssa.Parameter)
 				return ok && p.Parent() == fn
@@ -462,7 +478,7 @@ type checker struct {
 	pureFuncs            *directive.DirectiveFuncSet // Pure functions for analysis
 	immutableReturnFuncs *directive.DirectiveFuncSet // Immutable-return functions
 	immutableParamFuncs  *directive.DirectiveFuncSet // Immutable-param functions (params opt out of Phase 1b)
-	failedPure           map[*ssa.Function]bool      // Pure functions that failed contract validation
+	pureVerdicts         *tracer.PureVerdicts        // What validating the pure functions found
 	scopesCallbacks      map[*ssa.Function]bool      // Scopes/Preload callbacks (params are mutable roots)
 	immutableCallbacks   map[*ssa.Function]bool      // Transaction/FindInBatches callbacks (fresh tx)
 	needsImmutableParam  map[*ssa.Function]bool      // immutable-param fns that branch a param (2b caller check)
@@ -483,14 +499,14 @@ type editKey struct {
 // across parent functions and their closures.
 // The suggestedEdits map is shared to avoid duplicate fix edits.
 // The fixGen is shared to avoid recreating the generator for each violation.
-func newChecker(pass *analysis.Pass, ignores *directive.Ignores, pureFuncs, immutableReturnFuncs, immutableParamFuncs *directive.DirectiveFuncSet, failedPure, scopesCallbacks, immutableCallbacks, needsImmutableParam map[*ssa.Function]bool, reported map[token.Pos]bool, suggestedEdits map[editKey]bool, fixGen *fix.Generator) *checker {
+func newChecker(pass *analysis.Pass, ignores *directive.Ignores, pureFuncs, immutableReturnFuncs, immutableParamFuncs *directive.DirectiveFuncSet, pureVerdicts *tracer.PureVerdicts, scopesCallbacks, immutableCallbacks, needsImmutableParam map[*ssa.Function]bool, reported map[token.Pos]bool, suggestedEdits map[editKey]bool, fixGen *fix.Generator) *checker {
 	return &checker{
 		pass:                 pass,
 		ignores:              ignores,
 		pureFuncs:            pureFuncs,
 		immutableReturnFuncs: immutableReturnFuncs,
 		immutableParamFuncs:  immutableParamFuncs,
-		failedPure:           failedPure,
+		pureVerdicts:         pureVerdicts,
 		scopesCallbacks:      scopesCallbacks,
 		immutableCallbacks:   immutableCallbacks,
 		needsImmutableParam:  needsImmutableParam,
@@ -502,7 +518,7 @@ func newChecker(pass *analysis.Pass, ignores *directive.Ignores, pureFuncs, immu
 
 // checkFunction runs SSA analysis on a single function and reports violations.
 func (c *checker) checkFunction(fn *ssa.Function) {
-	analyzer := ssautil.NewAnalyzer(fn, c.pureFuncs, c.immutableReturnFuncs, c.immutableParamFuncs, c.failedPure, c.scopesCallbacks, c.immutableCallbacks, c.needsImmutableParam)
+	analyzer := ssautil.NewAnalyzer(fn, c.pureFuncs, c.immutableReturnFuncs, c.immutableParamFuncs, c.pureVerdicts, c.scopesCallbacks, c.immutableCallbacks, c.needsImmutableParam)
 	violations := analyzer.Analyze()
 
 	// Deduplicate violations by root to avoid generating duplicate fixes.

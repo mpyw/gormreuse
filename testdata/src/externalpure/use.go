@@ -120,3 +120,13 @@ func immutableInputIgnored(db *gorm.DB) {
 		tx.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 	})
 }
+
+// [LIMITATION] #195: which parameters a pure function may return (#188) is
+// known only for a callee in this package. ReturnArg returns q, but its result
+// is treated as a fresh chain here.
+// Expected: violation on q.Count(nil). Actual: not reported.
+func pureReturnedArgUnknown(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+	purelib.ReturnArg(q).Find(nil)
+	q.Count(nil)
+}

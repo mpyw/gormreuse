@@ -27,7 +27,9 @@
 // # What Pure Functions CAN Do
 //
 //   - Call immutable-returning methods (Session, WithContext, Debug)
-//   - Return a *gorm.DB derived from parameter (may be mutable)
+//   - Return a *gorm.DB derived from parameter (may be mutable). The
+//     parameters a result may be are recorded (ReturnedParams), so callers
+//     treat that result as the argument (#188)
 //   - Pass *gorm.DB to other pure functions, and to read-only stdlib
 //     formatting/logging functions (fmt, log, testing)
 package purity
@@ -42,6 +44,7 @@ import (
 
 	"github.com/mpyw/gormreuse/internal/directive"
 	"github.com/mpyw/gormreuse/internal/ssa/pollutionsource"
+	"github.com/mpyw/gormreuse/internal/ssa/tracer"
 	"github.com/mpyw/gormreuse/internal/typeutil"
 )
 
@@ -53,23 +56,28 @@ import (
 type Validator struct {
 	fn        *ssa.Function
 	pureFuncs *directive.DirectiveFuncSet
-	// failedPure lists //gormreuse:pure functions already known to break the
-	// contract definitively. Passing an argument to one of them breaks the
-	// caller's contract too, so failure propagates through pure wrappers. It
-	// may be nil.
-	failedPure   map[*ssa.Function]bool
+	// immutableReturnFuncs lists the //gormreuse:immutable-return functions.
+	// Like Session, their result is a fresh handle, never the argument. It may
+	// be nil.
+	immutableReturnFuncs *directive.DirectiveFuncSet
+	// pure holds what is known so far about the other //gormreuse:pure
+	// functions. Passing an argument to one that failed breaks the caller's
+	// contract too, so failure propagates through pure wrappers. The result of
+	// a trusted one is derived when it may be a derived argument. It may be nil.
+	pure         *tracer.PureVerdicts
 	paramDerived map[ssa.Value]bool
 	holdsCache   map[types.Type]bool
 }
 
 // NewValidator creates a Validator for a function marked as pure.
-func NewValidator(fn *ssa.Function, pureFuncs *directive.DirectiveFuncSet, failedPure map[*ssa.Function]bool) *Validator {
+func NewValidator(fn *ssa.Function, pureFuncs, immutableReturnFuncs *directive.DirectiveFuncSet, pure *tracer.PureVerdicts) *Validator {
 	return &Validator{
-		fn:           fn,
-		pureFuncs:    pureFuncs,
-		failedPure:   failedPure,
-		paramDerived: make(map[ssa.Value]bool),
-		holdsCache:   make(map[types.Type]bool),
+		fn:                   fn,
+		pureFuncs:            pureFuncs,
+		immutableReturnFuncs: immutableReturnFuncs,
+		pure:                 pure,
+		paramDerived:         make(map[ssa.Value]bool),
+		holdsCache:           make(map[types.Type]bool),
 	}
 }
 
@@ -86,17 +94,8 @@ func (v *Validator) Validate() []Violation {
 		return nil
 	}
 
-	// Initialize with every parameter that holds a *gorm.DB. A method's
-	// receiver is not an argument: it usually holds the application's root
-	// handle (r.db), and the directive's signature check ignores it too.
-	params := fn.Params
-	if fn.Signature != nil && fn.Signature.Recv() != nil && len(params) > 0 {
-		params = params[1:]
-	}
-	for _, p := range params {
-		if v.holdsGormDB(p.Type()) {
-			v.paramDerived[p] = true
-		}
+	for _, i := range v.seededParams() {
+		v.paramDerived[fn.Params[i]] = true
 	}
 
 	violations := v.validateBody(fn)
@@ -113,23 +112,49 @@ func (v *Validator) Validate() []Violation {
 	})
 }
 
+// ReturnedParams returns the indexes into fn.Params of the parameters the
+// function's result may be, or be derived from without an immutable-returning
+// call in between (#188). Callers trace such a result to the argument. Each
+// parameter is followed on its own, so `func(a, b *gorm.DB) *gorm.DB { return
+// a }` returns only a.
+func (v *Validator) ReturnedParams() []int {
+	if v.fn == nil || v.fn.Blocks == nil {
+		return nil
+	}
+	var returned []int
+	for _, i := range v.seededParams() {
+		one := NewValidator(v.fn, v.pureFuncs, v.immutableReturnFuncs, v.pure)
+		one.paramDerived[v.fn.Params[i]] = true
+		if one.returnsDerived(v.fn) {
+			returned = append(returned, i)
+		}
+	}
+	return returned
+}
+
+// seededParams returns the indexes of the parameters that hold a *gorm.DB. A
+// method's receiver is not an argument: it usually holds the application's
+// root handle (r.db), and the directive's signature check ignores it too.
+func (v *Validator) seededParams() []int {
+	first := 0
+	if v.fn.Signature.Recv() != nil {
+		first = 1
+	}
+	var seeded []int
+	for i := first; i < len(v.fn.Params); i++ {
+		if v.holdsGormDB(v.fn.Params[i].Type()) {
+			seeded = append(seeded, i)
+		}
+	}
+	return seeded
+}
+
 // validateBody propagates derivation through fn to a fixed point, then checks
 // every instruction. Closures created from parameter-derived values are
 // validated recursively with their captured variables seeded; each closure
 // has exactly one MakeClosure, so no body is visited twice.
 func (v *Validator) validateBody(fn *ssa.Function) []Violation {
-	// Loops feed values back through Phi edges and local variables, so a
-	// single forward pass can miss them.
-	for changed := true; changed; {
-		changed = false
-		for _, block := range fn.Blocks {
-			for _, instr := range block.Instrs {
-				if v.trackDerivation(instr) {
-					changed = true
-				}
-			}
-		}
-	}
+	v.propagate(fn)
 
 	var violations []Violation
 	for _, block := range fn.Blocks {
@@ -160,6 +185,36 @@ func (v *Validator) validateBody(fn *ssa.Function) []Violation {
 // =============================================================================
 // Derivation Tracking
 // =============================================================================
+
+// propagate marks the values of fn derived from parameter-derived values,
+// repeating until nothing changes: loops feed values back through Phi edges
+// and local variables, so a single forward pass can miss them.
+func (v *Validator) propagate(fn *ssa.Function) {
+	for changed := true; changed; {
+		changed = false
+		for _, block := range fn.Blocks {
+			for _, instr := range block.Instrs {
+				if v.trackDerivation(instr) {
+					changed = true
+				}
+			}
+		}
+	}
+}
+
+// returnsDerived propagates derivation through fn and reports whether any of
+// its results may be parameter-derived.
+func (v *Validator) returnsDerived(fn *ssa.Function) bool {
+	v.propagate(fn)
+	for _, block := range fn.Blocks {
+		for _, instr := range block.Instrs {
+			if ret, ok := instr.(*ssa.Return); ok && slices.ContainsFunc(ret.Results, v.isDerivedArg) {
+				return true
+			}
+		}
+	}
+	return false
+}
 
 // trackDerivation marks the values instr derives from parameter-derived
 // values. It reports whether it marked anything new.
@@ -254,8 +309,10 @@ func (v *Validator) markHolding(val ssa.Value) bool {
 }
 
 // callResultDerived reports whether a call's result may still share the
-// argument's Statement: a non-immutable gorm method on a derived receiver, or
-// a call that is not trusted as pure with a derived argument.
+// argument's Statement: a non-immutable gorm method on a derived receiver, a
+// closure that returns a derived value it captures, a trusted pure function
+// that may return a derived argument, or any other call with a derived
+// argument.
 func (v *Validator) callResultDerived(common *ssa.CallCommon) bool {
 	// An interface method call never has a *gorm.DB receiver (it is a
 	// concrete type), so it falls through to the regular-call rule below.
@@ -270,11 +327,36 @@ func (v *Validator) callResultDerived(common *ssa.CallCommon) bool {
 		return v.paramDerived[recv] && !typeutil.IsImmutableReturningBuiltin(callee.Name())
 	}
 
-	// Regular function call
-	if v.isTrustedPure(callee) {
+	// Like Session, an immutable-return function hands back a fresh handle.
+	if v.immutableReturnFuncs != nil && v.immutableReturnFuncs.Contains(callee) {
 		return false
 	}
+
+	// A closure may return what it captures: func() *gorm.DB { return db }().
+	if mc, ok := common.Value.(*ssa.MakeClosure); ok && v.seedClosure(mc) && v.returnsDerived(callee) {
+		return true
+	}
+
+	// Regular function call
+	if v.isTrustedPure(callee) {
+		return slices.ContainsFunc(v.pure.ReturnedArgs(callee, common.Args), v.isDerivedArg)
+	}
 	return slices.ContainsFunc(common.Args, v.isDerivedArg)
+}
+
+// seedClosure marks the free variables of a closure whose bindings are
+// derived, and reports whether it captures any derived value.
+func (v *Validator) seedClosure(mc *ssa.MakeClosure) bool {
+	// MakeClosure.Fn is always a *ssa.Function, with one FreeVar per binding.
+	closure, _ := mc.Fn.(*ssa.Function)
+	captured := false
+	for i, binding := range mc.Bindings {
+		if v.paramDerived[binding] {
+			v.paramDerived[closure.FreeVars[i]] = true
+			captured = true
+		}
+	}
+	return captured
 }
 
 // =============================================================================
@@ -330,18 +412,10 @@ func (v *Validator) checkClosure(mc *ssa.MakeClosure) []Violation {
 		return nil
 	}
 
-	// MakeClosure.Fn is always a *ssa.Function, with one FreeVar per binding.
-	closure, _ := mc.Fn.(*ssa.Function)
-	captured := false
-	for i, binding := range mc.Bindings {
-		if v.paramDerived[binding] {
-			v.paramDerived[closure.FreeVars[i]] = true
-			captured = true
-		}
-	}
-	if !captured {
+	if !v.seedClosure(mc) {
 		return nil
 	}
+	closure, _ := mc.Fn.(*ssa.Function)
 	return v.validateBody(closure)
 }
 
@@ -400,7 +474,7 @@ func (v *Validator) checkFunctionCallPollution(common *ssa.CallCommon, callee *s
 	if v.isTrustedPure(callee) {
 		return nil
 	}
-	failed := callee != nil && v.failedPure[callee]
+	failed := callee != nil && v.pure.HasFailed(callee)
 
 	var violations []Violation
 	for _, arg := range v.callArgsToCheck(common) {
@@ -456,7 +530,7 @@ func (v *Validator) isDerivedArg(arg ssa.Value) bool {
 // isTrustedPure reports whether callee is marked pure and has not failed
 // validation.
 func (v *Validator) isTrustedPure(callee *ssa.Function) bool {
-	return callee != nil && v.pureFuncs.Contains(callee) && !v.failedPure[callee]
+	return callee != nil && v.pureFuncs.Contains(callee) && !v.pure.HasFailed(callee)
 }
 
 // calleeName returns a human-readable name for a call's target, used in the

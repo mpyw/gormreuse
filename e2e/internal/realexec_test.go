@@ -512,3 +512,48 @@ func TestRangeOverFuncReuseAccumulates(t *testing.T) {
 		t.Errorf("second iteration should accumulate the first iteration's 'age' condition (got %d): %s", count, (*captured)[1])
 	}
 }
+
+// pureReturnArg does not pollute db, but returns it (#188).
+func pureReturnArg(db *gorm.DB) *gorm.DB { return db }
+
+// pureWithTenant does not pollute db, and isolates its result with Session.
+func pureWithTenant(db *gorm.DB, id int) *gorm.DB {
+	return db.Session(&gorm.Session{}).Where("tenant_id = ?", id)
+}
+
+// TestPureReturnedArgShares asserts that a branch from the result of a function
+// that returns its argument is a branch from the argument: the second query
+// inherits the first one's condition. This is why the analyzer traces such a
+// result to the argument's root (#188).
+func TestPureReturnedArgShares(t *testing.T) {
+	db, captured := setupDB(t)
+
+	q := db.Model(&User{}).Where("base = ?", 1) // clone==0
+	pureReturnArg(q).Where("a = ?", 10).Find(&[]User{})
+	q.Where("b = ?", 20).Find(&[]User{})
+
+	if len(*captured) < 2 {
+		t.Fatalf("Expected at least 2 queries, got %d", len(*captured))
+	}
+	if second := (*captured)[1]; !strings.Contains(second, "a =") {
+		t.Errorf("the result is the argument, so the second query should accumulate 'a': %s", second)
+	}
+}
+
+// TestPureSessionResultIsolated asserts that a result built from
+// db.Session(...).Where(...) does not share the argument's Statement, so the
+// analyzer keeps it as its own root (#188).
+func TestPureSessionResultIsolated(t *testing.T) {
+	db, captured := setupDB(t)
+
+	q := db.Model(&User{}).Where("base = ?", 1) // clone==0
+	pureWithTenant(q, 7).Where("a = ?", 10).Find(&[]User{})
+	q.Where("b = ?", 20).Find(&[]User{})
+
+	if len(*captured) < 2 {
+		t.Fatalf("Expected at least 2 queries, got %d", len(*captured))
+	}
+	if second := (*captured)[1]; strings.Contains(second, "a =") || strings.Contains(second, "tenant_id") {
+		t.Errorf("the Session-isolated result must not leak into the argument: %s", second)
+	}
+}

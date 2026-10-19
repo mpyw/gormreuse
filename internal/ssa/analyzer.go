@@ -77,16 +77,17 @@ type Analyzer struct {
 //   - fn: The SSA function to analyze (can be nil, will return no violations)
 //   - pureFuncs: Set of functions marked with //gormreuse:pure directive
 //   - immutableReturnFuncs: Set of functions marked with //gormreuse:immutable-return directive
-//   - failedPure: Pure functions that failed contract validation (not trusted as pure)
+//   - pure: What validating the pure functions found (the failed ones are not trusted
+//     as pure; the result of a trusted one may be its argument)
 //   - scopesCallbacks: Scopes/Preload callbacks whose *gorm.DB param is a mutable root
 //   - immutableParamFuncs: Functions marked //gormreuse:immutable-param (params opt out of Phase 1b)
 //   - immutableCallbacks: Transaction callbacks whose tx param is forkable (immutable)
 //   - needsImmutableParam: immutable-param functions that actually branch a param, so a caller
 //     passing a mutable value to them violates the contract (Phase 1b stage 2b)
-func NewAnalyzer(fn *ssa.Function, pureFuncs, immutableReturnFuncs, immutableParamFuncs *directive.DirectiveFuncSet, failedPure, scopesCallbacks, immutableCallbacks, needsImmutableParam map[*ssa.Function]bool) *Analyzer {
+func NewAnalyzer(fn *ssa.Function, pureFuncs, immutableReturnFuncs, immutableParamFuncs *directive.DirectiveFuncSet, pure *tracer.PureVerdicts, scopesCallbacks, immutableCallbacks, needsImmutableParam map[*ssa.Function]bool) *Analyzer {
 	return &Analyzer{
 		fn:                  fn,
-		rootTracer:          tracer.New(pureFuncs, immutableReturnFuncs, immutableParamFuncs, failedPure, scopesCallbacks, immutableCallbacks),
+		rootTracer:          tracer.New(pureFuncs, immutableReturnFuncs, immutableParamFuncs, pure, scopesCallbacks, immutableCallbacks),
 		cfgAnalyzer:         cfg.New(),
 		needsImmutableParam: needsImmutableParam,
 	}
