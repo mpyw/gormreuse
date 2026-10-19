@@ -312,7 +312,8 @@
  // Previously, this would report the same violation multiple times
  // (once from parent function, once from closure).
  func parentScopeVariable(db *gorm.DB) {
- 	q := db.Where("outer")
+-	q := db.Where("outer")
++	q := db.Where("outer").Session(&gorm.Session{})
  	func() {
 -		q.Where("inner")
 +		q = q.Where("inner").Session(&gorm.Session{})
@@ -323,7 +324,8 @@
  // nestedClosureFixDedup demonstrates nested closures should not
  // cause duplicate diagnostics at the same position.
  func nestedClosureFixDedup(db *gorm.DB) {
- 	q := db.Where("base")
+-	q := db.Where("base")
++	q := db.Where("base").Session(&gorm.Session{})
  	func() {
  		func() {
 -			q.Where("deep")
@@ -336,7 +338,8 @@
  // tripleNestedClosureDedup demonstrates deeply nested closures.
  // Should report only one violation, not 3 (one per closure scope).
  func tripleNestedClosureDedup(db *gorm.DB) {
- 	q := db.Where("base")
+-	q := db.Where("base")
++	q := db.Where("base").Session(&gorm.Session{})
  	func() {
  		func() {
  			func() {

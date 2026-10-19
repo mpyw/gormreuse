@@ -93,7 +93,7 @@ func RunSSA(
 	// violations across parent functions and their closures.
 	// When a closure accesses a parent scope variable, the same violation
 	// may be detected from both the parent function and the closure.
-	globalReported := make(map[token.Pos]bool)
+	globalReported := make(map[reportKey]bool)
 
 	// Every per-function step runs under guard, which reports a panic at the
 	// function instead of dropping its diagnostics silently (#186).
@@ -702,7 +702,7 @@ type checker struct {
 	immutableCallbacks   map[*ssa.Function]bool      // Transaction/FindInBatches callbacks (fresh tx)
 	needsImmutableParam  func(*ssa.Function) bool    // immutable-param fns that branch a param (2b caller check)
 	funcVars             callsite.FuncVars           // Package-level variables that hold one function (#183)
-	reported             map[token.Pos]bool          // Deduplication of reports
+	reported             map[reportKey]bool          // Deduplication of reports
 	fixGen               *fix.Generator              // Cached fix generator for all violations
 }
 
@@ -710,7 +710,7 @@ type checker struct {
 // The reported map is shared across all functions to deduplicate violations
 // across parent functions and their closures.
 // The fixGen is shared to avoid recreating the generator for each violation.
-func newChecker(pass *analysis.Pass, ignores *directive.Ignores, pureFuncs, immutableReturnFuncs, immutableParamFuncs *directive.DirectiveFuncSet, pureVerdicts *tracer.PureVerdicts, scopesCallbacks, immutableCallbacks map[*ssa.Function]bool, needsImmutableParam func(*ssa.Function) bool, funcVars callsite.FuncVars, reported map[token.Pos]bool, fixGen *fix.Generator) *checker {
+func newChecker(pass *analysis.Pass, ignores *directive.Ignores, pureFuncs, immutableReturnFuncs, immutableParamFuncs *directive.DirectiveFuncSet, pureVerdicts *tracer.PureVerdicts, scopesCallbacks, immutableCallbacks map[*ssa.Function]bool, needsImmutableParam func(*ssa.Function) bool, funcVars callsite.FuncVars, reported map[reportKey]bool, fixGen *fix.Generator) *checker {
 	return &checker{
 		pass:                 pass,
 		ignores:              ignores,
@@ -752,17 +752,44 @@ func (c *checker) checkFunction(fn *ssa.Function) {
 	// Group violations by position. Several roots can be reused at one position
 	// (use2(q, r)), and only one diagnostic is reported there, so it carries the
 	// fix of every root in the group. Otherwise only the first root would get a
-	// fix (#184).
+	// fix (#184). A violation with no root, such as a read-only argument that
+	// sees a change, is another bug, and is reported on its own (see
+	// reportKey).
 	for _, group := range groupByPos(violations) {
-		var fixFor []pollution.Violation
+		var reuse, fixFor []pollution.Violation
 		for _, v := range group {
-			if v.Root == nil || slices.ContainsFunc(fixFor, func(f pollution.Violation) bool { return f.Root == v.Root }) {
-				continue // No root to fix, or this root's fix is already in
+			if v.Root == nil {
+				c.reportViolation(v, nil, fixOf)
+				continue
 			}
-			fixFor = append(fixFor, v)
+			reuse = append(reuse, v)
+			if !slices.ContainsFunc(fixFor, func(f pollution.Violation) bool { return f.Root == v.Root }) {
+				fixFor = append(fixFor, v)
+			}
 		}
-		c.reportViolation(group[0], fixFor, fixOf)
+		if len(reuse) > 0 {
+			c.reportViolation(reuse[0], fixFor, fixOf)
+		}
 	}
+}
+
+// reportKey identifies a diagnostic for deduplication. A position has one
+// reuse diagnostic, which names one of the roots reused there and carries the
+// fixes of all of them, and one diagnostic of each other message. Reporting
+// only the first diagnostic at a position hid the others until a fix removed
+// it, as for `q = q.Where(r); q.Count(nil); r.Find(nil); q.Find(nil)`, where
+// q.Find both reuses q and reads r after r.Find changed it (#247).
+type reportKey struct {
+	pos     token.Pos
+	message string // "" for the reuse diagnostic
+}
+
+// keyOf returns the reportKey of v.
+func keyOf(v pollution.Violation) reportKey {
+	if v.Root != nil {
+		return reportKey{pos: v.Pos}
+	}
+	return reportKey{pos: v.Pos, message: v.Message}
 }
 
 // groupByPos groups violations by position. Groups keep the order in which
@@ -789,10 +816,10 @@ func (c *checker) reportViolation(v pollution.Violation, fixFor []pollution.Viol
 	pos := v.Pos
 
 	// Deduplicate: same position may be reached multiple times
-	if c.reported[pos] {
+	if c.reported[keyOf(v)] {
 		return
 	}
-	c.reported[pos] = true
+	c.reported[keyOf(v)] = true
 
 	if c.ignores.Ignore(pos) {
 		return // Suppressed by ignore directive

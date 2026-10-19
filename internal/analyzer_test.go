@@ -83,7 +83,7 @@ func TestNewChecker(t *testing.T) {
 	ignores := directive.NewIgnores(nil)
 	pureFuncs := directive.NewPureFuncSet(nil, nil)
 	immutableReturnFuncs := directive.NewImmutableReturnFuncSet(nil, nil)
-	reported := make(map[token.Pos]bool)
+	reported := make(map[reportKey]bool)
 
 	chk := newChecker(nil, ignores, pureFuncs, immutableReturnFuncs, nil, nil, nil, nil, nil, nil, reported, nil)
 

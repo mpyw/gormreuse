@@ -2274,7 +2274,8 @@
 -		q = db.Where("branch1", 1)
 +		q = db.Where("branch1", 1).Session(&gorm.Session{})
  	} else {
- 		q = db.Where("branch2", 2)
+-		q = db.Where("branch2", 2)
++		q = db.Where("branch2", 2).Session(&gorm.Session{})
  	}
  
  	// First branch - IIFE counts as single branch
@@ -2683,7 +2684,8 @@
  
  	(*p).Find(nil) // Pollutes through pointer
  
- 	*p = db.Where("y = ?", 2) // Reassign through pointer
+-	*p = db.Where("y = ?", 2) // Reassign through pointer
++	*p = db.Where("y = ?", 2).Session(&gorm.Session{}) // Reassign through pointer
  
  	// [LIMITATION] FALSE POSITIVE: Pointer reassignment creates new root tracking
  	q.Find(nil)  // want `\*gorm\.DB reused: second branch from mutable root`
@@ -3248,7 +3250,8 @@
 -		q = db.Where("a")
 +		q = db.Where("a").Session(&gorm.Session{})
  	} else {
- 		q = db.Where("b")
+-		q = db.Where("b")
++		q = db.Where("b").Session(&gorm.Session{})
  	}
  	q.Find(nil) // Pollute (both branches get polluted because Phi merges them)
  

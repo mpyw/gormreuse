@@ -829,9 +829,20 @@ These rules need every use of the root, in the function that defines it. `usesOr
 
 When the check fails, a root gets a Session when it has a use other than the one reassignment that reads it, which is what the fix did before. Removing a Session from a reassignment never drops an effect: the statement is still reassigned, so #199 holds. `testdata/src/gormreuse/fix_paths.go.golden` pins the output, `TestFixesConverge` re-lints that golden, and `TestFixPathsPreserveQueries` in `e2e/internal/fix_paths_test.go` compares the SQL before and after the fixes.
 
+Three more cases needed a second pass, or hid a reuse (#247):
+
+| Case | Example | Change |
+| --- | --- | --- |
+| A variable that a closure captures has no Phi: SSA keeps it in memory, and the tracer resolves every read to its first store. The other stores were meant to get a Session from a synthetic Phi, but its result had no referrers, so they never did. The re-lint was then clean, because it reads only the first store, while the other path still reused its root | `var q *gorm.DB; if c { q = db.Where("a") } else { q = db.Where("b") }; go func() { q.Find(nil); q.Count(nil) }()` got a Session on `"a"` only | `mergedEdges` gives a Session to each other store that may run before two of the root's uses. A use in a closure counts as after every store. `TestFixCapturedMergeNeedsEveryStore` in `e2e/internal/fix_one_pass_test.go` checks the leak at run time |
+| A reassignment inside a closure writes the captured variable, and detection does not follow a store in a closure (`closureModifiesCaptured`). The uses after it still read the root | `func() { q.Where("a") }(); q.Find(nil); q.Count(nil)`, and the body of a range-over-func loop | The root gets a Session in the same pass (`reassignsInClosure`) |
+| Only the first diagnostic at a position was reported. A read-only argument that sees a change at the position of a reuse appeared only after the reuse's fix | `q = q.Where(r); q.Count(nil); r.Find(nil); q.Find(nil)` | A position has one reuse diagnostic and one of each other message (`reportKey` in `internal/analyzer.go`) |
+
+`testdata/src/converge/fix_multipass.go` and `testdata/src/gormreuse/fix_one_pass.go` hold the cases.
+
 Limitations:
 
 - The rules follow the CFG of one function, not the run-time order of deferred calls or closures. Those roots get the conservative Sessions above, some of them redundant.
+- A reassignment in a `for` statement's post statement is ordered before the body, so its root needs a second pass (`onePassForPost`, see [Known Limitations](#known-limitations)).
 - A Phi edge with no call of its own still gets no Session (see [Fixes That Compile](#fixes-that-compile-200)).
 
 ## Fixes That Compile (#200)
@@ -997,6 +1008,8 @@ Each fixture function marked `[LIMITATION]` under `testdata/src` pins one of the
 | `G = db.Where("x"); if c { G = G.Where("a") }; G.Find(nil)` for a global or a field | `pvConditionalRebuildOfStore` | A store is not a merge point the way a local's Phi is |
 
 **Wrong position.** Uses in a deferred closure are ordered by their source position, not by when they run. `defer func() { q.Count(nil) }(); q.Find(nil)` is reported at `q.Find`, which runs first. A deferred call such as `defer q.Count(nil)` is ordered after the function's other uses and reported at the `defer`. Fixtures: `ifInsideDefer`, `ifElseInsideDefer`, `nestedIfInsideDefer`, `tripleNestingIfForDefer`, `tripleNestingForIfDefer`, `deferCapturingLoopVar`, `nestedDeferClosures`, `tripleNestedDeferClosures`, `nestedDeferWithFor`, `ultimateIfForDeferChaos`.
+
+**Fixes that need a second pass.** A reassignment in a `for` statement's post statement, as in `for i := 0; i < 2; q.Where("a") { q.Find(nil); i++ }`, is ordered by its position, before the body, although it runs after it. The fix leaves the root that the first iteration reads without a Session, and a second `-fix` pass adds it. Fixture: `onePassForPost` (#247, to be fixed by the run-order query of #266).
 
 Other limitations have no fixture marker. They are described with their design:
 

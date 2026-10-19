@@ -118,10 +118,14 @@ func TestRootWithoutPosition(t *testing.T) {
 	g := &Generator{fset: token.NewFileSet(), files: map[*token.File]*ast.File{}}
 	root := &ssa.Const{}
 
-	if positions := g.sessionPositionsForRoot(root.Pos(), root); positions != nil {
+	if positions := g.sessionPositionsForRoot(root.Pos(), root, nil); positions != nil {
 		t.Errorf("sessionPositionsForRoot() = %v, want nil", positions)
 	}
 	if v := g.findRootVar(root); v != nil {
 		t.Errorf("findRootVar() = %v, want nil", v)
+	}
+	// A Phi root whose result is used once needs no Session on its edges.
+	if positions := g.sessionPositionsForRoot(token.NoPos, &ssa.Phi{}, nil); positions != nil {
+		t.Errorf("sessionPositionsForRoot(Phi) = %v, want nil", positions)
 	}
 }
