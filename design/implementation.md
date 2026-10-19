@@ -289,7 +289,7 @@ gormreuse/
 │       ├── cfg/                 # Control flow of one function
 │       │   ├── analyzer.go      # Analyzer, NewAnalyzer, CanReach: block reachability
 │       │   ├── loop.go          # LoopInfo, DetectLoops: natural loops, range-over-func bodies (#177)
-│       │   └── repeat.go        # Repeats.RepeatsAfter: may a use run again for one run of its root's definition
+│       │   └── repeat.go        # Repeats.RepeatsAfter: may a use run again for one run of its root's definition (#249)
 │       ├── handler/call.go      # Instruction handlers: Call, Go, Defer, Send, Store, ...
 │       └── purity/              # Body contracts of the directives
 │           ├── validator.go     # pure (Validator, ReturnedParams)
@@ -603,13 +603,38 @@ Before #175, any Phi or Store to an Alloc counted as an assignment. A chain deri
 
 Limitation: the check asks whether the merge *can* yield `root`, not whether it does on the path that ran the call. `if c { q2 = q.Where("a") }; if d { q = q2 }` reaches `Phi(q₁, …)` and is still treated as an assignment.
 
+### Uses that run more than once (#249, #252)
+
+A use that may run more than once for one run of its root's definition reuses the root, even with one use in the source. `cfg.Repeats.RepeatsAfter(use, def)` is the one query for it. The handler asks it for the first root of every branch, of a call, a `go` or a `defer`. The suggested fixes ask it too (`usedAgainInLoop`, `escapeSeen`, the Session of a reassignment in a loop), so a fix and the diagnostic agree. `RunsAgain(block)` asks only whether a block can run after itself, for a loop-carried read (`storeReadTwice`).
+
+`RepeatsAfter` is true when:
+
+| Case | Example |
+| --- | --- |
+| The use is in a loop that does not hold `def` | `q := …; for … { q.Find(nil) }`. Also a root of an outer loop used in an inner loop, and a root of one loop used in a later loop |
+| The use is in a closure that runs at two sites that may both run (one can reach the other) | `f := func() { q.Find(nil) }; f(); f()`, `g.Go(f); g.Go(f)` |
+| A site where the closure runs is in a loop of the declaring function that does not hold `def`, at any depth | `for … { f() }`, `for … { func() { … }() }`, `for … { go func() { … }() }`, `for … { g.Go(func() error { … }) }`, `for … { funcs = append(funcs, func() { … }) }` |
+
+A site is any use of the closure value: a call, a `go` or `defer` statement, an argument, a store. A Phi of the closure, and a local variable that holds it, are followed to their uses, so `held = f` in a loop with `held()` after it is one site after the loop. Calls on two exclusive branches (`if c { f() } else { f() }`) are not two runs.
+
+Decisions:
+
+- **Nested loops (#252).** `DetectLoops` keeps one block set per loop header. `markLoopBlocks` used one set for every loop as its visited set, so the walk of an outer loop stopped at an inner header marked before it, and the outer loop's blocks before the inner loop were not in a loop. `IsInLoopWithout(use, def)` asks for a loop that holds the use but not the definition. Before, any loop counted, and a definition in any loop was taken to run as often as the use. So `for … { q := …; for … { q.Find(nil) } }` and a use in a later loop were missed.
+- **The blocks before a `for cond` loop (#252).** Back-edges are found by block index, and go/ssa puts the header of `for cond { … }` after its body. The edge from the header to the body is then taken as the back-edge, with the body as its header, which does not dominate the edge's source. The walk from it went on through the blocks before the loop, up to the entry. So a root defined at the entry, such as a parameter, counted as defined in a loop, and a use before the loop in a closure counted as repeating. The walk now keeps to the blocks that its header reaches.
+- **A definition in another function.** A definition in a function that declares the use's function, at any depth, is asked at the site where the closure runs. A definition in a closure that the use's function runs, such as a root returned by an IIFE, is moved to the block where that closure runs when it runs at one site, or where it is declared otherwise. Before, a root an IIFE returned in a loop was reported on every iteration. A definition in an unrelated function, and a global, are outside every loop and closure.
+- **A closure analysed on its own** (each closure is also a function of the package) asks only its own loops. The analysis of the function that declares it asks the sites, so one reuse is not reported twice.
+- **A closure passed to another function runs once** unless the site is in a loop or there are two sites. `slices.SortFunc(s, func(a, b T) int { q.Find(nil); … })` is missed. Counting every argument as a repeat would report each `db.Transaction(func(tx *gorm.DB) error { … })`.
+- Where a reuse is reported follows the closure's position rules ([Closure uses](#closure-uses-68-179)): at the body, or at the one later call site. `f := func() { q.Find(nil) }; for … { f() }` is reported at `f()`.
+
+In gorm's own source (the root module), the loop fixes add six reports (154 to 160). Each is a `*gorm.DB` parameter branched in a loop: in `Scan` (three), `CreateInBatches` (the parameter of its batch closure), `SaveAfterAssociations` and `SetupUpdateReflectValue`. Before, the parameter counted as defined in a loop, because a `for cond` loop in the function marked the entry block, or the use's block was left out of an outer loop. None comes from the closure rules. The `tests` module is unchanged (34).
+
 ### Range-over-func Loops
 
 SSA compiles the body of `for v := range seq` (Go 1.23+) into a synthetic closure that the iterator calls once per element. go/ssa marks it with `Synthetic == "range-over-func yield"`. The closure has no back-edge, so `DetectLoops` treats every block of it as in a loop (#177). A root defined outside the body and used inside it is then reported, as in a plain `for range`. A root defined inside the body is in a loop block, so it is fresh on each iteration.
 
 The body reaches outer variables through `FreeVar`s, so `q = q.Where(v)` inside it is a `Store` to a `FreeVar`, not to an `Alloc`. `isAssignment` treats a `FreeVar` as a merge point like an `Alloc` (see the previous section). Its values are those of the captured variable, so the store is an assignment only when that variable can hold `root`. That is the in-place update of a plain loop. A store into another variable, such as `last = q.Where(v)`, still counts as a use of `q`.
 
-Only the body closure itself is treated as a loop. A closure nested inside the body (an IIFE, a `defer`) is not, which matches how a closure nested in a plain loop is handled.
+A closure nested inside the body (an IIFE, a `defer`) runs once per run of the body, so it repeats as the body does ([Uses that run more than once](#uses-that-run-more-than-once-249-252)).
 
 ### Closure uses (#68, #179)
 
@@ -638,7 +663,7 @@ Three struct shapes lost the root before #181, so reuse through them was missed.
 
 The pointer walk stops at the call (`reachingFieldStores`): a store above it on a loop path wrote the struct of an earlier iteration. Only a `FieldAddr` chain directly on the call is followed. A pointer field inside the result (`p.inner.DB` with `inner *T`) is not.
 
-**Defining block (#250).** The loop check reports a use in a loop of a root defined outside it. It used to treat every value that is not an instruction as outside, so a `FieldRoot` from a call inside the loop was reported on every iteration. `tracer.RootBlock` now gives each root kind its defining block, and `cfg.Repeats.RepeatsAfter` takes that block with the use's block. It holds the loops of the analysed function only, so a root defined in another function, such as the function that declares a closure, is outside them. The suggested fixes use the same function.
+**Defining block (#250).** The loop check reports a use in a loop of a root defined outside it. It used to treat every value that is not an instruction as outside, so a `FieldRoot` from a call inside the loop was reported on every iteration. `tracer.RootBlock` now gives each root kind its defining block, and `cfg.Repeats.RepeatsAfter` takes that block with the use's block. A root defined in another function is placed as [Uses that run more than once](#uses-that-run-more-than-once-249-252) describes. The suggested fixes ask the same query.
 
 | Root kind | Defining block |
 | --- | --- |
@@ -892,7 +917,7 @@ After the reassignments, `simulateReassignments` decides which root each use rea
 | The simulation took uses in position order, so a use after an `if` without an `else` read only the reassignment in the `if` | `if c { q.Where("a") }; q.Where("b").Find(nil); q.Where("c").Find(nil)` left the root mutable on the path where `c` is false | A use reads each earlier reassignment that can reach it, back to the first whose block dominates it, and the original root when none does (`reassignmentReaches`) |
 | A root that flows into a Phi got Sessions only on the Phi's edges, and none when the Phi is used once | `q := db.Where("x"); q.Find(nil); q.Count(nil); if c { q = db.Where("z") }; q.Find(nil)` had no fix. With `q` captured by a closure, the synthetic Phi from its stores had the same result | `sessionPositionsForRoot` always puts a Session on the root itself, and adds the other edges when the Phi is used twice |
 
-`findRootsNeedingSession` counts two uses of one root as a reuse when the earlier one can reach the later one (`usesConflict`). A reassignment does not conflict with the uses after it: on any path through it, they read the new value. A root defined outside a loop and used in it, other than by a reassignment, gets a Session (`usedAgainInLoop`), as does a reassignment in a loop. A reassignment whose chain already ends in an immutable call, by the tracer's `IsImmutableCall`, gets no second Session (`endsImmutable`).
+`findRootsNeedingSession` counts two uses of one root as a reuse when the earlier one can reach the later one (`usesConflict`). A reassignment does not conflict with the uses after it: on any path through it, they read the new value. A root used again in a loop, other than by a reassignment, gets a Session (`usedAgainInLoop`). So does a reassignment in a loop that does not define the root again: the next iteration reads it. Both ask `cfg.Repeats`, as the checker does, and so does `escapeSeen`. The simulation takes the uses of one block in the order the block runs them (`runOrderedUses`), not by position: go/ssa puts a `for` statement's post statement at the end of the body's block, so `for i := 0; i < 2; q.Where("a") { q.Find(nil); i++ }` reads the root in `q.Find` before the post statement reassigns it (#247). A reassignment whose chain already ends in an immutable call, by the tracer's `IsImmutableCall`, gets no second Session (`endsImmutable`).
 
 These rules need every use of the root, in the function that defines it. `usesOrdered` checks that:
 
@@ -1104,7 +1129,7 @@ Each fixture function marked `[LIMITATION]` under `testdata/src` pins one of the
 | A `Session` copy used in `go`/`defer`, with the root changed after the statement | `siteDeferSessionCopyBranchAfterDefer` | The alias use is ordered by the statement's position, not by when the call runs ([Session and Debug copies](#session-and-debug-copies-174)) |
 | `defer` inside a `go` closure, or `defer` → `go` → `defer` | `deferInsideGoroutine`, `nestedDeferGoroutineDefer` | A deferred call nested in a spawned closure is not recorded as a use |
 | A method value merged by a Phi: `if c { find = q.Find } else { find = q.Find }; find(nil)` | `methodValueConditional`, `methodValuePhiWithNil` | The bound-method receiver is not traced through the Phi |
-| Closures stored in a slice and called in a loop | `closureCapturingLoopVar` | The closure body has one use of `q`. Nothing tells the analyzer that the closure runs more than once |
+| A closure passed once, outside a loop, to a function that calls it many times | `repeatsClosurePassedToRepeater` | Only the sites in the declaring function are counted ([Uses that run more than once](#uses-that-run-more-than-once-249-252)) |
 | A derived variable that flows back: `if c { q2 = q.Where("a") }; if d { q = q2 }` | `derivedThenMergedBack` | `isAssignment` asks whether a merge *can* hand back the root, not whether it does on that path ([Which merges are reassignments](#which-merges-are-reassignments-175)) |
 | A field rebuilt in a loop after it was copied: `p.db = q; for … { p.db = p.db.Where(c) }; q.Find(nil)` | `fsoLoopRebuildOfAliasedValue` | `isLoopFieldRebuild` makes the rebuild an assignment, so the first iteration's read of `q` is not a branch (#182) |
 | A pure function that returns a `Session` copy of its argument | `paCopyHidden` | The copy is not in `PureVerdicts.Returned` ([Session and Debug copies](#session-and-debug-copies-174)) |
@@ -1122,7 +1147,7 @@ Each fixture function marked `[LIMITATION]` under `testdata/src` pins one of the
 
 **Wrong position.** Uses in a deferred closure are ordered by their source position, not by when they run. `defer func() { q.Count(nil) }(); q.Find(nil)` is reported at `q.Find`, which runs first. A deferred call such as `defer q.Count(nil)` is ordered after the function's other uses and reported at the `defer`. Fixtures: `ifInsideDefer`, `ifElseInsideDefer`, `nestedIfInsideDefer`, `tripleNestingIfForDefer`, `tripleNestingForIfDefer`, `deferCapturingLoopVar`, `nestedDeferClosures`, `tripleNestedDeferClosures`, `nestedDeferWithFor`, `ultimateIfForDeferChaos`.
 
-**Fixes that need a second pass.** A reassignment in a `for` statement's post statement, as in `for i := 0; i < 2; q.Where("a") { q.Find(nil); i++ }`, is ordered by its position, before the body, although it runs after it. The fix leaves the root that the first iteration reads without a Session, and a second `-fix` pass adds it. Fixture: `onePassForPost` (#247, to be fixed by the run-order query of #266).
+**No fix.** A `go` or `defer` of a `*gorm.DB` method in a loop, as in `for … { go q.Find(nil) }`, records a branch use, which `Violation.AllUses` does not list, so the diagnostic has no fix. Fixtures: `siteGoInLoop`, `siteDeferInLoop`, `repeatsGoInLoop`, `repeatsDeferInLoop`.
 
 Other limitations have no fixture marker. They are described with their design:
 

@@ -204,7 +204,7 @@ q.Where("b").Find(nil) // OK: first branch from new root
 - Result is not assigned to a variable
 - Expression used as a statement. A chain such as `q.Where("a").Limit(10)` is reassigned as a whole, and a Session it needs goes after its last call
 - The receiver is the local variable that holds the reused root. These are not rewritten: aliases (`r := q`), calls that take the root as an argument (`base.Model(q)`), and package-level variables. Neither are variables captured by a closure that is not called inline (`go func() { ... }()`, `defer func() { ... }()`). The fix relies on a Session at the root instead, unless that would drop a discarded statement or another in-place change (see below)
-- A reassignment inside a loop always gets a Session, since the next iteration uses it again
+- A reassignment inside a loop gets a Session when the next iteration uses it again, that is, when the loop does not define the root again
 
 > [!IMPORTANT]
 > A discarded statement such as `q.Where("a")` changes `q` in place, and later queries see `"a"`. A Session at the root alone would make it change a copy, so the fixed code would silently drop `"a"`. So when such a statement cannot be reassigned, the diagnostic has **no fix**. Fix these by hand:
@@ -428,6 +428,18 @@ q.Session(&gorm.Session{}).Count(&c) // VIOLATION: second branch from q
 q := db.Where("x")
 for v := range slices.Values(ids) {
     q.Where("id = ?", v).Find(&users) // VIOLATION: reused on every iteration
+}
+
+// So does a closure that runs more than once: one called at two sites, or
+// called, spawned, deferred or passed to another function inside a loop.
+q := db.Where("x")
+f := func() { q.Find(&users) } // VIOLATION: f runs twice
+f()
+f()
+for _, id := range ids {
+    g.Go(func() error {
+        return q.Where("id = ?", id).Find(&users).Error // VIOLATION: one closure per iteration
+    })
 }
 ```
 
@@ -1003,7 +1015,7 @@ gormreuse reports a reuse only when it can follow the value. These cases are kno
 | `defer` inside a `go` closure, or `defer` → `go` → `defer` | These nested calls are not followed |
 | `c := q.Session(&gorm.Session{}); defer c.Count(nil)`, then `q.Where("a").Find(nil)` | The use of the copy is ordered at the `defer` statement, before the change |
 | A method value that a branch picks: `if c { find = q.Find } else { find = q.Find }` | A method value merged from branches is not traced to `q` |
-| Closures stored in a slice and called in a loop | Each call branches `q` again, but the calls are not counted |
+| A closure passed once to a function that calls it many times: `slices.SortFunc(s, func(a, b T) int { q.Find(nil); ... })` | Only the call sites in your code are counted. A closure passed to another function outside a loop is taken to run once |
 | `if c { q2 = q.Where("a") }; if d { q = q2 }; q.Count(nil)` | `q2` can flow back into `q`, so `Where("a")` is treated as an assignment of `q` |
 | A field rebuilt in a loop after it was copied: `p.db = q; for … { p.db = p.db.Where(c) }; q.Find(nil)` | In a loop, the rebuild is an assignment, so its first read of `q` is not a branch |
 | A pure function that returns `db.Session(...)` of its argument | The copy is not the argument, so the shared `Statement` is hidden from the caller |
@@ -1022,7 +1034,7 @@ gormreuse reports a reuse only when it can follow the value. These cases are kno
 
 **Wrong position:** a use inside a deferred closure runs at function exit. gormreuse orders it by its source position. So `defer func() { q.Count(nil) }(); q.Find(nil)` is reported at `q.Find`, which runs first.
 
-**Fixes that need a second pass:** a reassignment in a `for` statement's post statement, as in `for i := 0; i < 2; q.Where("a") { q.Find(nil); i++ }`, is ordered before the body. The first `-fix` pass leaves the root without a Session, and a second pass adds it.
+**No fix:** `for … { go q.Find(nil) }` and `for … { defer q.Find(nil) }` are reported, but get no suggested fix. Add `.Session(&gorm.Session{})` to the root by hand.
 
 See [Known Limitations](./design/implementation.md#known-limitations) in the implementation notes for the fixtures and the reasons.
 

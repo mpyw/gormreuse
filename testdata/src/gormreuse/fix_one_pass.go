@@ -43,10 +43,10 @@ func onePassMaskedArgument(db, other *gorm.DB) {
 	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root` `\*gorm\.DB reused: mutable root passed as a query argument`
 }
 
-// onePassForPost: [LIMITATION] the post statement runs after the body, but
-// the fix orders uses by position, so it reassigns q.Where("a") and leaves the
-// root, which q.Find reads first, without a Session. A second -fix pass adds
-// it (#247, to be fixed by #266).
+// onePassForPost: the post statement runs after the body, although it comes
+// first by position. The fix orders the uses of a block as it runs them, so
+// the root, which q.Find reads first, gets a Session with the reassignment of
+// q.Where("a") in one pass (#247).
 func onePassForPost(db *gorm.DB) {
 	q := db.Where("x")
 	for i := 0; i < 2; q.Where("a") { // want `\*gorm\.DB reused: second branch from mutable root`

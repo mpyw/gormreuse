@@ -455,7 +455,7 @@ func (g *Generator) changedElsewhere(v pollution.Violation) bool {
 	loops := cfg.NewAnalyzer()
 	ordered := usesOrdered(v)
 	for _, use := range v.AllUses {
-		if use.Escapes && escapeSeen(loops, use, v.AllUses, ordered, g.tracer.FuncVars()) {
+		if use.Escapes && escapeSeen(tracer.RootBlock(v.Root), use, v.AllUses, ordered, g.tracer.FuncVars()) {
 			return true
 		}
 	}
@@ -488,12 +488,14 @@ func (g *Generator) changedElsewhere(v pollution.Violation) bool {
 // result of a call that returns a *gorm.DB, such as `q = withTenant(q)`: the
 // result may be the root itself. Without the order of every use (see
 // usesOrdered) the change is assumed to be seen. An escape that is the last
-// use, as in `q.Find(&a); render(q)`, keeps its fix. vars resolves calls
-// through package-level function variables.
-func escapeSeen(a *cfg.Analyzer, escape pollution.UsageInfo, uses []pollution.UsageInfo, ordered bool, vars callsite.FuncVars) bool {
-	if !ordered || inCycle(a, escape.Block) || returnsGormDBAt(escape, vars) {
+// use, as in `q.Find(&a); render(q)`, keeps its fix. def is the block that
+// defines the root: an escape runs again when the checker's cfg.Repeats says
+// so. vars resolves calls through package-level function variables.
+func escapeSeen(def *ssa.BasicBlock, escape pollution.UsageInfo, uses []pollution.UsageInfo, ordered bool, vars callsite.FuncVars) bool {
+	if !ordered || repeatsAfter(escape.Block, def) || returnsGormDBAt(escape, vars) {
 		return true
 	}
+	a := cfg.NewAnalyzer()
 	return slices.ContainsFunc(uses, func(use pollution.UsageInfo) bool {
 		if use.Block == escape.Block {
 			return use.Pos > escape.Pos
@@ -698,14 +700,11 @@ type virtualRootKey struct {
 // dominates it, it may also see the original root. So in
 // `if c { q.Where("a") }; q.Where("b").Find(nil); q.Where("c").Find(nil)` the
 // original root, used on the path where c is false, needs a Session as well
-// as the reassignment in the if (#202). Uses are taken in position order, so
+// as the reassignment in the if (#202). Uses are taken in position order, the
+// uses of one block in run order (see runOrderedUses), so
 // a loop's next iteration is not seen here (see findRootsNeedingSession).
 func (g *Generator) simulateReassignments(root ssa.Value, uses []pollution.UsageInfo, reassigned map[token.Pos]token.Pos) map[virtualRootKey][]pollution.UsageInfo {
-	// Sort uses by position
-	sortedUses := slices.Clone(uses)
-	slices.SortFunc(sortedUses, func(a, b pollution.UsageInfo) int {
-		return cmp.Compare(a.Pos, b.Pos)
-	})
+	sortedUses := runOrderedUses(uses)
 
 	original := virtualRootKey{isOriginal: true, pos: root.Pos(), block: tracer.RootBlock(root)}
 	virtualUses := make(map[virtualRootKey][]pollution.UsageInfo)
@@ -743,6 +742,47 @@ func (g *Generator) simulateReassignments(root ssa.Value, uses []pollution.Usage
 	}
 
 	return virtualUses
+}
+
+// runOrderedUses returns uses sorted by position, except that the uses of one
+// block are in the order the block runs them. go/ssa puts the post statement
+// of a `for` loop at the end of the body's block when nothing else jumps to
+// it, so in `for i := 0; i < 2; q.Where("a") { q.Find(nil); i++ }` the post
+// statement's call comes first by position but runs after q.Find (#247). The
+// uses of each block keep the places that position gives them.
+func runOrderedUses(uses []pollution.UsageInfo) []pollution.UsageInfo {
+	sorted := slices.Clone(uses)
+	slices.SortFunc(sorted, func(a, b pollution.UsageInfo) int {
+		return cmp.Compare(a.Pos, b.Pos)
+	})
+	slots := make(map[*ssa.BasicBlock][]int)
+	for i, use := range sorted {
+		slots[use.Block] = append(slots[use.Block], i)
+	}
+	ordered := slices.Clone(sorted)
+	for block, idx := range slots {
+		if len(idx) < 2 {
+			continue
+		}
+		inBlock := make([]pollution.UsageInfo, len(idx))
+		for k, i := range idx {
+			inBlock[k] = sorted[i]
+		}
+		slices.SortStableFunc(inBlock, func(a, b pollution.UsageInfo) int {
+			return cmp.Compare(runIndex(block, a.Pos), runIndex(block, b.Pos))
+		})
+		for k, i := range idx {
+			ordered[i] = inBlock[k]
+		}
+	}
+	return ordered
+}
+
+// runIndex returns the index in block of the instruction at pos, the
+// position of a use, or -1 when there is none, as for a use recorded at a
+// closure's call site. Such uses keep their position order.
+func runIndex(block *ssa.BasicBlock, pos token.Pos) int {
+	return slices.IndexFunc(block.Instrs, func(instr ssa.Instruction) bool { return instr.Pos() == pos })
 }
 
 // endsImmutable reports whether the chain that vr, a virtual root, reassigns
@@ -811,14 +851,20 @@ func reassignmentReaches(a *cfg.Analyzer, def, use *ssa.BasicBlock) (reaches, do
 func (g *Generator) findRootsNeedingSession(virtualUses map[virtualRootKey][]pollution.UsageInfo, reassigned map[token.Pos]token.Pos, ordered bool) []virtualRootKey {
 	var roots []virtualRootKey
 	cfgAnalyzer := cfg.NewAnalyzer()
+	var def *ssa.BasicBlock
+	for root := range virtualUses {
+		if root.isOriginal {
+			def = root.block
+		}
+	}
 	for root, uses := range virtualUses {
 		var needs bool
 		switch {
-		case !root.isOriginal && inCycle(cfgAnalyzer, root.block):
+		case !root.isOriginal && repeatsAfter(root.block, def):
 			needs = true
 		case !ordered:
 			needs = len(uses) >= 2 || len(uses) == 1 && (!root.isOriginal || !reassigned[uses[0].Pos].IsValid())
-		case root.isOriginal && usedAgainInLoop(cfgAnalyzer, root.block, uses, reassigned):
+		case root.isOriginal && usedAgainInLoop(root.block, uses, reassigned):
 			needs = true
 		default:
 			needs = usesConflict(cfgAnalyzer, uses, reassigned)
@@ -868,10 +914,10 @@ func usesConflict(a *cfg.Analyzer, uses []pollution.UsageInfo, reassigned map[to
 // `q := db.Where("x"); for ... { q.Find(nil) }`. A reassignment reads the
 // root only on the first iteration; later ones read its result. The uses are
 // in def's function.
-func usedAgainInLoop(a *cfg.Analyzer, def *ssa.BasicBlock, uses []pollution.UsageInfo, reassigned map[token.Pos]token.Pos) bool {
+func usedAgainInLoop(def *ssa.BasicBlock, uses []pollution.UsageInfo, reassigned map[token.Pos]token.Pos) bool {
 	return slices.ContainsFunc(uses, func(use pollution.UsageInfo) bool {
 		_, isReassignment := reassigned[use.Pos]
-		return !isReassignment && inCycle(a, use.Block) && !a.CanReach(use.Block, def)
+		return !isReassignment && repeatsAfter(use.Block, def)
 	})
 }
 
@@ -897,10 +943,11 @@ func usesOrdered(v pollution.Violation) bool {
 	return reported
 }
 
-// inCycle reports whether block can run again after itself, as a loop body
-// does.
-func inCycle(a *cfg.Analyzer, block *ssa.BasicBlock) bool {
-	return slices.ContainsFunc(block.Succs, func(succ *ssa.BasicBlock) bool { return a.CanReach(succ, block) })
+// repeatsAfter reports whether a use in block use may run more than once for
+// one run of def, as the checker asks it (cfg.Repeats): a fix and the
+// diagnostic it fixes agree on which uses run again.
+func repeatsAfter(use, def *ssa.BasicBlock) bool {
+	return cfg.RepeatsOf(use.Parent()).RepeatsAfter(use, def)
 }
 
 // generateReassignmentEdit generates a TextEdit for reassignment.
@@ -1154,7 +1201,7 @@ func storeReadTwice(store *ssa.Store, uses []pollution.UsageInfo) bool {
 		switch {
 		case use.Block.Parent() != store.Parent():
 		case use.Block == store.Block():
-			if use.Pos < store.Pos() && !inCycle(a, use.Block) {
+			if use.Pos < store.Pos() && !cfg.RepeatsOf(store.Parent()).RunsAgain(use.Block) {
 				continue
 			}
 		case !a.CanReach(store.Block(), use.Block):

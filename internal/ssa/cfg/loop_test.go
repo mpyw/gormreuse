@@ -101,38 +101,61 @@ func TestDetectLoopsNilBlocks(t *testing.T) {
 	}
 }
 
-func TestIsDefinedOutsideLoop(t *testing.T) {
+// TestIsInLoopWithout guards #252: in nested loops, each loop has its own
+// blocks. The outer loop's blocks before the inner loop are in the outer loop,
+// and a block of the inner loop is in a loop that a block of the outer loop
+// is not in.
+func TestIsInLoopWithout(t *testing.T) {
 	t.Parallel()
-	fn := buildFunc(t, "package p\nfunc f(n int) int { s := 0; for i := 0; i < n; i++ { s += i }; return s }", "f")
-	a := NewAnalyzer()
-	info := a.DetectLoops(fn)
-
-	// The entry block, which defines the parameters, is outside any loop. So
-	// is a value with no defining block.
-	if !info.IsDefinedOutsideLoop(fn.Blocks[0]) {
-		t.Error("parameter should be defined outside the loop")
-	}
-	if !info.IsDefinedOutsideLoop(nil) {
-		t.Error("a value without a block should be outside the loop")
-	}
-
-	// An instruction inside a loop block is not defined outside the loop.
-	var insideFound bool
-	for _, b := range fn.Blocks {
-		if !info.IsInLoop(b) {
-			continue
+	fn := buildFunc(t, `package p
+func f(n int) int {
+	s := 0
+	for i := 0; i < n; i++ {
+		if i > 2 {
+			s++
 		}
-		for _, instr := range b.Instrs {
-			if v, ok := instr.(ssa.Value); ok {
-				if info.IsDefinedOutsideLoop(instr.Block()) {
-					t.Errorf("value %v in a loop block should be inside the loop", v)
-				}
-				insideFound = true
+		for j := 0; j < n; j++ {
+			s += j
+		}
+	}
+	return s
+}`, "f")
+	info := NewAnalyzer().DetectLoops(fn)
+
+	// The block of s++ is the then-block of `if i > 2`, before the inner
+	// loop. It was left out of the outer loop when the loops shared one set.
+	var then, inner *ssa.BasicBlock
+	for _, b := range fn.Blocks {
+		switch b.Comment {
+		case "if.then":
+			then = b
+		case "for.body":
+			if inner == nil || b.Index > inner.Index {
+				inner = b
 			}
 		}
 	}
-	if !insideFound {
-		t.Error("expected at least one value defined inside the loop")
+	if then == nil || inner == nil {
+		t.Fatalf("blocks not found: then=%v inner=%v", then, inner)
+	}
+	entry := fn.Blocks[0]
+
+	tests := []struct {
+		name       string
+		block, def *ssa.BasicBlock
+		want       bool
+	}{
+		{"outer body before the inner loop, def before the loops", then, entry, true},
+		{"outer body, no def", then, nil, true},
+		{"outer body, def in the outer body", then, then, false},
+		{"inner body, def in the outer body", inner, then, true},
+		{"inner body, def in the inner body", inner, inner, false},
+		{"entry", entry, nil, false},
+	}
+	for _, tc := range tests {
+		if got := info.IsInLoopWithout(tc.block, tc.def); got != tc.want {
+			t.Errorf("%s: IsInLoopWithout = %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }
 
@@ -195,5 +218,21 @@ func f(s int, xs []int) int {
 	}
 	if inLoop == 0 {
 		t.Fatal("expected in-loop blocks")
+	}
+}
+
+// TestDetectLoopsForCondKeepsEntryOut guards #252: go/ssa puts the header of
+// `for cond { ... }` after its body, so the edge from the header to the body
+// is the one found by block index. The walk from that header must not go on
+// through the blocks before the loop.
+func TestDetectLoopsForCondKeepsEntryOut(t *testing.T) {
+	t.Parallel()
+	fn := buildFunc(t, "package p\nfunc f(n int) int { s := 0; if n > 3 { s = 2 }; for s < n { s++ }; return s }", "f")
+	info := NewAnalyzer().DetectLoops(fn)
+	for _, b := range fn.Blocks {
+		want := b.Comment == "for.body" || b.Comment == "for.loop"
+		if got := info.IsInLoop(b); got != want {
+			t.Errorf("block %d (%s): IsInLoop = %v, want %v", b.Index, b.Comment, got, want)
+		}
 	}
 }
