@@ -30,6 +30,15 @@ func TestLineDirective(t *testing.T) {
 	analysistest.RunWithSuggestedFixes(t, testdata, gormreuse.Analyzer, "linedirective")
 }
 
+// TestCrossPackageDirectives checks directives declared in one package
+// (purelib) and used from another (externalpure), including the cases that
+// #195 still gets wrong (issue #197).
+func TestCrossPackageDirectives(t *testing.T) {
+	t.Parallel()
+	testdata := analysistest.TestData()
+	analysistest.Run(t, testdata, gormreuse.Analyzer, "purelib", "externalpure")
+}
+
 func TestSuggestedFixes(t *testing.T) {
 	t.Parallel()
 	testdata := analysistest.TestData()
