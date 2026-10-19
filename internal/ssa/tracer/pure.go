@@ -5,6 +5,8 @@ import (
 
 	"github.com/mpyw/gormreuse/internal/directive"
 	"github.com/mpyw/gormreuse/internal/facts"
+	"github.com/mpyw/gormreuse/internal/ssa/callsite"
+	"github.com/mpyw/gormreuse/internal/typeutil"
 )
 
 // PureVerdicts is what validating the //gormreuse:pure functions found. The
@@ -68,4 +70,109 @@ func (p *PureVerdicts) ReturnedArgs(fn *ssa.Function, args []ssa.Value) []ssa.Va
 		}
 	}
 	return returned
+}
+
+// IsPureFunction checks if a function is marked as pure (doesn't pollute arguments).
+//
+// A function is pure if:
+//   - It's a builtin pure method (Session, WithContext, Debug, Open, Begin, Transaction)
+//   - It's marked with //gormreuse:pure directive
+//
+// Pure functions don't pollute their *gorm.DB arguments.
+// Note: User-defined pure functions may return mutable values - only builtin pure
+// methods are guaranteed to return immutable values.
+func (t *RootTracer) IsPureFunction(fn *ssa.Function) bool {
+	if fn == nil {
+		return false
+	}
+	if t.isImmutableReturningBuiltin(fn) {
+		return true
+	}
+	// A //gormreuse:pure function that failed its own contract validation is
+	// NOT trusted here: its callers must see the leak it hides.
+	if t.pure.HasFailed(fn) {
+		return false
+	}
+	return t.pureFuncs.Contains(fn)
+}
+
+// pureReturnedArgs returns the arguments of a call to a trusted
+// //gormreuse:pure function that its *gorm.DB result may be (#188), or nil.
+//
+// The result is traced to these arguments first, so `r := pReturn(q)` makes r
+// a branch of q's root. When none of them has a mutable root (they are all
+// immutable, or the tracer cannot follow them), the result is immutable only
+// if the function returns nothing else (pureReturnsOnlyParams). Otherwise the call
+// stays its own root: the function may also return a fresh mutable chain.
+//
+// A tuple result such as (*gorm.DB, error) follows the same rule (#176): its
+// *gorm.DB elements share the call as their root, so they are traced to the
+// returned arguments together.
+//
+//declscope:shared // root.go's traceCall and traceAll follow a pure call to its arguments with it
+func (t *RootTracer) pureReturnedArgs(site callsite.Site) []ssa.Value {
+	if !typeutil.HasGormDBResult(site.Instr.(*ssa.Call).Type()) {
+		return nil
+	}
+	// A call through a method value passes its receiver as a binding, not
+	// as an argument; put it back so a pure method returning it is followed.
+	args := site.Args
+	if site.Recv != nil {
+		args = append([]ssa.Value{site.Recv}, args...)
+	}
+	args = t.pure.ReturnedArgs(site.Declared, args)
+	if len(args) == 0 || !t.IsPureFunction(site.Declared) {
+		return nil
+	}
+	return args
+}
+
+// PureReturnsOnlyParams reports whether every mutable root of the values fn
+// returns is one of fn's own parameters. The analyzer exports it for the pure
+// functions that may return an argument (#195).
+func (t *RootTracer) PureReturnsOnlyParams(fn *ssa.Function) bool {
+	return t.pureReturnsOnlyParams(fn)
+}
+
+// pureReturnsOnlyParams reports whether every mutable root of the values fn
+// returns is one of fn's own parameters, so fn returns an immutable value when
+// its arguments are immutable. `if c { return db.Session(s).Where("x") };
+// return db` also returns a fresh chain, so it does not.
+//
+//declscope:shared // root.go's traceCall decides a pure call with immutable arguments with it
+func (t *RootTracer) pureReturnsOnlyParams(fn *ssa.Function) bool {
+	// An instance or a bound method wrapper runs the declared body.
+	fn = directive.DeclaredFunc(fn)
+	if only, ok := t.onlyParams[fn]; ok {
+		return only
+	}
+	// The body of a function of another package is not built, so its package
+	// decided (#195).
+	if fn.Blocks == nil {
+		return t.pure != nil && t.pure.Imported.Of(fn).ReturnsOnlyParams
+	}
+	// A recursive call may return anything until fn is decided.
+	t.onlyParams[fn] = false
+	only := true
+	for _, block := range fn.Blocks {
+		for _, instr := range block.Instrs {
+			ret, ok := instr.(*ssa.Return)
+			if !ok {
+				continue
+			}
+			// Every *gorm.DB result counts, in any position of a tuple (#176).
+			for _, res := range ret.Results {
+				if !typeutil.IsGormDB(res.Type()) {
+					continue
+				}
+				for _, root := range t.traceAll(res, make(map[ssa.Value]bool), nil) {
+					if p, isParam := root.(*ssa.Parameter); !isParam || p.Parent() != fn {
+						only = false
+					}
+				}
+			}
+		}
+	}
+	t.onlyParams[fn] = only
+	return only
 }

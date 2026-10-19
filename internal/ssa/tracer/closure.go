@@ -2,10 +2,12 @@ package tracer
 
 import (
 	"go/types"
+	"maps"
 	"slices"
 
 	"golang.org/x/tools/go/ssa"
 
+	"github.com/mpyw/gormreuse/internal/ssa/cfg"
 	"github.com/mpyw/gormreuse/internal/typeutil"
 )
 
@@ -126,4 +128,95 @@ func closureHoldsGormDB(t types.Type, seen map[types.Type]bool) bool {
 		}
 	}
 	return false
+}
+
+// traceClosureReturns traces through an immediately invoked function expression.
+//
+// IIFE pattern:
+//
+//	_ = func() *gorm.DB {
+//	    return q.Where("y")   // ← trace this return value
+//	}().Find(nil)
+//
+// This allows treating the entire IIFE chain as a single branch from q,
+// rather than two separate branches (IIFE internal + Find external).
+//
+// We clone the visited map to avoid polluting the parent's tracking state.
+//
+//declscope:shared // root.go's traceCall sends IIFEs here
+func (t *RootTracer) traceClosureReturns(fn *ssa.Function, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) ssa.Value {
+	if fn.Signature == nil {
+		return nil
+	}
+	results := fn.Signature.Results()
+	if results == nil || results.Len() == 0 || !typeutil.IsGormDB(results.At(0).Type()) {
+		return nil
+	}
+
+	// Collect ALL roots from all return statements
+	var allRoots []ssa.Value
+	for _, block := range fn.Blocks {
+		for _, instr := range block.Instrs {
+			ret, ok := instr.(*ssa.Return)
+			if !ok || len(ret.Results) == 0 {
+				continue
+			}
+			// Clone visited map to isolate closure's tracing state
+			retVisited := maps.Clone(visited)
+			if root := t.trace(ret.Results[0], retVisited, loopInfo); root != nil {
+				allRoots = append(allRoots, root)
+			}
+		}
+	}
+
+	if len(allRoots) == 0 {
+		return nil
+	}
+
+	// If all roots are the same, return that root
+	firstRoot := allRoots[0]
+	allSame := true
+	for _, root := range allRoots[1:] {
+		if root != firstRoot {
+			allSame = false
+			break
+		}
+	}
+
+	if allSame {
+		return firstRoot
+	}
+
+	// Multiple different roots - return nil to signal caller should use call itself
+	// This happens with conditional returns like:
+	//   func() *gorm.DB { if cond { return q1 } else { return q2 } }()
+	return nil
+}
+
+// traceAllClosureReturns is the multi-root version of traceClosureReturns.
+// It collects roots from ALL return statements in the closure.
+//
+//declscope:shared // root.go's traceAll sends IIFEs here
+func (t *RootTracer) traceAllClosureReturns(fn *ssa.Function, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) []ssa.Value {
+	if fn.Signature == nil {
+		return nil
+	}
+	results := fn.Signature.Results()
+	if results == nil || results.Len() == 0 || !typeutil.IsGormDB(results.At(0).Type()) {
+		return nil
+	}
+
+	var allRoots []ssa.Value
+	for _, block := range fn.Blocks {
+		for _, instr := range block.Instrs {
+			ret, ok := instr.(*ssa.Return)
+			if !ok || len(ret.Results) == 0 {
+				continue
+			}
+			retVisited := maps.Clone(visited)
+			roots := t.traceAll(ret.Results[0], retVisited, loopInfo)
+			allRoots = append(allRoots, roots...)
+		}
+	}
+	return allRoots
 }

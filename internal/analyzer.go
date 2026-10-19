@@ -576,7 +576,7 @@ func exportFacts(pass *analysis.Pass, ssaInfo *buildssa.SSA, src factSources, gu
 				f.Pure = true
 				f.PureFailed = src.pureVerdicts.Failed[fn]
 				f.Returned = src.pureVerdicts.Returned[fn]
-				f.ReturnsOnlyParams = len(f.Returned) > 0 && src.tracer.ReturnsOnlyParams(fn)
+				f.ReturnsOnlyParams = len(f.Returned) > 0 && src.tracer.PureReturnsOnlyParams(fn)
 			}
 			f.ImmutableReturn = src.immutableReturnFuncs.Contains(fn) && !src.failedReturn[fn]
 			f.BranchesImmutableParam = src.needsImmutableParam[fn]
