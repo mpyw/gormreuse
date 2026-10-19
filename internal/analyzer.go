@@ -142,8 +142,8 @@ func RunSSA(
 	// mid-chain (clone==0) value, so reuse inside them must be detected (#60).
 	scopesCallbacks := tracer.CollectScopesCallbacks(ssaInfo.SrcFuncs)
 
-	// Collect immutable callbacks once: gorm's Transaction/Connection/FindInBatches
-	// hand their callback a fresh forkable (clone>0) handle, and a user function
+	// Collect immutable callbacks once: gorm's Transaction/FindInBatches hand
+	// their callback a fresh forkable (clone>0) handle, and a user function
 	// declared //gormreuse:immutable-input(cb) promises the same for cb. Their
 	// callback's tx parameter is therefore exempt from the Phase 1b
 	// mutable-by-default treatment (#60 SC103, #61, #62 case 2.2).
@@ -412,7 +412,7 @@ type checker struct {
 	immutableParamFuncs  *directive.DirectiveFuncSet // Immutable-param functions (params opt out of Phase 1b)
 	failedPure           map[*ssa.Function]bool      // Pure functions that failed contract validation
 	scopesCallbacks      map[*ssa.Function]bool      // Scopes/Preload callbacks (params are mutable roots)
-	immutableCallbacks   map[*ssa.Function]bool      // Transaction/Connection/FindInBatches callbacks (fresh tx)
+	immutableCallbacks   map[*ssa.Function]bool      // Transaction/FindInBatches callbacks (fresh tx)
 	needsImmutableParam  map[*ssa.Function]bool      // immutable-param fns that branch a param (2b caller check)
 	reported             map[token.Pos]bool          // Deduplication of reports
 	suggestedEdits       map[editKey]bool            // Global deduplication of suggested fixes

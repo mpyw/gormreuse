@@ -185,7 +185,8 @@ func (db *DB) Rollback() *DB { return db }
 // Transaction executes in transaction.
 func (db *DB) Transaction(fc func(tx *DB) error, opts ...interface{}) error { return nil }
 
-// Connection executes with a dedicated connection; fc receives a fresh handle.
+// Connection executes with a dedicated connection; fc receives a clone==0
+// handle (db.getInstance()), not a fresh one.
 func (db *DB) Connection(fc func(tx *DB) error) error { return nil }
 
 // FindInBatches finds records in batches; fc receives a fresh handle per batch.
