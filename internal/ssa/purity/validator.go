@@ -43,6 +43,7 @@ import (
 	"golang.org/x/tools/go/ssa"
 
 	"github.com/mpyw/gormreuse/internal/directive"
+	"github.com/mpyw/gormreuse/internal/ssa/callsite"
 	"github.com/mpyw/gormreuse/internal/ssa/pollutionsource"
 	"github.com/mpyw/gormreuse/internal/ssa/tracer"
 	"github.com/mpyw/gormreuse/internal/typeutil"
@@ -68,13 +69,13 @@ type Validator struct {
 	// funcVars resolves a call through a package-level variable that holds
 	// one function, so a pure closure stored in one is trusted (#183). It may
 	// be nil.
-	funcVars     tracer.FuncVars
+	funcVars     callsite.FuncVars
 	paramDerived map[ssa.Value]bool
 	holdsCache   map[types.Type]bool
 }
 
 // NewValidator creates a Validator for a function marked as pure.
-func NewValidator(fn *ssa.Function, pureFuncs, immutableReturnFuncs *directive.DirectiveFuncSet, pure *tracer.PureVerdicts, funcVars tracer.FuncVars) *Validator {
+func NewValidator(fn *ssa.Function, pureFuncs, immutableReturnFuncs *directive.DirectiveFuncSet, pure *tracer.PureVerdicts, funcVars callsite.FuncVars) *Validator {
 	return &Validator{
 		fn:                   fn,
 		pureFuncs:            pureFuncs,

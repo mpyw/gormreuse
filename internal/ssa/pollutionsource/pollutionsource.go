@@ -257,7 +257,7 @@ func ReadOnlyGormArgs(callee *ssa.Function, args []ssa.Value) []ssa.Value {
 // *gorm.DB method (see ReadOnlyGormArgs), and the index in common.Args of the
 // first read-only argument. ok is false for any other call. A call through a
 // method value (w := db.Where; w("id IN (?)", sub)) is read as the method call
-// it stands for, as the tracer's calledFunc does (#178).
+// it stands for, as callsite.Site does (#178).
 func CallReadOnlyArgs(common *ssa.CallCommon) (vals []ssa.Value, start int, ok bool) {
 	callee, offset := calledGormMethod(common)
 	first, ok := readOnlyArgStart(callee)

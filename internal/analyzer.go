@@ -54,6 +54,7 @@ import (
 	"github.com/mpyw/gormreuse/internal/fix"
 	"github.com/mpyw/gormreuse/internal/scopeswarn"
 	ssautil "github.com/mpyw/gormreuse/internal/ssa"
+	"github.com/mpyw/gormreuse/internal/ssa/callsite"
 	"github.com/mpyw/gormreuse/internal/ssa/pollution"
 	"github.com/mpyw/gormreuse/internal/ssa/purity"
 	"github.com/mpyw/gormreuse/internal/ssa/tracer"
@@ -126,7 +127,7 @@ func RunSSA(
 	// Analyze the closures of package-level `var f = func(...)` initializers
 	// too, and resolve calls through such variables (#183).
 	funcs := analyzedFuncs(ssaInfo)
-	funcVars := tracer.CollectFuncVars(append(slices.Clone(funcs), ssaInfo.Pkg.Func("init")))
+	funcVars := callsite.CollectFuncVars(append(slices.Clone(funcs), ssaInfo.Pkg.Func("init")))
 
 	// Callees in other packages are decided by the facts their packages
 	// exported (#195). A package without facts leaves its functions unmarked.
@@ -294,7 +295,7 @@ func analyzedFuncs(ssaInfo *buildssa.SSA) []*ssa.Function {
 func validatePureFuncs(
 	funcs []*ssa.Function,
 	pureFuncs, immutableReturnFuncs *directive.DirectiveFuncSet,
-	funcVars tracer.FuncVars,
+	funcVars callsite.FuncVars,
 	table *facts.Table,
 	skip func(*ssa.Function) bool,
 	report func(token.Pos, string),
@@ -462,7 +463,7 @@ func computeNeedsImmutableParam(
 	immutableParamFuncs, pureFuncs, immutableReturnFuncs *directive.DirectiveFuncSet,
 	pureVerdicts *tracer.PureVerdicts,
 	scopesCallbacks, immutableCallbacks map[*ssa.Function]bool,
-	funcVars tracer.FuncVars,
+	funcVars callsite.FuncVars,
 	skip func(*ssa.Function) bool,
 	guard *panicGuard,
 ) map[*ssa.Function]bool {
@@ -617,7 +618,7 @@ type checker struct {
 	scopesCallbacks      map[*ssa.Function]bool      // Scopes/Preload callbacks (params are mutable roots)
 	immutableCallbacks   map[*ssa.Function]bool      // Transaction/FindInBatches callbacks (fresh tx)
 	needsImmutableParam  func(*ssa.Function) bool    // immutable-param fns that branch a param (2b caller check)
-	funcVars             tracer.FuncVars             // Package-level variables that hold one function (#183)
+	funcVars             callsite.FuncVars           // Package-level variables that hold one function (#183)
 	reported             map[token.Pos]bool          // Deduplication of reports
 	fixGen               *fix.Generator              // Cached fix generator for all violations
 }
@@ -626,7 +627,7 @@ type checker struct {
 // The reported map is shared across all functions to deduplicate violations
 // across parent functions and their closures.
 // The fixGen is shared to avoid recreating the generator for each violation.
-func newChecker(pass *analysis.Pass, ignores *directive.Ignores, pureFuncs, immutableReturnFuncs, immutableParamFuncs *directive.DirectiveFuncSet, pureVerdicts *tracer.PureVerdicts, scopesCallbacks, immutableCallbacks map[*ssa.Function]bool, needsImmutableParam func(*ssa.Function) bool, funcVars tracer.FuncVars, reported map[token.Pos]bool, fixGen *fix.Generator) *checker {
+func newChecker(pass *analysis.Pass, ignores *directive.Ignores, pureFuncs, immutableReturnFuncs, immutableParamFuncs *directive.DirectiveFuncSet, pureVerdicts *tracer.PureVerdicts, scopesCallbacks, immutableCallbacks map[*ssa.Function]bool, needsImmutableParam func(*ssa.Function) bool, funcVars callsite.FuncVars, reported map[token.Pos]bool, fixGen *fix.Generator) *checker {
 	return &checker{
 		pass:                 pass,
 		ignores:              ignores,
