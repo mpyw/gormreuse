@@ -398,6 +398,21 @@ where := q.Where
 where("a").Find(&users1) // first branch from q - OK
 where("b").Find(&users2) // VIOLATION: second branch from q
 
+// go and defer are uses too, also through a method value. A deferred
+// call runs when the function returns, after every other use
+q := db.Where("x")
+find := q.Find
+defer find(&users) // VIOLATION: runs after q.Count
+q.Count(&count)
+
+// A variable that may hold one of two roots branches both
+q := b
+if condition {
+    q = a
+}
+q.Find(&users)   // first branch from a or b - OK
+a.Find(&admins)  // VIOLATION: second branch from a when condition holds
+
 // Session in middle doesn't help - result is still mutable
 q := db.Session(&gorm.Session{}).Where("x")  // q is mutable!
 q.Find(&users)   // first branch - OK
@@ -468,6 +483,14 @@ if condition {
     q = db.Where("alt")    // reassignment on this path
 }
 q.Find(&users)             // OK - first branch from whichever root
+
+// The same through a method value
+q = db.Where("base")
+if condition {
+    where := q.Where
+    q = where("alt")       // reassignment of q
+}
+q.Find(&users)             // OK
 ```
 
 Each example branches `db` more than once, which is safe only because `db` is immutable. If `db` were a `*gorm.DB` parameter, the second branch of `db` would be reported. A reassignment that extends the same variable, as in `if condition { q = q.Where("alt") }`, is not a second branch of `q`.
@@ -967,6 +990,7 @@ gormreuse reports a reuse only when it can follow the value. These cases are kno
 | --- | --- |
 | A closure assigns a captured variable: `f := func() { q = db.Where("x") }; f()` | The assignment inside the closure is not followed |
 | `defer` inside a `go` closure, or `defer` → `go` → `defer` | These nested calls are not followed |
+| `c := q.Session(&gorm.Session{}); defer c.Count(nil)`, then `q.Where("a").Find(nil)` | The use of the copy is ordered at the `defer` statement, before the change |
 | A method value that a branch picks: `if c { find = q.Find } else { find = q.Find }` | A method value merged from branches is not traced to `q` |
 | Closures stored in a slice and called in a loop | Each call branches `q` again, but the calls are not counted |
 | `if c { q2 = q.Where("a") }; if d { q = q2 }; q.Count(nil)` | `q2` can flow back into `q`, so `Where("a")` is treated as an assignment of `q` |

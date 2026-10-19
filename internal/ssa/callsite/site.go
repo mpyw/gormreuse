@@ -43,10 +43,26 @@ const (
 	SiteBuiltin
 )
 
+// SiteMode is when a Site runs: where it is, in a new goroutine, or when the
+// function returns.
+type SiteMode int
+
+// The modes of a Site.
+const (
+	// SiteCall is a plain call: it runs where it is.
+	SiteCall SiteMode = iota
+	// SiteGo is a go statement: the call runs in a new goroutine.
+	SiteGo
+	// SiteDefer is a defer statement: the call runs when the function returns.
+	SiteDefer
+)
+
 // Site is one call, go or defer instruction, resolved to the function it runs.
 type Site struct {
 	// Instr is the instruction the Site was read from.
 	Instr ssa.CallInstruction
+	// Mode is the kind of instruction: a call, a go or a defer.
+	Mode SiteMode
 	// Kind is how the call names its function.
 	Kind SiteKind
 	// Callee is the function the instruction calls: its static callee
@@ -72,14 +88,14 @@ type Site struct {
 // function variables; it may be nil.
 func SiteOf(instr ssa.CallInstruction, vars FuncVars) Site {
 	common := instr.Common()
-	s := Site{Instr: instr, Args: common.Args}
+	s := Site{Instr: instr, Mode: siteModeOf(instr), Args: common.Args}
 	switch v := common.Value.(type) {
 	case *ssa.Builtin:
 		s.Kind = SiteBuiltin
 		return s
 	case *ssa.MakeClosure:
 		if bound, ok := BoundSite(v); ok {
-			bound.Instr, bound.Args = instr, common.Args
+			bound.Instr, bound.Mode, bound.Args = instr, s.Mode, common.Args
 			return bound
 		}
 		s.Kind = SiteClosure
@@ -106,6 +122,17 @@ func SiteOf(instr ssa.CallInstruction, vars FuncVars) Site {
 		s.Recv, s.Args = s.Args[0], s.Args[1:]
 	}
 	return s
+}
+
+// siteModeOf returns the mode of instr.
+func siteModeOf(instr ssa.CallInstruction) SiteMode {
+	switch instr.(type) {
+	case *ssa.Go:
+		return SiteGo
+	case *ssa.Defer:
+		return SiteDefer
+	}
+	return SiteCall
 }
 
 // BoundSite reads the method value mc (r.m used as a value) as the Site of a

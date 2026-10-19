@@ -2599,8 +2599,8 @@ func pointerPhiCase(db *gorm.DB, flag bool) {
 
 	// q1 is detected because traceAllAllocStores finds the store
 	q1.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
-	// q2 detection depends on SSA structure - may or may not be detected
-	q2.Count(nil)
+	// *pp may hold q2 too: (*pp).Find(nil) may branch it (#252)
+	q2.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // =============================================================================
@@ -3166,10 +3166,11 @@ func boundMethodWithPhiOnePolluted(db *gorm.DB, flag bool) {
 	find(nil)      // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
-// [LIMITATION] boundMethodWithPhiOnePollutedReverse tests bound method with reversed branch order.
-// SSA block ordering may differ from source order. When pollution occurs in
-// a later-numbered block (else branch) that executes before a bound method call
-// in an earlier-numbered block (merge block), detection may fail.
+// boundMethodWithPhiOnePollutedReverse tests bound method with reversed branch order.
+// SSA block ordering may differ from source order: the else branch that
+// pollutes q is handled after the merge block. The call through find may
+// branch the else branch's root, and that is checked after every use is
+// recorded (#252).
 func boundMethodWithPhiOnePollutedReverse(db *gorm.DB, flag bool) {
 	var q *gorm.DB
 	if flag {
@@ -3180,7 +3181,7 @@ func boundMethodWithPhiOnePollutedReverse(db *gorm.DB, flag bool) {
 	}
 	// q is Phi(q_clean, q_polluted)
 	find := q.Find // Bound method
-	find(nil)      // SHOULD want violation, but SSA block order prevents detection
+	find(nil)      // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // goStatementWithPhiOnePolluted tests go statement where one branch of Phi is polluted.
