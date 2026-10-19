@@ -64,6 +64,10 @@ import (
 	"golang.org/x/tools/go/ssa"
 )
 
+// rangeFuncYieldSynthetic is the ssa.Function.Synthetic value that go/ssa gives
+// the yield closure holding the body of a range-over-func loop.
+const rangeFuncYieldSynthetic = "range-over-func yield"
+
 // Analyzer provides control flow graph analysis for SSA functions.
 //
 // It is stateless and can be reused across multiple analyses.
@@ -144,6 +148,12 @@ func (a *Analyzer) CanReach(src, dst *ssa.BasicBlock) bool {
 //  5. Mark loop headers for special handling of Phi nodes
 //
 // This handles for, for-range, and while-style loops.
+//
+// The body of a range-over-func loop (`for v := range seq`) has no back-edge:
+// SSA compiles it into a synthetic yield closure that the iterator calls once
+// per element. Every block of that closure is therefore in a loop (#177). It
+// has no header, because values from earlier iterations reach it through
+// captured variables, not Phi nodes.
 func (a *Analyzer) DetectLoops(fn *ssa.Function) *LoopInfo {
 	loopBlocks := make(map[*ssa.BasicBlock]bool)
 	loopHeaders := make(map[*ssa.BasicBlock]bool)
@@ -151,6 +161,11 @@ func (a *Analyzer) DetectLoops(fn *ssa.Function) *LoopInfo {
 		return &LoopInfo{
 			loopBlocks:  loopBlocks,
 			loopHeaders: loopHeaders,
+		}
+	}
+	if fn.Synthetic == rangeFuncYieldSynthetic {
+		for _, b := range fn.Blocks {
+			loopBlocks[b] = true
 		}
 	}
 

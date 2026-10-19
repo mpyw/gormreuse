@@ -10,6 +10,7 @@ package internal
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 
@@ -489,5 +490,25 @@ func TestSessionInitialized_SnapshotsReceiver(t *testing.T) {
 	}
 	if last := (*captured)[len(*captured)-1]; strings.Contains(last, "active") {
 		t.Errorf("Initialized result must not share the receiver's Statement: %s", last)
+	}
+}
+
+// TestRangeOverFuncReuseAccumulates asserts that a range-over-func loop body
+// runs once per element, so a mid-chain (clone==0) value branched inside it
+// accumulates conditions across iterations, as in a plain loop. This is why
+// the analyzer treats the body as a loop (#177).
+func TestRangeOverFuncReuseAccumulates(t *testing.T) {
+	db, captured := setupDB(t)
+
+	q := db.Model(&User{}).Where("base = ?", 1) // clone==0
+	for v := range slices.Values([]int{10, 20}) {
+		q.Where("age = ?", v).Find(&[]User{})
+	}
+
+	if len(*captured) < 2 {
+		t.Fatalf("Expected at least 2 queries, got %d", len(*captured))
+	}
+	if count := strings.Count((*captured)[1], "age ="); count != 2 {
+		t.Errorf("second iteration should accumulate the first iteration's 'age' condition (got %d): %s", count, (*captured)[1])
 	}
 }

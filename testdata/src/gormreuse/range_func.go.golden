@@ -1,0 +1,231 @@
+package internal
+
+import (
+	"iter"
+	"maps"
+	"slices"
+
+	"gorm.io/gorm"
+)
+
+// =============================================================================
+// RANGE-OVER-FUNC LOOPS (#177)
+//
+// SSA compiles the body of `for v := range seq` (Go 1.23+) into a synthetic
+// "range-over-func yield" closure that the iterator calls once per element.
+// The closure's own CFG has no back-edge, so the body must be treated as a
+// loop as a whole: a mutable root defined outside the loop and used inside
+// is reused on every iteration, exactly as with a plain `for range` over a
+// slice.
+// =============================================================================
+
+// =============================================================================
+// SHOULD REPORT
+// =============================================================================
+
+// rangeFuncSlicesValues: slices.Values iterator.
+func rangeFuncSlicesValues(db *gorm.DB, xs []int) {
+	q := db.Where("x").Session(&gorm.Session{})
+	for v := range slices.Values(xs) {
+		q.Where("v = ?", v).Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	}
+}
+
+// rangeFuncMapsKeys: maps.Keys iterator.
+func rangeFuncMapsKeys(db *gorm.DB, m map[string]int) {
+	q := db.Where("x").Session(&gorm.Session{})
+	for k := range maps.Keys(m) {
+		q.Where("k = ?", k).Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	}
+}
+
+// rangeFuncSeqParam: a user iter.Seq parameter.
+func rangeFuncSeqParam(db *gorm.DB, seq iter.Seq[int]) {
+	q := db.Where("x").Session(&gorm.Session{})
+	for v := range seq {
+		q.Where("v = ?", v).Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	}
+}
+
+// rangeFuncSeq2Param: a user iter.Seq2 parameter.
+func rangeFuncSeq2Param(db *gorm.DB, seq iter.Seq2[int, string]) {
+	q := db.Where("x").Session(&gorm.Session{})
+	for k, v := range seq {
+		q.Where("k = ? AND v = ?", k, v).Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	}
+}
+
+// rangeFuncParamRoot: a bare *gorm.DB parameter is a mutable root, so
+// deriving from it on every iteration is reuse, as in a plain loop.
+//gormreuse:immutable-param
+func rangeFuncParamRoot(db *gorm.DB, seq iter.Seq[int]) {
+	for v := range seq {
+		db.Where("v = ?", v).Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	}
+}
+
+// rangeFuncNested: a root from outside both loops, used in the inner body.
+func rangeFuncNested(db *gorm.DB, outer, inner iter.Seq[int]) {
+	q := db.Where("x").Session(&gorm.Session{})
+	for a := range outer {
+		for b := range inner {
+			q.Where("a = ? AND b = ?", a, b).Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+		}
+	}
+}
+
+// rangeFuncNestedOuterBodyRoot: a root defined in the outer body is reused on
+// every iteration of the inner loop.
+func rangeFuncNestedOuterBodyRoot(db *gorm.DB, outer, inner iter.Seq[int]) {
+	base := db.Session(&gorm.Session{})
+	for a := range outer {
+		q := base.Where("a = ?", a).Session(&gorm.Session{})
+		for b := range inner {
+			q.Where("b = ?", b).Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+		}
+	}
+}
+
+// rangeFuncBreak: break does not make the body run only once.
+func rangeFuncBreak(db *gorm.DB, seq iter.Seq[int]) {
+	q := db.Where("x").Session(&gorm.Session{})
+	for v := range seq {
+		if v > 10 {
+			break
+		}
+		q.Where("v = ?", v).Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	}
+}
+
+// rangeFuncReturn: return inside the body exits the loop, but earlier
+// iterations have already used q.
+func rangeFuncReturn(db *gorm.DB, seq iter.Seq[int]) error {
+	q := db.Where("x").Session(&gorm.Session{})
+	for v := range seq {
+		if err := q.Where("v = ?", v).Find(nil).Error; err != nil { // want `\*gorm\.DB reused: second branch from mutable root`
+			return err
+		}
+	}
+	return nil
+}
+
+// rangeFuncUseAfterLoop: a use after the loop is still a second branch.
+func rangeFuncUseAfterLoop(db *gorm.DB, seq iter.Seq[int]) {
+	q := db.Where("x").Session(&gorm.Session{})
+	for v := range seq {
+		q.Where("v = ?", v).Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	}
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// rangeFuncStoreOtherVar: storing the chain into another captured variable
+// is not a self-update, so each iteration branches q again.
+func rangeFuncStoreOtherVar(db *gorm.DB, seq iter.Seq[int]) {
+	q := db.Where("x").Session(&gorm.Session{})
+	var last *gorm.DB
+	for v := range seq {
+		last = q.Where("v = ?", v) // want `\*gorm\.DB reused: second branch from mutable root`
+	}
+	last.Find(nil)
+}
+
+// =============================================================================
+// SHOULD NOT REPORT
+// =============================================================================
+
+// rangeFuncRootInsideBody: a root defined inside the body is fresh on every
+// iteration. It is built from an immutable base, since a bare *gorm.DB
+// parameter is itself a mutable root.
+func rangeFuncRootInsideBody(db *gorm.DB, seq iter.Seq[int]) {
+	base := db.Session(&gorm.Session{})
+	for v := range seq {
+		q := base.Where("v = ?", v)
+		q.Find(nil)
+	}
+}
+
+// rangeFuncRootInsideNestedBody: a root defined in the inner body is fresh on
+// every inner iteration.
+func rangeFuncRootInsideNestedBody(db *gorm.DB, outer, inner iter.Seq[int]) {
+	base := db.Session(&gorm.Session{})
+	for a := range outer {
+		for b := range inner {
+			q := base.Where("a = ? AND b = ?", a, b)
+			q.Find(nil)
+		}
+	}
+}
+
+// rangeFuncImmutableRoot: an immutable root may be reused freely.
+func rangeFuncImmutableRoot(db *gorm.DB, seq iter.Seq[int]) {
+	q := db.Where("x").Session(&gorm.Session{})
+	for v := range seq {
+		q.Where("v = ?", v).Find(nil)
+	}
+}
+
+// rangeFuncReassign: reassigning the outer variable each iteration builds a
+// single chain, like `q = q.Where(...)` in a plain loop.
+func rangeFuncReassign(db *gorm.DB, seq iter.Seq[int]) {
+	q := db.Where("x")
+	for v := range seq {
+		q = q.Where("v = ?", v)
+		q = q.Where("a").Where("b = ?", v)
+	}
+	q.Find(nil)
+}
+
+// rangeFuncReassignNested: the self-update also holds from a nested body,
+// whose captured q is itself a captured variable of the outer body.
+func rangeFuncReassignNested(db *gorm.DB, outer, inner iter.Seq[int]) {
+	q := db.Where("x")
+	for a := range outer {
+		for b := range inner {
+			q = q.Where("a = ? AND b = ?", a, b)
+		}
+	}
+	q.Find(nil)
+}
+
+// rangeFuncReassignHelper: a user function result assigned back to the same
+// variable is a self-update too.
+func rangeFuncReassignHelper(db *gorm.DB, seq iter.Seq[int]) {
+	q := db.Where("x")
+	for v := range seq {
+		q = rangeFuncFilter(q, v)
+	}
+	q.Find(nil)
+}
+
+// rangeFuncStoreFreshValues: values that do not derive from an outer root
+// may be stored into a captured variable on every iteration.
+func rangeFuncStoreFreshValues(seq iter.Seq[int]) {
+	var last *gorm.DB
+	for v := range seq {
+		last = rangeFuncNew()
+		last = rangeFuncFromInt(v)
+		last = rangeFuncFilter(rangeFuncNew(), v)
+	}
+	last.Find(nil)
+}
+
+func rangeFuncNew() *gorm.DB {
+	return (*gorm.DB)(nil).Session(&gorm.Session{})
+}
+
+func rangeFuncFromInt(v int) *gorm.DB {
+	return rangeFuncNew().Limit(v).Session(&gorm.Session{})
+}
+
+func rangeFuncFilter(q *gorm.DB, v int) *gorm.DB {
+	return q.Where("v = ?", v)
+}
+
+// rangeFuncPlainClosure: a closure passed to a function that is not a range
+// body is not assumed to run repeatedly.
+func rangeFuncPlainClosure(db *gorm.DB, run func(func())) {
+	q := db.Where("x")
+	run(func() {
+		q.Find(nil)
+	})
+}

@@ -365,7 +365,7 @@ User-Defined Function Reassignment:
 
 A straight-line `q = q.Where("a")` needs no special case: the new SSA value is its own root, and `q.Where("a")` is a branch of the old one. The special case is a merge. In `if c { q = q.Where("a") }; q.Find(nil)`, the use reads `Phi(q₁, q₂)`, and `FindMutableRoot` resolves that Phi to `q₁`. If `q.Where("a")` polluted `q₁`, `q.Find` would be a false second branch. So `isAssignment` records such a call with `RecordAssignment`, which does not pollute.
 
-`isAssignment(call, root)` follows the call's result forward through chained gorm calls and Phi nodes. It returns true only when it reaches a Phi, or a Store to an Alloc, whose `FindAllMutableRoots` include `root`. Only that merge can hand `root` back to a later use.
+`isAssignment(call, root)` follows the call's result forward through chained gorm calls and Phi nodes. It returns true only when it reaches a Phi, or a Store to an Alloc or to a captured variable (`FreeVar`, #177), whose `FindAllMutableRoots` include `root`. Only that merge can hand `root` back to a later use.
 
 | Code | Merge | Result |
 | --- | --- | --- |
@@ -375,10 +375,20 @@ A straight-line `q = q.Where("a")` needs no special case: the new SSA value is i
 | `if c { q2 = q.Where("a") }` | `Phi(nil, q₂)` | branch of `q` |
 | `q2 := q.Where("a")`, `q2` captured by a closure | Store to `q2`'s Alloc | branch of `q` |
 | `q := db.Where("b"); if c { q = db.Where("a") }` | `Phi(q₁, q₂)`, both branches of `db` | branch of `db` |
+| `for v := range seq { q = q.Where(v) }` | Store to the captured `q` (`FreeVar`) | assignment |
+| `for v := range seq { last = q.Where(v) }` | Store to the captured `last` | branch of `q` |
 
 Before #175, any Phi or Store to an Alloc counted as an assignment. A chain derived into a different variable was then never a branch, and branching a mutable `db` parameter twice under a condition was missed.
 
 Limitation: the check asks whether the merge *can* yield `root`, not whether it does on the path that ran the call. `if c { q2 = q.Where("a") }; if d { q = q2 }` reaches `Phi(q₁, …)` and is still treated as an assignment.
+
+### Range-over-func Loops
+
+SSA compiles the body of `for v := range seq` (Go 1.23+) into a synthetic closure that the iterator calls once per element. go/ssa marks it with `Synthetic == "range-over-func yield"`. The closure has no back-edge, so `DetectLoops` treats every block of it as in a loop (#177). A root defined outside the body and used inside it is then reported, as in a plain `for range`. A root defined inside the body is in a loop block, so it is fresh on each iteration.
+
+The body reaches outer variables through `FreeVar`s, so `q = q.Where(v)` inside it is a `Store` to a `FreeVar`, not to an `Alloc`. `isAssignment` treats a `FreeVar` as a merge point like an `Alloc` (see the previous section). Its values are those of the captured variable, so the store is an assignment only when that variable can hold `root`. That is the in-place update of a plain loop. A store into another variable, such as `last = q.Where(v)`, still counts as a use of `q`.
+
+Only the body closure itself is treated as a loop. A closure nested inside the body (an IIFE, a `defer`) is not, which matches how a closure nested in a plain loop is handled.
 
 ## Pure Contract Validation
 
