@@ -1,0 +1,286 @@
+package internal
+
+import "gorm.io/gorm"
+
+// =============================================================================
+// PACKAGE-LEVEL VARIABLES (#183)
+//
+// A load of a package-level *gorm.DB is matched to the stores to it in the same
+// function that can reach the load, like a struct field (#182). A load that no
+// store in the function reaches is immutable: such a global usually holds a
+// gorm.Open result.
+//
+// The body of a package-level `var f = func(...)` closure is analyzed like a
+// local closure, and a call through such a variable honours the directives on
+// the closure.
+// =============================================================================
+
+var (
+	pvDB      *gorm.DB
+	pvGlobal  *gorm.DB
+	pvRebuilt *gorm.DB
+	pvLoop    *gorm.DB
+	pvCond    *gorm.DB
+	pvOuter   *gorm.DB
+	pvAliased *gorm.DB
+	pvOnce    *gorm.DB
+	pvClosure *gorm.DB
+	pvMerge   *gorm.DB
+)
+
+// pvInit is initialized at package level with a mutable chain.
+var pvInit = pvDB.Where("pkg")
+
+// =============================================================================
+// SHOULD REPORT: stores to a package-level variable
+// =============================================================================
+
+// pvStoreThenReuse: the case from #183.
+func pvStoreThenReuse(db *gorm.DB) {
+	pvGlobal = db.Session(&gorm.Session{}).Where("tenant").Session(&gorm.Session{})
+	pvGlobal.Where("a").Find(nil)
+	pvGlobal.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// pvRebuildThenReuse: the builder idiom on a global.
+func pvRebuildThenReuse() {
+	pvRebuilt = pvRebuilt.Where("tenant").Session(&gorm.Session{})
+	pvRebuilt.Find(nil)
+	pvRebuilt.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// pvConditionalStoreTwice: a store in one branch reaches both uses.
+func pvConditionalStoreTwice(cond bool) {
+	if cond {
+		pvCond = pvCond.Where("tenant").Session(&gorm.Session{})
+	}
+	pvCond.Find(nil)
+	pvCond.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// pvLoopUseOfOuterStore: a value stored before a loop is reused on every
+// iteration.
+func pvLoopUseOfOuterStore(n int) {
+	pvOuter = pvOuter.Where("tenant").Session(&gorm.Session{})
+	for i := 0; i < n; i++ {
+		pvOuter.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	}
+}
+
+// pvLoopRebuildThenUse: the value rebuilt in one iteration is used, then
+// rebuilt again in the next.
+func pvLoopRebuildThenUse(conds []string) {
+	for _, c := range conds {
+		pvLoop = pvLoop.Where(c).Session(&gorm.Session{}) // want `\*gorm\.DB reused: second branch from mutable root`
+		pvLoop.Find(nil)
+	}
+}
+
+// pvStoreThenLocalReuse: the stored value is reused through the global and
+// through the local it came from.
+func pvStoreThenLocalReuse(db *gorm.DB) {
+	q := db.Where("x").Session(&gorm.Session{})
+	pvAliased = q
+	pvAliased.Find(nil)
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// =============================================================================
+// SHOULD NOT REPORT: stores to a package-level variable
+// =============================================================================
+
+// pvStoreOnce: one use after the store.
+func pvStoreOnce(db *gorm.DB) {
+	pvOnce = db.Where("tenant")
+	pvOnce.Find(nil)
+}
+
+// pvRebuildOnce: one use after the builder store.
+func pvRebuildOnce() {
+	pvRebuilt = pvRebuilt.Where("a")
+	pvRebuilt = pvRebuilt.Where("b")
+	pvRebuilt.Find(nil)
+}
+
+// pvLoopBuilder: the builder idiom repeated in a loop, then one use.
+func pvLoopBuilder(conds []string) {
+	for _, c := range conds {
+		pvLoop = pvLoop.Where(c)
+	}
+	pvLoop.Find(nil)
+}
+
+// pvStoreImmutable: a Session at the end of the chain makes the stored value
+// immutable.
+func pvStoreImmutable(db *gorm.DB) {
+	pvOnce = db.Where("tenant").Session(&gorm.Session{})
+	pvOnce.Find(nil)
+	pvOnce.Count(nil)
+}
+
+// pvReadOnly: a global that the function never stores to is immutable. This is
+// the deliberate trade-off: it usually holds a gorm.Open result.
+func pvReadOnly() {
+	pvDB.Where("a").Find(nil)
+	pvDB.Where("b").Find(nil)
+}
+
+// pvInitializedAtPackageLevel: pvInit holds a mutable chain from its package
+// level initializer.
+// [LIMITATION] Not reported. Stores in other functions, including the package
+// initializer, are not seen, so the load is immutable.
+func pvInitializedAtPackageLevel() {
+	pvInit.Find(nil)
+	pvInit.Count(nil)
+}
+
+// pvStoreInClosure: the store happens inside a closure.
+// [LIMITATION] Not reported. Only stores in the load's own function are seen.
+func pvStoreInClosure(db *gorm.DB) {
+	func() { pvClosure = db.Where("x") }()
+	pvClosure.Find(nil)
+	pvClosure.Count(nil)
+}
+
+// pvConditionalRebuildOfStore: the rebuild in one branch replaces the value
+// stored before it.
+// [LIMITATION] Reported. A store to a global is not a merge point the way a
+// local's Phi is, so Where("a") counts as a branch of the stored root. A
+// struct field behaves the same.
+func pvConditionalRebuildOfStore(db *gorm.DB, cond bool) {
+	pvMerge = db.Where("x").Session(&gorm.Session{})
+	if cond {
+		pvMerge = pvMerge.Where("a")
+	}
+	pvMerge.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// =============================================================================
+// PACKAGE-LEVEL CLOSURES
+// =============================================================================
+
+// pvReuseClosure: the body of a package-level closure is analyzed.
+var pvReuseClosure = func(db *gorm.DB) {
+	q := db.Where("x").Session(&gorm.Session{})
+	q.Find(nil)
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// pvNestedClosure: a closure nested in a package-level closure is analyzed.
+var pvNestedClosure = func(db *gorm.DB) func() {
+	return func() {
+		q := db.Where("x").Session(&gorm.Session{})
+		q.Find(nil)
+		q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	}
+}
+
+// pvPureClosure keeps the pure contract.
+//
+//gormreuse:pure
+var pvPureClosure = func(q *gorm.DB) *gorm.DB { return q.Session(&gorm.Session{}) }
+
+// pvLeakingPureClosure breaks the pure contract.
+//
+//gormreuse:pure
+var pvLeakingPureClosure = func(q *gorm.DB) {
+	q.Where("x") // want `pure function pollutes \*gorm\.DB argument by calling Where`
+}
+
+// pvImmutableReturnClosure returns an immutable value.
+//
+//gormreuse:immutable-return
+var pvImmutableReturnClosure = func() *gorm.DB { return pvDB.Session(&gorm.Session{}) }
+
+// pvCallPureClosure: a call through a pure package-level closure does not
+// pollute its argument.
+func pvCallPureClosure(db *gorm.DB) {
+	q := db.Where("x")
+	pvPureClosure(q)
+	q.Find(nil)
+}
+
+// pvCallLeakingPureClosure: a pure closure that breaks its contract is not
+// trusted at its call sites.
+func pvCallLeakingPureClosure(db *gorm.DB) {
+	q := db.Where("x").Session(&gorm.Session{})
+	pvLeakingPureClosure(q)
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// pvCallImmutableReturnClosure: the result of an immutable-return closure can
+// be reused.
+func pvCallImmutableReturnClosure() {
+	q := pvImmutableReturnClosure()
+	q.Find(nil)
+	q.Count(nil)
+}
+
+// pvReassignedClosure is assigned again outside its initializer, so a call
+// through it may run another function.
+//
+//gormreuse:pure
+var pvReassignedClosure = func(q *gorm.DB) { _ = q }
+
+func pvReassignClosure() {
+	pvReassignedClosure = func(q *gorm.DB) { q.Find(nil) }
+}
+
+// pvCallReassignedClosure: the callee is not known, so the call pollutes.
+func pvCallReassignedClosure(db *gorm.DB) {
+	q := db.Where("x").Session(&gorm.Session{})
+	pvReassignedClosure(q)
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// PvExportedPureClosure may be assigned by another package.
+//
+//gormreuse:pure
+var PvExportedPureClosure = func(q *gorm.DB) { _ = q }
+
+// pvCallExportedPureClosure: an exported variable may hold another function
+// when it is called, so the call pollutes.
+func pvCallExportedPureClosure(db *gorm.DB) {
+	q := db.Where("x").Session(&gorm.Session{})
+	PvExportedPureClosure(q)
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// pvAddressTakenClosure and pvStoredAddressClosure have their address taken,
+// so they may be assigned through a pointer.
+//
+//gormreuse:pure
+var pvAddressTakenClosure = func(q *gorm.DB) { _ = q }
+
+//gormreuse:pure
+var pvStoredAddressClosure = func(q *gorm.DB) { _ = q }
+
+var pvClosurePtr = &pvStoredAddressClosure
+
+func pvTakeClosureAddr() *func(*gorm.DB) { return &pvAddressTakenClosure }
+
+// pvCallAddressTakenClosures: neither callee is known, so both calls pollute.
+func pvCallAddressTakenClosures(db *gorm.DB) {
+	base := db.Session(&gorm.Session{})
+	q := base.Where("x").Session(&gorm.Session{})
+	pvAddressTakenClosure(q)
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	r := base.Where("y").Session(&gorm.Session{})
+	pvStoredAddressClosure(r)
+	r.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// pvImmutableParamClosure branches its parameter, so a caller must pass an
+// isolated value.
+//
+//gormreuse:immutable-param
+var pvImmutableParamClosure = func(q *gorm.DB) {
+	q.Where("a").Find(nil)
+	q.Where("b").Find(nil)
+}
+
+// pvCallImmutableParamClosure: the caller-side contract is checked through the
+// variable.
+func pvCallImmutableParamClosure(db *gorm.DB) {
+	pvImmutableParamClosure(db.Where("x")) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter`
+}

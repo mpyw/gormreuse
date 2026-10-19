@@ -515,6 +515,32 @@ Decisions and limitations:
 - A struct value that a Phi merges (`e := E{a}; if c { e = E{b} }`) yields the field of every edge. The single-root trace takes the first edge, so the suggested fix makes only that edge immutable. A struct from a channel receive, or a map or slice element, is not followed.
 - A `Field` read over a load uses the CFG-ordered store matching of #182 (`fieldStores`), so `e.DB = other` between two promoted calls is not a second branch. A read inside a closure has no CFG path to the stores in the enclosing function, so it matches all of them, and the single-root trace takes the first. This keeps reuse reported when the closure may run before a later store.
 
+### Package-level variables (#183)
+
+A package-level variable reaches the analysis in two ways: as a `*gorm.DB` that a function loads and stores, and as a `var f = func(...)` closure.
+
+**Loads of a `*gorm.DB` global.** A load `*G` is matched to the stores to `G` in the load's own function that reach it, with the same CFG walk as a field (`fieldStores`, #182). `globalStoredValues` does this, and `isLoopFieldRebuild` treats `for … { G = G.Where(c) }` like the field form.
+
+| Code | The load sees | Result |
+| --- | --- | --- |
+| `G = db.Session(s).Where("t"); G.Where("a").Find(nil); G.Where("b").Find(nil)` | the store | second branch reported |
+| `G = G.Where("t"); G.Find(nil); G.Count(nil)` | nothing on the right, the store after it | second branch reported |
+| `G.Where("a").Find(nil); G.Where("b").Find(nil)`, no store in the function | nothing | immutable |
+
+The last row is a deliberate trade-off. A global that a function only reads usually holds a `gorm.Open` result, which is safe to branch. Treating every read of a global as mutable would report each second use of a shared handle. So the function's own stores decide, and a read that no store reaches is immutable. The `//gormreuse:immutable-return` body check reads globals the other way: it reports a returned global only when every assignment in the package is provably mutable ([Immutable-return body contract](#immutable-return-body-contract-194)). Both directions give the benefit of the doubt when the value is unknown.
+
+Limitations:
+
+- Stores in other functions are not seen. That includes the package initializer (`var gq = g.Where("pkg")`), a closure the function calls, and the enclosing function of a closure that loads the global.
+- A store to a global is not a merge point. `G = db.Where("x"); if c { G = G.Where("a") }; G.Find(nil)` is reported, because `Where("a")` counts as a branch of the stored root. A struct field behaves the same.
+
+**Package-level closures.** buildssa puts only declared functions and their literals in `SrcFuncs`. The closure of `var f = func(...)` belongs to the synthetic package `init`, so before #183 its body was never analyzed, a `//gormreuse:pure` on it was never validated, and a call through `f` carried none of its directives. Now:
+
+- `analyzedFuncs` adds the anonymous functions of `init`, nested ones included, to every pass. Their bodies get reuse detection and directive validation like any closure.
+- `tracer.CollectFuncVars` maps a variable to its closure, and `FuncVars.Callee` resolves a call through it. The tracer, the call handler (plain, `go` and `defer` calls) and the pure validator use it, so `pure`, `immutable-return` and the `immutable-param` caller contract apply at the call site.
+
+A variable is resolved only when the package stores to it once, the stored value is a function, its address is used only to load and store it, and it is unexported. Otherwise the call may run another function: a second assignment, a write through a pointer, or an assignment in another package. An unresolved call stays a dynamic call: it pollutes its arguments, and its result is a mutable root (#176).
+
 ## Pure Contract Validation
 
 `purity.Validator` checks the body of every `//gormreuse:pure` function. It follows "parameter-derived" values and reports when one is polluted or escapes.
@@ -736,6 +762,7 @@ When refactoring code, follow these rules strictly:
 - **IIFE/closure stored result**: When IIFE/closure result is stored (not directly chained), branch tracking differs from runtime order
 
 - **immutable-param through an interface**: `var a applier = repo{}; a.apply(q)` calls an interface method, so the callee and its directive are unknown and the caller-side contract is not checked. The same holds for a call through a func-typed parameter
+- **Package-level variables (#183)**: a load of a `*gorm.DB` global sees only the stores in its own function, so a global that the function never stores to is immutable. A call through an exported, reassigned or address-taken `var f = func(...)` does not honour the closure's directives. See [Package-level variables](#package-level-variables-183)
 - **Directives across packages (#195)**: a callee's `pure` and `immutable-return` are read back from its source on disk and trusted, even when its body breaks the contract. The `immutable-param` caller contract is not checked, and `immutable-input(name)` is ignored, for a callee in another package
 
 These are documented in `testdata/src/gormreuse/evil.go` and `testdata/src/externalpure/use.go` with `[LIMITATION]` markers.
@@ -789,7 +816,7 @@ Limitations:
 - A dynamic callee (a func-typed parameter, an interface method) ends the trace, so a Session result returned through one is not reported.
 - A callback that returns a root `*gorm.DB` (also `clone>0`, for example a package-level `DB`) leaks the same way. It is not reported, since the warning is about the three Session-family methods.
 - The rule does not model the order of several scopes; each callback that returns a Session-family result is reported, even when a later scope returns a `clone==0` value.
-- A package-level closure is now a known Scopes callback, but reuse detection still does not analyze its body, because it is not in `SrcFuncs` (#183).
+- A package-level closure is a known Scopes callback, and reuse detection analyzes its body like any closure ([Package-level variables](#package-level-variables-183)).
 
 ## Related Projects
 

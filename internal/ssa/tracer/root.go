@@ -47,6 +47,8 @@
 //	│  *ssa.Alloc             │  Find Store instructions to this alloc     │
 //	│  *ssa.FreeVar           │  Find binding in parent's MakeClosure      │
 //	│  *ssa.FieldAddr         │  Find Store to this field                  │
+//	│  *ssa.Global            │  Find Store to it in the same function     │
+//	│                         │  (none: immutable, #183)                   │
 //	│  *ssa.Parameter         │  ROOT - a *gorm.DB parameter is mutable by │
 //	│                         │  default (caller may pass clone==0, #61)   │
 //	│  *ssa.Parameter (exempt)│  STOP - immutable when the fn is annotated │
@@ -113,6 +115,7 @@ type RootTracer struct {
 	scopesCallbacks      map[*ssa.Function]bool      // Scopes/Preload callbacks (params are mutable roots)
 	immutableCallbacks   map[*ssa.Function]bool      // Transaction/FindInBatches callbacks (fresh tx)
 	fieldRoots           map[fieldRootKey]*FieldRoot // Interned FieldRoots (one per call and field path)
+	funcVars             FuncVars                    // Package-level variables that hold one function (#183)
 }
 
 // PureVerdicts is what validating the //gormreuse:pure functions found. The
@@ -177,7 +180,10 @@ func (p *PureVerdicts) ReturnedArgs(fn *ssa.Function, args []ssa.Value) []ssa.Va
 // (issue #61). immutableCallbacks lists function literals passed to gorm's
 // Transaction/FindInBatches, whose tx parameter is a fresh forkable (clone>0)
 // handle and is therefore immutable. Both may be nil.
-func New(pureFuncs, immutableReturnFuncs, immutableParamFuncs *directive.DirectiveFuncSet, pure *PureVerdicts, scopesCallbacks, immutableCallbacks map[*ssa.Function]bool) *RootTracer {
+//
+// funcVars resolves a call through a package-level variable that holds one
+// function to that function, so its directives apply (#183). It may be nil.
+func New(pureFuncs, immutableReturnFuncs, immutableParamFuncs *directive.DirectiveFuncSet, pure *PureVerdicts, scopesCallbacks, immutableCallbacks map[*ssa.Function]bool, funcVars FuncVars) *RootTracer {
 	return &RootTracer{
 		pureFuncs:            pureFuncs,
 		immutableReturnFuncs: immutableReturnFuncs,
@@ -185,6 +191,7 @@ func New(pureFuncs, immutableReturnFuncs, immutableParamFuncs *directive.Directi
 		pure:                 pure,
 		scopesCallbacks:      scopesCallbacks,
 		immutableCallbacks:   immutableCallbacks,
+		funcVars:             funcVars,
 		onlyParams:           make(map[*ssa.Function]bool),
 		fieldRoots:           make(map[fieldRootKey]*FieldRoot),
 	}
@@ -251,6 +258,13 @@ func (t *RootTracer) IsPureFunction(fn *ssa.Function) bool {
 		return false
 	}
 	return t.pureFuncs.Contains(fn)
+}
+
+// Callee returns the function that common calls: its static callee, or the
+// function a package-level variable holds (see FuncVars). It returns nil when
+// neither is known.
+func (t *RootTracer) Callee(common *ssa.CallCommon) *ssa.Function {
+	return t.funcVars.Callee(common)
 }
 
 // IsScopesCallbackFunc reports whether fn is a Scopes/Preload callback. The
@@ -380,7 +394,7 @@ func (t *RootTracer) traceCall(call *ssa.Call, visited map[ssa.Value]bool, loopI
 				return root
 			}
 		}
-		if t.returnsOnlyParams(call.Call.StaticCallee()) {
+		if callee, _, _ := t.calledFunc(call); t.returnsOnlyParams(callee) {
 			return nil
 		}
 	}
@@ -400,7 +414,7 @@ func (t *RootTracer) traceCall(call *ssa.Call, visited map[ssa.Value]bool, loopI
 		}
 	}
 
-	callee, _, _ := calledFunc(call)
+	callee, _, _ := t.calledFunc(call)
 	if callee != nil && isGormDBMethod(callee) {
 		// This is a gorm method call - THIS CALL is the mutable root
 		// Don't trace further - each gorm call result is its own root
@@ -981,6 +995,13 @@ func (t *RootTracer) tracePointerLoad(load *ssa.UnOp, visited map[ssa.Value]bool
 		return t.traceAlloc(p, visited, loopInfo)
 	case *ssa.FieldAddr:
 		return t.traceFieldStore(p, load, visited, loopInfo)
+	case *ssa.Global:
+		// Single-root: trace the first value stored into the global that
+		// reaches the load.
+		if vals := globalStoredValues(p, load); len(vals) > 0 {
+			return t.trace(vals[0], visited, loopInfo)
+		}
+		return nil
 	default:
 		return t.trace(p, visited, loopInfo)
 	}
@@ -1292,7 +1313,7 @@ type fieldRootKey struct {
 // the call returns immutable values (a builtin or //gormreuse:immutable-return
 // function).
 func (t *RootTracer) internFieldRoot(r *FieldRoot) ssa.Value {
-	if t.returnsImmutable(r.Call.Call.StaticCallee()) {
+	if callee, _, _ := t.calledFunc(r.Call); t.returnsImmutable(callee) {
 		return nil
 	}
 	key := fieldRootKey{call: r.Call, path: r.pathString()}
@@ -1482,6 +1503,23 @@ func fieldStores(fn *ssa.Function, root ssa.Value, path []int, load ssa.Instruct
 	// order.
 	slices.SortFunc(found, func(a, b *ssa.Store) int { return a.Block().Index - b.Block().Index })
 	return found
+}
+
+// globalStoredValues returns, in program order, the values stored into the
+// package-level variable g that reach load (#183). Only stores in load's own
+// function are seen, matched as fieldStores matches a field. A load that no
+// such store reaches has no stored value, so it is immutable: a global the
+// function only reads usually holds a gorm.Open result, and treating every
+// read of it as mutable would report each second use of a shared handle.
+//
+//	DB = DB.Where("tenant")  // the load on the right sees no store
+//	DB.Find(nil)             // sees the store above
+func globalStoredValues(g *ssa.Global, load ssa.Instruction) []ssa.Value {
+	var vals []ssa.Value
+	for _, store := range fieldStores(load.Parent(), g, nil, load) {
+		vals = append(vals, store.Val)
+	}
+	return vals
 }
 
 // traceIIFEReturns traces through an immediately invoked function expression.
@@ -1743,6 +1781,12 @@ func (t *RootTracer) traceAllPointerLoads(load *ssa.UnOp, visited map[ssa.Value]
 		return t.traceAllAllocStores(p, visited, loopInfo)
 	case *ssa.FieldAddr:
 		return t.traceAllFieldStores(p, load, visited, loopInfo)
+	case *ssa.Global:
+		var roots []ssa.Value
+		for _, v := range globalStoredValues(p, load) {
+			roots = append(roots, t.traceAll(v, visited, loopInfo)...)
+		}
+		return roots
 	case *ssa.Phi:
 		// Check for loop variable swap pattern
 		if loopHeaderPhis := isLoopVariableSwap(p, loopInfo); loopHeaderPhis != nil {
@@ -1878,9 +1922,9 @@ func (t *RootTracer) isImmutableSource(v ssa.Value) bool {
 		// Builtin or //gormreuse:immutable-return call yields an immutable value,
 		// except a Session call that may set Initialized: it returns a clone==0
 		// handle, so the call is a mutable root like a chain method (#174).
-		callee, _, _ := calledFunc(val)
+		callee, _, _ := t.calledFunc(val)
 		if t.isImmutableReturningBuiltin(callee) {
-			return !builtinCallEffect(val).ReturnsMutable
+			return !t.builtinCallEffect(val).ReturnsMutable
 		}
 		return t.returnsImmutable(callee)
 	default:
@@ -1927,7 +1971,7 @@ func (t *RootTracer) collectAliasedRoots(v ssa.Value, loopInfo *cfg.LoopInfo, se
 			continue
 		}
 		seen[call] = true
-		_, recv, _ := calledFunc(call)
+		_, recv, _ := t.calledFunc(call)
 		if r := t.FindMutableRoot(recv, loopInfo); r != nil {
 			*roots = append(*roots, AliasedRoot{Root: r, Copy: call})
 		}
@@ -1938,18 +1982,18 @@ func (t *RootTracer) collectAliasedRoots(v ssa.Value, loopInfo *cfg.LoopInfo, se
 // sharesReceiverStatement reports whether call is a gorm Session or Debug
 // method call whose result may share its receiver's Statement.
 func (t *RootTracer) sharesReceiverStatement(call *ssa.Call) bool {
-	callee, recv, _ := calledFunc(call)
+	callee, recv, _ := t.calledFunc(call)
 	if !t.isImmutableReturningBuiltin(callee) || recv == nil {
 		return false
 	}
-	return builtinCallEffect(call).SharesStatement
+	return t.builtinCallEffect(call).SharesStatement
 }
 
 // builtinCallEffect returns the effect of a call to a gorm builtin, passing
 // the *gorm.Session argument of a Session method call. The caller must make
 // sure the callee is a gorm builtin.
-func builtinCallEffect(call *ssa.Call) typeutil.BuiltinEffect {
-	callee, _, args := calledFunc(call)
+func (t *RootTracer) builtinCallEffect(call *ssa.Call) typeutil.BuiltinEffect {
+	callee, _, args := t.calledFunc(call)
 	var sessionConfig ssa.Value
 	if len(args) > 0 {
 		sessionConfig = args[0]
@@ -1965,14 +2009,15 @@ func builtinCallEffect(call *ssa.Call) typeutil.BuiltinEffect {
 // r.m(x): SSA builds f as MakeClosure(m$bound, [r]), so the receiver is the
 // closure's binding and the method is the one the synthetic wrapper stands
 // for (directive.DeclaredFunc). Without this, the wrapper's own m call would
-// be the root of every call through f (#178). The callee is nil for a dynamic
-// call.
-func calledFunc(call *ssa.Call) (callee *ssa.Function, recv ssa.Value, args []ssa.Value) {
+// be the root of every call through f (#178). A call through a package-level
+// variable that holds one function is resolved to it (see FuncVars, #183). The
+// callee is nil for any other dynamic call.
+func (t *RootTracer) calledFunc(call *ssa.Call) (callee *ssa.Function, recv ssa.Value, args []ssa.Value) {
 	if isMethodValueCall(call) {
 		mc := call.Call.Value.(*ssa.MakeClosure)
 		return directive.DeclaredFunc(mc.Fn.(*ssa.Function)), mc.Bindings[0], call.Call.Args
 	}
-	callee = call.Call.StaticCallee()
+	callee = t.Callee(&call.Call)
 	if callee != nil && callee.Signature.Recv() != nil && len(call.Call.Args) > 0 {
 		return callee, call.Call.Args[0], call.Call.Args[1:]
 	}
@@ -2008,7 +2053,7 @@ func (t *RootTracer) pureReturnedArgs(call *ssa.Call) []ssa.Value {
 	}
 	// A call through a method value passes its receiver as a binding, not
 	// as an argument; put it back so a pure method returning it is followed.
-	callee, recv, args := calledFunc(call)
+	callee, recv, args := t.calledFunc(call)
 	if recv != nil {
 		args = append([]ssa.Value{recv}, args...)
 	}
@@ -2434,6 +2479,76 @@ func walkInstrs(funcs []*ssa.Function, visit func(ssa.Instruction)) {
 	for _, fn := range funcs {
 		rec(fn)
 	}
+}
+
+// FuncVars maps each package-level variable that always holds one function to
+// that function, such as `var helper = func(db *gorm.DB) { ... }` (#183). A
+// call through such a variable has no static callee, so without this map it
+// would carry none of the directives written on the closure.
+//
+// A variable is in the map only when the package stores to it exactly once, the
+// stored value is a function, its address is used only to load and store it,
+// and it is unexported. Any other variable may hold another function when it
+// is called: a second assignment, a write through a pointer, or, for an
+// exported one, an assignment in another package.
+type FuncVars map[*ssa.Global]*ssa.Function
+
+// CollectFuncVars builds the FuncVars of the package that funcs belong to.
+// funcs must hold every function of the package with a body, including the
+// package initializer, which runs package-level `var x = ...` initializers.
+// Nested anonymous functions are visited too.
+func CollectFuncVars(funcs []*ssa.Function) FuncVars {
+	stored := make(map[*ssa.Global][]ssa.Value)
+	escaped := make(map[*ssa.Global]bool)
+	walkInstrs(funcs, func(instr ssa.Instruction) {
+		switch x := instr.(type) {
+		case *ssa.Store:
+			if g, ok := x.Addr.(*ssa.Global); ok {
+				stored[g] = append(stored[g], x.Val)
+			}
+			if g, ok := x.Val.(*ssa.Global); ok {
+				escaped[g] = true
+			}
+			return
+		case *ssa.UnOp:
+			if x.Op == token.MUL {
+				return
+			}
+		case *ssa.DebugRef:
+			return
+		}
+		for _, op := range instr.Operands(nil) {
+			if g, ok := (*op).(*ssa.Global); ok {
+				escaped[g] = true
+			}
+		}
+	})
+
+	vars := make(FuncVars)
+	for g, vals := range stored {
+		if escaped[g] || len(vals) != 1 || g.Object() == nil || g.Object().Exported() {
+			continue
+		}
+		if fn, ok := vals[0].(*ssa.Function); ok {
+			vars[g] = fn
+		}
+	}
+	return vars
+}
+
+// Callee returns the function that common calls: its static callee, or the
+// function held by the package-level variable it loads. It returns nil when
+// neither is known.
+func (vars FuncVars) Callee(common *ssa.CallCommon) *ssa.Function {
+	if fn := common.StaticCallee(); fn != nil {
+		return fn
+	}
+	if load, ok := common.Value.(*ssa.UnOp); ok && load.Op == token.MUL {
+		if g, ok := load.X.(*ssa.Global); ok {
+			return vars[g]
+		}
+	}
+	return nil
 }
 
 // collectCallbacksPassedTo returns every function passed as a variadic

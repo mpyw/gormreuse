@@ -98,6 +98,11 @@ func RunSSA(
 	// function instead of dropping its diagnostics silently (#186).
 	guard := &panicGuard{pass: pass, reported: make(map[*ssa.Function]bool)}
 
+	// Analyze the closures of package-level `var f = func(...)` initializers
+	// too, and resolve calls through such variables (#183).
+	funcs := analyzedFuncs(ssaInfo)
+	funcVars := tracer.CollectFuncVars(append(slices.Clone(funcs), ssaInfo.Pkg.Func("init")))
+
 	// skip reports whether a function is in an excluded file. Ignore directives
 	// do not skip anything: they only suppress reports (see report).
 	skip := func(fn *ssa.Function) bool {
@@ -119,29 +124,29 @@ func RunSSA(
 	// as pure at its call sites (issue #66), and the result of one that keeps
 	// it may be its argument (#188), so this must complete for ALL functions
 	// before the analysis pass runs — a caller may be visited before its callee.
-	pureVerdicts := validatePureFuncs(ssaInfo, pureFuncs, immutableReturnFuncs, skip, report, guard)
+	pureVerdicts := validatePureFuncs(funcs, pureFuncs, immutableReturnFuncs, funcVars, skip, report, guard)
 
 	// Collect Scopes/Preload callbacks once: their *gorm.DB parameter receives a
 	// mid-chain (clone==0) value, so reuse inside them must be detected (#60).
-	scopesCallbacks := tracer.CollectScopesCallbacks(ssaInfo.SrcFuncs)
+	scopesCallbacks := tracer.CollectScopesCallbacks(funcs)
 
 	// Collect immutable callbacks once: gorm's Transaction/FindInBatches hand
 	// their callback a fresh forkable (clone>0) handle, and a user function
 	// declared //gormreuse:immutable-input(cb) promises the same for cb. Their
 	// callback's tx parameter is therefore exempt from the Phase 1b
 	// mutable-by-default treatment (#60 SC103, #61, #62 case 2.2).
-	immutableCallbacks := tracer.CollectImmutableCallbacks(ssaInfo.SrcFuncs)
-	tracer.CollectImmutableInputCallbacks(ssaInfo.SrcFuncs, immutableInputSet, immutableCallbacks)
+	immutableCallbacks := tracer.CollectImmutableCallbacks(funcs)
+	tracer.CollectImmutableInputCallbacks(funcs, immutableInputSet, immutableCallbacks)
 	// The sets are keyed by function, so keep only the functions that nothing
 	// else can call: a named callback that is also called directly, or that is
 	// exported, keeps a mutable parameter (#191).
-	tracer.DropReachableCallbacks(ssaInfo.SrcFuncs, immutableInputSet, immutableCallbacks)
+	tracer.DropReachableCallbacks(funcs, immutableInputSet, immutableCallbacks)
 
 	// Enforce the body-side immutable-input contract (#62 cases 2.3/2.4) and
 	// report unused immutable-input directives (U1-U3). Uses a tracer with the
 	// full context so FindMutableRoot classifies immutable sources correctly.
-	inputTracer := tracer.New(pureFuncs, immutableReturnFuncs, immutableParamFuncs, pureVerdicts, scopesCallbacks, immutableCallbacks)
-	for _, fn := range ssaInfo.SrcFuncs {
+	inputTracer := tracer.New(pureFuncs, immutableReturnFuncs, immutableParamFuncs, pureVerdicts, scopesCallbacks, immutableCallbacks, funcVars)
+	for _, fn := range funcs {
 		if skip(fn) {
 			continue
 		}
@@ -160,12 +165,12 @@ func RunSSA(
 	// Enforce the body-side immutable-return contract. Reuses inputTracer, which
 	// carries the full pass context so other immutable-return / immutable-param
 	// functions are classified correctly.
-	reportImmutableReturnViolations(ssaInfo, immutableReturnFuncs, inputTracer, skip, report, guard)
+	reportImmutableReturnViolations(funcs, immutableReturnFuncs, inputTracer, skip, report, guard)
 
 	// TEMPORARY (GORM bug go-gorm/gorm#7592): warn on Session/WithContext/Debug
 	// results returned from Scopes callbacks. Deletable by removing the scopeswarn
 	// package and this block once the upstream fix ships in a supported release — see that package.
-	scopesOnly := tracer.CollectScopesOnlyCallbacks(ssaInfo.SrcFuncs)
+	scopesOnly := tracer.CollectScopesOnlyCallbacks(funcs)
 	for _, w := range scopeswarn.Validate(scopesOnly, skip) {
 		report(w.Pos, w.Message)
 	}
@@ -181,21 +186,21 @@ func RunSSA(
 	// contract check (stage 2b, passed into the checker below) and, by its
 	// complement, redundant-directive detection (a directive whose function does
 	// NOT reuse a param suppresses nothing).
-	needsImmutableParam := computeNeedsImmutableParam(ssaInfo, immutableParamFuncs, pureFuncs, immutableReturnFuncs, pureVerdicts, scopesCallbacks, immutableCallbacks, skip, guard)
+	needsImmutableParam := computeNeedsImmutableParam(funcs, immutableParamFuncs, pureFuncs, immutableReturnFuncs, pureVerdicts, scopesCallbacks, immutableCallbacks, funcVars, skip, guard)
 
 	// PASS 2: run SSA reuse analysis.
-	for _, fn := range ssaInfo.SrcFuncs {
+	for _, fn := range funcs {
 		if skip(fn) {
 			continue
 		}
 
-		chk := newChecker(pass, ignores, pureFuncs, immutableReturnFuncs, immutableParamFuncs, pureVerdicts, scopesCallbacks, immutableCallbacks, needsImmutableParam, globalReported, globalSuggestedEdits, fixGen)
+		chk := newChecker(pass, ignores, pureFuncs, immutableReturnFuncs, immutableParamFuncs, pureVerdicts, scopesCallbacks, immutableCallbacks, needsImmutableParam, funcVars, globalReported, globalSuggestedEdits, fixGen)
 		guard.run(fn, func() { chk.checkFunction(fn) })
 	}
 
 	// Report immutable-param directives that are signature-valid but have no
 	// effect (no *gorm.DB parameter is reused).
-	reportRedundantImmutableParam(ssaInfo, immutableParamFuncs, pureFuncs, needsImmutableParam, skip, report)
+	reportRedundantImmutableParam(funcs, immutableParamFuncs, pureFuncs, needsImmutableParam, skip, report)
 
 	reportUnusedDirectiveFuncs(pureFuncs, immutableReturnFuncs, immutableParamFuncs, report)
 
@@ -204,6 +209,26 @@ func RunSSA(
 	for _, pos := range ignores.UnusedIgnores() {
 		pass.Reportf(pos, "unused gormreuse:ignore directive")
 	}
+}
+
+// analyzedFuncs returns the functions the analysis runs on: the source
+// functions of the package, then the closures of package-level initializers
+// such as `var f = func(db *gorm.DB) { ... }` (#183), nested ones included.
+// Those closures belong to the synthetic package init function, which
+// buildssa leaves out of SrcFuncs.
+func analyzedFuncs(ssaInfo *buildssa.SSA) []*ssa.Function {
+	funcs := slices.Clone(ssaInfo.SrcFuncs)
+	if init := ssaInfo.Pkg.Func("init"); init != nil {
+		var addAnons func(fn *ssa.Function)
+		addAnons = func(fn *ssa.Function) {
+			for _, anon := range fn.AnonFuncs {
+				funcs = append(funcs, anon)
+				addAnons(anon)
+			}
+		}
+		addAnons(init)
+	}
+	return funcs
 }
 
 // validatePureFuncs reports every //gormreuse:pure contract violation and
@@ -218,8 +243,9 @@ func RunSSA(
 // from the final round, so each is reported once and sees the complete
 // verdicts.
 func validatePureFuncs(
-	ssaInfo *buildssa.SSA,
+	funcs []*ssa.Function,
 	pureFuncs, immutableReturnFuncs *directive.DirectiveFuncSet,
+	funcVars tracer.FuncVars,
 	skip func(*ssa.Function) bool,
 	report func(token.Pos, string),
 	guard *panicGuard,
@@ -229,7 +255,7 @@ func validatePureFuncs(
 		Returned: make(map[*ssa.Function][]int),
 	}
 	var targets []*ssa.Function
-	for _, fn := range ssaInfo.SrcFuncs {
+	for _, fn := range funcs {
 		if !skip(fn) && pureFuncs.Contains(fn) {
 			targets = append(targets, fn)
 		}
@@ -244,7 +270,7 @@ func validatePureFuncs(
 				continue
 			}
 			guard.run(fn, func() {
-				validator := purity.NewValidator(fn, pureFuncs, immutableReturnFuncs, verdicts)
+				validator := purity.NewValidator(fn, pureFuncs, immutableReturnFuncs, verdicts, funcVars)
 				// Only a definitive violation revokes pure-trust at call sites;
 				// conservative func-arg violations do not (avoids FP cascades).
 				if slices.ContainsFunc(validator.Validate(), func(v purity.Violation) bool { return v.Definitive }) {
@@ -266,7 +292,7 @@ func validatePureFuncs(
 	reported := make(map[purity.Violation]bool)
 	for _, fn := range targets {
 		guard.run(fn, func() {
-			for _, v := range purity.NewValidator(fn, pureFuncs, immutableReturnFuncs, verdicts).Validate() {
+			for _, v := range purity.NewValidator(fn, pureFuncs, immutableReturnFuncs, verdicts, funcVars).Validate() {
 				if reported[v] {
 					continue
 				}
@@ -284,15 +310,15 @@ func validatePureFuncs(
 // (returnsImmutable) and silently allows unsafe reuse of the actually-mutable
 // return value at every call site.
 func reportImmutableReturnViolations(
-	ssaInfo *buildssa.SSA,
+	funcs []*ssa.Function,
 	immutableReturnFuncs *directive.DirectiveFuncSet,
 	rt *tracer.RootTracer,
 	skip func(*ssa.Function) bool,
 	report func(token.Pos, string),
 	guard *panicGuard,
 ) {
-	validator := purity.NewImmutableReturnValidator(ssaInfo.SrcFuncs, immutableReturnFuncs, rt)
-	for _, fn := range ssaInfo.SrcFuncs {
+	validator := purity.NewImmutableReturnValidator(funcs, immutableReturnFuncs, rt)
+	for _, fn := range funcs {
 		if skip(fn) {
 			continue
 		}
@@ -329,10 +355,11 @@ func reportImmutableReturnViolations(
 // contract violation at the forwarding call. This is an uncommon delegation
 // pattern; suppress with //gormreuse:ignore if intended.
 func computeNeedsImmutableParam(
-	ssaInfo *buildssa.SSA,
+	funcs []*ssa.Function,
 	immutableParamFuncs, pureFuncs, immutableReturnFuncs *directive.DirectiveFuncSet,
 	pureVerdicts *tracer.PureVerdicts,
 	scopesCallbacks, immutableCallbacks map[*ssa.Function]bool,
+	funcVars tracer.FuncVars,
 	skip func(*ssa.Function) bool,
 	guard *panicGuard,
 ) map[*ssa.Function]bool {
@@ -340,7 +367,7 @@ func computeNeedsImmutableParam(
 	if immutableParamFuncs == nil {
 		return needs
 	}
-	for _, fn := range ssaInfo.SrcFuncs {
+	for _, fn := range funcs {
 		if skip(fn) || !immutableParamFuncs.Contains(fn) {
 			continue
 		}
@@ -352,7 +379,7 @@ func computeNeedsImmutableParam(
 		}
 		guard.run(fn, func() {
 			// Counterfactual: analyze fn with its parameters treated as mutable.
-			cf := ssautil.NewAnalyzer(fn, pureFuncs, immutableReturnFuncs, nil, pureVerdicts, scopesCallbacks, immutableCallbacks, nil)
+			cf := ssautil.NewAnalyzer(fn, pureFuncs, immutableReturnFuncs, nil, pureVerdicts, scopesCallbacks, immutableCallbacks, nil, funcVars)
 			if slices.ContainsFunc(cf.Analyze(), func(v pollution.Violation) bool {
 				p, ok := v.Root.(*ssa.Parameter)
 				return ok && p.Parent() == fn
@@ -379,7 +406,7 @@ func computeNeedsImmutableParam(
 // reportUnusedDirectiveFuncs, not here; the same guards used when building
 // needsImmutableParam keep the two paths from overlapping.
 func reportRedundantImmutableParam(
-	ssaInfo *buildssa.SSA,
+	funcs []*ssa.Function,
 	immutableParamFuncs, pureFuncs *directive.DirectiveFuncSet,
 	needsImmutableParam map[*ssa.Function]bool,
 	skip func(*ssa.Function) bool,
@@ -388,7 +415,7 @@ func reportRedundantImmutableParam(
 	if immutableParamFuncs == nil {
 		return
 	}
-	for _, fn := range ssaInfo.SrcFuncs {
+	for _, fn := range funcs {
 		if skip(fn) || !immutableParamFuncs.Contains(fn) {
 			continue
 		}
@@ -487,6 +514,7 @@ type checker struct {
 	scopesCallbacks      map[*ssa.Function]bool      // Scopes/Preload callbacks (params are mutable roots)
 	immutableCallbacks   map[*ssa.Function]bool      // Transaction/FindInBatches callbacks (fresh tx)
 	needsImmutableParam  map[*ssa.Function]bool      // immutable-param fns that branch a param (2b caller check)
+	funcVars             tracer.FuncVars             // Package-level variables that hold one function (#183)
 	reported             map[token.Pos]bool          // Deduplication of reports
 	suggestedEdits       map[editKey]bool            // Global deduplication of suggested fixes
 	fixGen               *fix.Generator              // Cached fix generator for all violations
@@ -504,7 +532,7 @@ type editKey struct {
 // across parent functions and their closures.
 // The suggestedEdits map is shared to avoid duplicate fix edits.
 // The fixGen is shared to avoid recreating the generator for each violation.
-func newChecker(pass *analysis.Pass, ignores *directive.Ignores, pureFuncs, immutableReturnFuncs, immutableParamFuncs *directive.DirectiveFuncSet, pureVerdicts *tracer.PureVerdicts, scopesCallbacks, immutableCallbacks, needsImmutableParam map[*ssa.Function]bool, reported map[token.Pos]bool, suggestedEdits map[editKey]bool, fixGen *fix.Generator) *checker {
+func newChecker(pass *analysis.Pass, ignores *directive.Ignores, pureFuncs, immutableReturnFuncs, immutableParamFuncs *directive.DirectiveFuncSet, pureVerdicts *tracer.PureVerdicts, scopesCallbacks, immutableCallbacks, needsImmutableParam map[*ssa.Function]bool, funcVars tracer.FuncVars, reported map[token.Pos]bool, suggestedEdits map[editKey]bool, fixGen *fix.Generator) *checker {
 	return &checker{
 		pass:                 pass,
 		ignores:              ignores,
@@ -515,6 +543,7 @@ func newChecker(pass *analysis.Pass, ignores *directive.Ignores, pureFuncs, immu
 		scopesCallbacks:      scopesCallbacks,
 		immutableCallbacks:   immutableCallbacks,
 		needsImmutableParam:  needsImmutableParam,
+		funcVars:             funcVars,
 		reported:             reported,
 		suggestedEdits:       suggestedEdits,
 		fixGen:               fixGen,
@@ -523,7 +552,7 @@ func newChecker(pass *analysis.Pass, ignores *directive.Ignores, pureFuncs, immu
 
 // checkFunction runs SSA analysis on a single function and reports violations.
 func (c *checker) checkFunction(fn *ssa.Function) {
-	analyzer := ssautil.NewAnalyzer(fn, c.pureFuncs, c.immutableReturnFuncs, c.immutableParamFuncs, c.pureVerdicts, c.scopesCallbacks, c.immutableCallbacks, c.needsImmutableParam)
+	analyzer := ssautil.NewAnalyzer(fn, c.pureFuncs, c.immutableReturnFuncs, c.immutableParamFuncs, c.pureVerdicts, c.scopesCallbacks, c.immutableCallbacks, c.needsImmutableParam, c.funcVars)
 	violations := analyzer.Analyze()
 
 	// Deduplicate violations by root to avoid generating duplicate fixes.

@@ -27,10 +27,8 @@ import (
 
 // PV000: Directive on a package-level `var` closure is matched, not reported as
 // unused (issue #72 gap2). A package-level var is a Decl, not a Stmt, so the
-// directive-matching path must handle the ValueSpec directly. (The closure body
-// itself is not contract-validated — package-level var closures are not among
-// the analyzed source functions — but the directive is correctly associated, so
-// no spurious "unused" warning is emitted.)
+// directive-matching path must handle the ValueSpec directly. The closure body
+// is contract-validated like any other closure (#183, see package_vars.go).
 //
 //gormreuse:pure
 var pkgLevelPureClosure = func(q *gorm.DB) { _ = q }

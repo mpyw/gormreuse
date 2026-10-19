@@ -79,7 +79,7 @@ func gormMethod(allFuncs map[*ssa.Function]bool, name string) *ssa.Function {
 func TestIsImmutableReturningBuiltin(t *testing.T) {
 	t.Parallel()
 	fixtures, all := loadProgram(t)
-	tr := New(nil, nil, nil, nil, nil, nil)
+	tr := New(nil, nil, nil, nil, nil, nil, nil)
 
 	session := gormMethod(all, "Session")
 	if session == nil {
@@ -107,7 +107,7 @@ func TestIsPureFunction(t *testing.T) {
 	t.Parallel()
 	fixtures, all := loadProgram(t)
 	// Syntax-backed pure set resolves //gormreuse:pure via each function's AST.
-	tr := New(directive.NewPureFuncSet(nil, nil), nil, nil, nil, nil, nil)
+	tr := New(directive.NewPureFuncSet(nil, nil), nil, nil, nil, nil, nil, nil)
 
 	if session := gormMethod(all, "Session"); session != nil && !tr.IsPureFunction(session) {
 		t.Error("Session (immutable builtin) should count as pure")
@@ -252,7 +252,7 @@ func TestFindMutableRootScopesParam(t *testing.T) {
 	// With namedScope registered as a Scopes callback, its *gorm.DB parameter is
 	// a mutable root.
 	scopes := map[*ssa.Function]bool{named: true}
-	tr := New(nil, nil, nil, nil, scopes, nil)
+	tr := New(nil, nil, nil, nil, scopes, nil, nil)
 
 	if !tr.IsScopesCallbackFunc(named) {
 		t.Error("namedScope should be recognized as a Scopes callback function")
@@ -275,14 +275,14 @@ func TestFindMutableRootScopesParam(t *testing.T) {
 	if root := tr.FindMutableRoot(ordParam, loops.DetectLoops(ordinary)); root != ordParam {
 		t.Errorf("Phase 1b: ordinary parameter should be a mutable root, got %v", root)
 	}
-	trPlain := New(nil, nil, nil, nil, nil, nil)
+	trPlain := New(nil, nil, nil, nil, nil, nil, nil)
 	if root := trPlain.FindMutableRoot(namedParam, loops.DetectLoops(named)); root != namedParam {
 		t.Errorf("Phase 1b: unregistered parameter should be a mutable root, got %v", root)
 	}
 
 	// A Transaction callback's tx parameter is exempt (fresh forkable handle):
 	// registering the helper as a transaction callback makes its param immutable.
-	trTx := New(nil, nil, nil, nil, nil, map[*ssa.Function]bool{ordinary: true})
+	trTx := New(nil, nil, nil, nil, nil, map[*ssa.Function]bool{ordinary: true}, nil)
 	if root := trTx.FindMutableRoot(ordParam, loops.DetectLoops(ordinary)); root != nil {
 		t.Errorf("Transaction callback parameter should be immutable (nil root), got %v", root)
 	}
@@ -321,7 +321,7 @@ func TestFindMutableRootThroughStructField(t *testing.T) {
 	t.Parallel()
 	fixtures, _ := loadProgram(t)
 	loops := cfg.New()
-	tr := New(nil, nil, nil, nil, nil, nil)
+	tr := New(nil, nil, nil, nil, nil, nil, nil)
 
 	for _, name := range []string{
 		"go127PromotedFieldLiteral",
@@ -405,7 +405,7 @@ func TestFieldRoot(t *testing.T) {
 	t.Parallel()
 	fixtures, _ := loadProgram(t)
 	loops := cfg.New()
-	tr := New(nil, nil, nil, nil, nil, nil)
+	tr := New(nil, nil, nil, nil, nil, nil, nil)
 
 	whereRoots := func(name string) []ssa.Value {
 		fn := fixtures[name]
