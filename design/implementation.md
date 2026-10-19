@@ -158,9 +158,7 @@ gormreuse/
 │   │   └── directive_validation.go  # Directive tests (pure, immutable-return)
 │   └── gorm.io/gorm/           # GORM stub for testing
 │
-└── testdata/
-    ├── cmd/gengolden/          # Golden file generator
-    └── e2e/                    # SQL behavior verification (separate module)
+└── e2e/internal/               # SQL behavior verification (separate module)
 ```
 
 The `plugin` package registers `Analyzer` with golangci-lint's module plugin system. `Analyzer` reads no flags, so the plugin hands it over as it is and rejects any settings. It lives in the main module: `plugin-module-register` adds nothing beyond `golang.org/x/tools`, and a nested module would need its own tag per release.
@@ -328,8 +326,8 @@ go vet -vettool=./bin/gormreuse ./...
 # Run E2E tests (SQL behavior verification)
 cd e2e/internal && go test -v
 
-# Generate golden files for suggested fixes
-go run ./testdata/cmd/gengolden/main.go
+# Regenerate the .golden and .diff fixtures after changing detection or fixes
+GORMREUSE_UPDATE_GOLDEN=1 go test -run TestGoldenFiles .
 ```
 
 ## Releasing
@@ -350,6 +348,25 @@ Validate config changes with `goreleaser check`, and dry-run with `goreleaser re
 - Test structure:
   - `===== SHOULD REPORT =====` - Cases that should trigger warnings
   - `===== SHOULD NOT REPORT =====` - Negative cases
+
+### Suggested-fix fixtures
+
+Each fixture `testdata/src/gormreuse/X.go` has two committed files that record its suggested fixes:
+
+| File | Content | Checked by |
+| --- | --- | --- |
+| `X.go.golden` | The source with every suggested fix applied | `TestSuggestedFixes` and `TestGoldenFiles` |
+| `X.go.diff` | A full-context unified diff from `X.go` to `X.go.golden`, for review | `TestGoldenFiles` |
+
+A plain `go test` only compares these files. It never writes them, so CI fails when they are stale. To regenerate them after a change to detection or fixes:
+
+```bash
+GORMREUSE_UPDATE_GOLDEN=1 go test -run TestGoldenFiles .
+```
+
+This rewrites every `.golden` and `.diff` file and deletes the ones whose source fixture is gone. Read each changed `.diff` before you commit it: it shows exactly what `-fix` now does to the fixture. The failure message of `TestGoldenFiles` prints the same command. Rendering a `.diff` needs `diff` on `PATH`, and a failing `diff` fails the test.
+
+`TestFixesConverge` applies the fixes to each fixture in `testdata/src/converge`, then lints the fixed output again. It fails when the directory has no fixture, when a fixture's fixes change nothing, when the fixed output does not type-check, or when any diagnostic remains. So every fixture there must need a fix, and one pass of fixes must resolve all of it.
 
 > **Trap: never name a fixture `*_test.go` unless you mean to.** `analysistest`
 > loads a package's `*_test.go` files as part of both the normal package and the
