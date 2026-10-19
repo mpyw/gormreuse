@@ -147,6 +147,9 @@ func RunSSA(
 	pureFuncs.Import(func(fn *ssa.Function) bool { return table.Of(fn).Pure })
 	immutableReturnFuncs.Import(func(fn *ssa.Function) bool { return table.Of(fn).ImmutableReturn })
 	immutableInputSet.Import(func(fn *ssa.Function) []directive.ImmutableInputCallback { return table.Of(fn).ImmutableInput })
+	// Only the immutable-param functions that branch a parameter export a
+	// fact, and only those matter to a caller (#255).
+	immutableParamFuncs.Import(func(fn *ssa.Function) bool { return table.Of(fn).BranchesImmutableParam })
 
 	// PASS 1: validate pure function contracts and collect the functions that
 	// definitively broke them, and the parameters each trusted one may return.

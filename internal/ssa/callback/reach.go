@@ -3,7 +3,6 @@ package callback
 import (
 	"go/types"
 	"slices"
-	"strings"
 
 	"golang.org/x/tools/go/ssa"
 
@@ -58,7 +57,7 @@ func DropReachableCallbacks(funcs []*ssa.Function, inputs *directive.ImmutableIn
 			if name, ok := reachedInterfaceMethod(ref); ok {
 				invoked = append(invoked, name)
 			}
-			if fn := reachedFunc(ref); set[fn] && !refReachesOnlyCallback(instr, ref, inputs) {
+			if fn := directive.DeclaredFunc(ref); set[fn] && !refReachesOnlyCallback(instr, ref, inputs) {
 				delete(set, fn)
 			}
 		}
@@ -84,20 +83,6 @@ func reachedInterfaceMethod(fn *ssa.Function) (string, bool) {
 		return "", false
 	}
 	return obj.Name(), true
-}
-
-// reachedFunc maps a function value to the declared function whose body it
-// runs: a generic instance or bound method wrapper as DeclaredFunc does, and a
-// method expression thunk (T.m) to its method.
-func reachedFunc(fn *ssa.Function) *ssa.Function {
-	if fn.Synthetic != "" && strings.HasSuffix(fn.Name(), "$thunk") {
-		if obj, ok := fn.Object().(*types.Func); ok {
-			if method := fn.Prog.FuncValue(obj.Origin()); method != nil {
-				return method
-			}
-		}
-	}
-	return directive.DeclaredFunc(fn)
 }
 
 // refReachesOnlyCallback reports whether instr uses v only to hand it to an

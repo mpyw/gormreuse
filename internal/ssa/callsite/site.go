@@ -3,9 +3,10 @@
 //
 // SSA spells one source call several ways. A method value call
 // (f := r.m; f(x)) calls a MakeClosure over a synthetic "m$bound" wrapper; a
-// call through a package-level variable that holds one function (#183) loads
-// the variable first; a function literal called in place is a MakeClosure of
-// its own. A Site reads each of these as the call it stands for, so callers do
+// method expression (T.m(r, x)) calls a synthetic "m$thunk" wrapper that takes
+// the receiver as its first argument; a call through a package-level variable
+// that holds one function (#183) loads the variable first; a function literal
+// called in place is a MakeClosure of its own. A Site reads each of these as the call it stands for, so callers do
 // not each repeat the pattern matching.
 package callsite
 
@@ -54,13 +55,14 @@ type Site struct {
 	// package-level variable holds. It is nil for an invoke, a builtin or any
 	// other dynamic call.
 	Callee *ssa.Function
-	// Declared is the function the call stands for. For a method value it is
-	// the declared method (directive.DeclaredFunc); otherwise it is Callee.
-	// A method expression thunk and a generic instance stay as they are.
+	// Declared is the function the call stands for. For a method value or a
+	// method expression it is the declared method (directive.DeclaredFunc);
+	// otherwise it is Callee. A generic instance stays as it is. The wrapper
+	// of an interface method has no declared method, so it stays too.
 	Declared *ssa.Function
 	// Recv is the receiver of a method call: the closure binding of a method
-	// value, or the first argument of a static method call. It is nil when
-	// Declared has no receiver parameter.
+	// value, or the first argument of a static method call or a method
+	// expression. It is nil when Declared has no receiver parameter.
 	Recv ssa.Value
 	// Args are the arguments passed to Declared, the receiver excluded.
 	Args []ssa.Value
@@ -97,6 +99,9 @@ func SiteOf(instr ssa.CallInstruction, vars FuncVars) Site {
 		s.Kind = SiteFuncVar
 	}
 	s.Declared = s.Callee
+	if s.Kind == SiteThunk {
+		s.Declared = directive.DeclaredFunc(s.Callee)
+	}
 	if s.Declared != nil && s.Declared.Signature.Recv() != nil && len(s.Args) > 0 {
 		s.Recv, s.Args = s.Args[0], s.Args[1:]
 	}
@@ -140,9 +145,9 @@ func (s Site) IsGormMethod() bool {
 // Declared is nil.
 func (s Site) Method() string {
 	switch {
-	case s.Kind == SiteBound:
+	case s.Kind == SiteBound || s.Kind == SiteThunk:
 		// The wrapper's object, not Declared: the wrapper of an interface
-		// method value has no declared method to stand for.
+		// method value or expression has no declared method to stand for.
 		return s.Callee.Object().Name()
 	case s.Declared != nil:
 		return s.Declared.Name()
@@ -159,7 +164,9 @@ func (s Site) ArgParam(i int) int {
 
 // StaticSite returns the Site read from the instruction's static callee alone:
 // a method value call is a call of its "m$bound" wrapper, which takes no
-// receiver, and a call through a package-level variable has no callee. Code
+// receiver, and a call through a package-level variable has no callee. A
+// method expression passes its receiver first, as a static method call does,
+// so it stays the call of the method it stands for (#258). Code
 // that still reads a call this way calls it, so each use is a place where it
 // and the Site disagree (#266).
 func (s Site) StaticSite() Site {

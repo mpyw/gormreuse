@@ -156,6 +156,38 @@ func ReturnArgOrChain(db *gorm.DB, fresh bool) *gorm.DB { // want ReturnArgOrCha
 	return db
 }
 
+// Repo holds a handle, so a method value of it captures a *gorm.DB (#255).
+type Repo struct{ DB *gorm.DB }
+
+// Branch branches q, so callers must pass an isolated value.
+//
+//gormreuse:immutable-param
+func (Repo) Branch(q *gorm.DB) { // want Branch:"gormreuse immutable-param"
+	q.Where("a = ?", 1).Find(nil)
+	q.Where("b = ?", 2).Find(nil)
+}
+
+// Inspect does not pollute q.
+//
+//gormreuse:pure
+func (Repo) Inspect(q *gorm.DB) { // want Inspect:"gormreuse pure"
+	_ = q
+}
+
+// Fresh returns an isolated value.
+//
+//gormreuse:immutable-return
+func (r Repo) Fresh() *gorm.DB { // want Fresh:"gormreuse immutable-return"
+	return r.DB.Session(&gorm.Session{})
+}
+
+// With hands cb an isolated value.
+//
+//gormreuse:immutable-input(cb)
+func (Repo) With(db *gorm.DB, cb func(*gorm.DB)) { // want With:`gormreuse immutable-input\(cb\)`
+	cb(db.Session(&gorm.Session{}))
+}
+
 // helper is unexported, so another package cannot call it and it exports no
 // fact.
 //
