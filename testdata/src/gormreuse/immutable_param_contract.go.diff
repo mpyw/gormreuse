@@ -1,6 +1,6 @@
 --- immutable_param_contract.go	1970-01-01 00:00:00
 +++ immutable_param_contract.go.golden	1970-01-01 00:00:00
-@@ -1,130 +1,129 @@
+@@ -1,153 +1,152 @@
  package internal
  
  import "gorm.io/gorm"
@@ -127,6 +127,32 @@
  	f := contractRepo{}.apply
 -	defer f(root.Where("x")) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of apply`
 +	defer f(root.Where("x").Session(&gorm.Session{})) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of apply`
+ }
+ 
+ // contractWithAny takes a *gorm.DB in an interface too. A plain call, go and
+ // defer check that argument alike: the fix generator asks the same of each
+ // call before it declares a function immutable-param (#245).
+ //
+ //gormreuse:immutable-param
+ func contractWithAny(db *gorm.DB, v any) {
+ 	db.Where("a").Find(nil)
+ 	db.Where("b").Find(nil)
+ 	_ = v
+ }
+ 
+ func contractAnyArg(root *gorm.DB) {
+-	contractWithAny(root.Session(&gorm.Session{}), root.Where("x")) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of contractWithAny`
++	contractWithAny(root.Session(&gorm.Session{}), root.Where("x").Session(&gorm.Session{})) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of contractWithAny`
+ }
+ 
+ func contractGoAnyArg(root *gorm.DB) {
+-	go contractWithAny(root.Session(&gorm.Session{}), root.Where("y")) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of contractWithAny`
++	go contractWithAny(root.Session(&gorm.Session{}), root.Where("y").Session(&gorm.Session{})) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of contractWithAny`
+ }
+ 
+ func contractDeferAnyArg(root *gorm.DB) {
+-	defer contractWithAny(root.Session(&gorm.Session{}), root.Where("z")) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of contractWithAny`
++	defer contractWithAny(root.Session(&gorm.Session{}), root.Where("z").Session(&gorm.Session{})) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of contractWithAny`
  }
  
  func contractGoIsolated(root *gorm.DB) {

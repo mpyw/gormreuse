@@ -45,6 +45,40 @@ func TestIgnoreFixWithTestFiles(t *testing.T) {
 	}
 }
 
+// TestParamFixWithTestFiles checks that a parameter root declared outside the
+// test files of a package with test files gets the body Session in both
+// variants of the package, so their fixes agree, while one declared in a test
+// file may get immutable-param (#245).
+func TestParamFixWithTestFiles(t *testing.T) {
+	t.Parallel()
+	results := analysistest.Run(t, analysistest.TestData(), gormreuse.Analyzer, "paramtests")
+	seen := map[string]int{}
+	for _, result := range results {
+		for _, diag := range result.Diagnostics {
+			name := filepath.Base(result.Pass.Fset.Position(diag.Pos).Filename)
+			seen[name]++
+			var text strings.Builder
+			for _, fix := range diag.SuggestedFixes {
+				for _, edit := range fix.TextEdits {
+					text.Write(edit.NewText)
+				}
+			}
+			got, want := text.String(), "tx = tx.Session(&gorm.Session{})"
+			if name == "code_test.go" {
+				want = "//gormreuse:immutable-param"
+			}
+			if !strings.Contains(got, want) {
+				t.Errorf("%s: %s: fix inserts %q, want %q", name, diag.Message, got, want)
+			}
+		}
+	}
+	// The variant without the test files and the test variant both report
+	// code.go.
+	if seen["code.go"] != 2 || seen["code_test.go"] != 1 {
+		t.Errorf("diagnostics by file = %v, want 2 in code.go and 1 in code_test.go", seen)
+	}
+}
+
 // TestLineDirective verifies that //line directives do not move ignore and
 // pure directives, the generated-file skip, or the line keys of ignores
 // (issues #151, #152, #153).

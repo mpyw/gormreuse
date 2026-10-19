@@ -527,16 +527,30 @@ func recordArgumentRead(v ssa.Value, call *ssa.Call, ctx *Context) {
 	}
 }
 
-// checksImmutableParamArg reports whether argument i of the call is bound to a
-// parameter under the caller-side //gormreuse:immutable-param contract: its
-// callee (or the function it stands in for, see directive.DeclaredFunc)
-// branches its parameters. The directive governs parameters, not the
-// receiver, so that argument is skipped.
+// checksImmutableParamArg reports whether argument i of the call breaks the
+// caller-side //gormreuse:immutable-param contract: its callee (or the
+// function it stands in for, see directive.DeclaredFunc) branches its
+// parameters, and the argument breaks the contract (see BreaksImmutableParam).
 func checksImmutableParamArg(site callsite.Site, i int, ctx *Context) bool {
 	if site.Callee == nil || ctx.NeedsImmutableParam == nil || !ctx.NeedsImmutableParam(directive.DeclaredFunc(site.Callee)) {
 		return false
 	}
-	return site.ArgParam(i) >= 0
+	return BreaksImmutableParam(site, i, ctx.RootTracer, ctx.LoopInfo)
+}
+
+// BreaksImmutableParam reports whether argument i of the call at site would
+// break the caller-side //gormreuse:immutable-param contract of its callee:
+// it is bound to a parameter, not the receiver, which the directive does not
+// govern, and its *gorm.DB, directly or in an interface, has a mutable root.
+// The fix generator asks it of every argument of every call before it
+// declares a function immutable-param, so the declaration cannot make the
+// caller-side check report a call (#245).
+func BreaksImmutableParam(site callsite.Site, i int, rt *tracer.RootTracer, loopInfo *cfg.LoopInfo) bool {
+	if site.ArgParam(i) < 0 {
+		return false
+	}
+	arg, ok := pollutionsource.UnwrapGormDB(site.Instr.Common().Args[i])
+	return ok && rt.FindMutableRoot(arg, loopInfo) != nil
 }
 
 // immutableParamContractMessage builds the diagnostic for passing a mutable
@@ -738,15 +752,14 @@ func processGormDBCallCommonWith(instr ssa.CallInstruction, block *ssa.BasicBloc
 
 	// Function call with *gorm.DB arguments
 	for i, arg := range instr.Common().Args {
-		if !typeutil.IsGormDB(arg.Type()) {
-			continue
-		}
 		// The caller-side immutable-param contract holds for a deferred or
 		// spawned call as for a plain one (#192).
-		if checksImmutableParamArg(site, i, ctx) && ctx.RootTracer.FindMutableRoot(arg, ctx.LoopInfo) != nil {
+		if checksImmutableParamArg(site, i, ctx) {
 			ctx.Tracker.AddContractViolation(ctx.pos(pos), immutableParamContractMessage(site.Callee), instr, site.ArgParam(i))
 		}
-		handleBranchUse(arg, pos, block, ctx, isPolluted)
+		if typeutil.IsGormDB(arg.Type()) {
+			handleBranchUse(arg, pos, block, ctx, isPolluted)
+		}
 	}
 }
 

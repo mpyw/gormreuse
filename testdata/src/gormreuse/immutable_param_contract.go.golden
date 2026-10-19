@@ -116,6 +116,29 @@ func contractDeferMethodValue(root *gorm.DB) {
 	defer f(root.Where("x").Session(&gorm.Session{})) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of apply`
 }
 
+// contractWithAny takes a *gorm.DB in an interface too. A plain call, go and
+// defer check that argument alike: the fix generator asks the same of each
+// call before it declares a function immutable-param (#245).
+//
+//gormreuse:immutable-param
+func contractWithAny(db *gorm.DB, v any) {
+	db.Where("a").Find(nil)
+	db.Where("b").Find(nil)
+	_ = v
+}
+
+func contractAnyArg(root *gorm.DB) {
+	contractWithAny(root.Session(&gorm.Session{}), root.Where("x").Session(&gorm.Session{})) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of contractWithAny`
+}
+
+func contractGoAnyArg(root *gorm.DB) {
+	go contractWithAny(root.Session(&gorm.Session{}), root.Where("y").Session(&gorm.Session{})) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of contractWithAny`
+}
+
+func contractDeferAnyArg(root *gorm.DB) {
+	defer contractWithAny(root.Session(&gorm.Session{}), root.Where("z").Session(&gorm.Session{})) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of contractWithAny`
+}
+
 func contractGoIsolated(root *gorm.DB) {
 	go applyTwoFilters(root.Session(&gorm.Session{}))         // OK: isolated
 	defer contractRepo{}.apply(root.Session(&gorm.Session{})) // OK: isolated

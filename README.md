@@ -249,12 +249,12 @@ A reused `*gorm.DB` parameter has no definition to append a Session to. The fix 
 
 | Function | Fix |
 | --- | --- |
-| Unexported, not a method, only called directly in the package, and every caller passes an immutable value | Add [`//gormreuse:immutable-param`](#gormreuseimmutable-param). The caller-side check keeps the callers isolated |
-| Any other function: exported, a method, used as a function value, or with a caller that passes a mid-chain value | Rebind the parameter at the top of the body: `tx = tx.Session(&gorm.Session{})`. Discarded statements on it are reassigned as for a local root |
+| Unexported, not a method, only called directly in the package, and every caller passes an immutable value for every `*gorm.DB` parameter. Callers in package-level closures (`var f = func(...)`) count. When the package has test files, the function must be declared in a test file | Add [`//gormreuse:immutable-param`](#gormreuseimmutable-param). The caller-side check keeps the callers isolated |
+| Any other function: exported, a method, used as a function value, with a caller that passes a mid-chain value, or outside the test files of a package that has test files | Rebind the parameter at the top of the body: `tx = tx.Session(&gorm.Session{})`. Discarded statements on it are reassigned as for a local root |
 | A Scopes/Preload callback, a function that returns a `*gorm.DB` and is not only called directly (it may be a Scopes callback), or a closure | **No fix** |
 | A function with a discarded statement on the parameter (`tx.Where("a")`) and no `*gorm.DB` result | **No fix**. The statement also changes the caller's value, and callers such as `applyTenant(q); q.Find(&users)` rely on that. With `tx = tx.Where("a")` the change would stay inside the function |
 
-`immutable-param` on an exported function would hide the reuse: callers in other packages are never checked. On a function with a mid-chain caller, it would move the report to that caller, where it has no fix.
+`immutable-param` on an exported function would hide the reuse: callers in other packages are never checked. On a function with a mid-chain caller, it would move the report to that caller. A package with test files is analyzed twice: without the test files and with them. The run without them cannot see the callers in the test files, so both runs use the body Session for a function outside the test files, and their fixes agree.
 
 ### Combined Example
 
