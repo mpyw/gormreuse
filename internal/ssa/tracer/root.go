@@ -77,6 +77,7 @@ import (
 
 	"github.com/mpyw/gormreuse/internal/directive"
 	"github.com/mpyw/gormreuse/internal/ssa/cfg"
+	"github.com/mpyw/gormreuse/internal/ssa/pollutionsource"
 	"github.com/mpyw/gormreuse/internal/typeutil"
 )
 
@@ -1932,8 +1933,9 @@ func (t *RootTracer) isImmutableSource(v ssa.Value) bool {
 	}
 }
 
-// FindAliasedRoots returns the mutable roots whose Statement v may point at
-// through a Session or Debug copy (#174).
+// FindAliasedRoots returns the mutable roots whose Statement v may read later:
+// through a Session or Debug copy (#174), or as a read-only argument of a call
+// in v's chain, such as a subquery (#185).
 //
 // On a clone==0 receiver, Session(&gorm.Session{}) and Debug() return a handle
 // that shares the receiver's Statement. Each use of the copy forks its own
@@ -1949,33 +1951,70 @@ func (t *RootTracer) isImmutableSource(v ssa.Value) bool {
 // Copies of copies are followed, so q.Session(...).Debug() still reaches q's
 // root. A copy reached through a Phi, a variable, or a closure capture is found
 // the same way as a mutable root.
+//
+// A subquery is kept in the Statement of the chain it is passed to, and GORM
+// builds it from the argument when the chain runs. So each use of the chain
+// reads the argument's root too:
+//
+//	x := db.Where("id IN (?)", sub)
+//	sub.Where("age > 1").Find(nil) // changes sub's Statement in place
+//	x.Find(nil)                    // builds the subquery from it
+//
+// Every call in v's chain is searched for such arguments, through Session and
+// WithContext too, since a cloned Statement still holds the argument. A
+// Session copy below another chain call is not an alias: that call forked its
+// own Statement.
 func (t *RootTracer) FindAliasedRoots(v ssa.Value, loopInfo *cfg.LoopInfo) []AliasedRoot {
 	var roots []AliasedRoot
-	t.collectAliasedRoots(v, loopInfo, make(map[*ssa.Call]bool), &roots)
+	t.collectAliasedRoots(v, loopInfo, true, make(map[aliasVisit]bool), &roots)
 	return roots
 }
 
-// AliasedRoot is a mutable root that a value shares a Statement with, and the
-// Session or Debug call that took the copy from it.
+// AliasedRoot is a mutable root that a value reads, and the call it reads it
+// through: the Session or Debug call that took the copy, or, when Argument is
+// set, the call that took the root as a read-only argument.
 type AliasedRoot struct {
-	Root ssa.Value
-	Copy *ssa.Call
+	Root     ssa.Value
+	Copy     *ssa.Call
+	Argument bool
+}
+
+// aliasVisit is a call visited by collectAliasedRoots, and whether Session
+// and Debug copies still counted there.
+type aliasVisit struct {
+	call   *ssa.Call
+	copies bool
 }
 
 // collectAliasedRoots adds to roots the mutable roots that v reaches through
-// Statement-sharing builtin calls. seen stops cycles through loops.
-func (t *RootTracer) collectAliasedRoots(v ssa.Value, loopInfo *cfg.LoopInfo, seen map[*ssa.Call]bool, roots *[]AliasedRoot) {
+// Statement-sharing builtin calls, while copies is set, and through read-only
+// arguments of the gorm calls in its chain. seen stops cycles through loops.
+func (t *RootTracer) collectAliasedRoots(v ssa.Value, loopInfo *cfg.LoopInfo, copies bool, seen map[aliasVisit]bool, roots *[]AliasedRoot) {
 	for _, candidate := range t.FindAllMutableRoots(v, loopInfo) {
 		call, ok := candidate.(*ssa.Call)
-		if !ok || seen[call] || !t.sharesReceiverStatement(call) {
+		if !ok || seen[aliasVisit{call, copies}] {
 			continue
 		}
-		seen[call] = true
-		_, recv, _ := t.calledFunc(call)
-		if r := t.FindMutableRoot(recv, loopInfo); r != nil {
-			*roots = append(*roots, AliasedRoot{Root: r, Copy: call})
+		// A call through a method value (w := q.Where; w(x, sub)) is read as
+		// the method call it stands for (#178).
+		callee, recv, args := t.calledFunc(call)
+		if callee == nil || !isGormDBMethod(callee) || recv == nil {
+			continue
 		}
-		t.collectAliasedRoots(recv, loopInfo, seen, roots)
+		seen[aliasVisit{call, copies}] = true
+		isCopy := copies && t.sharesReceiverStatement(call)
+		if isCopy {
+			if r := t.FindMutableRoot(recv, loopInfo); r != nil {
+				*roots = append(*roots, AliasedRoot{Root: r, Copy: call})
+			}
+		}
+		for _, arg := range pollutionsource.ReadOnlyGormArgs(callee, args) {
+			if r := t.FindMutableRoot(arg, loopInfo); r != nil {
+				*roots = append(*roots, AliasedRoot{Root: r, Copy: call, Argument: true})
+			}
+			t.collectAliasedRoots(arg, loopInfo, true, seen, roots)
+		}
+		t.collectAliasedRoots(recv, loopInfo, isCopy, seen, roots)
 	}
 }
 

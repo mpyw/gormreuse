@@ -76,21 +76,22 @@ func fixTargetAliasReceiver(db *gorm.DB) {
 	q.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
-// fixTargetArgumentOr: q is an argument of base.Or. Rebinding base would not
-// address q, so the root gets a Session instead.
-func fixTargetArgumentOr(db, base *gorm.DB) {
+// fixTargetArgumentModel: q is an argument of base.Model. Rebinding base would
+// not address q, so the root gets a Session instead. (A read-only argument,
+// as of base.Or, is not a branch: #185.)
+func fixTargetArgumentModel(db, base *gorm.DB) {
 	q := db.Where("x").Session(&gorm.Session{})
-	base.Or(q)
+	base.Model(q)
 	q.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
-// fixTargetArgumentWhere: q is an argument of db.Where. Rebinding db would not
-// address q, so the root gets a Session instead.
+// fixTargetArgumentOfReceiver: q is an argument of db.Model. Rebinding db
+// would not address q, so the root gets a Session instead.
 //
 //gormreuse:immutable-param
-func fixTargetArgumentWhere(db *gorm.DB) {
+func fixTargetArgumentOfReceiver(db *gorm.DB) {
 	q := db.Where("x").Session(&gorm.Session{})
-	db.Where(q)
+	db.Model(q)
 	q.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 

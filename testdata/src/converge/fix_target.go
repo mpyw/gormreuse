@@ -41,10 +41,10 @@ func fixTargetAliasReceiver(db *gorm.DB) {
 	q.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
-// fixTargetArgument: the fix makes q's root immutable, not base = base.Or.
+// fixTargetArgument: the fix makes q's root immutable, not base = base.Model.
 func fixTargetArgument(db, base *gorm.DB) {
 	q := db.Where("x")
-	base.Or(q)
+	base.Model(q)
 	q.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
