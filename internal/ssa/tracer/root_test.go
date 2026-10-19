@@ -147,7 +147,7 @@ func TestClosureCapturesGormDB(t *testing.T) {
 func TestFindMutableRootScopesParam(t *testing.T) {
 	t.Parallel()
 	fixtures, _ := loadProgram(t)
-	loops := cfg.New()
+	loops := cfg.NewAnalyzer()
 
 	named := fixtures["namedScope"]
 	ordinary := fixtures["ordinaryHelperParamBranches"]
@@ -226,7 +226,7 @@ func gormCallReceiver(fn *ssa.Function, method string) ssa.Value {
 func TestFindMutableRootThroughStructField(t *testing.T) {
 	t.Parallel()
 	fixtures, _ := loadProgram(t)
-	loops := cfg.New()
+	loops := cfg.NewAnalyzer()
 	tr := New(nil, nil, nil, nil, nil, nil, nil)
 
 	for _, name := range []string{
@@ -310,7 +310,7 @@ func TestFieldStoredValuesReachingLoad(t *testing.T) {
 func TestFieldRoot(t *testing.T) {
 	t.Parallel()
 	fixtures, _ := loadProgram(t)
-	loops := cfg.New()
+	loops := cfg.NewAnalyzer()
 	tr := New(nil, nil, nil, nil, nil, nil, nil)
 
 	whereRoots := func(name string) []ssa.Value {

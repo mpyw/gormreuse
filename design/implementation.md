@@ -258,7 +258,10 @@ gormreuse/
 │       ├── tracer/root.go       # RootTracer: mutable roots, aliases
 │       ├── pollution/tracker.go # Tracker: records uses, DetectViolations
 │       ├── pollutionsource/     # Which uses leak a *gorm.DB; read-only query arguments
-│       ├── cfg/analyzer.go      # Loops and reachability
+│       ├── cfg/                 # Control flow of one function
+│       │   ├── analyzer.go      # Analyzer, NewAnalyzer, CanReach: block reachability
+│       │   ├── loop.go          # LoopInfo, DetectLoops: natural loops, range-over-func bodies (#177)
+│       │   └── repeat.go        # Repeats.RepeatsAfter: may a use run again for one run of its root's definition
 │       ├── handler/call.go      # Instruction handlers: Call, Go, Defer, Send, Store, ...
 │       └── purity/              # Body contracts of the directives
 │           ├── validator.go     # pure (Validator, ReturnedParams)
@@ -335,7 +338,7 @@ The same input must give the same diagnostics and fixes on every run (#184). Gol
 4. **Separation of Concerns**:
    - `tracer/`: WHERE is the mutable root? (value tracing)
    - `pollution/`: WHAT uses exist and are they violations? (state tracking)
-   - `cfg/`: CAN use A reach use B? (control flow)
+   - `cfg/`: CAN use A reach use B? MAY a use run again? (control flow)
    - `handler/`: HOW to process each instruction type? (dispatch)
 
 ### Key Design Decisions
@@ -575,7 +578,7 @@ Three struct shapes lost the root before #181, so reuse through them was missed.
 
 The pointer walk stops at the call (`reachingFieldStores`): a store above it on a loop path wrote the struct of an earlier iteration. Only a `FieldAddr` chain directly on the call is followed. A pointer field inside the result (`p.inner.DB` with `inner *T`) is not.
 
-**Defining block (#250).** The loop check reports a use in a loop of a root defined outside it. It used to treat every value that is not an instruction as outside, so a `FieldRoot` from a call inside the loop was reported on every iteration. `tracer.RootBlock` now gives each root kind its defining block, and `cfg.IsDefinedOutsideLoop` takes that block. The suggested fixes use the same function.
+**Defining block (#250).** The loop check reports a use in a loop of a root defined outside it. It used to treat every value that is not an instruction as outside, so a `FieldRoot` from a call inside the loop was reported on every iteration. `tracer.RootBlock` now gives each root kind its defining block, and `cfg.Repeats.RepeatsAfter` takes that block with the use's block. It holds the loops of the analysed function only, so a root defined in another function, such as the function that declares a closure, is outside them. The suggested fixes use the same function.
 
 | Root kind | Defining block |
 | --- | --- |
