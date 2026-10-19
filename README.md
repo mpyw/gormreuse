@@ -148,7 +148,9 @@ Use golangci-lint's own options in place of the driver flags below: `run.tests: 
 | `-test` | `true` | Analyze test files (`*_test.go`) — built-in driver flag |
 | `-fix` | `false` | Apply suggested fixes automatically — built-in driver flag |
 
-Generated files (containing `// Code generated ... DO NOT EDIT.`) are always excluded and cannot be opted in.
+Generated files (containing `// Code generated ... DO NOT EDIT.`) are always excluded and cannot be opted in. Files that import `"C"` are analyzed: the header that cgo adds to its output does not count. `-fix` does not edit them, because the driver treats cgo's output as generated.
+
+If gormreuse fails inside a function, it reports `gormreuse: internal error analyzing <func>: ...` at that function. Please [open an issue](https://github.com/mpyw/gormreuse/issues) with the code. Set `GORMREUSE_DEBUG_PANIC=1` to get the stack trace instead.
 
 ### Examples
 

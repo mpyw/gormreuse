@@ -1,6 +1,8 @@
 package gormreuse_test
 
 import (
+	"os/exec"
+	"strings"
 	"testing"
 
 	"golang.org/x/tools/go/analysis/analysistest"
@@ -37,6 +39,26 @@ func TestCrossPackageDirectives(t *testing.T) {
 	t.Parallel()
 	testdata := analysistest.TestData()
 	analysistest.Run(t, testdata, gormreuse.Analyzer, "purelib", "externalpure")
+}
+
+// TestCgoFiles verifies that the files of a package that imports "C" are
+// analyzed, and that a file marked generated is still skipped (#186). It needs
+// cgo and a C compiler, and is skipped without them.
+func TestCgoFiles(t *testing.T) {
+	t.Parallel()
+	out, err := exec.Command("go", "env", "CGO_ENABLED", "CC").Output()
+	if err != nil {
+		t.Skipf("go env failed: %v", err)
+	}
+	env := strings.Fields(string(out))
+	if len(env) < 2 || env[0] != "1" {
+		t.Skip("cgo is disabled")
+	}
+	if _, err := exec.LookPath(env[1]); err != nil {
+		t.Skipf("no C compiler: %v", err)
+	}
+	testdata := analysistest.TestData()
+	analysistest.Run(t, testdata, gormreuse.Analyzer, "cgofile")
 }
 
 func TestSuggestedFixes(t *testing.T) {
