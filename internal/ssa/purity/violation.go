@@ -7,7 +7,7 @@ import "go/token"
 // =============================================================================
 
 // Violation represents a contract violation found by this package's
-// validators (Validator.Validate, ValidateImmutableReturn, ValidateImmutableInputs).
+// validators (Validator.Validate, ImmutableReturnValidator.Validate, ValidateImmutableInputs).
 type Violation struct {
 	Pos     token.Pos
 	Message string
