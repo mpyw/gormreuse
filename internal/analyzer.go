@@ -178,15 +178,11 @@ func RunSSA(
 	reportImmutableReturnViolations(pass, ssaInfo, immutableReturnFuncs, inputTracer, skip)
 
 	// TEMPORARY (GORM bug go-gorm/gorm#7592): warn on Session/WithContext/Debug
-	// inside Scopes callbacks. Deletable by removing the scopeswarn package and
-	// this loop once the upstream fix ships in a supported release — see that package.
-	for _, fn := range ssaInfo.SrcFuncs {
-		if skip(fn, false) {
-			continue
-		}
-		for _, w := range scopeswarn.Validate(fn) {
-			pass.Reportf(w.Pos, "%s", w.Message)
-		}
+	// results returned from Scopes callbacks. Deletable by removing the scopeswarn
+	// package and this block once the upstream fix ships in a supported release — see that package.
+	scopesOnly := tracer.CollectScopesOnlyCallbacks(ssaInfo.SrcFuncs)
+	for _, w := range scopeswarn.Validate(scopesOnly, func(fn *ssa.Function) bool { return skip(fn, false) }) {
+		pass.Reportf(w.Pos, "%s", w.Message)
 	}
 
 	// Share a single fix generator across all violations (it caches AST

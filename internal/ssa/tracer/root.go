@@ -915,17 +915,18 @@ func (t *RootTracer) tracePointerLoad(ptr ssa.Value, visited map[ssa.Value]bool,
 //
 // This function finds the MakeClosure in the parent and traces the binding.
 func (t *RootTracer) traceFreeVar(fv *ssa.FreeVar, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) ssa.Value {
-	if binding := t.freeVarBinding(fv); binding != nil {
+	if binding := FreeVarBinding(fv); binding != nil {
 		return t.trace(binding, visited, loopInfo)
 	}
 	return nil
 }
 
-// freeVarBinding resolves the value captured by fv: it locates the MakeClosure
+// FreeVarBinding resolves the value captured by fv: it locates the MakeClosure
 // that creates fv's parent closure and returns the binding at fv's index in the
 // captured-variable list. Returns nil if the closure or binding can't be found.
-// Shared by traceFreeVar (single root) and traceAllFreeVar (all roots).
-func (t *RootTracer) freeVarBinding(fv *ssa.FreeVar) ssa.Value {
+// Shared by traceFreeVar (single root), traceAllFreeVar (all roots), the Scopes
+// callback resolver, and scopeswarn.
+func FreeVarBinding(fv *ssa.FreeVar) ssa.Value {
 	fn := fv.Parent()
 	if fn == nil {
 		return nil
@@ -972,15 +973,16 @@ func (t *RootTracer) freeVarBinding(fv *ssa.FreeVar) ssa.Value {
 // This function finds the Store instruction that writes to the Alloc.
 func (t *RootTracer) traceAlloc(alloc *ssa.Alloc, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) ssa.Value {
 	// Single-root: trace the first value stored into the Alloc.
-	if vals := allocStoredValues(alloc); len(vals) > 0 {
+	if vals := AllocStoredValues(alloc); len(vals) > 0 {
 		return t.trace(vals[0], visited, loopInfo)
 	}
 	return nil
 }
 
-// allocStoredValues returns, in program order, the values stored into alloc.
-// Shared by traceAlloc (first) and traceAllAllocStores (all).
-func allocStoredValues(alloc *ssa.Alloc) []ssa.Value {
+// AllocStoredValues returns, in program order, the values stored into alloc.
+// Shared by traceAlloc (first), traceAllAllocStores (all), the Scopes callback
+// resolver, and scopeswarn.
+func AllocStoredValues(alloc *ssa.Alloc) []ssa.Value {
 	fn := alloc.Parent()
 	if fn == nil {
 		return nil
@@ -1383,7 +1385,7 @@ func (t *RootTracer) traceAllPhiEdges(phi *ssa.Phi, visited map[ssa.Value]bool, 
 
 func (t *RootTracer) traceAllAllocStores(alloc *ssa.Alloc, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) []ssa.Value {
 	var roots []ssa.Value
-	for _, v := range allocStoredValues(alloc) {
+	for _, v := range AllocStoredValues(alloc) {
 		roots = append(roots, t.traceAll(v, visited, loopInfo)...)
 	}
 	return roots
@@ -1424,7 +1426,7 @@ func (t *RootTracer) traceAllFieldStores(fa *ssa.FieldAddr, visited map[ssa.Valu
 //	fn := func() { q.Find(nil) }  // FreeVar captures Phi of [q1, q2]
 //	fn()  // Need to check BOTH q1 and q2
 func (t *RootTracer) traceAllFreeVar(fv *ssa.FreeVar, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) []ssa.Value {
-	if binding := t.freeVarBinding(fv); binding != nil {
+	if binding := FreeVarBinding(fv); binding != nil {
 		return t.traceAll(binding, visited, loopInfo)
 	}
 	return nil
@@ -1532,11 +1534,15 @@ func ClosureCapturesGormDB(mc *ssa.MakeClosure) bool {
 // variadic, so the callbacks are packed into a varargs array (the last call
 // argument is a slice of it); Preload additionally boxes them in interface{}.
 func CollectScopesCallbacks(funcs []*ssa.Function) map[*ssa.Function]bool {
-	set := make(map[*ssa.Function]bool)
-	walkCalls(funcs, func(call *ssa.Call) {
-		collectScopesCallbacksFromCall(call, set)
-	})
-	return set
+	return collectCallbacksPassedTo(funcs, isScopesOrPreloadMethod)
+}
+
+// CollectScopesOnlyCallbacks is CollectScopesCallbacks without Preload: the
+// functions passed to gorm's Scopes, resolved the same way. The temporary
+// Session-in-Scopes warning (go-gorm/gorm#7592) uses it, so it covers the same
+// callbacks as reuse detection (#196).
+func CollectScopesOnlyCallbacks(funcs []*ssa.Function) map[*ssa.Function]bool {
+	return collectCallbacksPassedTo(funcs, isScopesMethod)
 }
 
 // CollectImmutableCallbacks returns the set of function literals passed as the
@@ -1685,6 +1691,16 @@ func cloneVisited(visited map[ssa.Value]bool) map[ssa.Value]bool {
 // walkCalls visits every *ssa.Call in funcs and their nested anonymous functions
 // exactly once. Shared by the Scopes/Preload and Transaction callback collectors.
 func walkCalls(funcs []*ssa.Function, visit func(*ssa.Call)) {
+	walkInstrs(funcs, func(instr ssa.Instruction) {
+		if call, ok := instr.(*ssa.Call); ok {
+			visit(call)
+		}
+	})
+}
+
+// walkInstrs visits every instruction in funcs and their nested anonymous
+// functions, visiting each function exactly once.
+func walkInstrs(funcs []*ssa.Function, visit func(ssa.Instruction)) {
 	visited := make(map[*ssa.Function]bool)
 	var rec func(fn *ssa.Function)
 	rec = func(fn *ssa.Function) {
@@ -1694,9 +1710,7 @@ func walkCalls(funcs []*ssa.Function, visit func(*ssa.Call)) {
 		visited[fn] = true
 		for _, block := range fn.Blocks {
 			for _, instr := range block.Instrs {
-				if call, ok := instr.(*ssa.Call); ok {
-					visit(call)
-				}
+				visit(instr)
 			}
 		}
 		for _, af := range fn.AnonFuncs {
@@ -1708,43 +1722,185 @@ func walkCalls(funcs []*ssa.Function, visit func(*ssa.Call)) {
 	}
 }
 
-// collectScopesCallbacksFromCall adds any callback function passed to a
-// Scopes/Preload call to set.
-func collectScopesCallbacksFromCall(call *ssa.Call, set map[*ssa.Function]bool) {
-	callee := call.Call.StaticCallee()
-	if callee == nil || !isScopesOrPreloadMethod(callee) {
-		return
-	}
-
-	// The variadic callbacks are packed into an array whose slice is the last
-	// argument. Walk the array's element stores back to the callback functions.
-	args := call.Call.Args
-	if len(args) == 0 {
-		return
-	}
-	slice, ok := args[len(args)-1].(*ssa.Slice)
-	if !ok {
-		return
-	}
-	alloc, ok := slice.X.(*ssa.Alloc)
-	if !ok || alloc.Referrers() == nil {
-		return
-	}
-	for _, r := range *alloc.Referrers() {
-		idx, ok := r.(*ssa.IndexAddr)
-		if !ok || idx.Referrers() == nil {
-			continue
+// collectCallbacksPassedTo returns every function passed as a variadic
+// callback to a call whose static callee satisfies match, resolved by a
+// scopesCallbackResolver.
+func collectCallbacksPassedTo(funcs []*ssa.Function, match func(*ssa.Function) bool) map[*ssa.Function]bool {
+	set := make(map[*ssa.Function]bool)
+	r := &scopesCallbackResolver{funcs: funcs, set: set, seen: make(map[ssa.Value]bool)}
+	walkCalls(funcs, func(call *ssa.Call) {
+		callee := call.Call.StaticCallee()
+		if callee == nil || !match(callee) {
+			return
 		}
-		for _, ir := range *idx.Referrers() {
-			store, ok := ir.(*ssa.Store)
-			if !ok {
+		// The variadic callbacks arrive as a slice in the last argument.
+		if args := call.Call.Args; len(args) > 0 {
+			r.addSliceElems(args[len(args)-1])
+		}
+	})
+	return set
+}
+
+// scopesCallbackResolver resolves the slice handed to Scopes/Preload back to
+// the functions it can hold (#196). It follows:
+//
+//   - the varargs array (`Scopes(a, b)`) and slice literals
+//   - `append` (`s = append(s, f)`; `Scopes(s...)`) and Phi edges
+//   - local, captured and package-level variables, and struct fields
+//   - method values (`Scopes(r.scope)`): both the $bound wrapper and the method
+//
+// It stays a may-hold set: an unresolvable source (a parameter, an interface
+// call) adds nothing.
+type scopesCallbackResolver struct {
+	funcs        []*ssa.Function
+	set          map[*ssa.Function]bool
+	seen         map[ssa.Value]bool
+	globalStores map[*ssa.Global][]ssa.Value // built on first use
+}
+
+// addSliceElems adds the functions that the slice (or array pointer) v may hold.
+func (r *scopesCallbackResolver) addSliceElems(v ssa.Value) {
+	if v == nil || r.seen[v] {
+		return
+	}
+	r.seen[v] = true
+
+	// Element stores: `arr[i] = f` for varargs and literals, `s[i] = f` for make.
+	if refs := v.Referrers(); refs != nil {
+		for _, ref := range *refs {
+			idx, ok := ref.(*ssa.IndexAddr)
+			if !ok || idx.X != v || idx.Referrers() == nil {
 				continue
 			}
-			if cb := callbackFuncValue(store.Val); cb != nil {
-				set[cb] = true
+			for _, ir := range *idx.Referrers() {
+				if store, ok := ir.(*ssa.Store); ok && store.Addr == idx {
+					r.addFunc(store.Val)
+				}
 			}
 		}
 	}
+
+	switch x := v.(type) {
+	case *ssa.Slice:
+		r.addSliceElems(x.X)
+	case *ssa.Phi:
+		for _, e := range x.Edges {
+			r.addSliceElems(e)
+		}
+	case *ssa.Call:
+		if b, ok := x.Call.Value.(*ssa.Builtin); ok && b.Name() == "append" {
+			for _, a := range x.Call.Args {
+				r.addSliceElems(a)
+			}
+		}
+	case *ssa.UnOp:
+		if x.Op == token.MUL {
+			for _, sv := range r.storedValues(x.X) {
+				r.addSliceElems(sv)
+			}
+		}
+	case *ssa.FreeVar:
+		r.addSliceElems(FreeVarBinding(x))
+	case *ssa.ChangeType:
+		r.addSliceElems(x.X)
+	}
+}
+
+// addFunc adds the functions that the func value v may be.
+func (r *scopesCallbackResolver) addFunc(v ssa.Value) {
+	if v == nil || r.seen[v] {
+		return
+	}
+	r.seen[v] = true
+
+	switch x := v.(type) {
+	case *ssa.Function:
+		r.set[x] = true
+	case *ssa.MakeClosure:
+		fn, ok := x.Fn.(*ssa.Function)
+		if !ok {
+			return
+		}
+		r.set[fn] = true
+		// A method value is a closure over a synthetic $bound wrapper; the
+		// method itself receives the *gorm.DB, so it is a callback too.
+		if target := boundMethodTarget(fn); target != nil {
+			r.set[target] = true
+		}
+	case *ssa.MakeInterface:
+		r.addFunc(x.X)
+	case *ssa.ChangeType:
+		r.addFunc(x.X)
+	case *ssa.Phi:
+		for _, e := range x.Edges {
+			r.addFunc(e)
+		}
+	case *ssa.UnOp:
+		if x.Op == token.MUL {
+			for _, sv := range r.storedValues(x.X) {
+				r.addFunc(sv)
+			}
+		}
+	case *ssa.FreeVar:
+		r.addFunc(FreeVarBinding(x))
+	}
+}
+
+// storedValues returns the values stored at addr: a local, a captured local, a
+// struct field, or a package-level variable.
+func (r *scopesCallbackResolver) storedValues(addr ssa.Value) []ssa.Value {
+	switch a := addr.(type) {
+	case *ssa.Alloc:
+		return AllocStoredValues(a)
+	case *ssa.FieldAddr:
+		return fieldStoredValues(a)
+	case *ssa.FreeVar:
+		return r.storedValues(FreeVarBinding(a))
+	case *ssa.Global:
+		return r.globalStoredValues(a)
+	}
+	return nil
+}
+
+// globalStoredValues returns the values stored into g by the analyzed functions
+// and by the package initializer, which runs package-level `var x = ...`
+// initializers but is not a source function.
+func (r *scopesCallbackResolver) globalStoredValues(g *ssa.Global) []ssa.Value {
+	if r.globalStores == nil {
+		r.globalStores = make(map[*ssa.Global][]ssa.Value)
+		funcs := slices.Clone(r.funcs)
+		if g.Pkg != nil {
+			if init := g.Pkg.Func("init"); init != nil {
+				funcs = append(funcs, init)
+			}
+		}
+		walkInstrs(funcs, func(instr ssa.Instruction) {
+			if store, ok := instr.(*ssa.Store); ok {
+				if sg, ok := store.Addr.(*ssa.Global); ok {
+					r.globalStores[sg] = append(r.globalStores[sg], store.Val)
+				}
+			}
+		})
+	}
+	return r.globalStores[g]
+}
+
+// boundMethodTarget returns the method that a synthetic $bound wrapper (built
+// for a method value such as `r.scope`) calls, or nil if fn is not one.
+func boundMethodTarget(fn *ssa.Function) *ssa.Function {
+	if fn.Synthetic == "" || len(fn.FreeVars) != 1 || fn.Object() == nil {
+		return nil
+	}
+	for _, block := range fn.Blocks {
+		for _, instr := range block.Instrs {
+			if call, ok := instr.(*ssa.Call); ok {
+				if callee := call.Call.StaticCallee(); callee != nil && callee.Object() == fn.Object() {
+					return callee
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // isScopesOrPreloadMethod reports whether callee is gorm's Scopes or Preload
@@ -1754,6 +1910,16 @@ func isScopesOrPreloadMethod(callee *ssa.Function) bool {
 	if name != "Scopes" && name != "Preload" {
 		return false
 	}
+	return isGormDBMethod(callee)
+}
+
+// isScopesMethod reports whether callee is gorm's Scopes method.
+func isScopesMethod(callee *ssa.Function) bool {
+	return callee.Name() == "Scopes" && isGormDBMethod(callee)
+}
+
+// isGormDBMethod reports whether callee is a method with a gorm.DB receiver.
+func isGormDBMethod(callee *ssa.Function) bool {
 	sig := callee.Signature
 	return sig != nil && sig.Recv() != nil && typeutil.IsGormDB(sig.Recv().Type())
 }
@@ -1789,8 +1955,7 @@ func isImmutableCallbackMethod(callee *ssa.Function) bool {
 	default:
 		return false
 	}
-	sig := callee.Signature
-	return sig != nil && sig.Recv() != nil && typeutil.IsGormDB(sig.Recv().Type())
+	return isGormDBMethod(callee)
 }
 
 // callbackFuncValue extracts the concrete function from a value stored into a

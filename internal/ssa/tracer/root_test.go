@@ -180,6 +180,64 @@ func TestCollectScopesCallbacks(t *testing.T) {
 	}
 }
 
+// TestCollectScopesOnlyCallbacks covers the indirect callback shapes of #196
+// (fixtures in scopes_session_warning.go) and the Preload exclusion.
+func TestCollectScopesOnlyCallbacks(t *testing.T) {
+	t.Parallel()
+	fixtures, allFuncs := loadProgram(t)
+
+	// Like buildssa's SrcFuncs, leave out the synthetic package initializer: the
+	// resolver must find package-level initializers by itself.
+	var srcFuncs []*ssa.Function
+	for name, fn := range fixtures {
+		if name != "init" {
+			srcFuncs = append(srcFuncs, fn)
+		}
+	}
+	set := CollectScopesOnlyCallbacks(srcFuncs)
+	names := make(map[string]bool)
+	for fn := range set {
+		names[fn.String()] = true
+		// Package-level closures are numbered across files; name this one by its variable.
+		if strings.HasPrefix(fn.Name(), "init$") && strings.HasSuffix(fn.Prog.Fset.Position(fn.Pos()).Filename, "scopes_session_warning.go") {
+			names["packageSessionScope"] = true
+		}
+	}
+
+	for _, want := range []string{
+		"gormreuse.namedSessionScope",                       // named function
+		"(gormreuse.sessionScopeRepo).scope",                // method value target
+		"gormreuse.scopesAppendSliceSessionWarns$1",         // append-built slice
+		"packageSessionScope",                               // package-level closure
+		"gormreuse.scopesCallbackSessionWarns$1",            // inline closure
+		"gormreuse.scopesCallbackConditionalSessionWarns$1", // closure with captures
+	} {
+		if !names[want] {
+			t.Errorf("%s should be collected as a Scopes callback", want)
+		}
+	}
+	for _, unwanted := range []string{
+		"gormreuse.preloadCallbackSessionClean$1", // Preload, not Scopes
+		"gormreuse.notScopesSessionClean",         // never passed to Scopes
+		"gormreuse.sessionScopeHelper",            // called by a callback, not passed
+	} {
+		if names[unwanted] {
+			t.Errorf("%s should not be collected as a Scopes callback", unwanted)
+		}
+	}
+
+	// The Preload callback is still in the Scopes+Preload set.
+	var preload *ssa.Function
+	for fn := range allFuncs {
+		if fn.String() == "gormreuse.preloadCallbackSessionClean$1" {
+			preload = fn
+		}
+	}
+	if preload == nil || !CollectScopesCallbacks(srcFuncs)[preload] {
+		t.Error("preloadCallbackSessionClean$1 should be in CollectScopesCallbacks")
+	}
+}
+
 func TestFindMutableRootScopesParam(t *testing.T) {
 	t.Parallel()
 	fixtures, _ := loadProgram(t)
