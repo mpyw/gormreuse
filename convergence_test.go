@@ -1,6 +1,7 @@
 package gormreuse_test
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -21,6 +22,10 @@ var wantComment = regexp.MustCompile(`(?m)[ \t]*// want .*$`)
 // output in a fresh GOPATH and asserts the analyzer reports nothing. This is the
 // check RunWithSuggestedFixes never does (it only diffs one pass against a
 // golden), which is why wrong/non-convergent fixes could hide in CI.
+//
+// So that it cannot pass vacuously (#203), it also requires at least one
+// fixture, requires each fixture's fixes to change it, and requires the fixed
+// output to type-check (analysistest.Run only logs type errors).
 func TestFixesConverge(t *testing.T) {
 	t.Parallel()
 	testdata := analysistest.TestData()
@@ -30,14 +35,20 @@ func TestFixesConverge(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list fixtures: %v", err)
 	}
+	if len(fixtures) == 0 {
+		t.Fatalf("no fixtures in %s", srcDir)
+	}
 
 	for _, name := range fixtures {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			src := filepath.Join(srcDir, name)
-			_, fixed, err := goldentest.ApplyFixes(testdata, "converge", src, gormreuse.Analyzer)
+			original, fixed, err := goldentest.ApplyFixes(testdata, "converge", src, gormreuse.Analyzer)
 			if err != nil {
 				t.Fatalf("apply fixes: %v", err)
+			}
+			if bytes.Equal(original, fixed) {
+				t.Fatalf("the suggested fixes did not change %s; every converge fixture must need a fix", name)
 			}
 			fixed = wantComment.ReplaceAll(fixed, nil)
 
@@ -58,7 +69,11 @@ func TestFixesConverge(t *testing.T) {
 				t.Fatalf("write fixed: %v", err)
 			}
 
-			analysistest.Run(t, gopath, gormreuse.Analyzer, "converge")
+			for _, result := range analysistest.Run(t, gopath, gormreuse.Analyzer, "converge") {
+				for _, err := range result.Action.Package.Errors {
+					t.Errorf("fixed output does not compile: %v", err)
+				}
+			}
 		})
 	}
 }

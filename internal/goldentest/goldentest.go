@@ -5,11 +5,17 @@
 // gengolden command, TestGenerateDiffFiles, and TestDiffFilesUpToDate) and the
 // fixture list was hardcoded in the tests while gengolden globbed — so
 // assignment_patterns.go and export.go silently had no .diff coverage (#77).
+//
+// TestGoldenFiles is now the only generator and checker. A plain `go test` only
+// compares the fixtures and never writes them. It writes them only when the
+// updateEnv environment variable is set (#203).
 package goldentest
 
 import (
 	"bytes"
 	"cmp"
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,6 +26,19 @@ import (
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/analysis/analysistest"
 )
+
+// updateEnv is the environment variable that switches the fixture tests from
+// checking the committed .golden/.diff files to rewriting them.
+const updateEnv = "GORMREUSE_UPDATE_GOLDEN"
+
+// UpdateCommand is the command that regenerates every .golden/.diff fixture.
+// Failure messages print it so the update path is visible where it is needed.
+const UpdateCommand = updateEnv + "=1 go test -run TestGoldenFiles ."
+
+// Updating reports whether updateEnv asks the tests to rewrite the fixtures.
+func Updating() bool {
+	return os.Getenv(updateEnv) != ""
+}
 
 // NoopT implements the analysistest.Testing interface, swallowing every failure
 // so the analyzer can be run purely to collect its suggested fixes (the
@@ -97,21 +116,65 @@ func ApplyFixes(testdata, pkg, srcPath string, a *analysis.Analyzer) (original, 
 	return original, fixed, nil
 }
 
+// Render returns the committed fixture contents for srcPath: the .golden file
+// (the source with every suggested fix applied) and the .diff file (see
+// generateDiff).
+func Render(testdata, pkg, srcPath string, a *analysis.Analyzer) (golden, diff []byte, err error) {
+	original, fixed, err := ApplyFixes(testdata, pkg, srcPath, a)
+	if err != nil {
+		return nil, nil, err
+	}
+	diff, err = generateDiff(filepath.Base(srcPath), original, fixed)
+	if err != nil {
+		return nil, nil, err
+	}
+	return fixed, diff, nil
+}
+
+// Orphans returns the .golden/.diff files under srcDir whose source fixture is
+// gone (or is no longer a fixture, see Fixtures). They would otherwise sit in
+// the tree unchecked.
+func Orphans(srcDir string) ([]string, error) {
+	fixtures, err := Fixtures(srcDir)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, ext := range []string{".golden", ".diff"} {
+		matches, err := filepath.Glob(filepath.Join(srcDir, "*.go"+ext))
+		if err != nil {
+			return nil, err
+		}
+		for _, m := range matches {
+			if !slices.Contains(fixtures, strings.TrimSuffix(filepath.Base(m), ext)) {
+				out = append(out, m)
+			}
+		}
+	}
+	slices.Sort(out)
+	return out, nil
+}
+
 var timestampRegex = regexp.MustCompile(`\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(\.\d+)?( [+-]\d{4})?`)
 
-// GenerateDiff renders the committed .diff representation of the fix for
+// generateDiff renders the committed .diff representation of the fix for
 // filename: a full-context unified diff between original and fixed with stable
 // filename and timestamp placeholders. It returns nil (an empty diff) when the
 // two are equal.
-func GenerateDiff(filename string, original, fixed []byte) ([]byte, error) {
+func generateDiff(filename string, original, fixed []byte) ([]byte, error) {
 	if bytes.Equal(original, fixed) {
 		return nil, nil
 	}
 
-	tmpOriginal := filepath.Join(os.TempDir(), "goldentest_original_"+filename)
-	tmpFixed := filepath.Join(os.TempDir(), "goldentest_fixed_"+filename)
-	defer func() { _ = os.Remove(tmpOriginal) }()
-	defer func() { _ = os.Remove(tmpFixed) }()
+	// A private directory per call, so that concurrent test runs (for example
+	// in several worktrees) cannot overwrite each other's inputs.
+	tmpDir, err := os.MkdirTemp("", "goldentest")
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+	tmpOriginal := filepath.Join(tmpDir, "original_"+filename)
+	tmpFixed := filepath.Join(tmpDir, "fixed_"+filename)
 
 	if err := os.WriteFile(tmpOriginal, original, 0o644); err != nil {
 		return nil, err
@@ -120,13 +183,22 @@ func GenerateDiff(filename string, original, fixed []byte) ([]byte, error) {
 		return nil, err
 	}
 
-	// diff exits 1 when the files differ, which is expected; only the output
-	// matters.
-	var out bytes.Buffer
+	// diff exits 1 when the files differ, which is expected. Any other failure,
+	// including diff missing from PATH, must not turn into an empty diff that
+	// then compares equal to another empty diff (#203).
+	var out, stderr bytes.Buffer
 	cmd := exec.Command("diff", "-U", "999999", tmpOriginal, tmpFixed)
 	cmd.Stdout = &out
-	cmd.Stderr = &out
-	_ = cmd.Run()
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+			return nil, fmt.Errorf("diff %s: %w (stderr: %q)", filename, err, stderr.Bytes())
+		}
+	}
+	if out.Len() == 0 {
+		return nil, fmt.Errorf("diff %s: no output for files that differ", filename)
+	}
 
 	b := out.Bytes()
 	b = bytes.ReplaceAll(b, []byte(tmpOriginal), []byte(filename))

@@ -62,6 +62,11 @@ jobs:
         run: go test -v ./...
         working-directory: e2e/internal
 
+      # The tests only compare the .golden/.diff fixtures; they must never
+      # rewrite tracked files (#203).
+      - name: Check that the tests left tracked files unchanged
+        run: git diff --exit-code
+
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v7
         with:
