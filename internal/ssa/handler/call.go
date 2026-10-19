@@ -37,11 +37,11 @@ package handler
 import (
 	"go/token"
 	"slices"
-	"strings"
 
 	"golang.org/x/tools/go/ssa"
 
 	"github.com/mpyw/gormreuse/internal/directive"
+	"github.com/mpyw/gormreuse/internal/ssa/callsite"
 	"github.com/mpyw/gormreuse/internal/ssa/cfg"
 	"github.com/mpyw/gormreuse/internal/ssa/pollution"
 	"github.com/mpyw/gormreuse/internal/ssa/pollutionsource"
@@ -249,29 +249,11 @@ func sameAddr(a, b ssa.Value) bool {
 }
 
 // isChainedGormMethodCall checks if nextCall is a gorm method call that uses
-// v as receiver (i.e., they form a method chain).
+// v as receiver (i.e., they form a method chain). A call of a method value
+// bound to v is not followed.
 func isChainedGormMethodCall(v ssa.Value, nextCall *ssa.Call) bool {
-	// Check if nextCall is a gorm method call
-	callee := nextCall.Call.StaticCallee()
-	if callee == nil {
-		return false
-	}
-
-	sig := callee.Signature
-	if sig == nil || sig.Recv() == nil {
-		return false
-	}
-
-	if !typeutil.IsGormDB(sig.Recv().Type()) {
-		return false
-	}
-
-	// Check if v is nextCall's receiver (first argument)
-	if len(nextCall.Call.Args) == 0 {
-		return false
-	}
-
-	return nextCall.Call.Args[0] == v
+	site := callsite.SiteOf(nextCall, nil).StaticSite()
+	return site.IsGormMethod() && site.Recv == v
 }
 
 // handle processes a Call instruction and tracks *gorm.DB pollution.
@@ -283,34 +265,28 @@ func isChainedGormMethodCall(v ssa.Value, nextCall *ssa.Call) bool {
 //  4. Check all Phi roots for conditional merges
 func (h *callHandler) handle(call *ssa.Call, ctx *Context) {
 	isInLoop := ctx.LoopInfo.IsInLoop(call.Block())
+	site := ctx.RootTracer.Site(call)
 
 	// Check function call pollution (non-gorm-method calls with *gorm.DB args)
-	h.checkFunctionCallPollution(call, ctx)
+	h.checkFunctionCallPollution(call, site, ctx)
 
-	// Check bound method calls (method values)
-	if mc, ok := call.Call.Value.(*ssa.MakeClosure); ok {
-		h.processBoundMethodCall(call, mc, isInLoop, ctx)
+	switch site.Kind {
+	case callsite.SiteBound:
+		// Check bound method calls (method values)
+		h.processBoundMethodCall(call, site, isInLoop, ctx)
+		return
+	case callsite.SiteClosure:
 		return
 	}
 
 	// Check gorm method calls
-	if !h.isGormDBMethodCall(call) {
+	if !site.IsGormMethod() {
 		return
 	}
 
-	callee := call.Call.StaticCallee()
-	if callee == nil {
-		return
-	}
-
-	methodName := callee.Name()
+	methodName := site.Method()
 	isImmutableReturning := typeutil.IsImmutableReturningBuiltin(methodName)
-
-	// Get receiver
-	if len(call.Call.Args) == 0 {
-		return
-	}
-	recv := call.Call.Args[0]
+	recv := site.Recv
 
 	// pos is the effective position (call-site override inside an invoked
 	// closure, else the call's own position) — see Context.pos / #68.
@@ -376,17 +352,13 @@ func (h *callHandler) handle(call *ssa.Call, ctx *Context) {
 //	find := q.Find  // MakeClosure(Find$bound, [q])
 //	find(nil)       // first use - OK
 //	q.Count(nil)    // VIOLATION (q already polluted by find(nil))
-func (h *callHandler) processBoundMethodCall(call *ssa.Call, mc *ssa.MakeClosure, isInLoop bool, ctx *Context) {
-	if len(mc.Bindings) == 0 {
+func (h *callHandler) processBoundMethodCall(call *ssa.Call, site callsite.Site, isInLoop bool, ctx *Context) {
+	if !site.IsGormMethod() {
 		return
 	}
 
-	recv := mc.Bindings[0]
-	if !typeutil.IsGormDB(recv.Type()) {
-		return
-	}
-
-	methodName := strings.TrimSuffix(mc.Fn.Name(), "$bound")
+	recv := site.Recv
+	methodName := site.Method()
 	isImmutableReturning := typeutil.IsImmutableReturningBuiltin(methodName)
 
 	pos := ctx.pos(call.Pos())
@@ -440,12 +412,15 @@ func (h *callHandler) processBoundMethodCall(call *ssa.Call, mc *ssa.MakeClosure
 //	q := db.Where("x")
 //	pureHelper(q)  // does NOT pollute
 //	q.Count(nil)   // OK (first use)
-func (h *callHandler) checkFunctionCallPollution(call *ssa.Call, ctx *Context) {
-	callee := ctx.RootTracer.Site(call).Callee
+func (h *callHandler) checkFunctionCallPollution(call *ssa.Call, site callsite.Site, ctx *Context) {
+	callee := site.Callee
+	// A method value call is read as a call of its wrapper: every argument
+	// is a parameter.
+	isGormMethodCall := site.StaticSite().IsGormMethod()
 
 	// A Session/Debug copy passed to a function may be read there, pure or not.
 	// The receiver of a gorm method is handled in handle.
-	if !h.isGormDBMethodCall(call) {
+	if !isGormMethodCall {
 		for _, arg := range call.Call.Args {
 			if gormArg, ok := pollutionsource.UnwrapGormDB(arg); ok {
 				recordCallAliasUses(gormArg, call.Block(), ctx.pos(call.Pos()), ctx)
@@ -455,7 +430,7 @@ func (h *callHandler) checkFunctionCallPollution(call *ssa.Call, ctx *Context) {
 
 	// A *gorm.DB passed to a read-only parameter of a gorm method, such as a
 	// subquery, is read, not branched (#185).
-	readOnlyArgs, readStart, hasReadOnly := pollutionsource.CallReadOnlyArgs(&call.Call)
+	readOnlyArgs, readStart, hasReadOnly := pollutionsource.CallReadOnlyArgs(site)
 	for _, v := range readOnlyArgs {
 		recordArgumentRead(v, call, ctx)
 	}
@@ -472,7 +447,7 @@ func (h *callHandler) checkFunctionCallPollution(call *ssa.Call, ctx *Context) {
 	// it here too gave every use a second copy, and the fix generator then
 	// counted a reassigning call as a use of the root it creates (#202).
 	firstArg := 0
-	if h.isGormDBMethodCall(call) {
+	if isGormMethodCall {
 		firstArg = 1
 	}
 
@@ -487,7 +462,7 @@ func (h *callHandler) checkFunctionCallPollution(call *ssa.Call, ctx *Context) {
 		if i < firstArg {
 			continue
 		}
-		if hasReadOnly && i >= readStart {
+		if hasReadOnly && site.ArgParam(i) >= readStart {
 			continue // read above
 		}
 		// Check if arg is *gorm.DB (directly or wrapped in MakeInterface)
@@ -505,7 +480,7 @@ func (h *callHandler) checkFunctionCallPollution(call *ssa.Call, ctx *Context) {
 		// (root != nil) *gorm.DB to a parameter of a function that relies on
 		// immutability — it branches the parameter — is unsafe: the callee's
 		// internal branching interferes because the value is not isolated.
-		if checksImmutableParamArg(callee, i, ctx) {
+		if checksImmutableParamArg(site, i, ctx) {
 			ctx.Tracker.AddMessageViolation(ctx.pos(call.Pos()), immutableParamContractMessage(callee))
 		}
 
@@ -551,17 +526,16 @@ func recordArgumentRead(v ssa.Value, call *ssa.Call, ctx *Context) {
 	}
 }
 
-// checksImmutableParamArg reports whether argument i of a call to callee is
-// bound to a parameter under the caller-side //gormreuse:immutable-param
-// contract: callee (or the function it stands in for, see
-// directive.DeclaredFunc) branches its parameters. A method call carries its
-// receiver as Args[0]; the directive governs parameters, not the receiver, so
-// that argument is skipped. A bound method wrapper has no receiver argument.
-func checksImmutableParamArg(callee *ssa.Function, i int, ctx *Context) bool {
-	if callee == nil || ctx.NeedsImmutableParam == nil || !ctx.NeedsImmutableParam(directive.DeclaredFunc(callee)) {
+// checksImmutableParamArg reports whether argument i of the call is bound to a
+// parameter under the caller-side //gormreuse:immutable-param contract: its
+// callee (or the function it stands in for, see directive.DeclaredFunc)
+// branches its parameters. The directive governs parameters, not the
+// receiver, so that argument is skipped.
+func checksImmutableParamArg(site callsite.Site, i int, ctx *Context) bool {
+	if site.Callee == nil || ctx.NeedsImmutableParam == nil || !ctx.NeedsImmutableParam(directive.DeclaredFunc(site.Callee)) {
 		return false
 	}
-	return callee.Signature.Recv() == nil || i != 0
+	return site.ArgParam(i) >= 0
 }
 
 // immutableParamContractMessage builds the diagnostic for passing a mutable
@@ -573,20 +547,6 @@ func immutableParamContractMessage(callee *ssa.Function) string {
 	}
 	return "mutable *gorm.DB passed to //gormreuse:immutable-param parameter of " + name +
 		"; isolate it with .Session(&gorm.Session{}) before passing"
-}
-
-func (h *callHandler) isGormDBMethodCall(call *ssa.Call) bool {
-	callee := call.Call.StaticCallee()
-	if callee == nil {
-		return false
-	}
-
-	sig := callee.Signature
-	if sig == nil || sig.Recv() == nil {
-		return false
-	}
-
-	return typeutil.IsGormDB(sig.Recv().Type())
 }
 
 // goHandler handles *ssa.Go instructions.
@@ -762,32 +722,28 @@ func DispatchGo(g *ssa.Go, ctx *Context) {
 // e.g. `defer q.Find(nil); defer q.Count(nil)` — are detected. Branch uses are
 // excluded from position-ordered detection (see pollution.Tracker.branchUses).
 func processGormDBCallCommonWith(instr ssa.CallInstruction, block *ssa.BasicBlock, ctx *Context, isPolluted pollutionChecker) {
-	callCommon, pos := instr.Common(), instr.Pos()
-	callee := ctx.RootTracer.Site(instr).Callee
-	if callee == nil {
+	pos := instr.Pos()
+	site := ctx.RootTracer.Site(instr)
+	if site.Callee == nil {
 		return
 	}
 
-	sig := callee.Signature
-
-	// Method call on *gorm.DB
-	if sig != nil && sig.Recv() != nil && typeutil.IsGormDB(sig.Recv().Type()) {
-		if len(callCommon.Args) == 0 {
-			return
-		}
-		handleBranchUse(callCommon.Args[0], pos, block, ctx, isPolluted)
+	// Method call on *gorm.DB. A method value call is read as a call of its
+	// wrapper, whose arguments exclude the bound receiver.
+	if static := site.StaticSite(); static.IsGormMethod() {
+		handleBranchUse(static.Recv, pos, block, ctx, isPolluted)
 		return
 	}
 
 	// Function call with *gorm.DB arguments
-	for i, arg := range callCommon.Args {
+	for i, arg := range instr.Common().Args {
 		if !typeutil.IsGormDB(arg.Type()) {
 			continue
 		}
 		// The caller-side immutable-param contract holds for a deferred or
 		// spawned call as for a plain one (#192).
-		if checksImmutableParamArg(callee, i, ctx) && ctx.RootTracer.FindMutableRoot(arg, ctx.LoopInfo) != nil {
-			ctx.Tracker.AddMessageViolation(ctx.pos(pos), immutableParamContractMessage(callee))
+		if checksImmutableParamArg(site, i, ctx) && ctx.RootTracer.FindMutableRoot(arg, ctx.LoopInfo) != nil {
+			ctx.Tracker.AddMessageViolation(ctx.pos(pos), immutableParamContractMessage(site.Callee))
 		}
 		handleBranchUse(arg, pos, block, ctx, isPolluted)
 	}

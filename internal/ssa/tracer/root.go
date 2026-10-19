@@ -2040,7 +2040,7 @@ func (t *RootTracer) isImmutableSource(v ssa.Value) bool {
 		// handle, so the call is a mutable root like a chain method (#174).
 		site := t.Site(val)
 		if t.isImmutableReturningBuiltin(site.Declared) {
-			return !t.builtinCallEffect(site).ReturnsMutable
+			return !site.SessionEffect().ReturnsMutable
 		}
 		return t.returnsImmutable(site.Declared)
 	default:
@@ -2136,7 +2136,7 @@ func (t *RootTracer) collectAliasedRoots(v ssa.Value, loopInfo *cfg.LoopInfo, co
 				*roots = append(*roots, AliasedRoot{Root: r, Copy: call})
 			}
 		}
-		for _, arg := range pollutionsource.ReadOnlyGormArgs(site.Declared, site.Args) {
+		for _, arg := range pollutionsource.ReadOnlyGormArgs(site) {
 			if r := t.FindMutableRoot(arg, loopInfo); r != nil {
 				*roots = append(*roots, AliasedRoot{Root: r, Copy: call, Argument: true})
 			}
@@ -2171,7 +2171,7 @@ func (t *RootTracer) mayAlias(v ssa.Value, loopInfo *cfg.LoopInfo, copies bool) 
 		if isCopy && t.FindMutableRoot(site.Recv, loopInfo) != nil {
 			return true
 		}
-		for _, arg := range pollutionsource.ReadOnlyGormArgs(site.Declared, site.Args) {
+		for _, arg := range pollutionsource.ReadOnlyGormArgs(site) {
 			if t.FindMutableRoot(arg, loopInfo) != nil || t.mayAlias(arg, loopInfo, true) {
 				return true
 			}
@@ -2204,18 +2204,7 @@ func (t *RootTracer) sharesReceiverStatement(site callsite.Site) bool {
 	if !t.isImmutableReturningBuiltin(site.Declared) || site.Recv == nil {
 		return false
 	}
-	return t.builtinCallEffect(site).SharesStatement
-}
-
-// builtinCallEffect returns the effect of a call to a gorm builtin, passing
-// the *gorm.Session argument of a Session method call. The caller must make
-// sure the callee is a gorm builtin.
-func (t *RootTracer) builtinCallEffect(site callsite.Site) typeutil.BuiltinEffect {
-	var sessionConfig ssa.Value
-	if len(site.Args) > 0 {
-		sessionConfig = site.Args[0]
-	}
-	return typeutil.ImmutableBuiltinEffect(site.Declared.Name(), sessionConfig)
+	return site.SessionEffect().SharesStatement
 }
 
 // pureReturnedArgs returns the arguments of a call to a trusted

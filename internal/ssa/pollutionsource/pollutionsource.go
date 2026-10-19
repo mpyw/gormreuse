@@ -39,11 +39,10 @@ package pollutionsource
 
 import (
 	"slices"
-	"strings"
 
 	"golang.org/x/tools/go/ssa"
 
-	"github.com/mpyw/gormreuse/internal/directive"
+	"github.com/mpyw/gormreuse/internal/ssa/callsite"
 	"github.com/mpyw/gormreuse/internal/typeutil"
 )
 
@@ -172,7 +171,7 @@ func isReadOnlyVariadicArg(idx *ssa.IndexAddr, val ssa.Value) bool {
 // isReadOnlyStdlibCallee reports whether call targets a function in an
 // allow-listed read-only package (see readOnlyVariadicPkgs).
 func isReadOnlyStdlibCallee(call *ssa.Call) bool {
-	callee := call.Call.StaticCallee()
+	callee := callsite.SiteOf(call, nil).StaticSite().Callee
 	if callee == nil || callee.Object() == nil || callee.Object().Pkg() == nil {
 		return false
 	}
@@ -207,35 +206,29 @@ var readOnlyArgMethods = map[string]int{
 	"UpdateColumn": 1,
 }
 
-// readOnlyArgStart returns the index of the first argument, not counting the
-// receiver, that a call to the *gorm.DB method callee passes to a read-only
-// parameter (see readOnlyArgMethods). Every later argument is read-only too.
-// It returns false when callee is not such a method. A caller that resolves a
-// call through a method value passes the method it stands for.
-func readOnlyArgStart(callee *ssa.Function) (int, bool) {
-	if callee == nil {
+// readOnlyArgStart returns the index in site.Args of the first argument that
+// a call to a *gorm.DB method passes to a read-only parameter (see
+// readOnlyArgMethods). Every later argument is read-only too. It returns false
+// when site is not a call to such a method.
+func readOnlyArgStart(site callsite.Site) (int, bool) {
+	if !site.IsGormMethod() {
 		return 0, false
 	}
-	recv := callee.Signature.Recv()
-	if recv == nil || !typeutil.IsGormDB(recv.Type()) {
-		return 0, false
-	}
-	first, ok := readOnlyArgMethods[callee.Name()]
+	first, ok := readOnlyArgMethods[site.Method()]
 	return first, ok
 }
 
-// ReadOnlyGormArgs returns the *gorm.DB values that a call to callee passes
-// to a read-only parameter (see readOnlyArgStart): directly, boxed in an
+// ReadOnlyGormArgs returns the *gorm.DB values that the call passes to a
+// read-only parameter (see readOnlyArgStart): directly, boxed in an
 // interface, or packed into a varargs array that goes nowhere else
-// (isReadOnlyGormVarargs). args are the call's arguments without the
-// receiver.
-func ReadOnlyGormArgs(callee *ssa.Function, args []ssa.Value) []ssa.Value {
-	start, ok := readOnlyArgStart(callee)
-	if !ok || start > len(args) {
+// (isReadOnlyGormVarargs).
+func ReadOnlyGormArgs(site callsite.Site) []ssa.Value {
+	start, ok := readOnlyArgStart(site)
+	if !ok || start > len(site.Args) {
 		return nil
 	}
 	var vals []ssa.Value
-	for _, arg := range args[start:] {
+	for _, arg := range site.Args[start:] {
 		if v, ok := UnwrapGormDB(arg); ok {
 			vals = append(vals, v)
 			continue
@@ -254,33 +247,16 @@ func ReadOnlyGormArgs(callee *ssa.Function, args []ssa.Value) []ssa.Value {
 }
 
 // CallReadOnlyArgs returns the read-only *gorm.DB arguments of a call to a
-// *gorm.DB method (see ReadOnlyGormArgs), and the index in common.Args of the
+// *gorm.DB method (see ReadOnlyGormArgs), and the index in site.Args of the
 // first read-only argument. ok is false for any other call. A call through a
 // method value (w := db.Where; w("id IN (?)", sub)) is read as the method call
-// it stands for, as callsite.Site does (#178).
-func CallReadOnlyArgs(common *ssa.CallCommon) (vals []ssa.Value, start int, ok bool) {
-	callee, offset := calledGormMethod(common)
-	first, ok := readOnlyArgStart(callee)
+// it stands for (#178).
+func CallReadOnlyArgs(site callsite.Site) (vals []ssa.Value, start int, ok bool) {
+	start, ok = readOnlyArgStart(site)
 	if !ok {
 		return nil, 0, false
 	}
-	return ReadOnlyGormArgs(callee, common.Args[offset:]), first + offset, true
-}
-
-// calledGormMethod returns the method a call runs and the index in
-// common.Args of its first argument after the receiver: 1 for a static
-// method call, 0 for a call through a method value, whose receiver is bound.
-func calledGormMethod(common *ssa.CallCommon) (*ssa.Function, int) {
-	if mc, ok := common.Value.(*ssa.MakeClosure); ok && len(mc.Bindings) > 0 {
-		if fn, ok := mc.Fn.(*ssa.Function); ok && fn.Synthetic != "" && strings.HasSuffix(fn.Name(), "$bound") {
-			return directive.DeclaredFunc(fn), 0
-		}
-	}
-	callee := common.StaticCallee()
-	if callee == nil || callee.Signature.Recv() == nil || len(common.Args) == 0 {
-		return nil, 0
-	}
-	return callee, 1
+	return ReadOnlyGormArgs(site), start, true
 }
 
 // isReadOnlyGormVarargs reports whether array is a local array whose every
@@ -306,9 +282,9 @@ func isReadOnlyGormVarargs(array ssa.Value) bool {
 				if !ok {
 					return false
 				}
-				callee, offset := calledGormMethod(&call.Call)
-				first, ok := readOnlyArgStart(callee)
-				if !ok || slices.Index(call.Call.Args, ssa.Value(u)) < first+offset {
+				site := callsite.SiteOf(call, nil)
+				first, ok := readOnlyArgStart(site)
+				if !ok || slices.Index(site.Args, ssa.Value(u)) < first {
 					return false
 				}
 			}

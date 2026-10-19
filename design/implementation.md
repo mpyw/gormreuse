@@ -70,7 +70,7 @@ The name-based "immutable-returning" class is not exact. In GORM v1.31, `Session
 | `Session` with `NewDB` | `clone == 1`: each use starts a new Statement | Pure use only (unchanged) |
 | `Session` with `Initialized` | Returns `tx.getInstance()`: a `clone == 0` handle with its own copy | Pure use of the receiver; the result is a **new mutable root** |
 
-`typeutil.ImmutableBuiltinEffect` decides this from the `&gorm.Session{...}` literal. In SSA the literal is an `Alloc` with one `FieldAddr`+`Store` per set field. Any other use of the `Alloc`, a store in another block than the `Alloc`, or a non-constant bool makes the field unknown. An unknown config is assumed to both share and return a mutable value. A `Context` set to any non-constant value counts as set, matching the existing trust in `WithContext(ctx)`.
+`callsite.Site.SessionEffect` decides this from the `&gorm.Session{...}` literal. In SSA the literal is an `Alloc` with one `FieldAddr`+`Store` per set field. Any other use of the `Alloc`, a store in another block than the `Alloc`, or a non-constant bool makes the field unknown. An unknown config is assumed to both share and return a mutable value. A `Context` set to any non-constant value counts as set, matching the existing trust in `WithContext(ctx)`.
 
 `RootTracer.FindAliasedRoots` finds the copies a value reaches through `FindAllMutableRoots` (so Phi, variables and closure captures work) and returns each copy's receiver root, following copies of copies. The call handler records an alias use for a gorm method receiver, a bound-method receiver, and a `*gorm.DB` argument of a non-gorm function. `DetectViolations` reports an alias use when a polluting **or assignment** use of the root lies between the copy and the use and reaches the use. Assignment uses count here because `q = q.Where(...)` changes a `clone == 0` Statement in place. A change before the copy is not counted: it already makes the `Session`/`Debug` call itself a second branch, so counting it again would duplicate that report.
 
@@ -242,11 +242,12 @@ gormreuse/
 │   ├── fix/generator.go         # Suggested fixes: reassignment, Session, immutable-param
 │   ├── goldentest/goldentest.go # Shared golden machinery (ApplyFixes, UpdateCommand)
 │   ├── scopeswarn/scopeswarn.go # TEMPORARY Session-returned-from-Scopes warning (GORM bug #7592)
-│   ├── typeutil/gorm.go         # IsGormDB, IsImmutableReturningBuiltin, ImmutableBuiltinEffect
+│   ├── typeutil/gorm.go         # IsGormDB, IsImmutableReturningBuiltin
 │   └── ssa/
 │       ├── analyzer.go          # Per-function Analyzer: tracking, then detection
 │       ├── callsite/            # What a call, go or defer instruction runs
 │       │   ├── site.go          # Site, SiteOf, EachSite: callee, receiver, arguments
+│       │   ├── session.go       # SessionEffect: what a Session/Debug call shares (#174)
 │       │   ├── funcvar.go       # FuncVars: package-level variables that hold one function
 │       │   └── walk.go          # WalkInstrs: every instruction, nested closures included
 │       ├── tracer/root.go       # RootTracer: mutable roots, aliases, callbacks
@@ -495,7 +496,7 @@ Limitation: every `*gorm.DB` element of one tuple shares the call as its root. `
 
 ### Calls through a method value (#178)
 
-The tracer resolves a call `w(x)` through a method value `w := r.m` as the call `r.m(x)`. `callsite.SiteOf` reads it as a `SiteBound` site: `Declared` is the declared method (`directive.DeclaredFunc` of the `m$bound` wrapper), `Recv` the receiver (`MakeClosure.Bindings[0]`), and `Args` the other arguments. `traceCall`, `traceAll`, `isImmutableSource`, `pureReturnedArgs` and the Session/Debug copy checks (`sharesReceiverStatement`, `builtinCallEffect`, `collectAliasedRoots`) all read the call through it. So:
+The tracer resolves a call `w(x)` through a method value `w := r.m` as the call `r.m(x)`. `callsite.SiteOf` reads it as a `SiteBound` site: `Declared` is the declared method (`directive.DeclaredFunc` of the `m$bound` wrapper), `Recv` the receiver (`MakeClosure.Bindings[0]`), and `Args` the other arguments. `traceCall`, `traceAll`, `isImmutableSource`, `pureReturnedArgs` and the Session/Debug copy checks (`sharesReceiverStatement`, `Site.SessionEffect`, `collectAliasedRoots`) all read the call through it. The call handler, the pure validator and `pollutionsource.CallReadOnlyArgs` read it the same way. Code that still reads the `m$bound` wrapper as a plain function, such as `go`/`defer` of a method value, calls `Site.StaticSite()` (#266). So:
 
 | Code | Result |
 | --- | --- |
@@ -611,7 +612,7 @@ Limitations:
 **Package-level closures.** buildssa puts only declared functions and their literals in `SrcFuncs`. The closure of `var f = func(...)` belongs to the synthetic package `init`, so before #183 its body was never analyzed, a `//gormreuse:pure` on it was never validated, and a call through `f` carried none of its directives. Now:
 
 - `analyzedFuncs` adds the anonymous functions of `init`, nested ones included, to every pass. Their bodies get reuse detection and directive validation like any closure.
-- `callsite.CollectFuncVars` maps a variable to its closure, and `FuncVars.Callee` resolves a call through it (`callsite.SiteOf` reads such a call as a `SiteFuncVar` site). The tracer, the call handler (plain, `go` and `defer` calls) and the pure validator use it, so `pure`, `immutable-return` and the `immutable-param` caller contract apply at the call site.
+- `callsite.CollectFuncVars` maps a variable to its closure, and `callsite.SiteOf` reads a call through it as a `SiteFuncVar` site. The tracer, the call handler (plain, `go` and `defer` calls) and the pure validator use it, so `pure`, `immutable-return` and the `immutable-param` caller contract apply at the call site.
 
 A variable is resolved only when the package stores to it once, the stored value is a function, its address is used only to load and store it, and it is unexported. Otherwise the call may run another function: a second assignment, a write through a pointer, or an assignment in another package. An unresolved call stays a dynamic call: it pollutes its arguments, and its result is a mutable root (#176).
 
@@ -665,7 +666,7 @@ Decisions and limitations:
 | Returned value | Provably mutable when |
 | --- | --- |
 | A gorm chain-method call (`Where`, `Order`, …) | Always |
-| `Session(cfg)` | `cfg` is a `&gorm.Session{...}` literal that sets `Initialized: true` (`typeutil.SessionSetsInitialized`). It returns `tx.getInstance()`, a `clone == 0` handle (#174). An unreadable config is not reported |
+| `Session(cfg)` | `cfg` is a `&gorm.Session{...}` literal that sets `Initialized: true` (`callsite.Site.SessionSetsInitialized`). It returns `tx.getInstance()`, a `clone == 0` handle (#174). An unreadable config is not reported |
 | A Phi | Any edge is |
 | A call to a closure: an IIFE, a `MakeClosure`, or a captured local assigned exactly once (`f := func() ...; return f()`) | One of the closure's returns is, checked the same way. A closure marked `immutable-return` is trusted here and checked on its own |
 | A load of a named result that a deferred closure stores to | Any value the closure stores is. When a deferred closure stores on every path through it and its `defer` dominates the return (or the return is in the recover block), the values stored before it are hidden and not checked |
