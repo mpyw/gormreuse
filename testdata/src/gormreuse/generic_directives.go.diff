@@ -1,6 +1,6 @@
 --- generic_directives.go	1970-01-01 00:00:00
 +++ generic_directives.go.golden	1970-01-01 00:00:00
-@@ -1,232 +1,232 @@
+@@ -1,237 +1,237 @@
  package internal
  
  import "gorm.io/gorm"
@@ -136,6 +136,11 @@
  // genPassMutable: the caller-side contract is checked for the instance.
  func genPassMutable(root *gorm.DB) {
  	genBranch[int](root.Session(&gorm.Session{}).Where("x")) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of genBranch`
+ }
+ 
+ // genDeferMutable: the same under defer (#192).
+ func genDeferMutable(root *gorm.DB) {
+ 	defer genBranch[int](root.Session(&gorm.Session{}).Where("x")) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of genBranch`
  }
  
  // genPassIsolated: an isolated value satisfies the contract.

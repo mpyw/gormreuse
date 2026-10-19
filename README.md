@@ -604,6 +604,8 @@ func applyFilters(tx *gorm.DB) {
 > }
 > ```
 > Fix by passing an isolated value (`root.Session(&gorm.Session{})`), or make the caller `//gormreuse:immutable-param` too so the contract propagates.
+>
+> The check covers direct calls, function and method values, generic instances, and the same calls under `go` and `defer`. It cannot cover a call through an interface or a func-typed parameter, where the callee is unknown, or a callee in another package ([#195](https://github.com/mpyw/gormreuse/issues/195)).
 
 > [!TIP]
 > Combine with `//gormreuse:pure` when a helper both leaves its argument unpolluted and expects an isolated value. A **redundant** `//gormreuse:immutable-param` — one whose parameter is never reused, so it suppresses nothing — is reported so you can drop it.

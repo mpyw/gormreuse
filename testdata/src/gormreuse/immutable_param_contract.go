@@ -64,3 +64,67 @@ func contractRedundantCalleeNoContract(root *gorm.DB) {
 func applyOneFilter(db *gorm.DB) { // want `redundant gormreuse:immutable-param directive: no \*gorm\.DB parameter is reused`
 	db.Where("a").Find(nil)
 }
+
+// ===== Call forms (#192) =====
+//
+// The caller-side contract is checked for every call form whose callee is
+// known statically: a direct call, a function value, a method value, and the
+// same calls under go and defer. Generic instances are covered in
+// generic_directives.go.
+
+// contractRepo carries an immutable-param method, for the method-value forms.
+type contractRepo struct{}
+
+//gormreuse:immutable-param
+func (contractRepo) apply(db *gorm.DB) {
+	db.Where("a").Find(nil)
+	db.Where("b").Find(nil)
+}
+
+// contractApplier is implemented by contractRepo.
+type contractApplier interface {
+	apply(db *gorm.DB)
+}
+
+func contractFuncValue(root *gorm.DB) {
+	f := applyTwoFilters
+	f(root.Where("x")) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of applyTwoFilters`
+}
+
+func contractGo(root *gorm.DB) {
+	go applyTwoFilters(root.Where("x")) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of applyTwoFilters`
+}
+
+func contractDefer(root *gorm.DB) {
+	defer applyTwoFilters(root.Where("x")) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of applyTwoFilters`
+}
+
+func contractMethod(root *gorm.DB) {
+	contractRepo{}.apply(root.Where("x")) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of apply`
+}
+
+func contractMethodValue(root *gorm.DB) {
+	f := contractRepo{}.apply
+	f(root.Where("x")) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of apply`
+}
+
+func contractGoMethod(root *gorm.DB) {
+	go contractRepo{}.apply(root.Where("x")) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of apply`
+}
+
+func contractDeferMethodValue(root *gorm.DB) {
+	f := contractRepo{}.apply
+	defer f(root.Where("x")) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of apply`
+}
+
+func contractGoIsolated(root *gorm.DB) {
+	go applyTwoFilters(root.Session(&gorm.Session{}))         // OK: isolated
+	defer contractRepo{}.apply(root.Session(&gorm.Session{})) // OK: isolated
+}
+
+// [LIMITATION] contractInterface calls through an interface. The callee is not known
+// statically, so the contract cannot be checked (a documented limitation).
+func contractInterface(root *gorm.DB) {
+	var a contractApplier = contractRepo{}
+	a.apply(root.Where("x")) // [LIMITATION] FALSE NEGATIVE: interface call
+}

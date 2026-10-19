@@ -376,10 +376,6 @@ func (h *callHandler) checkFunctionCallPollution(call *ssa.Call, ctx *Context) {
 	// This enables patterns like: q = buildQuery(q, "filter")
 	returnsGormDB := typeutil.IsGormDB(call.Type())
 
-	// A method call carries its receiver as Args[0]; //gormreuse:immutable-param
-	// governs parameters, not the receiver, so the contract check below skips it.
-	recvArg := callee != nil && callee.Signature != nil && callee.Signature.Recv() != nil
-
 	for i, arg := range call.Call.Args {
 		// Check if arg is *gorm.DB (directly or wrapped in MakeInterface)
 		gormArg, ok := pollutionsource.UnwrapGormDB(arg)
@@ -396,7 +392,7 @@ func (h *callHandler) checkFunctionCallPollution(call *ssa.Call, ctx *Context) {
 		// (root != nil) *gorm.DB to a parameter of a function that relies on
 		// immutability — it branches the parameter — is unsafe: the callee's
 		// internal branching interferes because the value is not isolated.
-		if callee != nil && ctx.NeedsImmutableParam[directive.DeclaredFunc(callee)] && (!recvArg || i != 0) {
+		if checksImmutableParamArg(callee, i, ctx) {
 			ctx.Tracker.AddMessageViolation(ctx.pos(call.Pos()), immutableParamContractMessage(callee))
 		}
 
@@ -418,6 +414,19 @@ func recordCallAliasUses(v ssa.Value, block *ssa.BasicBlock, pos token.Pos, ctx 
 	for _, aliased := range ctx.RootTracer.FindAliasedRoots(v, ctx.LoopInfo) {
 		ctx.Tracker.RecordAliasUse(aliased.Root, aliased.Copy.Pos(), block, pos)
 	}
+}
+
+// checksImmutableParamArg reports whether argument i of a call to callee is
+// bound to a parameter under the caller-side //gormreuse:immutable-param
+// contract: callee (or the function it stands in for, see
+// directive.DeclaredFunc) branches its parameters. A method call carries its
+// receiver as Args[0]; the directive governs parameters, not the receiver, so
+// that argument is skipped. A bound method wrapper has no receiver argument.
+func checksImmutableParamArg(callee *ssa.Function, i int, ctx *Context) bool {
+	if callee == nil || !ctx.NeedsImmutableParam[directive.DeclaredFunc(callee)] {
+		return false
+	}
+	return callee.Signature.Recv() == nil || i != 0
 }
 
 // immutableParamContractMessage builds the diagnostic for passing a mutable
@@ -635,10 +644,16 @@ func processGormDBCallCommonWith(callCommon *ssa.CallCommon, pos token.Pos, bloc
 	}
 
 	// Function call with *gorm.DB arguments
-	for _, arg := range callCommon.Args {
-		if typeutil.IsGormDB(arg.Type()) {
-			handleBranchUse(arg, pos, block, ctx, isPolluted)
+	for i, arg := range callCommon.Args {
+		if !typeutil.IsGormDB(arg.Type()) {
+			continue
 		}
+		// The caller-side immutable-param contract holds for a deferred or
+		// spawned call as for a plain one (#192).
+		if checksImmutableParamArg(callee, i, ctx) && ctx.RootTracer.FindMutableRoot(arg, ctx.LoopInfo) != nil {
+			ctx.Tracker.AddMessageViolation(ctx.pos(pos), immutableParamContractMessage(callee))
+		}
+		handleBranchUse(arg, pos, block, ctx, isPolluted)
 	}
 }
 
