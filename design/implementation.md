@@ -76,6 +76,15 @@ The name-based "immutable-returning" class is not exact. In GORM v1.31, `Session
 
 **Rejected: count the copy as a branch of the receiver.** The issue suggested this. It would also report `q.Session(&gorm.Session{}).Count(); q.Session(&gorm.Session{}).Find()` and "copy used, then the original changed", which are safe at runtime (`TestSessionBeforeFinisher`, `TestCopyOfMidChain_UseDoesNotChangeOriginal`). The alias-use model reports only the order that leaks.
 
+**Cost (#260).** Every gorm call asks `FindAliasedRoots` about its receiver, and each step down the chain asks `FindAllMutableRoots` again. With `n` conditional reassignments `if c { q = q.Where(...) }` that was cubic in `n` (about 10 s at `n = 400`). Two memos on the `RootTracer` keep it near quadratic, and neither changes a report:
+
+- `FindAllMutableRoots` keeps its result per value and `LoopInfo`. The result depends on nothing else once the pure verdicts are final, which is before any `RootTracer` is made.
+- `mayAlias` keeps, per value and `copies` flag, whether `collectAliasedRoots` can add a root from there. A search that cannot is skipped. Every call it would visit adds nothing either, so what is added, and in what order, stays the same. A search that reaches itself through a loop is assumed to add one, so loops are never skipped.
+
+**Rejected: one shared `visited` set for the whole search.** It visits each value once, but through a loop it visits roots in a different order, and the order of alias uses picks the message when two reports share a position.
+
+`TestPerformance` in `performance_test.go` times the analyzer on generated functions with 400 reassignments, 400 reassignments through `Session` copies, and a chain of 400 pure functions.
+
 Alias violations carry no suggested fix. The reuse-fix strategies rewrite the root's branches, and the right fix (`.Session(&gorm.Session{})` at the end of the root's chain, or an isolating copy) depends on intent.
 
 Limitations:
@@ -618,7 +627,7 @@ A variable is resolved only when the package stores to it once, the stored value
 
 A violation is **definitive** (`Violation.Definitive`) when the argument is polluted by a gorm chain method, escapes, or is passed to a pure function that already failed. Only definitive violations put the function in `PureVerdicts.Failed`, which makes the tracer stop trusting it at call sites. Passing the argument to a function that is not marked pure stays conservative and does not revoke trust (`nestedClosureOuterPureViolation`, PV117).
 
-Failure is transitive (#187). `validatePureFuncs` in `internal/analyzer.go` validates all pure functions repeatedly until `PureVerdicts` stops changing, then reports from a final round. The failed set and each returned set only grow, and larger ones only add violations and returned parameters, so this ends.
+Failure is transitive (#187). `validatePureFuncs` in `internal/analyzer.go` validates the pure functions from a worklist until `PureVerdicts` stops changing, then reports from a final round. When a verdict changes, the pure functions that call or refer to that function (`pureCallers`, closures inside them included) are validated again. The failed set and each returned set only grow, and larger ones only add violations and returned parameters, so this ends, at the same verdicts in any order. A chain of `n` pure functions, each returning the next one's result, takes about `2n` validations. Repeating whole rounds took `n` rounds of `n` (#260).
 
 Decisions and limitations:
 
