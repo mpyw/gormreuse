@@ -19,17 +19,17 @@ func onePassCapturedMerge(db *gorm.DB, c bool) {
 	}()
 }
 
-// onePassCapturedMergeBefore: the read in the closure may run after any store,
-// since the closure may be called anywhere, so "b" gets a Session too. It is
-// redundant here. Every read resolves to the first store, so the last read is
-// reported as a reuse of "a".
+// onePassCapturedMergeBefore: f's only use is the call, so the read in the
+// closure sees the store that reaches the call, "a" (#251). Each read outside
+// sees the store that reaches it, so the last read is the first branch of "b"
+// and only "a" gets a Session.
 func onePassCapturedMergeBefore(db, other *gorm.DB) {
 	q := db.Where("a").Session(&gorm.Session{})
 	f := func() { q.Find(nil) }
 	f()
 	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
-	q = other.Where("b").Session(&gorm.Session{})
-	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	q = other.Where("b")
+	q.Find(nil)
 }
 
 // onePassMaskedArgument: q.Find both reuses q and reads r, which r.Find

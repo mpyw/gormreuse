@@ -217,3 +217,116 @@ func (t *RootTracer) traceAllClosureReturns(fn *ssa.Function, visited map[ssa.Va
 	}
 	return allRoots
 }
+
+// closureInvocationCalls returns the plain calls of mc, the closure of a
+// function literal, or nil when mc is used in any other way: deferred,
+// spawned, stored or passed on. Only then are the calls all the places it runs.
+//
+//declscope:shared // store.go reads a captured variable at the closure's calls
+func closureInvocationCalls(mc *ssa.MakeClosure) []*ssa.Call {
+	var calls []*ssa.Call
+	for _, ref := range *mc.Referrers() {
+		call, ok := ref.(*ssa.Call)
+		if !ok || call.Call.Value != ssa.Value(mc) {
+			return nil
+		}
+		calls = append(calls, call)
+	}
+	return calls
+}
+
+// closureCallOwnsRoots reports whether call, a call of a function literal
+// whose returns trace to roots, is a mutable root of its own rather than
+// sharing them with the closure's other calls (#251). That is so when the
+// closure may run more than once and each run builds a fresh chain:
+//
+//	base := func() *gorm.DB { return db.Model(&User{}) } // db immutable
+//	base().Where("c").Find(nil)
+//	base().Where("d").Find(nil)  // a new Statement, not a second branch
+//
+// Each root must be a gorm method call in the closure whose result is only
+// returned, so no use inside the closure shares it with the caller's, and the
+// chain it ends must start from immutable values. A chain that starts from a
+// captured mutable root, a parameter or a call of another function is shared
+// by every run, so it keeps its roots.
+//
+// cfg.Repeats counts the runs (#249).
+//
+//declscope:shared // root.go's traceCall and traceAll keep a closure factory's call as its own root
+func (t *RootTracer) closureCallOwnsRoots(call *ssa.Call, roots []ssa.Value, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) bool {
+	mc, ok := call.Call.Value.(*ssa.MakeClosure)
+	if !ok || !t.closureRunsRepeatedly(mc) {
+		return false
+	}
+	fn, _ := mc.Fn.(*ssa.Function)
+	seen := make(map[*ssa.Call]bool)
+	for _, root := range roots {
+		c, ok := root.(*ssa.Call)
+		if !ok || !closureResultOnlyReturned(c) || !t.closureChainIsFresh(c, fn, visited, loopInfo, seen) {
+			return false
+		}
+	}
+	return true
+}
+
+// closureRunsRepeatedly reports whether the closure mc may run more than once
+// for one run of the MakeClosure, as cfg.Repeats counts it (#249): at two
+// sites that may both run, or at a site in a loop that does not create it.
+func (t *RootTracer) closureRunsRepeatedly(mc *ssa.MakeClosure) bool {
+	fn, ok := mc.Fn.(*ssa.Function)
+	if !ok || len(fn.Blocks) == 0 {
+		return false
+	}
+	repeats, ok := t.closureRepeats[fn]
+	if !ok {
+		repeats = cfg.RepeatsOf(fn)
+		t.closureRepeats[fn] = repeats
+	}
+	return repeats.RepeatsAfter(fn.Blocks[0], mc.Block())
+}
+
+// closureResultOnlyReturned reports whether every use of c's result is a
+// return.
+func closureResultOnlyReturned(c *ssa.Call) bool {
+	for _, ref := range *c.Referrers() {
+		if _, ok := ref.(*ssa.Return); !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// closureChainIsFresh reports whether c, a call in fn, is a gorm method call
+// whose *gorm.DB operands are immutable or come from such calls in fn, fresh
+// on each run of fn. seen holds the calls already found fresh.
+func (t *RootTracer) closureChainIsFresh(c *ssa.Call, fn *ssa.Function, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo, seen map[*ssa.Call]bool) bool {
+	if seen[c] {
+		return true
+	}
+	site := t.Site(c)
+	if c.Parent() != fn || !site.IsGormMethod() {
+		return false
+	}
+	seen[c] = true
+	operands := site.Args
+	if site.Recv != nil {
+		operands = append([]ssa.Value{site.Recv}, operands...)
+	}
+	for _, op := range operands {
+		// A gorm method takes no struct of handles: its other parameters
+		// are interfaces, whose subqueries are only read (#185).
+		if !typeutil.IsGormDB(op.Type()) {
+			continue
+		}
+		for _, root := range t.traceAll(op, maps.Clone(visited), loopInfo) {
+			if t.IsImmutableCall(root) {
+				continue
+			}
+			rc, ok := root.(*ssa.Call)
+			if !ok || !t.closureChainIsFresh(rc, fn, visited, loopInfo, seen) {
+				return false
+			}
+		}
+	}
+	return true
+}

@@ -122,6 +122,8 @@ type RootTracer struct {
 	onlyParams map[*ssa.Function]bool // Memo of pureReturnsOnlyParams
 	//declscope:shared // alias.go's mayAlias fills it
 	aliases map[aliasedRootsKey]bool // Memo of mayAlias
+	//declscope:shared // closure.go's closureRunsRepeatedly fills it
+	closureRepeats map[*ssa.Function]*cfg.Repeats // Memo of cfg.RepeatsOf for a closure
 }
 
 // NewRootTracer creates a new RootTracer.
@@ -156,6 +158,7 @@ func NewRootTracer(pureFuncs, immutableReturnFuncs, immutableParamFuncs *directi
 		fieldRoots:           make(map[fieldRootKey]*FieldRoot),
 		allRoots:             make(map[allRootsKey][]ssa.Value),
 		aliases:              make(map[aliasedRootsKey]bool),
+		closureRepeats:       make(map[*ssa.Function]*cfg.Repeats),
 	}
 }
 
@@ -379,7 +382,9 @@ func (t *RootTracer) traceCall(call *ssa.Call, visited map[ssa.Value]bool, loopI
 			// If closure result is stored in a variable (Extract instruction),
 			// treat each call as independent root.
 			// Only trace through IIFE when result is directly chained.
-			if t.isClosureResultStored(call) {
+			// So is each call of a closure that runs more than once and
+			// builds a fresh chain on each run (#251).
+			if t.isClosureResultStored(call) || t.closureCallOwnsRoots(call, []ssa.Value{root}, visited, loopInfo) {
 				return call
 			}
 			return root
@@ -447,7 +452,7 @@ func (t *RootTracer) traceNonCall(v ssa.Value, visited map[ssa.Value]bool, loopI
 
 	case *ssa.Alloc:
 		// Alloc: local variable allocation
-		return t.traceAllocStore(val, visited, loopInfo)
+		return t.traceAllocStore(val, nil, visited, loopInfo)
 
 	case *ssa.Field:
 		// Field: a field of a struct held in a register, as promoted methods
@@ -477,9 +482,9 @@ func (t *RootTracer) traceUnOp(unop *ssa.UnOp, visited map[ssa.Value]bool, loopI
 func (t *RootTracer) tracePointerLoad(load *ssa.UnOp, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) ssa.Value {
 	switch p := load.X.(type) {
 	case *ssa.FreeVar:
-		return t.traceFreeVar(p, visited, loopInfo)
+		return t.traceFreeVarLoad(p, load, visited, loopInfo)
 	case *ssa.Alloc:
-		return t.traceAllocStore(p, visited, loopInfo)
+		return t.traceAllocStore(p, load, visited, loopInfo)
 	case *ssa.FieldAddr:
 		return t.traceFieldStore(p, load, visited, loopInfo)
 	case *ssa.Global:
@@ -652,7 +657,7 @@ func (t *RootTracer) traceAll(v ssa.Value, visited map[ssa.Value]bool, loopInfo 
 		return t.traceAll(val.X, visited, loopInfo)
 
 	case *ssa.Alloc:
-		return t.traceAllAllocStores(val, visited, loopInfo)
+		return t.traceAllAllocStores(val, nil, visited, loopInfo)
 
 	case *ssa.FreeVar:
 		return t.traceAllFreeVar(val, visited, loopInfo)
@@ -680,8 +685,9 @@ func (t *RootTracer) traceAll(v ssa.Value, visited map[ssa.Value]bool, loopInfo 
 		// call through a method value is a call of its own (see traceCall).
 		if site.Kind == callsite.SiteClosure {
 			if roots := t.traceAllClosureReturns(site.Callee, visited, loopInfo); len(roots) > 0 {
-				// If closure result is stored, treat call itself as root
-				if t.isClosureResultStored(val) {
+				// If closure result is stored, or each call builds a fresh
+				// chain (#251), treat call itself as root
+				if t.isClosureResultStored(val) || t.closureCallOwnsRoots(val, roots, visited, loopInfo) {
 					return []ssa.Value{val}
 				}
 				return roots
@@ -709,7 +715,9 @@ func (t *RootTracer) traceAll(v ssa.Value, visited map[ssa.Value]bool, loopInfo 
 func (t *RootTracer) traceAllPointerLoads(load *ssa.UnOp, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) []ssa.Value {
 	switch p := load.X.(type) {
 	case *ssa.Alloc:
-		return t.traceAllAllocStores(p, visited, loopInfo)
+		return t.traceAllAllocStores(p, load, visited, loopInfo)
+	case *ssa.FreeVar:
+		return t.traceAllFreeVarLoads(p, load, visited, loopInfo)
 	case *ssa.FieldAddr:
 		return t.traceAllFieldStores(p, load, visited, loopInfo)
 	case *ssa.Global:

@@ -642,6 +642,23 @@ A closure nested inside the body (an IIFE, a `defer`) runs once per run of the b
 
 **Reachability (#179).** The same single invocation, and also an IIFE, gives the closure an invocation site: the block of its one plain call (`Tracker.RecordInvocationSite`). When two uses are in different functions, `isReachable` lifts each use through these sites to the innermost function that holds both, and asks the CFG whether the first site reaches the second. So `if c { f() } else { q.Count(nil) }`, `if c { f(); return }; q.Count(nil)` and one IIFE per branch are not reported. Positions still decide the order. If the two sites are the same block, or no common function is reached, the pair counts as reachable, as before #179. A closure with no single plain call (more than one call, `defer`, `go`, passed as an argument, stored) has no site, so its uses stay conservative. A nested closure without its own site does not inherit its parent's site either: it can escape the parent and run after it.
 
+**Reassigned captured variables (#251).** A variable that a closure captures and that is reassigned lives in an `Alloc`, with no Phi. Before #251 every read of it resolved to its first store, often the parameter it was initialized with, so `db = db.WithContext(ctx); db.Find(nil); func() { db.Count(nil) }()` reported two branches of the parameter, and `-fix` added a redundant Session. Now `allocReachingStoreValues` matches stores with the CFG-ordered search of #182 (`fieldStores` with an empty path):
+
+| Read | Stores it sees |
+| --- | --- |
+| In the function that declares the variable | The stores that reach the read |
+| In a closure declared there whose only uses are plain calls (`f()`, an IIFE) | The stores that reach any of those calls |
+| In a closure that is deferred, spawned, stored, passed on, or nested in another closure | Every store, as before: it may run at any point |
+
+The single-root trace takes the first store it sees, in block order. A store made inside a closure is still not seen (`closureModifiesCaptured`). This also fixes `p := &q; *p = db.Where("y")`, which is a direct store to `q`'s `Alloc` (`reassignPointerDeref`). The fix's `mergedEdges` still gives a Session to a store that may run before two reads of the variable, so a store whose own reads need none can get a redundant one.
+
+**Closure factories (#251).** A closure that returns a chain, such as `base := func() *gorm.DB { return db.Model(&User{}) }`, is traced through its returns like an IIFE, so every call of it shared the root inside its body. Calling it twice, or once in a loop, reported the second query, though each call builds a new `Statement`. `closureCallOwnsRoots` makes the call its own root when both hold:
+
+- The closure may run more than once for one run of its `MakeClosure`, as `cfg.Repeats` counts it (#249): at two sites that may both run, or at a site in a loop that does not create it (`closureRunsRepeatedly`, which asks `cfg.RepeatsOf` once per closure). A closure called once in a loop is already safe without this rule, since `RepeatsAfter` places a root inside it at its one call site; two calls are not.
+- Each root is a gorm method call in the closure whose result is only returned, and every `*gorm.DB` operand of the chain it ends is immutable or another such call in the closure. A chain from a captured mutable root, a closure parameter or a call of another function is shared by every run, so it keeps its root and stays reported (`cfFactoryCapturedRoot`, `cfFactoryParam`, `cfFactoryHelper`). So does a returned value that the body also uses (`cfFactoryBodyUse`).
+
+The rule does not count the runs itself, so the checker, the fixes and the tracer agree on when a closure runs again.
+
 ### Struct roots (#181)
 
 Three struct shapes lost the root before #181, so reuse through them was missed.
@@ -679,7 +696,7 @@ Decisions and limitations:
 - No fix is suggested for a `FieldRoot`. `Session()` cannot be appended to a call that returns a struct. It belongs where the function builds the struct.
 - A field read through a parameter or a receiver is still not a mutable root, whether the struct is passed by value or by pointer. That trade-off is unchanged.
 - A write to a returned struct inside another function (`p.Reset()`, `reset(&s)`) is not seen. A later read still sees the call's field, so it can be reported though the field was replaced. A closure capturing such a parameter sees only the stores in the enclosing function, as the function itself does.
-- A captured pointer variable is resolved like a captured `*gorm.DB` variable: the single-root trace takes the first pointer stored into it. After `h = &T{q: b}`, a use of `h.q` can still be matched to the first value, as `q = db.Where("b")` on a captured `q` already is.
+- A captured pointer variable is resolved by its stores in program order: the single-root trace takes the first pointer stored into it. After `h = &T{q: b}`, a use of `h.q` can still be matched to the first value. A captured `*gorm.DB` variable is now read by the stores that reach the read instead ([Reassigned captured variables](#closure-uses-68-179)).
 - A struct value that a Phi merges (`e := E{a}; if c { e = E{b} }`) yields the field of every edge. The single-root trace takes the first edge, so the suggested fix makes only that edge immutable. A struct from a channel receive, or a map or slice element, is not followed.
 - A `Field` read over a load uses the CFG-ordered store matching of #182 (`fieldStores`), so `e.DB = other` between two promoted calls is not a second branch. A read inside a closure has no CFG path to the stores in the enclosing function, so it matches all of them, and the single-root trace takes the first. This keeps reuse reported when the closure may run before a later store.
 
@@ -1142,7 +1159,6 @@ Each fixture function marked `[LIMITATION]` under `testdata/src` pins one of the
 | Case | Fixtures | Cause |
 | --- | --- | --- |
 | `a, b := pair(db)`, then `a.Find(nil); b.Find(nil)` | `opaqueTuplePairShared` | Every `*gorm.DB` of one tuple shares the call as its root (#176) |
-| `p := &q; (*p).Find(nil); *p = db.Where("y")`, then `q.Find(nil)` | `reassignPointerDeref` | The store through `p` is not seen as a reassignment of `q`, so `q` still resolves to the old root |
 | `G = db.Where("x"); if c { G = G.Where("a") }; G.Find(nil)` for a global or a field | `pvConditionalRebuildOfStore` | A store is not a merge point the way a local's Phi is |
 
 **Wrong position.** Uses in a deferred closure are ordered by their source position, not by when they run. `defer func() { q.Count(nil) }(); q.Find(nil)` is reported at `q.Find`, which runs first. A deferred call such as `defer q.Count(nil)` is ordered after the function's other uses and reported at the `defer`. Fixtures: `ifInsideDefer`, `ifElseInsideDefer`, `nestedIfInsideDefer`, `tripleNestingIfForDefer`, `tripleNestingForIfDefer`, `deferCapturingLoopVar`, `nestedDeferClosures`, `tripleNestedDeferClosures`, `nestedDeferWithFor`, `ultimateIfForDeferChaos`.

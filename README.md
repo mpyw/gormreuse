@@ -656,6 +656,27 @@ if condition {
 
 A closure called from more than one place, deferred, run with `go`, passed to a function, or stored, may run at any time. A use inside it conflicts with every other use of the same root.
 
+A closure reads a captured variable as it is at the closure's calls. So rebinding a parameter before the closure runs makes it safe to use there:
+
+```go
+db = db.WithContext(ctx)
+db.Find(&users)
+func() { db.Count(&count) }() // OK - reads the WithContext result
+```
+
+A deferred, spawned, stored or passed-on closure may run at any point, so it may read any value the variable held.
+
+A closure that builds a new chain from an immutable value on each call is a factory. Each call is its own root, whether it is called twice or in a loop:
+
+```go
+db = db.Session(&gorm.Session{})
+base := func() *gorm.DB { return db.Model(&User{}) }
+base().Where("c").Find(&users) // OK
+base().Where("d").Find(&users) // OK - a new chain
+```
+
+If the chain starts from a captured mutable root (`return q.Where("y")`), every call branches `q`, so the second call is still reported.
+
 #### Package-level variables
 
 A package-level `*gorm.DB` follows the stores to it in the same function:
@@ -1029,7 +1050,6 @@ gormreuse reports a reuse only when it can follow the value. These cases are kno
 | Code | Why it is reported |
 | --- | --- |
 | `a, b := pair(db)`, then `a.Find(nil); b.Find(nil)` | Both results of one call share the call as their root |
-| `p := &q; *p = db.Where("y")`, then `q.Find(nil)` | The new value stored through the pointer is still traced to the old root |
 | `G = db.Where("x"); if c { G = G.Where("a") }; G.Find(nil)` for a global or a field `G` | A store is not a merge point, so `Where("a")` counts as a branch of the stored root |
 
 **Wrong position:** a use inside a deferred closure runs at function exit. gormreuse orders it by its source position. So `defer func() { q.Count(nil) }(); q.Find(nil)` is reported at `q.Find`, which runs first.

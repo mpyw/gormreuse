@@ -2675,8 +2675,9 @@
  	q = db.Where("y = ?", 2) // Reassignment doesn't affect deferred call (already captured)
  }
  
- // reassignPointerDeref demonstrates reassignment through pointer.
- // [LIMITATION] Pointer dereference reassignment tracking not fully supported.
+ // reassignPointerDeref demonstrates reassignment through pointer. p is q's
+ // address, so `*p = ...` is a store to q, and a read of q sees the stores that
+ // reach it (#251): q.Find is the first branch of the new root.
  //
  // immutable-param keeps the test off Phase 1b parameter branching: db is
  // branched more than once (#175).
@@ -2692,8 +2693,7 @@
 -	*p = db.Where("y = ?", 2) // Reassign through pointer
 +	*p = db.Where("y = ?", 2).Session(&gorm.Session{}) // Reassign through pointer
  
- 	// [LIMITATION] FALSE POSITIVE: Pointer reassignment creates new root tracking
- 	q.Find(nil)  // want `\*gorm\.DB reused: second branch from mutable root`
+ 	q.Find(nil)
  	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  }
  

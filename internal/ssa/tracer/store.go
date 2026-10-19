@@ -17,15 +17,69 @@ import (
 //	Store t1 <value>            // Store a value into q
 //	t2 = UnOp * t1              // Load value from q (dereference)
 //
-// This function finds the Store instruction that writes to the Alloc.
+// This function finds the Store instructions that write to the Alloc and can
+// reach load (see allocReachingStoreValues). A nil load sees all of them.
 //
-//declscope:shared // root.go's traceNonCall and tracePointerLoad send local variables here
-func (t *RootTracer) traceAllocStore(alloc *ssa.Alloc, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) ssa.Value {
+//declscope:shared // root.go's traceNonCall and tracePointerLoad, and freevar.go's traceFreeVarLoad, send local variables here
+func (t *RootTracer) traceAllocStore(alloc *ssa.Alloc, load ssa.Instruction, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) ssa.Value {
 	// Single-root: trace the first value stored into the Alloc.
-	if vals := AllocStoredValues(alloc); len(vals) > 0 {
+	if vals := allocReachingStoreValues(alloc, load); len(vals) > 0 {
 		return t.trace(vals[0], visited, loopInfo)
 	}
 	return nil
+}
+
+// allocReachingStoreValues returns, in program order, the values stored into
+// alloc that a read at load can see (#251). A variable lives in an Alloc when a
+// closure captures it and it is reassigned, so a read from it used to see the
+// first store, often the parameter it was initialized with:
+//
+//	db = db.WithContext(ctx)   // *t0 = db (param); ...; *t0 = WithContext(...)
+//	db.Find(nil)               // sees the WithContext store only
+//	func() { db.Count(nil) }() // so does this read, at the IIFE's call
+//
+// A load in alloc's own function sees the stores that reach it, as a field
+// load does (#182). A load in a closure declared there sees the stores that
+// reach the closure's calls, when plain calls there are its only uses. A
+// closure that is deferred, spawned, stored, passed on or nested deeper may run
+// at any point, so its loads, like a nil load, see every store. A store made
+// inside a closure is not seen, as before.
+func allocReachingStoreValues(alloc *ssa.Alloc, load ssa.Instruction) []ssa.Value {
+	fn := alloc.Parent()
+	if load == nil || fn == nil {
+		return AllocStoredValues(alloc)
+	}
+	reads := []ssa.Instruction{load}
+	if load.Parent() != fn {
+		reads = nil
+		if mc := freeVarMakeClosure(load.Parent()); mc != nil && mc.Parent() == fn {
+			for _, call := range closureInvocationCalls(mc) {
+				reads = append(reads, call)
+			}
+		}
+		if len(reads) == 0 {
+			return AllocStoredValues(alloc)
+		}
+	}
+	var stores []*ssa.Store
+	for _, read := range reads {
+		for _, store := range fieldStores(fn, alloc, nil, read) {
+			if !slices.Contains(stores, store) {
+				stores = append(stores, store)
+			}
+		}
+	}
+	slices.SortFunc(stores, func(a, b *ssa.Store) int {
+		if a.Block() != b.Block() {
+			return a.Block().Index - b.Block().Index
+		}
+		return slices.Index(a.Block().Instrs, ssa.Instruction(a)) - slices.Index(b.Block().Instrs, ssa.Instruction(b))
+	})
+	vals := make([]ssa.Value, 0, len(stores))
+	for _, store := range stores {
+		vals = append(vals, store.Val)
+	}
+	return vals
 }
 
 // AllocStoredValues returns, in program order, the values stored into alloc.
@@ -341,10 +395,12 @@ func globalStoredValues(g *ssa.Global, load ssa.Instruction) []ssa.Value {
 	return vals
 }
 
-//declscope:shared // root.go's traceAll and traceAllPointerLoads send local variables here
-func (t *RootTracer) traceAllAllocStores(alloc *ssa.Alloc, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) []ssa.Value {
+// traceAllAllocStores is traceAllocStore for every value that can reach load.
+//
+//declscope:shared // root.go's traceAll and traceAllPointerLoads, and freevar.go's traceAllFreeVarLoads, send local variables here
+func (t *RootTracer) traceAllAllocStores(alloc *ssa.Alloc, load ssa.Instruction, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) []ssa.Value {
 	var roots []ssa.Value
-	for _, v := range AllocStoredValues(alloc) {
+	for _, v := range allocReachingStoreValues(alloc, load) {
 		roots = append(roots, t.traceAll(v, visited, loopInfo)...)
 	}
 	return roots
