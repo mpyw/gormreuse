@@ -1487,11 +1487,85 @@ func (t *RootTracer) isImmutableSource(v ssa.Value) bool {
 		// Constants (including nil) are immutable
 		return true
 	case *ssa.Call:
-		// Builtin or //gormreuse:immutable-return call yields an immutable value.
-		return t.returnsImmutable(val.Call.StaticCallee())
+		// Builtin or //gormreuse:immutable-return call yields an immutable value,
+		// except a Session call that may set Initialized: it returns a clone==0
+		// handle, so the call is a mutable root like a chain method (#174).
+		callee := val.Call.StaticCallee()
+		if t.isImmutableReturningBuiltin(callee) {
+			return !builtinCallEffect(val).ReturnsMutable
+		}
+		return t.returnsImmutable(callee)
 	default:
 		return false
 	}
+}
+
+// FindAliasedRoots returns the mutable roots whose Statement v may point at
+// through a Session or Debug copy (#174).
+//
+// On a clone==0 receiver, Session(&gorm.Session{}) and Debug() return a handle
+// that shares the receiver's Statement. Each use of the copy forks its own
+// Statement, so it does not change the receiver. But it reads the receiver's
+// Statement as it is at that moment. So each use of the copy is a pure use of
+// the receiver's root at the use's own position:
+//
+//	q := db.Where("tenant")       // root
+//	countQ := q.Session(&gorm.Session{})
+//	q.Where("active").Find(nil)   // changes q's Statement in place
+//	countQ.Count(nil)             // reads it: pure use of q's root, after a branch
+//
+// Copies of copies are followed, so q.Session(...).Debug() still reaches q's
+// root. A copy reached through a Phi, a variable, or a closure capture is found
+// the same way as a mutable root.
+func (t *RootTracer) FindAliasedRoots(v ssa.Value, loopInfo *cfg.LoopInfo) []AliasedRoot {
+	var roots []AliasedRoot
+	t.collectAliasedRoots(v, loopInfo, make(map[*ssa.Call]bool), &roots)
+	return roots
+}
+
+// AliasedRoot is a mutable root that a value shares a Statement with, and the
+// Session or Debug call that took the copy from it.
+type AliasedRoot struct {
+	Root ssa.Value
+	Copy *ssa.Call
+}
+
+// collectAliasedRoots adds to roots the mutable roots that v reaches through
+// Statement-sharing builtin calls. seen stops cycles through loops.
+func (t *RootTracer) collectAliasedRoots(v ssa.Value, loopInfo *cfg.LoopInfo, seen map[*ssa.Call]bool, roots *[]AliasedRoot) {
+	for _, candidate := range t.FindAllMutableRoots(v, loopInfo) {
+		call, ok := candidate.(*ssa.Call)
+		if !ok || seen[call] || !t.sharesReceiverStatement(call) {
+			continue
+		}
+		seen[call] = true
+		recv := call.Call.Args[0]
+		if r := t.FindMutableRoot(recv, loopInfo); r != nil {
+			*roots = append(*roots, AliasedRoot{Root: r, Copy: call})
+		}
+		t.collectAliasedRoots(recv, loopInfo, seen, roots)
+	}
+}
+
+// sharesReceiverStatement reports whether call is a gorm Session or Debug
+// method call whose result may share its receiver's Statement.
+func (t *RootTracer) sharesReceiverStatement(call *ssa.Call) bool {
+	callee := call.Call.StaticCallee()
+	if !t.isImmutableReturningBuiltin(callee) || callee.Signature.Recv() == nil || len(call.Call.Args) == 0 {
+		return false
+	}
+	return builtinCallEffect(call).SharesStatement
+}
+
+// builtinCallEffect returns the effect of a static call to a gorm builtin,
+// passing the *gorm.Session argument of a Session method call. The caller
+// must make sure the callee is a gorm builtin.
+func builtinCallEffect(call *ssa.Call) typeutil.BuiltinEffect {
+	var sessionConfig ssa.Value
+	if len(call.Call.Args) > 1 {
+		sessionConfig = call.Call.Args[1]
+	}
+	return typeutil.ImmutableBuiltinEffect(call.Call.StaticCallee().Name(), sessionConfig)
 }
 
 // returnsImmutable reports whether a call to callee yields an immutable

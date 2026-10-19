@@ -154,8 +154,10 @@ func gormOrMethodArg(db *gorm.DB) {
 	base := db.Session(&gorm.Session{}) // immutable base
 	q := db.Where("x")
 
-	// q is passed to Or as interface{} - pollutes q
-	base.Or(q)
+	// q is passed to Or as interface{} - pollutes q.
+	// base also shares db's Statement, which db.Where("x") changed in place
+	// when db is clone==0 (#174).
+	base.Or(q) // want "\\*gorm\\.DB reused: Session/Debug copy shares the Statement of a mutable root"
 
 	q.Find(nil) // want "\\*gorm\\.DB reused: second branch from mutable root"
 }
@@ -166,8 +168,8 @@ func gormOrMethodChain(db *gorm.DB) {
 	base := db.Session(&gorm.Session{}) // immutable base
 	q := db.Where("x")
 
-	// q is polluted by .Where("y") chain call
-	base.Or(q.Where("y"))
+	// q is polluted by .Where("y") chain call. base shares db's Statement (#174).
+	base.Or(q.Where("y")) // want "\\*gorm\\.DB reused: Session/Debug copy shares the Statement of a mutable root"
 
 	q.Find(nil) // want "\\*gorm\\.DB reused: second branch from mutable root"
 }
