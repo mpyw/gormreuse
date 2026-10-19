@@ -290,7 +290,7 @@ func namedCallbackUseExported(db *gorm.DB) {
 // this package are checked, and the Transaction callback reference is fine.
 //
 //gormreuse:immutable-param
-func NamedCallbackExportedImmutable(q *gorm.DB) error {
+func NamedCallbackExportedImmutable(q *gorm.DB) error { // want NamedCallbackExportedImmutable:"gormreuse immutable-param"
 	q.Find(nil)
 	q.Count(nil) // OK: immutable-param
 	return nil

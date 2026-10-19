@@ -44,6 +44,7 @@ package gormreuse
 
 import (
 	"go/ast"
+	"slices"
 	"strings"
 
 	"golang.org/x/tools/go/analysis"
@@ -53,12 +54,15 @@ import (
 
 	"github.com/mpyw/gormreuse/internal"
 	"github.com/mpyw/gormreuse/internal/directive"
+	"github.com/mpyw/gormreuse/internal/facts"
 )
 
 // Analyzer is the main analyzer for gormreuse.
 //
 // It requires the buildssa analyzer to build SSA form of the code,
-// then performs reuse detection via pollution tracking. It also requires the
+// then performs reuse detection via pollution tracking. It exports what it
+// finds about the directive functions of a package as facts, so drivers run
+// it on every dependency first. It also requires the
 // inspect analyzer, which buildssa already depends on, so the directive scans
 // share one AST traversal instead of walking each file again.
 //
@@ -73,7 +77,10 @@ var Analyzer = &analysis.Analyzer{
 	Name:     "gormreuse",
 	Doc:      "detects unsafe *gorm.DB instance reuse after chain methods",
 	Requires: []*analysis.Analyzer{buildssa.Analyzer, inspect.Analyzer},
-	Run:      run,
+	// What a package's analysis finds about its directive functions is
+	// exported to the packages that call them (#195).
+	FactTypes: []analysis.Fact{new(facts.Func)},
+	Run:       run,
 }
 
 func run(pass *analysis.Pass) (any, error) {
@@ -95,7 +102,10 @@ func run(pass *analysis.Pass) (any, error) {
 	for cur := range insp.Root().Children() {
 		file := cur.Node().(*ast.File)
 		filename := pass.Fset.PositionFor(file.Pos(), false).Filename
-		if skipFiles[filename] {
+		// A file with no comment that names gormreuse holds no directive and
+		// no directive problem. The drivers run the analyzer on every
+		// dependency for its facts, so this keeps those runs cheap (#195).
+		if skipFiles[filename] || !mentionsGormreuse(file) {
 			continue
 		}
 		ignores.AddFile(cur)
@@ -130,6 +140,14 @@ func run(pass *analysis.Pass) (any, error) {
 	internal.RunSSA(pass, ssaInfo, ignores, pureFuncs, immutableReturnFuncs, immutableParamFuncs, immutableInputSet, skipFiles)
 
 	return nil, nil
+}
+
+// mentionsGormreuse reports whether a comment of file contains "gormreuse:".
+// Every directive, and every comment reported as a malformed one, does.
+func mentionsGormreuse(file *ast.File) bool {
+	return slices.ContainsFunc(file.Comments, func(cg *ast.CommentGroup) bool {
+		return slices.ContainsFunc(cg.List, func(c *ast.Comment) bool { return strings.Contains(c.Text, "gormreuse:") })
+	})
 }
 
 // buildSkipFiles creates a set of filenames to skip.

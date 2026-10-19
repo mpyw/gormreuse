@@ -125,7 +125,7 @@ Decisions and limitations:
   An ignore only suppresses reports. Before #190 a function-level ignore skipped the function in every pass. That hid contract violations while the directive stayed trusted (a leaking `pure` function was trusted at call sites), never covered closures, and marked the ignore used even when nothing was suppressed. Now every pass runs, so `failedPure` and `needsImmutableParam` see ignored functions, and an ignore is used only when it suppressed a report. Unused-ignore reports go straight to `pass.Reportf`: an ignore never silences another ignore's staleness. So do `panicGuard` internal-error reports, which can now come from an ignored function too, since it is analyzed.
 - `//gormreuse:pure` - Mark function/method/closure as not polluting its `*gorm.DB` argument
 - `//gormreuse:immutable-return` - Mark function/method/closure as returning immutable `*gorm.DB` (like Session/WithContext). **Body contract**: when the function actually returns a provably-mutable value — one whose root is a gorm chain-method call, e.g. `db.Where(...)` or `Session().Where(...)` (the trailing chain re-forks a fresh `clone==0` Statement), or `Session(&gorm.Session{Initialized: true})` — the directive is reported at the declaration, since the linter would otherwise trust it and silently allow unsafe reuse of the return value at call sites. Closures, deferred writes to named results and some package-level variables are followed; see [Immutable-return body contract](#immutable-return-body-contract-194). Roots the tracer treats as mutable only conservatively (a bare `*gorm.DB` parameter, or a call into an unmarked named function) are given the benefit of the doubt and not reported.
-- `//gormreuse:immutable-param` - Opt a function's `*gorm.DB` parameters out of the Phase 1b mutable-by-default treatment: they are treated as immutable inside the function (the caller is responsible for passing an isolated value). **Caller-side contract**: when the function actually branches such a parameter, passing a mutable `*gorm.DB` at a call site is reported (isolate with `.Session(&gorm.Session{})` first, or make the caller `immutable-param` too so the contract propagates). The check runs wherever the callee is known statically: a direct call, a function or method value, a generic instance, and the same calls under `go` and `defer` (#192). The `go`/`defer` path (`processGormDBCallCommonWith`) shares `checksImmutableParamArg` with the call path. An interface method call or a call through a func-typed parameter has no static callee, so its contract cannot be checked. A callee in another package is not checked either (#195).
+- `//gormreuse:immutable-param` - Opt a function's `*gorm.DB` parameters out of the Phase 1b mutable-by-default treatment: they are treated as immutable inside the function (the caller is responsible for passing an isolated value). **Caller-side contract**: when the function actually branches such a parameter, passing a mutable `*gorm.DB` at a call site is reported (isolate with `.Session(&gorm.Session{})` first, or make the caller `immutable-param` too so the contract propagates). The check runs wherever the callee is known statically: a direct call, a function or method value, a generic instance, and the same calls under `go` and `defer` (#192). The `go`/`defer` path (`processGormDBCallCommonWith`) shares `checksImmutableParamArg` with the call path. An interface method call or a call through a func-typed parameter has no static callee, so its contract cannot be checked. A callee in another package is checked through its package's fact (see [Directives across packages](#directives-across-packages-195)).
 - `//gormreuse:immutable-input(name)` - Declare that the function passes an **immutable** `*gorm.DB` to its callback parameter `name` (a user-defined equivalent of gorm's `Transaction`/`FindInBatches`). The named callback's `*gorm.DB` parameter is then treated as immutable, so reuse inside the callback is allowed. **Body contract**: if the function actually passes a mutable value to the callback, it is reported. Reported unused when `name` isn't a parameter, isn't a function type, or the callback has no `*gorm.DB` parameter.
 
   **Following the callback (#193).** Before #193 `ValidateImmutableInputs` checked only a `Call` whose callee was the parameter itself, so `go cb(...)`, `defer cb(...)`, a closure, `forward(cb, ...)`, `(*(&cb))(...)`, a struct field and a slice element all handed a mutable value to the callback unreported. Now `immutableInputFlow` walks the parameter's referrers with a worklist:
@@ -151,7 +151,7 @@ Also: gorm's built-in `Transaction` (via `Begin`) and `FindInBatches` (via `Sess
 | Case | Why |
 | --- | --- |
 | Any reference that is not an argument in a callback position: a direct call (also under `go`/`defer`, and recursion), a method expression `T.m`, a store, a `Phi`, a capture, a return, an ordinary argument | That reference can hand the parameter a mid-chain value |
-| The function or method is exported | Another package can call it, and the analyzer cannot see that call (#195) |
+| The function or method is exported | Another package can call it, and the analyzer cannot see that call. Facts do not change this: they flow from a package to the packages that import it, so the declaring package is analyzed before any caller in another package (#195) |
 | A method whose name matches an interface call, interface method value or interface method expression in the package | Dynamic dispatch can reach it |
 
 A reference counts as a callback position when it is the Transaction/FindInBatches callback argument or an `immutable-input(name)` argument. A closure (`MakeClosure`, including a bound method value `r.m`) is followed: it counts only when all its uses are callback positions. Any other wrapper, such as an interface conversion, counts as a non-callback reference, because both callback positions are func-typed. The scan covers the source functions, their nested literals and the package `init` (package-level variable initializers). A function that is dropped falls back to the rules for an ordinary parameter, so it can opt in with `immutable-param`, whose caller-side check then covers the direct calls. A capture of a local variable holding the function (`cb := f; go func() { _ = db.Transaction(cb) }()`) is treated as a non-callback reference, which may report a callback that is only ever passed to Transaction. That direction is the conservative one.
@@ -171,7 +171,7 @@ Directives can be combined with commas: `//gormreuse:pure,immutable-return`
 
 **Generic instances and method values (#180).** A call can resolve to a stand-in for the function the directive is written on: an instance of a generic function or method (`genBranch[int]`), or a bound method wrapper (`f := r.m`, named `m$bound`). The directive sets and the maps keyed by `*ssa.Function` (`failedPure`, `needsImmutableParam`, the Scopes and immutable callback sets) are keyed by the declared function. `directive.DeclaredFunc` maps a stand-in to it: an instance to its `Origin()`, a bound wrapper to the declared method (`Prog.FuncValue`). Every lookup goes through it: `DirectiveFuncSet.Contains`, `ImmutableInputSet.Callbacks`, the `failedPure` check in `IsPureFunction`, the immutable-param caller check, and the callback collectors (`scopesCallbackResolver` for Scopes/Preload, `callbackFuncValue` for Transaction/FindInBatches and immutable-input). Code that reads the arguments of a call keeps the resolved callee: a bound wrapper has no receiver argument, so the receiver shift is decided from its own signature. An interface method value has no declared body, so `DeclaredFunc` leaves it unchanged and it carries no directive.
 
-All internal positions (file keys, ignore lines, directive placement, the generated-file skip, the disk fallback in `funcset.go`, fix offsets) use `PositionFor(pos, false)`, so `//line` directives cannot move them (#151, #152, #153). Only the `root at file:line` text in messages stays adjusted, to match the position the driver prints.
+All internal positions (file keys, ignore lines, directive placement, the generated-file skip, fix offsets) use `PositionFor(pos, false)`, so `//line` directives cannot move them (#151, #152, #153). Only the `root at file:line` text in messages stays adjusted, to match the position the driver prints.
 
 **Directive placement for closures:**
 
@@ -216,6 +216,8 @@ gormreuse/
 │   │   ├── directive.go        # Directive parsing and problems (parse, FindDirectiveProblems, IsIgnore/IsPure)
 │   │   ├── ignore.go           # //gormreuse:ignore - Ignores scope rule, IgnoreMap, unused tracking
 │   │   └── funcset.go          # DirectiveFuncSet - directive-marked function sets
+│   │
+│   ├── facts/                  # Directive facts exported to importing packages (#195)
 │   │
 │   ├── scopeswarn/             # TEMPORARY Session-returned-from-Scopes warning (GORM bug #7592)
 │   │
@@ -608,7 +610,7 @@ Decisions and limitations:
 - **The argument wins when the result may be either.** A result that may be the argument or a fresh chain is treated as the argument. A branch from it is then counted against the argument, which can report a reuse on the fresh path. Treating it as fresh would miss the reuse on the other path.
 - **A Session-isolated result is not an alias.** `db.Session(&gorm.Session{}).Where(...)` gets its own Statement copy at the `Where` (`TestPureSessionResultIsolated` in `e2e/internal`), so the documented `withTenant` pattern keeps a fresh root, as the README says.
 - **A tuple result follows the same rule (#176).** `Validator.ReturnedParams` already looks at every operand of each `Return`, so `return db, nil` records `db`. `pureReturnedArgs` accepts a tuple result, and `returnsOnlyParams` checks every `*gorm.DB` operand, in any position. The `*gorm.DB` elements of one tuple share the call as their root (see [Results the tracer cannot see through](#results-the-tracer-cannot-see-through-176)), so they are all traced to the returned arguments.
-- **Across packages.** `ReturnedParams` needs the callee's body, so a pure function in another package is still trusted to return a fresh value (#195, `pureReturnedArgUnknown` in `testdata/src/externalpure/use.go`).
+- **Across packages.** `ReturnedParams` needs the callee's body, so the declaring package exports the summary and `returnsOnlyParams` in its fact (#195, `pureReturnedArg` in `testdata/src/externalpure/use.go`).
 - **The receiver.** The receiver is not seeded, so a pure method that returns `r.db` is not an alias of anything.
 
 ## Immutable-return body contract (#194)
@@ -631,6 +633,38 @@ Decisions and limitations:
 - **Named functions are not followed.** A call into an unmarked named helper stays the benefit of the doubt, as the README says. Only closures, whose body belongs to the function, are followed.
 - **Deferred writes are direct stores only.** A store made by a closure that the deferred closure calls, or by a non-deferred closure (`f := func() { r = r.Where("x") }; f(); return`), is not seen.
 - **A captured closure variable** is followed only when it is assigned once and no closure assigns it.
+
+## Directives across packages (#195)
+
+Before #195 the analyzer exported no facts. For a callee in another package, `DirectiveFuncSet` parsed the callee's source file from disk and looked for the directive in the doc comment of a declaration with the same name. So a same-line directive and a generic instance (`GenF[int]`, whose name is not `GenF`) were missed, a contract that the body broke was still trusted, the `immutable-param` caller check never ran, `immutable-input(name)` was ignored, and a package whose source the driver does not load had no directives at all.
+
+Now `exportFacts` in `internal/analyzer.go` exports a `facts.Func` object fact for every exported function and method with a directive, after every pass has run. A caller reads it through `facts.Table`, which `RunSSA` plugs into each consumer. A function of another package has no syntax in the SSA program, so a consumer asks the table only for a function without syntax.
+
+| Field | Set when | Read by |
+| --- | --- | --- |
+| `Pure` | Marked `pure`, valid or not, as `DirectiveFuncSet.Contains` decides in the package | `DirectiveFuncSet.Import` on the pure set |
+| `PureFailed` | The body definitively breaks the contract | `PureVerdicts.HasFailed`. So a pure function that passes its argument to it fails too (#187) |
+| `Returned`, `ReturnsOnlyParams` | The parameters the result may be (#188), and whether nothing else is returned | `PureVerdicts.ReturnedArgs`, `RootTracer.returnsOnlyParams` |
+| `ImmutableReturn` | Marked `immutable-return`, and `ImmutableReturnValidator` reports nothing | `DirectiveFuncSet.Import` on the immutable-return set |
+| `BranchesImmutableParam` | In `needsImmutableParam` | The caller-side check (`handler.Context.NeedsImmutableParam`) |
+| `ImmutableInput` | Marked `immutable-input(name)`, and `ValidateImmutableInputs` reports nothing | `ImmutableInputSet.Import`. The callback collectors and the body check then see the callee's callbacks |
+
+Decisions:
+
+- **A broken contract is trusted at home, not abroad.** In the declaring package a broken `immutable-return` or `immutable-input` is reported at the declaration and still trusted, so the mistake is reported once. A caller in another package may belong to someone who never sees that report, so the fact leaves the directive out and the callee is treated as unmarked. A broken `pure` is distrusted in both places, as before (#66).
+- **Exported functions only.** Another package can name only an exported function or method, so only those get a fact. This also keeps fact expectations in the test fixtures few: `analysistest` fails on a fact without an expectation, and an object fact is expected with `// want Name:"..."` on the declaration line.
+- **No fact means no directive.** The disk fallback is gone. Every driver that supports facts (`singlechecker`, `go vet`, golangci-lint, `analysistest`) runs the analyzer on the dependencies first, so a dependency without a fact has no directive function. A driver without facts would see none, which reports more, not less.
+- **The #191 exemption is not exported.** It concerns the callee's own parameter, which is checked when the callee's package is analyzed. Exported functions stay out of it, because facts cannot tell the declaring package how other packages call it.
+- **A directive in a generated file of the same package.** Generated files are not added to the directive sets, so only a doc-comment directive in one is seen. Before, a same-line directive there was found by parsing the file from disk. The difference reports more, not less.
+
+Cost: with `FactTypes` set, the drivers also run the analyzer, and `buildssa`, on every dependency, including the standard library. Only facts come out of those runs. Two shortcuts keep them cheap, and neither changes a report:
+
+| Shortcut | Why it is safe |
+| --- | --- |
+| `run` skips the directive scans of a file with no comment that contains `gormreuse:` | Every directive, and every comment `FindDirectiveProblems` reports, contains it |
+| `RunSSA` skips the SSA passes of a package that does not reach `gorm.io/gorm` through its imports (`typeutil.ReachesGorm`). It still reports unused directives and ignores | No value in such a package can hold a `*gorm.DB`, since its type would name `gorm.DB` and so record gorm among the imports |
+
+On `e2e/internal`, the command used about 2.8 s of CPU with both, 4.6 s with only the second, and 7.5 s with neither. v0.22.0, without facts, used about 1.6 to 2.4 s.
 
 ## Reassignment Fix Target
 
@@ -804,7 +838,7 @@ testdata/src/gormreuse/
 └── ignore.go        # //gormreuse:ignore directive tests
 ```
 
-Directives across packages are tested by `TestCrossPackageDirectives`: `testdata/src/purelib` declares them and `testdata/src/externalpure` calls them. Both packages' diagnostics are checked. The cases that are wrong today because the analyzer exports no facts (#195) assert the current behaviour and are marked `[LIMITATION] #195`. Update them when #195 is fixed.
+Directives across packages are tested by `TestCrossPackageDirectives`: `testdata/src/purelib` declares them and `testdata/src/externalpure` calls them. Both packages' diagnostics and purelib's facts are checked. `TestCrossPackageFactsE2E` in `cmd/gormreuse` runs the same kind of pair through the built command and through `go vet -vettool`.
 
 ### E2E Tests
 
@@ -838,9 +872,8 @@ When refactoring code, follow these rules strictly:
 
 - **immutable-param through an interface**: `var a applier = repo{}; a.apply(q)` calls an interface method, so the callee and its directive are unknown and the caller-side contract is not checked. The same holds for a call through a func-typed parameter
 - **Package-level variables (#183)**: a load of a `*gorm.DB` global sees only the stores in its own function, so a global that the function never stores to is immutable. A call through an exported, reassigned or address-taken `var f = func(...)` does not honour the closure's directives. See [Package-level variables](#package-level-variables-183)
-- **Directives across packages (#195)**: a callee's `pure` and `immutable-return` are read back from its source on disk and trusted, even when its body breaks the contract. The `immutable-param` caller contract is not checked, and `immutable-input(name)` is ignored, for a callee in another package
 
-These are documented in `testdata/src/gormreuse/evil.go` and `testdata/src/externalpure/use.go` with `[LIMITATION]` markers.
+These are documented in `testdata/src/gormreuse/evil.go` with `[LIMITATION]` markers.
 
 **Closure use ordering (#68)**: uses inside a closure that is invoked at a *single* later call site (`f := func() { q.Find(nil) }; …; f()`) are ordered by that **call-site position**, not the closure body's source position — so define-early/call-late reuse is reported at the call site and the earlier direct use is correctly treated as the first branch. This applies only to the unambiguous single-invocation case; IIFEs (invoked inline), deferred/spawned closures, and closures invoked from multiple sites keep their body positions.
 

@@ -179,7 +179,7 @@ func paCallsBrokenPure(db *gorm.DB) {
 type paRepo struct{}
 
 //gormreuse:pure
-func (paRepo) Same(db *gorm.DB) *gorm.DB { return db }
+func (paRepo) Same(db *gorm.DB) *gorm.DB { return db } // want Same:`gormreuse pure returns\[1\] returns-only-params`
 
 //gormreuse:pure
 func paGeneric[T any](db *gorm.DB, _ T) *gorm.DB { return db }

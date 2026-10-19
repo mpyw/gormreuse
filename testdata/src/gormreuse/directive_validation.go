@@ -718,7 +718,7 @@ type IRRepository struct {
 }
 
 //gormreuse:immutable-return
-func (r *IRRepository) DB() *gorm.DB {
+func (r *IRRepository) DB() *gorm.DB { // want DB:"gormreuse immutable-return"
 	return r.db.Session(&gorm.Session{})
 }
 
@@ -972,7 +972,7 @@ type DBFactory struct {
 }
 
 //gormreuse:pure,immutable-return
-func (f *DBFactory) NewDB() *gorm.DB {
+func (f *DBFactory) NewDB() *gorm.DB { // want NewDB:"gormreuse pure immutable-return"
 	return f.baseDB.Session(&gorm.Session{})
 }
 

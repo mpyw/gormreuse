@@ -512,7 +512,7 @@ A repository interface whose method returns a fresh handle is reported when its 
 Transaction and FindInBatches callbacks (e.g. `tx` in `db.Transaction(func(tx *gorm.DB) error {...})`) are exempt — their `tx` is a fresh forkable handle. A Connection callback is **not** exempt: gorm passes it a `clone == 0` handle, so branching its `tx` twice is reported. Declare your own such helpers with [`//gormreuse:immutable-input(name)`](#gormreuseimmutable-inputname).
 
 > [!NOTE]
-> A **named** function or method is exempt only when every use of it in the package passes it as such a callback. If it is also called directly, stored, returned, passed as an ordinary argument, or exported (another package could call it), its parameter is treated as mutable like any other parameter. To keep it exempt, mark it [`//gormreuse:immutable-param`](#gormreuseimmutable-param): then each direct caller in the package must pass an isolated value.
+> A **named** function or method is exempt only when every use of it in the package passes it as such a callback. If it is also called directly, stored, returned, passed as an ordinary argument, or exported (another package could call it), its parameter is treated as mutable like any other parameter. The packages that import an exported function are analyzed after its own package, so its own package cannot see their calls. To keep it exempt, mark it [`//gormreuse:immutable-param`](#gormreuseimmutable-param): then each direct caller, in its package or in another one, must pass an isolated value.
 
 #### Safe: Variable reassignment
 
@@ -567,6 +567,17 @@ Only `//gormreuse:name[,name...]` is a directive: a line comment, lowercase name
 The names are `ignore`, `pure`, `immutable-return`, `immutable-param` and `immutable-input(name)`.
 
 A directive on a generic function or method applies to every instance of it (`helper[int](q)`). A directive on a method also applies when the method is called through a method value (`f := r.helper; f(q)`).
+
+A directive on an exported function or method also applies in the packages that call it. The analysis of the declaring package checks the function's body and passes the result on as an [analysis fact](https://pkg.go.dev/golang.org/x/tools/go/analysis#hdr-Modular_analysis_with_Facts), so the packages that call it do not read its source. This works with the `gormreuse` command, `go vet` and golangci-lint, which all analyze the dependencies first.
+
+| Directive in the declaring package | In a package that calls the function |
+| --- | --- |
+| `pure` | Trusted, unless the body pollutes its argument. Which arguments the result may be is known too |
+| `immutable-return` | Trusted, unless the body returns a mutable value |
+| `immutable-param` | The caller must pass an isolated value, when the function branches the parameter |
+| `immutable-input(name)` | The callback gets an immutable value, unless the body hands it a mutable one |
+
+A contract that the body breaks is reported in the declaring package. Its callers in that package still trust it, so the mistake is reported once. A caller in another package does not trust it, since the author of that package may never see the report.
 
 > [!WARNING]
 > Any other comment that starts with `gormreuse:` has no effect, and is reported with how to write it. One unknown name in a list drops the whole comment: `//gormreuse:pure,bogus` does not mark the function pure.
@@ -744,7 +755,7 @@ func applyFilters(tx *gorm.DB) {
 > ```
 > Fix by passing an isolated value (`root.Session(&gorm.Session{})`), or make the caller `//gormreuse:immutable-param` too so the contract propagates.
 >
-> The check covers direct calls, function and method values, generic instances, and the same calls under `go` and `defer`. It cannot cover a call through an interface or a func-typed parameter, where the callee is unknown, or a callee in another package ([#195](https://github.com/mpyw/gormreuse/issues/195)).
+> The check covers direct calls, function and method values, generic instances, and the same calls under `go` and `defer`, also when the function is in another package. It cannot cover a call through an interface or a func-typed parameter, where the callee is unknown.
 
 > [!TIP]
 > Combine with `//gormreuse:pure` when a helper both leaves its argument unpolluted and expects an isolated value. A **redundant** `//gormreuse:immutable-param` — one whose parameter is never reused, so it suppresses nothing — is reported so you can drop it.

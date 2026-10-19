@@ -33,8 +33,8 @@ func TestLineDirective(t *testing.T) {
 }
 
 // TestCrossPackageDirectives checks directives declared in one package
-// (purelib) and used from another (externalpure), including the cases that
-// #195 still gets wrong (issue #197).
+// (purelib) and used from another (externalpure) through the facts that
+// purelib's analysis exports (#195, #197).
 func TestCrossPackageDirectives(t *testing.T) {
 	t.Parallel()
 	testdata := analysistest.TestData()
