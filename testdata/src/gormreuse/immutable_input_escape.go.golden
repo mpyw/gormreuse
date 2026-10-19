@@ -226,6 +226,44 @@ func structPointerCallbackImmutableInput(cb func(*struct{ db *gorm.DB }), db *go
 	cb(&s) // want `immutable-input\(cb\) declared but cannot verify the \*gorm\.DB passed to callback`
 }
 
+//gormreuse:immutable-input(cb)
+func mapParamCallbackImmutableInput(cb func(*gorm.DB) error, m map[string]func(*gorm.DB) error) {
+	m["a"] = cb // want `immutable-input\(cb\) declared but callback cb escapes \(stored outside the function\); cannot verify the \*gorm\.DB it receives`
+}
+
+//gormreuse:immutable-input(cb)
+func arraySliceCallbackImmutableInput(cb func(*gorm.DB) error, db *gorm.DB) error {
+	var arr [1]func(*gorm.DB) error
+	s := arr[:]
+	s[0] = cb
+	return arr[0](db.Where("x")) // want `immutable-input\(cb\) declared but mutable \*gorm\.DB passed to callback`
+}
+
+//gormreuse:immutable-input(cb)
+func extraArgCallbackImmutableInput(cb func(*gorm.DB, int) error, db *gorm.DB) error {
+	return cb(db.Session(&gorm.Session{}), 1) // OK: the int holds no *gorm.DB
+}
+
+// A method that declares immutable-input keeps the promise as well.
+type immutableInputRunnerImpl struct{}
+
+//gormreuse:immutable-input(cb)
+func (immutableInputRunnerImpl) withFresh(cb func(*gorm.DB) error, db *gorm.DB) error {
+	return cb(db.Session(&gorm.Session{}))
+}
+
+//gormreuse:immutable-input(cb)
+func forwardToMethodImmutableInput(r immutableInputRunnerImpl, cb func(*gorm.DB) error, db *gorm.DB) error {
+	return r.withFresh(cb, db) // OK: withFresh promises an immutable value too
+}
+
+func forwardImmutableInputTwice(a, b func(*gorm.DB) error) { _, _ = a, b }
+
+//gormreuse:immutable-input(cb)
+func twiceCallbackImmutableInput(cb func(*gorm.DB) error) {
+	forwardImmutableInputTwice(cb, cb) // want `immutable-input\(cb\) declared but callback cb escapes \(passed to forwardImmutableInputTwice\); cannot verify the \*gorm\.DB it receives`
+}
+
 // =============================================================================
 // Same-line and closure placements (#193)
 // =============================================================================
