@@ -85,7 +85,9 @@ type Site struct {
 }
 
 // SiteOf reads instr as a Site. vars resolves calls through package-level
-// function variables; it may be nil.
+// function variables. Pass the FuncVars of the package, so a call through
+// such a variable lines up its receiver and arguments as the checker does
+// (#293); a read that cannot reach them uses SiteOfWithoutFuncVars instead.
 func SiteOf(instr ssa.CallInstruction, vars FuncVars) Site {
 	common := instr.Common()
 	s := Site{Instr: instr, Mode: siteModeOf(instr), Args: common.Args}
@@ -124,6 +126,16 @@ func SiteOf(instr ssa.CallInstruction, vars FuncVars) Site {
 		s.Recv, s.Args = s.Args[0], s.Args[1:]
 	}
 	return s
+}
+
+// SiteOfWithoutFuncVars reads instr as a Site without resolving calls through
+// package-level function variables: such a call is a SiteDynamic with no
+// Callee. It is for reads that look only for a *gorm.DB method or a library
+// function called by name, where the FuncVars are not at hand. Every other
+// read calls SiteOf with the package's FuncVars; a test keeps SiteOf from
+// being called with a nil literal outside tests.
+func SiteOfWithoutFuncVars(instr ssa.CallInstruction) Site {
+	return SiteOf(instr, nil)
 }
 
 // siteModeOf returns the mode of instr.

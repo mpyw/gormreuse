@@ -315,7 +315,7 @@ func wrappedGormDBs(v ssa.Value) []ssa.Value {
 			}
 		}
 	case *ssa.Call:
-		site := callsite.SiteOf(w, nil)
+		site := callsite.SiteOfWithoutFuncVars(w)
 		if start, ok := wrapperArgStart(site); ok && start <= len(site.Args) && isReadOnlyValue(w) {
 			for _, arg := range site.Args[start:] {
 				vals = append(vals, wrappedGormDBs(arg)...)
@@ -390,7 +390,7 @@ func isReadOnlyUse(v ssa.Value, instr ssa.Instruction) bool {
 	case ssa.CallInstruction:
 		// A go or defer statement reads the argument when the call runs, as
 		// a plain call does. Only a plain call has a result to wrap it in.
-		site := callsite.SiteOf(u, nil)
+		site := callsite.SiteOfWithoutFuncVars(u)
 		if first, ok := readOnlyArgStart(site); ok {
 			return slices.Index(site.Args, v) >= first
 		}

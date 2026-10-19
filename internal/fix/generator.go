@@ -283,13 +283,12 @@ func (g *Generator) GenerateIsolation(v pollution.Violation) []analysis.Suggeste
 
 // receiverArgs returns how many arguments of call pass the receiver of the
 // method that instr stands for: 1 for a method expression, whose function
-// takes the receiver as its first parameter, and 0 otherwise.
+// takes the receiver as its first parameter, and 0 otherwise. instr is the
+// call of an immutable-param violation, read with the same FuncVars as the
+// checker read it, so it always stands for a declared function (#293).
 func (g *Generator) receiverArgs(call *ast.CallExpr, instr ssa.CallInstruction) int {
-	declared := callsite.SiteOf(instr, nil).Declared
-	sig, ok := g.pass.TypesInfo.TypeOf(call.Fun).Underlying().(*types.Signature)
-	if !ok || declared == nil {
-		return 0
-	}
+	declared := callsite.SiteOf(instr, g.tracer.FuncVars()).Declared
+	sig := g.pass.TypesInfo.TypeOf(call.Fun).Underlying().(*types.Signature)
 	return sig.Params().Len() - declared.Signature.Params().Len()
 }
 

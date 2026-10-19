@@ -243,7 +243,7 @@ func sameAddr(a, b ssa.Value) bool {
 // v as receiver (i.e., they form a method chain). A call of a method value
 // bound to v is not followed.
 func isChainedGormMethodCall(v ssa.Value, nextCall *ssa.Call) bool {
-	site := callsite.SiteOf(nextCall, nil)
+	site := callsite.SiteOfWithoutFuncVars(nextCall)
 	return site.IsGormMethod() && site.Recv == v
 }
 

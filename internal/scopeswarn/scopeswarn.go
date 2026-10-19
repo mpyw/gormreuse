@@ -71,7 +71,7 @@ func Validate(callbacks map[*ssa.Function]bool, vars callsite.FuncVars, skip fun
 
 	warnings := make([]Warning, 0, len(found))
 	for call := range found {
-		warnings = append(warnings, Warning{Pos: call.Pos(), Message: message(callsite.SiteOf(call, nil).Method())})
+		warnings = append(warnings, Warning{Pos: call.Pos(), Message: message(callsite.SiteOf(call, vars).Method())})
 	}
 	slices.SortFunc(warnings, func(a, b Warning) int { return cmp.Compare(a.Pos, b.Pos) })
 	return warnings
