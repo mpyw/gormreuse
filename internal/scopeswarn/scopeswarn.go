@@ -54,7 +54,7 @@ const maxCallDepth = 16
 
 // Validate warns about each Session()/WithContext()/Debug() call whose result
 // a Scopes callback returns. callbacks is the set of functions passed to Scopes
-// (tracer.CollectScopesOnlyCallbacks). The returned value is followed through
+// (callback.CollectScopesOnlyCallbacks). The returned value is followed through
 // Phi edges, variables, captured variables, and the returns of helpers and
 // closures the callback calls. The warnings are sorted by position, one per
 // call. analyzer.go (package internal) drives this check.

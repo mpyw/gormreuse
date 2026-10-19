@@ -144,100 +144,6 @@ func TestClosureCapturesGormDB(t *testing.T) {
 	}
 }
 
-func TestCollectScopesCallbacks(t *testing.T) {
-	t.Parallel()
-	fixtures, _ := loadProgram(t)
-
-	var srcFuncs []*ssa.Function
-	for _, fn := range fixtures {
-		srcFuncs = append(srcFuncs, fn)
-	}
-	set := CollectScopesCallbacks(srcFuncs)
-
-	// The named function passed to Scopes must be collected.
-	named := fixtures["namedScope"]
-	if named == nil {
-		t.Fatal("namedScope fixture missing")
-	}
-	if !set[named] {
-		t.Error("namedScope (passed to db.Scopes) should be collected")
-	}
-
-	// An ordinary helper never handed to Scopes/Preload must NOT be collected.
-	if ord := fixtures["ordinaryHelperParamBranches"]; ord != nil && set[ord] {
-		t.Error("ordinary helper should not be collected as a Scopes callback")
-	}
-
-	// The inline Scopes/Preload closures should be collected too.
-	var sawInlineClosure bool
-	for fn := range set {
-		if strings.HasPrefix(fn.Name(), "scopesCallbackReuse$") || strings.HasPrefix(fn.Name(), "preloadCallbackReuse$") {
-			sawInlineClosure = true
-		}
-	}
-	if !sawInlineClosure {
-		t.Error("expected inline Scopes/Preload closures to be collected")
-	}
-}
-
-// TestCollectScopesOnlyCallbacks covers the indirect callback shapes of #196
-// (fixtures in scopes_session_warning.go) and the Preload exclusion.
-func TestCollectScopesOnlyCallbacks(t *testing.T) {
-	t.Parallel()
-	fixtures, allFuncs := loadProgram(t)
-
-	// Like buildssa's SrcFuncs, leave out the synthetic package initializer: the
-	// resolver must find package-level initializers by itself.
-	var srcFuncs []*ssa.Function
-	for name, fn := range fixtures {
-		if name != "init" {
-			srcFuncs = append(srcFuncs, fn)
-		}
-	}
-	set := CollectScopesOnlyCallbacks(srcFuncs)
-	names := make(map[string]bool)
-	for fn := range set {
-		names[fn.String()] = true
-		// Package-level closures are numbered across files; name this one by its variable.
-		if strings.HasPrefix(fn.Name(), "init$") && strings.HasSuffix(fn.Prog.Fset.Position(fn.Pos()).Filename, "scopes_session_warning.go") {
-			names["packageSessionScope"] = true
-		}
-	}
-
-	for _, want := range []string{
-		"gormreuse.namedSessionScope",                       // named function
-		"(gormreuse.sessionScopeRepo).scope",                // method value target
-		"gormreuse.scopesAppendSliceSessionWarns$1",         // append-built slice
-		"packageSessionScope",                               // package-level closure
-		"gormreuse.scopesCallbackSessionWarns$1",            // inline closure
-		"gormreuse.scopesCallbackConditionalSessionWarns$1", // closure with captures
-	} {
-		if !names[want] {
-			t.Errorf("%s should be collected as a Scopes callback", want)
-		}
-	}
-	for _, unwanted := range []string{
-		"gormreuse.preloadCallbackSessionClean$1", // Preload, not Scopes
-		"gormreuse.notScopesSessionClean",         // never passed to Scopes
-		"gormreuse.sessionScopeHelper",            // called by a callback, not passed
-	} {
-		if names[unwanted] {
-			t.Errorf("%s should not be collected as a Scopes callback", unwanted)
-		}
-	}
-
-	// The Preload callback is still in the Scopes+Preload set.
-	var preload *ssa.Function
-	for fn := range allFuncs {
-		if fn.String() == "gormreuse.preloadCallbackSessionClean$1" {
-			preload = fn
-		}
-	}
-	if preload == nil || !CollectScopesCallbacks(srcFuncs)[preload] {
-		t.Error("preloadCallbackSessionClean$1 should be in CollectScopesCallbacks")
-	}
-}
-
 func TestFindMutableRootScopesParam(t *testing.T) {
 	t.Parallel()
 	fixtures, _ := loadProgram(t)
@@ -311,7 +217,7 @@ func gormCallReceiver(fn *ssa.Function, method string) ssa.Value {
 }
 
 // TestFindMutableRootThroughStructField pins the field-path matching in
-// fieldStoredValues. The SSA builder stages a composite literal in a separate
+// FieldStoredValues. The SSA builder stages a composite literal in a separate
 // temporary and copies the finished aggregate into the destination, and it emits
 // a fresh FieldAddr chain for every access, so a field read shares neither the
 // store's base value nor its address chain. Matching the whole field path (and
@@ -387,13 +293,13 @@ func TestFieldStoredValuesReachingLoad(t *testing.T) {
 	}
 
 	fa := loads[0].X.(*ssa.FieldAddr)
-	if got := fieldStoredValues(fa, loads[0]); len(got) != 0 {
+	if got := FieldStoredValues(fa, loads[0]); len(got) != 0 {
 		t.Errorf("the load before the store should see no store, got %v", got)
 	}
-	if got := fieldStoredValues(loads[1].X.(*ssa.FieldAddr), loads[1]); len(got) != 1 || got[0] != tenant {
+	if got := FieldStoredValues(loads[1].X.(*ssa.FieldAddr), loads[1]); len(got) != 1 || got[0] != tenant {
 		t.Errorf("the load after the store should see the Where(\"tenant\") result, got %v", got)
 	}
-	if got := fieldStoredValues(fa, nil); len(got) != 1 || got[0] != tenant {
+	if got := FieldStoredValues(fa, nil); len(got) != 1 || got[0] != tenant {
 		t.Errorf("without a load every store should be seen, got %v", got)
 	}
 }

@@ -54,6 +54,7 @@ import (
 	"github.com/mpyw/gormreuse/internal/fix"
 	"github.com/mpyw/gormreuse/internal/scopeswarn"
 	ssautil "github.com/mpyw/gormreuse/internal/ssa"
+	"github.com/mpyw/gormreuse/internal/ssa/callback"
 	"github.com/mpyw/gormreuse/internal/ssa/callsite"
 	"github.com/mpyw/gormreuse/internal/ssa/pollution"
 	"github.com/mpyw/gormreuse/internal/ssa/purity"
@@ -146,19 +147,19 @@ func RunSSA(
 
 	// Collect Scopes/Preload callbacks once: their *gorm.DB parameter receives a
 	// mid-chain (clone==0) value, so reuse inside them must be detected (#60).
-	scopesCallbacks := tracer.CollectScopesCallbacks(funcs)
+	scopesCallbacks := callback.CollectScopesCallbacks(funcs)
 
 	// Collect immutable callbacks once: gorm's Transaction/FindInBatches hand
 	// their callback a fresh forkable (clone>0) handle, and a user function
 	// declared //gormreuse:immutable-input(cb) promises the same for cb. Their
 	// callback's tx parameter is therefore exempt from the Phase 1b
 	// mutable-by-default treatment (#60 SC103, #61, #62 case 2.2).
-	immutableCallbacks := tracer.CollectImmutableCallbacks(funcs)
-	tracer.CollectImmutableInputCallbacks(funcs, immutableInputSet, immutableCallbacks)
+	immutableCallbacks := callback.CollectImmutableCallbacks(funcs)
+	callback.CollectImmutableInputCallbacks(funcs, immutableInputSet, immutableCallbacks)
 	// The sets are keyed by function, so keep only the functions that nothing
 	// else can call: a named callback that is also called directly, or that is
 	// exported, keeps a mutable parameter (#191).
-	tracer.DropReachableCallbacks(funcs, immutableInputSet, immutableCallbacks)
+	callback.DropReachableCallbacks(funcs, immutableInputSet, immutableCallbacks)
 
 	// Enforce the body-side immutable-input contract (#62 cases 2.3/2.4) and
 	// report unused immutable-input directives (U1-U3). Uses a tracer with the
@@ -186,7 +187,7 @@ func RunSSA(
 	// TEMPORARY (GORM bug go-gorm/gorm#7592): warn on Session/WithContext/Debug
 	// results returned from Scopes callbacks. Deletable by removing the scopeswarn
 	// package and this block once the upstream fix ships in a supported release — see that package.
-	scopesOnly := tracer.CollectScopesOnlyCallbacks(funcs)
+	scopesOnly := callback.CollectScopesOnlyCallbacks(funcs)
 	for _, w := range scopeswarn.Validate(scopesOnly, skip) {
 		report(w.Pos, w.Message)
 	}
