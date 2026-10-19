@@ -276,3 +276,23 @@ func repeatsLaterLoop(db *gorm.DB, ids []int) {
 		q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 	}
 }
+
+// repeatsClosureCalledThroughSlice: [LIMITATION] the closure runs twice,
+// through a slice element. Only the uses of the closure value itself are
+// sites. Here that is one store, and a call through the slice is a dynamic
+// call, so the closure is taken to run once.
+func repeatsClosureCalledThroughSlice(db *gorm.DB) {
+	q := db.Where("x")
+	fs := []func(){func() { q.Find(nil) }}
+	fs[0]()
+	fs[0]()
+}
+
+// repeatsClosureCalledThroughField: [LIMITATION] the same through a field of
+// a local struct.
+func repeatsClosureCalledThroughField(db *gorm.DB) {
+	q := db.Where("x")
+	h := struct{ f func() }{f: func() { q.Find(nil) }}
+	h.f()
+	h.f()
+}

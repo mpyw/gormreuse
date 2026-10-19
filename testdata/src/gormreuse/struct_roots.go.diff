@@ -159,9 +159,9 @@
  	s.DB.Where("b").Find(nil)
  }
  
- // fieldOfStructParam reads a field of a struct parameter. Like a field read
- // through a pointer parameter or receiver, it is not a mutable root, so reuse
- // is not reported.
+ // fieldOfStructParam reads a field of a struct parameter.
+ // [LIMITATION] Not reported. Like a field read through a pointer parameter or
+ // a receiver, it is not a mutable root.
  func fieldOfStructParam(s srTwoDB) {
  	s.DB.Where("a").Find(nil)
  	s.DB.Where("b").Find(nil)

@@ -178,3 +178,15 @@ func fsoLoopRebuildOfAliasedValue(p *fsoRepo, db *gorm.DB, conds []string) {
 	}
 	q.Find(nil)
 }
+
+// fsoLocalLoopCarried: the local form of the loop-carried read. Find on one
+// iteration branches the value that the next iteration's Where extends.
+// [LIMITATION] Not reported. The loop-carried check covers fields and globals
+// only. For a local, the loop-header Phi makes `q = q.Where(c)` an assignment.
+func fsoLocalLoopCarried(db *gorm.DB, conds []string) {
+	q := db.Where("x")
+	for _, c := range conds {
+		q = q.Where(c)
+		q.Find(nil)
+	}
+}
