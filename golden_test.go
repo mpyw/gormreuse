@@ -1,8 +1,6 @@
 package gormreuse_test
 
 import (
-	"bytes"
-	"os"
 	"path/filepath"
 	"testing"
 
@@ -30,19 +28,12 @@ func TestGoldenFiles(t *testing.T) {
 		t.Fatalf("No fixtures found in %s", srcDir)
 	}
 
-	orphans, err := goldentest.Orphans(srcDir)
+	orphans, err := goldentest.SyncOrphans(srcDir, update)
 	if err != nil {
-		t.Fatalf("Failed to list orphaned fixtures: %v", err)
+		t.Fatalf("Failed to check orphaned fixtures: %v", err)
 	}
 	for _, path := range orphans {
-		if !update {
-			t.Errorf("%s has no source fixture.\nRun: %s\nThen review and commit the changes.", path, goldentest.UpdateCommand)
-			continue
-		}
-		if err := os.Remove(path); err != nil {
-			t.Fatalf("Failed to remove %s: %v", path, err)
-		}
-		t.Logf("Removed orphaned %s", path)
+		t.Errorf("%s has no source fixture.\nRun: %s\nThen review and commit the changes.", path, goldentest.UpdateCommand)
 	}
 
 	for _, filename := range fixtures {
@@ -50,22 +41,12 @@ func TestGoldenFiles(t *testing.T) {
 			t.Parallel()
 			srcPath := filepath.Join(srcDir, filename)
 
-			golden, diff, err := goldentest.Render(testdata, "gormreuse", srcPath, gormreuse.Analyzer)
+			stale, err := goldentest.SyncFixture(testdata, "gormreuse", srcPath, gormreuse.Analyzer, update)
 			if err != nil {
-				t.Fatalf("Failed to render fixtures for %s: %v", srcPath, err)
+				t.Fatalf("Failed to check fixtures for %s: %v", srcPath, err)
 			}
-
-			for path, want := range map[string][]byte{srcPath + ".golden": golden, srcPath + ".diff": diff} {
-				if update {
-					if err := os.WriteFile(path, want, 0o644); err != nil {
-						t.Fatalf("Failed to write %s: %v", path, err)
-					}
-					continue
-				}
-				got, err := os.ReadFile(path)
-				if err != nil || !bytes.Equal(got, want) {
-					t.Errorf("%s is missing or out of date.\nRun: %s\nThen review and commit the changes.", filepath.Base(path), goldentest.UpdateCommand)
-				}
+			for _, path := range stale {
+				t.Errorf("%s is missing or out of date.\nRun: %s\nThen review and commit the changes.", filepath.Base(path), goldentest.UpdateCommand)
 			}
 		})
 	}

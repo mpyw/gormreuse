@@ -84,7 +84,17 @@ func ApplyFixes(testdata, pkg, srcPath string, a *analysis.Analyzer) (original, 
 		return nil, nil, err
 	}
 
+	// NoopT also swallows load failures, which would leave no fixes and so an
+	// unchanged file. Report them instead (#203).
 	results := analysistest.Run(NoopT{}, testdata, a, pkg)
+	if len(results) == 0 {
+		return nil, nil, fmt.Errorf("analysistest loaded no package for %q from %s", pkg, testdata)
+	}
+	for _, result := range results {
+		if result.Err != nil {
+			return nil, nil, fmt.Errorf("analyzing %s: %w", pkg, result.Err)
+		}
+	}
 
 	type offsetEdit struct {
 		start, end int
@@ -116,43 +126,67 @@ func ApplyFixes(testdata, pkg, srcPath string, a *analysis.Analyzer) (original, 
 	return original, fixed, nil
 }
 
-// Render returns the committed fixture contents for srcPath: the .golden file
-// (the source with every suggested fix applied) and the .diff file (see
-// generateDiff).
-func Render(testdata, pkg, srcPath string, a *analysis.Analyzer) (golden, diff []byte, err error) {
+// SyncFixture compares srcPath's committed .golden file (the source with every
+// suggested fix applied) and .diff file (see generateDiff) with what analyzer a
+// produces now, and returns the paths of those that are missing or stale. With
+// update set, it rewrites both files instead and returns nothing stale.
+func SyncFixture(testdata, pkg, srcPath string, a *analysis.Analyzer, update bool) (stale []string, err error) {
 	original, fixed, err := ApplyFixes(testdata, pkg, srcPath, a)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	diff, err = generateDiff(filepath.Base(srcPath), original, fixed)
+	diff, err := generateDiff(filepath.Base(srcPath), original, fixed)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	return fixed, diff, nil
+
+	for _, f := range []struct {
+		path string
+		want []byte
+	}{{srcPath + ".golden", fixed}, {srcPath + ".diff", diff}} {
+		if update {
+			if err := os.WriteFile(f.path, f.want, 0o644); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		got, err := os.ReadFile(f.path)
+		if err != nil || !bytes.Equal(got, f.want) {
+			stale = append(stale, f.path)
+		}
+	}
+	return stale, nil
 }
 
-// Orphans returns the .golden/.diff files under srcDir whose source fixture is
-// gone (or is no longer a fixture, see Fixtures). They would otherwise sit in
-// the tree unchecked.
-func Orphans(srcDir string) ([]string, error) {
+// SyncOrphans returns the .golden/.diff files under srcDir whose source fixture
+// is gone (or is no longer a fixture, see Fixtures). They would otherwise sit
+// in the tree unchecked. With update set, it deletes them instead and returns
+// nothing.
+func SyncOrphans(srcDir string, update bool) (orphans []string, err error) {
 	fixtures, err := Fixtures(srcDir)
 	if err != nil {
 		return nil, err
 	}
-	var out []string
 	for _, ext := range []string{".golden", ".diff"} {
 		matches, err := filepath.Glob(filepath.Join(srcDir, "*.go"+ext))
 		if err != nil {
 			return nil, err
 		}
 		for _, m := range matches {
-			if !slices.Contains(fixtures, strings.TrimSuffix(filepath.Base(m), ext)) {
-				out = append(out, m)
+			if slices.Contains(fixtures, strings.TrimSuffix(filepath.Base(m), ext)) {
+				continue
+			}
+			if !update {
+				orphans = append(orphans, m)
+				continue
+			}
+			if err := os.Remove(m); err != nil {
+				return nil, err
 			}
 		}
 	}
-	slices.Sort(out)
-	return out, nil
+	slices.Sort(orphans)
+	return orphans, nil
 }
 
 var timestampRegex = regexp.MustCompile(`\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(\.\d+)?( [+-]\d{4})?`)
