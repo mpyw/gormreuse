@@ -92,7 +92,7 @@ func NewAnalyzer(fn *ssa.Function, pureFuncs, immutableReturnFuncs, immutablePar
 	return &Analyzer{
 		fn:                  fn,
 		rootTracer:          tracer.New(pureFuncs, immutableReturnFuncs, immutableParamFuncs, pure, scopesCallbacks, immutableCallbacks, funcVars),
-		cfgAnalyzer:         cfg.New(),
+		cfgAnalyzer:         cfg.NewAnalyzer(),
 		needsImmutableParam: needsImmutableParam,
 	}
 }
@@ -159,8 +159,8 @@ func (a *Analyzer) processFunction(fn *ssa.Function, tracker *pollution.Tracker,
 	ctx := &handler.Context{
 		Tracker:             tracker,
 		RootTracer:          a.rootTracer,
-		CFG:                 a.cfgAnalyzer,
 		LoopInfo:            loopInfo,
+		Repeats:             cfg.NewRepeats(loopInfo),
 		CurrentFn:           fn,
 		PosOverride:         posOverride,
 		NeedsImmutableParam: a.needsImmutableParam,

@@ -270,7 +270,7 @@ func (g *Generator) callersAllIsolate(p *ssa.Parameter) bool {
 		return false
 	}
 	idx := slices.Index(p.Parent().Params, p)
-	loops := cfg.New()
+	loops := cfg.NewAnalyzer()
 	for _, caller := range g.funcs {
 		var loopInfo *cfg.LoopInfo
 		for _, block := range caller.Blocks {
@@ -384,7 +384,7 @@ func (g *Generator) paramSessionSite(p *ssa.Parameter) sessionSite {
 //
 // A Session at the root makes each of them see a copy (#243).
 func (g *Generator) changedElsewhere(v pollution.Violation) bool {
-	loops := cfg.New()
+	loops := cfg.NewAnalyzer()
 	ordered := usesOrdered(v)
 	for _, use := range v.AllUses {
 		if use.Escapes && escapeSeen(loops, use, v.AllUses, ordered) {
@@ -639,7 +639,7 @@ func (g *Generator) simulateReassignments(root ssa.Value, uses []pollution.Usage
 
 	original := virtualRootKey{isOriginal: true, pos: root.Pos(), block: tracer.RootBlock(root)}
 	virtualUses := make(map[virtualRootKey][]pollution.UsageInfo)
-	cfgAnalyzer := cfg.New()
+	cfgAnalyzer := cfg.NewAnalyzer()
 
 	// The virtual roots made so far, in position order.
 	var made []virtualRootKey
@@ -740,7 +740,7 @@ func reassignmentReaches(a *cfg.Analyzer, def, use *ssa.BasicBlock) (reaches, do
 // reassignment that reads it.
 func (g *Generator) findRootsNeedingSession(virtualUses map[virtualRootKey][]pollution.UsageInfo, reassigned map[token.Pos]token.Pos, ordered bool) []virtualRootKey {
 	var roots []virtualRootKey
-	cfgAnalyzer := cfg.New()
+	cfgAnalyzer := cfg.NewAnalyzer()
 	for root, uses := range virtualUses {
 		var needs bool
 		switch {
@@ -1078,7 +1078,7 @@ func storedTo(fn *ssa.Function, v ssa.Value) *ssa.Alloc {
 // storeReadTwice reports whether two of uses may run after store. A use in
 // another function, such as a closure, may run after it whatever its block.
 func storeReadTwice(store *ssa.Store, uses []pollution.UsageInfo) bool {
-	a := cfg.New()
+	a := cfg.NewAnalyzer()
 	after := 0
 	for _, use := range uses {
 		switch {

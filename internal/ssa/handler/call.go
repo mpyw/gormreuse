@@ -56,8 +56,8 @@ import (
 type Context struct {
 	Tracker    *pollution.Tracker // Records usage and detects violations
 	RootTracer *tracer.RootTracer // Traces values to mutable roots
-	CFG        *cfg.Analyzer      // Control flow graph analysis
 	LoopInfo   *cfg.LoopInfo      // Loop detection results for current function
+	Repeats    *cfg.Repeats       // Whether a use may run again (current function)
 	CurrentFn  *ssa.Function      // The function being analyzed
 
 	// NeedsImmutableParam reports whether a declared function is marked
@@ -264,7 +264,6 @@ func isChainedGormMethodCall(v ssa.Value, nextCall *ssa.Call) bool {
 //  3. Process gorm method calls: pure/assignment/actual use
 //  4. Check all Phi roots for conditional merges
 func (h *callHandler) handle(call *ssa.Call, ctx *Context) {
-	isInLoop := ctx.LoopInfo.IsInLoop(call.Block())
 	site := ctx.RootTracer.Site(call)
 
 	// Check function call pollution (non-gorm-method calls with *gorm.DB args)
@@ -273,7 +272,7 @@ func (h *callHandler) handle(call *ssa.Call, ctx *Context) {
 	switch site.Kind {
 	case callsite.SiteBound:
 		// Check bound method calls (method values)
-		h.processBoundMethodCall(call, site, isInLoop, ctx)
+		h.processBoundMethodCall(call, site, ctx)
 		return
 	case callsite.SiteClosure:
 		return
@@ -317,7 +316,7 @@ func (h *callHandler) handle(call *ssa.Call, ctx *Context) {
 		ctx.Tracker.ProcessBranch(root, use)
 
 		// Loop with external root - immediate violation (only for non-pure methods)
-		if isInLoop && ctx.CFG.IsDefinedOutsideLoop(tracer.RootBlock(root), ctx.LoopInfo) {
+		if ctx.Repeats.RepeatsAfter(call.Block(), tracer.RootBlock(root)) {
 			ctx.Tracker.AddViolationWithRoot(pos, root)
 		}
 	}
@@ -352,7 +351,7 @@ func (h *callHandler) handle(call *ssa.Call, ctx *Context) {
 //	find := q.Find  // MakeClosure(Find$bound, [q])
 //	find(nil)       // first use - OK
 //	q.Count(nil)    // VIOLATION (q already polluted by find(nil))
-func (h *callHandler) processBoundMethodCall(call *ssa.Call, site callsite.Site, isInLoop bool, ctx *Context) {
+func (h *callHandler) processBoundMethodCall(call *ssa.Call, site callsite.Site, ctx *Context) {
 	if !site.IsGormMethod() {
 		return
 	}
@@ -389,7 +388,7 @@ func (h *callHandler) processBoundMethodCall(call *ssa.Call, site callsite.Site,
 		ctx.Tracker.ProcessBranch(root, use)
 
 		// Loop with external root - immediate violation (only for non-pure methods)
-		if isInLoop && ctx.CFG.IsDefinedOutsideLoop(tracer.RootBlock(root), ctx.LoopInfo) {
+		if ctx.Repeats.RepeatsAfter(call.Block(), tracer.RootBlock(root)) {
 			ctx.Tracker.AddViolationWithRoot(pos, root)
 		}
 	}
