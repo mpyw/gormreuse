@@ -391,6 +391,22 @@ Decisions and limitations:
 - **Captured variables.** A closure that assigns a derived value to a variable captured from the pure function (`func() { x = db }()`) is reported as a store through a pointer. The free variable is not traced back to the enclosing `Alloc`.
 - **Returning the argument.** A pure function that returns its argument is still trusted as returning a fresh value, so `pureReturnsArg(db).Find(nil)` in another pure function is not reported. That is #188.
 
+## Reassignment Fix Target
+
+The reassignment fix (`q.Where("a")` → `q = q.Where("a")`) rewrites one variable: the one that holds the reused root (#198). `findReassignTarget` in `internal/fix/generator.go` finds it from the root's own definition (`q := <call>`, `q = <call>` or `var q = <call>`; for a Phi, every edge must name the same variable). A statement is rewritten only when its own top-level call is the use and its receiver is an identifier that `types.Info.Uses` resolves to that variable.
+
+No statement is rewritten, and the root gets a Session instead, when:
+
+| Case | Example | Why |
+| --- | --- | --- |
+| The root is not assigned to one local variable | `r.db.Where(...)`, a package-level `DB` | There is no local to rebind |
+| A use does not mention the variable | `r := q; r.Where("a")`, a method value `where := q.Where` | Rebinding `q` leaves that branch on the old root |
+| A closure captures the variable, unless it is called inline | `go func() { q.Where("a") }()`, `defer func() { q.Find(nil) }()`, `fn := func() { ... }` | A goroutine that writes `q` races with its parent. A deferred or stored closure would see the new value |
+
+An inline closure `func() { ... }()` runs in program order, so writing a captured variable from it is safe. A closure passed to a call, such as `Transaction`, `t.Run` or `wg.Go`, may run later or on another goroutine, so it counts as a capture. A variable declared inside such a closure is local to it and is rewritten as usual.
+
+The old resolver took the receiver of the outermost method call around the use. Inside `DB.Transaction(func(tx) { ... })` that rewrote the package-level `DB`, and in `base.Or(q)` it rebound `base`. `TestGoldenFilesCompile` now type-checks every `.golden`, and `testdata/src/gormreuse/fix_target.go` and `testdata/src/converge/fix_target.go` hold the cases.
+
 ## Development Commands
 
 Develop on Go 1.27 or later: the fixtures use generic methods and promoted

@@ -186,6 +186,7 @@ q.Where("b").Find(nil) // OK: first branch from new root
 - Non-finisher methods (chain builders like `Where`, `Order`, `Limit`)
 - Result is not assigned to a variable
 - Expression used as a statement (not part of a larger expression)
+- The receiver is the local variable that holds the reused root. Aliases (`r := q`), calls that take the root as an argument (`base.Or(q)`), package-level variables, and variables captured by a closure that is not called inline (`go func() { ... }()`, `defer func() { ... }()`) are not rewritten. The fix relies on a Session at the root instead
 
 ### Strategy 2: Session (Making Roots Immutable)
 
