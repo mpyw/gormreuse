@@ -557,3 +557,60 @@ func TestPureSessionResultIsolated(t *testing.T) {
 		t.Errorf("the Session-isolated result must not leak into the argument: %s", second)
 	}
 }
+
+// TestMethodValue_ImmutableReceiverIsSafe asserts that each call through a
+// method value of a clone>0 handle forks a fresh Statement, like calling the
+// method directly (#178): w("a") and w("b") do not see each other.
+func TestMethodValue_ImmutableReceiverIsSafe(t *testing.T) {
+	db, captured := setupDB(t)
+
+	w := db.Session(&gorm.Session{}).Where
+	w("a = ?", 10).Find(&[]User{})
+	w("b = ?", 20).Find(&[]User{})
+
+	if len(*captured) < 2 {
+		t.Fatalf("Expected at least 2 queries, got %d", len(*captured))
+	}
+	if second := (*captured)[1]; strings.Contains(second, "a =") {
+		t.Errorf("each call through the method value should fork a fresh Statement: %s", second)
+	}
+}
+
+// TestMethodValue_MutableReceiverAccumulates asserts that a method value of a
+// mid-chain (clone==0) handle changes that handle's Statement on each call, so
+// the second call is a second branch of the receiver.
+func TestMethodValue_MutableReceiverAccumulates(t *testing.T) {
+	db, captured := setupDB(t)
+
+	q := db.Model(&User{}).Where("tenant = ?", 1) // clone==0
+	w := q.Where
+	w("a = ?", 10).Find(&[]User{})
+	w("b = ?", 20).Find(&[]User{})
+
+	if len(*captured) < 2 {
+		t.Fatalf("Expected at least 2 queries, got %d", len(*captured))
+	}
+	if second := (*captured)[1]; !strings.Contains(second, "a =") || !strings.Contains(second, "b =") {
+		t.Errorf("calls through a mid-chain method value should accumulate both 'a' and 'b': %s", second)
+	}
+}
+
+// TestMethodValue_SessionCopySharesStatement asserts that a Session copy taken
+// through a method value (s := q.Session) shares q's Statement like
+// q.Session(...) does.
+func TestMethodValue_SessionCopySharesStatement(t *testing.T) {
+	db, captured := setupDB(t)
+
+	q := db.Model(&User{}).Where("tenant = ?", 1) // clone==0
+	s := q.Session
+	countQ := s(&gorm.Session{})
+	q.Where("active = ?", true).Find(&[]User{})
+	countQ.Count(new(int64))
+
+	if len(*captured) < 2 {
+		t.Fatalf("Expected at least 2 queries, got %d", len(*captured))
+	}
+	if last := (*captured)[len(*captured)-1]; !strings.Contains(last, "active") {
+		t.Errorf("a copy taken through a method value should see the later change: %s", last)
+	}
+}

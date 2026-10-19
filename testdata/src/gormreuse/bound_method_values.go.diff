@@ -1,0 +1,219 @@
+--- bound_method_values.go	1970-01-01 00:00:00
++++ bound_method_values.go.golden	1970-01-01 00:00:00
+@@ -1,210 +1,210 @@
+ package internal
+ 
+ import "gorm.io/gorm"
+ 
+ // =============================================================================
+ // Calls through a method value (#178)
+ //
+ // SSA builds w := r.Where as MakeClosure(Where$bound, [r]). Each call w(x)
+ // behaves like r.Where(x): it is one branch of r's root, and its result is a
+ // new root of its own. The result is not the Where call inside the synthetic
+ // wrapper, which every call through w would share.
+ // =============================================================================
+ 
+ // boundFreshDB returns a handle that is safe to reuse.
+ //
+ //gormreuse:immutable-return
+ func boundFreshDB(db *gorm.DB) *gorm.DB {
+ 	return db.Session(&gorm.Session{})
+ }
+ 
+ // ===== SHOULD NOT REPORT =====
+ 
+ // boundOnSession: the receiver is immutable, so each call forks a fresh
+ // Statement and returns its own mutable root (the issue's repro).
+ func boundOnSession(db *gorm.DB) {
+ 	w := db.Session(&gorm.Session{}).Where
+ 	w("a").Find(nil)
+ 	w("b").Find(nil)
+ }
+ 
+ // boundOnImmutableReturn: the receiver comes from an immutable-return call.
+ func boundOnImmutableReturn(db *gorm.DB) {
+ 	m := boundFreshDB(db).Model
+ 	m(&User{}).Find(nil)
+ 	m(&User{}).Count(nil)
+ }
+ 
+ // boundOnSessionInLoop: a method value of an immutable receiver called in a
+ // loop yields a fresh root on each iteration.
+ func boundOnSessionInLoop(db *gorm.DB, items []string) {
+ 	w := db.Session(&gorm.Session{}).Where
+ 	for _, item := range items {
+ 		w("name = ?", item).Find(nil)
+ 	}
+ }
+ 
+ // boundResultChainedTwice: each call result is its own root, used once.
+ func boundResultChainedTwice(db *gorm.DB) {
+ 	w := db.Session(&gorm.Session{}).Where
+ 	q := w("a")
+ 	q.Where("b").Find(nil)
+ 	w("c").Find(nil)
+ }
+ 
+ // boundSessionValue: s := db.Session is a method value of a builtin that
+ // returns an immutable handle, like db.Session(...) called directly.
+ func boundSessionValue(db *gorm.DB) {
+ 	s := db.Session
+ 	q := s(&gorm.Session{})
+ 	q.Where("a").Find(nil)
+ 	q.Where("b").Find(nil)
+ }
+ 
+ // boundSessionValueOfImmutable: the copy is taken from an immutable handle.
+ func boundSessionValueOfImmutable(db *gorm.DB) {
+ 	s := db.Session(&gorm.Session{}).Session
+ 	s(&gorm.Session{}).Find(nil)
+ 	s(&gorm.Session{}).Find(nil)
+ }
+ 
+ // boundNeverCalled: taking a method value is not a use of its receiver.
+ func boundNeverCalled(db *gorm.DB) {
+ 	q := db.Where("x")
+ 	w := q.Where
+ 	_ = w
+ 	q.Find(nil)
+ }
+ 
+ // boundRepo has a method returning a fresh chain from an immutable handle.
+ type boundRepo struct{ db *gorm.DB }
+ 
+ func (r boundRepo) active() *gorm.DB {
+ 	return r.db.Session(&gorm.Session{}).Where("active = 1")
+ }
+ 
+ // boundUserMethod: each call through a method value of a user method is its
+ // own call, like r.active() written twice.
+ func boundUserMethod(r boundRepo) {
+ 	f := r.active
+ 	f().Find(nil)
+ 	f().Count(nil)
+ }
+ 
+ // ===== SHOULD REPORT =====
+ 
+ // boundOnMutable: each call is a branch of the mutable q, so the second call
+ // is reported once, at the call through the method value.
+ func boundOnMutable(db *gorm.DB) {
+-	q := db.Where("x")
++	q := db.Where("x").Session(&gorm.Session{})
+ 	w := q.Where
+ 	w("a").Find(nil)
+ 	w("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root \(root at [^)]+\)`
+ }
+ 
+ // boundDiscardedThroughMethodValue: w("a") changes q in place, and nothing
+ // keeps its result. A Session at q's root would make it change a copy and drop
+ // "a" from the later query, and a call through w names no variable to rebind,
+ // so no fix is offered (#199).
+ func boundDiscardedThroughMethodValue(db *gorm.DB) {
+ 	q := db.Where("x")
+ 	w := q.Where
+ 	w("a")
+ 	w("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root \(root at [^)]+\)`
+ }
+ 
+ // boundDiscardedChainThroughMethodValue: the same for a longer discarded chain.
+ func boundDiscardedChainThroughMethodValue(db *gorm.DB) {
+ 	q := db.Where("x")
+ 	w := q.Where
+ 	w("a").Limit(1)
+ 	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root \(root at [^)]+\)`
+ }
+ 
+ // boundOnMutableInLoop: every iteration branches q, defined outside the loop.
+ func boundOnMutableInLoop(db *gorm.DB, items []string) {
+ 	q := db.Where("x")
+ 	w := q.Where
+ 	for _, item := range items {
+ 		w("name = ?", item).Find(nil) // want `\*gorm\.DB reused: second branch from mutable root \(root at [^)]+\)`
+ 	}
+ }
+ 
+ // boundResultReused: the result of a call through a method value is itself a
+ // mutable root.
+ func boundResultReused(db *gorm.DB) {
+ 	w := db.Session(&gorm.Session{}).Where
+-	q := w("a")
++	q := w("a").Session(&gorm.Session{})
+ 	q.Find(nil)
+ 	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root \(root at [^)]+\)`
+ }
+ 
+ // boundSessionInitialized: Session with Initialized returns a mutable handle,
+ // through a method value too.
+ func boundSessionInitialized(db *gorm.DB) {
+ 	s := db.Session(&gorm.Session{}).Session
+-	q := s(&gorm.Session{Initialized: true})
++	q := s(&gorm.Session{Initialized: true}).Session(&gorm.Session{})
+ 	q.Find(nil)
+ 	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root \(root at [^)]+\)`
+ }
+ 
+ // boundSessionCopyAfterBranch: a copy taken through s := q.Session shares
+ // q's Statement like q.Session(...) does (#174).
+ func boundSessionCopyAfterBranch(db *gorm.DB) {
+ 	q := db.Session(&gorm.Session{}).Where("tenant = 1")
+ 	s := q.Session
+ 	countQ := s(&gorm.Session{})
+ 	q.Where("active = 1").Find(nil)
+ 	countQ.Count(nil) // want `\*gorm\.DB reused: Session/Debug copy shares the Statement of a mutable root`
+ }
+ 
+ // boundUserMethodResultReused: the result of one call is a mutable root.
+ func boundUserMethodResultReused(r boundRepo) {
+ 	f := r.active
+-	q := f()
++	q := f().Session(&gorm.Session{})
+ 	q.Find(nil)
+ 	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root \(root at [^)]+\)`
+ }
+ 
+ // boundOpener returns a tuple holding a fresh mutable chain.
+ type boundOpener struct{ db *gorm.DB }
+ 
+ func (o boundOpener) open() (*gorm.DB, error) {
+ 	return o.db.Session(&gorm.Session{}).Where("x"), nil
+ }
+ 
+ // boundTupleResultReused: a tuple result of a call through a method value is a
+ // mutable root, as for o.open() (#176).
+ func boundTupleResultReused(o boundOpener) {
+ 	f := o.open
+ 	q, _ := f()
+ 	q.Find(nil)
+ 	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root \(root at [^)]+\)`
+ }
+ 
+ // boundQuerier is an interface whose method returns a handle.
+ type boundQuerier interface{ Query() *gorm.DB }
+ 
+ // boundInterfaceResultReused: a method value of an interface method has no
+ // declared body, so its result is a mutable root, as for r.Query() (#176).
+ func boundInterfaceResultReused(r boundQuerier) {
+ 	f := r.Query
+-	q := f()
++	q := f().Session(&gorm.Session{})
+ 	q.Find(nil)
+ 	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root \(root at [^)]+\)`
+ }
+ 
+ // boundHelper has a pure method that returns its argument.
+ type boundHelper struct{}
+ 
+ //gormreuse:pure
+ func (boundHelper) same(db *gorm.DB) *gorm.DB { return db }
+ 
+ // boundPureMethodReturnsArg: the result of a pure method called through a
+ // method value is its argument, as for h.same(q) (#188).
+ func boundPureMethodReturnsArg(h boundHelper, db *gorm.DB) {
+-	q := db.Where("x")
++	q := db.Where("x").Session(&gorm.Session{})
+ 	f := h.same
+ 	f(q).Find(nil)
+ 	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root \(root at [^)]+\)`
+ }

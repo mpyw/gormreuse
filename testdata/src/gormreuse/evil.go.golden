@@ -2532,7 +2532,7 @@ func reassignFromMethodValue(db *gorm.DB) {
 	q.Find(nil) // Pollutes q
 
 	where := db.Where
-	q = where("y = ?", 2) // Reassign from method value
+	q = where("y = ?", 2).Session(&gorm.Session{}) // Reassign from method value
 	q.Find(nil)           // Pollutes new q
 	q.Count(nil)          // want `\*gorm\.DB reused: second branch from mutable root`
 }

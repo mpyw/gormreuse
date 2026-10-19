@@ -296,6 +296,11 @@ q.Find(&users)   // OK - q is immutable, can branch freely
 q := db.Where("base").Session(&gorm.Session{})
 q.Where("a").Find(&users1)  // OK - branch 1 (independent chain)
 q.Where("b").Find(&users2)  // OK - branch 2 (independent chain)
+
+// A call through a method value is the same as the direct call
+where := db.Where("base").Session(&gorm.Session{}).Where
+where("a").Find(&users1)    // OK - same as q.Where("a")
+where("b").Find(&users2)    // OK - same as q.Where("b")
 ```
 
 #### Violation: Multiple branches from mutable
@@ -310,6 +315,12 @@ q.Count(&count)  // VIOLATION: second branch from q
 q := db.Where("x")
 q.Where("a")     // first branch from q - OK
 q.Where("b")     // VIOLATION: second branch from q
+
+// A method value of a mutable value branches it on each call
+q := db.Where("x")
+where := q.Where
+where("a").Find(&users1) // first branch from q - OK
+where("b").Find(&users2) // VIOLATION: second branch from q
 
 // Session in middle doesn't help - result is still mutable
 q := db.Session(&gorm.Session{}).Where("x")  // q is mutable!
