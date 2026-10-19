@@ -535,7 +535,7 @@ func chaosPolluteInNestedIf(db *gorm.DB, a, b, c bool) {
 		q = q.Where("after_b") // want `\*gorm\.DB reused: second branch from mutable root`
 	}
 
-	q.Count(nil) // OK: Phi result used once (optimizer limitation - pollution inside nested if not tracked through Phi)
+	q.Count(nil) // OK: on every path, the value it reads is not branched yet
 }
 
 // chaosPolluteMultipleTimes demonstrates multiple pollutions at different levels.

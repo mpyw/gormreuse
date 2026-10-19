@@ -53,7 +53,7 @@ branch2 := q.Where("b")                       // OK: creates new Statement
 
 The linter detects when a mutable `*gorm.DB` branches into multiple code paths:
 
-1. **Immutable-returning methods** ([`Session`](https://pkg.go.dev/gorm.io/gorm#DB.Session), [`WithContext`](https://pkg.go.dev/gorm.io/gorm#DB.WithContext), [`Debug`](https://pkg.go.dev/gorm.io/gorm#DB.Debug), [`Open`](https://pkg.go.dev/gorm.io/gorm#Open), [`Begin`](https://pkg.go.dev/gorm.io/gorm#DB.Begin), [`Transaction`](https://pkg.go.dev/gorm.io/gorm#DB.Transaction)) return a new immutable instance
+1. **Immutable-returning methods** ([`Session`](https://pkg.go.dev/gorm.io/gorm#DB.Session), [`WithContext`](https://pkg.go.dev/gorm.io/gorm#DB.WithContext), [`Debug`](https://pkg.go.dev/gorm.io/gorm#DB.Debug), [`Open`](https://pkg.go.dev/gorm.io/gorm#Open), [`Begin`](https://pkg.go.dev/gorm.io/gorm#DB.Begin)) return a new `clone > 0` instance (`clone == 1` or `2`; the exceptions are below). A call to one is a pure use of the receiver's root, not a branch. `typeutil.IsImmutableReturningBuiltin` also lists [`Transaction`](https://pkg.go.dev/gorm.io/gorm#DB.Transaction). It returns `error`, so only the pure use applies: it runs its callback on a `Begin` result. Its callback's fresh `tx` is a separate exemption (see [Directives](#directives))
 2. **All other methods** on a mutable instance create a **branch** that consumes the instance
 3. **Second branch** from the same mutable root is a **violation**
 4. A **use of a `Session`/`Debug` copy** after its mutable root changed is a **violation** (see below)
@@ -125,7 +125,7 @@ Decisions and limitations:
   An ignore only suppresses reports. Before #190 a function-level ignore skipped the function in every pass. That hid contract violations while the directive stayed trusted (a leaking `pure` function was trusted at call sites), never covered closures, and marked the ignore used even when nothing was suppressed. Now every pass runs, so `failedPure` and `needsImmutableParam` see ignored functions, and an ignore is used only when it suppressed a report. Unused-ignore reports go straight to `pass.Reportf`: an ignore never silences another ignore's staleness. So do `panicGuard` internal-error reports, which can now come from an ignored function too, since it is analyzed.
 - `//gormreuse:pure` - Mark function/method/closure as not polluting its `*gorm.DB` argument
 - `//gormreuse:immutable-return` - Mark function/method/closure as returning immutable `*gorm.DB` (like Session/WithContext). **Body contract**: when the function actually returns a provably-mutable value — one whose root is a gorm chain-method call, e.g. `db.Where(...)` or `Session().Where(...)` (the trailing chain re-forks a fresh `clone==0` Statement), or `Session(&gorm.Session{Initialized: true})` — the directive is reported at the declaration, since the linter would otherwise trust it and silently allow unsafe reuse of the return value at call sites. Closures, deferred writes to named results and some package-level variables are followed; see [Immutable-return body contract](#immutable-return-body-contract-194). Roots the tracer treats as mutable only conservatively (a bare `*gorm.DB` parameter, or a call into an unmarked named function) are given the benefit of the doubt and not reported.
-- `//gormreuse:immutable-param` - Opt a function's `*gorm.DB` parameters out of the Phase 1b mutable-by-default treatment: they are treated as immutable inside the function (the caller is responsible for passing an isolated value). **Caller-side contract**: when the function actually branches such a parameter, passing a mutable `*gorm.DB` at a call site is reported (isolate with `.Session(&gorm.Session{})` first, or make the caller `immutable-param` too so the contract propagates). The check runs wherever the callee is known statically: a direct call, a function or method value, a generic instance, and the same calls under `go` and `defer` (#192). The `go`/`defer` path (`processGormDBCallCommonWith`) shares `checksImmutableParamArg` with the call path. An interface method call or a call through a func-typed parameter has no static callee, so its contract cannot be checked. A callee in another package is checked through its package's fact (see [Directives across packages](#directives-across-packages-195)).
+- `//gormreuse:immutable-param` - Opt a function's `*gorm.DB` parameters out of the mutable-by-default treatment of parameters: they are treated as immutable inside the function (the caller is responsible for passing an isolated value). **Caller-side contract**: when the function actually branches such a parameter, passing a mutable `*gorm.DB` at a call site is reported (isolate with `.Session(&gorm.Session{})` first, or make the caller `immutable-param` too so the contract propagates). The check runs wherever the callee is known statically: a direct call, a function or method value, a generic instance, and the same calls under `go` and `defer` (#192). The `go`/`defer` path (`processGormDBCallCommonWith`) shares `checksImmutableParamArg` with the call path. An interface method call or a call through a func-typed parameter has no static callee, so its contract cannot be checked. A callee in another package is checked through its package's fact (see [Directives across packages](#directives-across-packages-195)).
 - `//gormreuse:immutable-input(name)` - Declare that the function passes an **immutable** `*gorm.DB` to its callback parameter `name` (a user-defined equivalent of gorm's `Transaction`/`FindInBatches`). The named callback's `*gorm.DB` parameter is then treated as immutable, so reuse inside the callback is allowed. **Body contract**: if the function actually passes a mutable value to the callback, it is reported. Reported unused when `name` isn't a parameter, isn't a function type, or the callback has no `*gorm.DB` parameter.
 
   **Following the callback (#193).** Before #193 `ValidateImmutableInputs` checked only a `Call` whose callee was the parameter itself, so `go cb(...)`, `defer cb(...)`, a closure, `forward(cb, ...)`, `(*(&cb))(...)`, a struct field and a slice element all handed a mutable value to the callback unreported. Now `immutableInputFlow` walks the parameter's referrers with a worklist:
@@ -190,68 +190,63 @@ helper := func(q *gorm.DB) { //gormreuse:pure
 a, b := func(q *gorm.DB) { _ = q }, func(q *gorm.DB) { _ = q }
 ```
 
-> **Important**: User-defined functions that accept `*gorm.DB` are treated as polluting **unless** the function returns `*gorm.DB` and the result is assigned (e.g., `q = helper(q)`). In that case, it's treated like a gorm method assignment. Use `//gormreuse:pure` to mark functions that don't pollute arguments even when result is discarded, and `//gormreuse:immutable-return` to mark functions whose return value can be safely reused (like DB connection helpers).
+> **Important**: Passing `q` to a user-defined function without `//gormreuse:pure` is a branch of `q`, like a gorm method call. When the function returns a `*gorm.DB`, its call is also handled like a gorm method call in a merge: `if c { q = helper(q) }` is an assignment (`checkFunctionCallPollution` calls `isAssignment`, see [Which merges are reassignments](#which-merges-are-reassignments-175)). Its result is a new mutable root. Use `//gormreuse:pure` for functions that don't pollute their arguments, and `//gormreuse:immutable-return` for functions whose result can be reused (like DB connection helpers).
 
 > **Note**: Unused directives are reported as warnings:
 > - Unused `//gormreuse:ignore` - line/function-level ignores that suppress no diagnostic
 > - Unused `//gormreuse:pure` - directives that don't match any function
 > - Unused `//gormreuse:immutable-return` - directives that don't match any function
 > - Unused `//gormreuse:immutable-param` - directives that don't match any function (no `*gorm.DB` parameter)
-> - **Redundant** `//gormreuse:immutable-param` - directive is signature-valid but has no effect: the parameter is never reused, so even treated as mutable it would produce no violation to suppress. Reported at the function declaration. Skipped when combined with `//gormreuse:pure` (a valid pure function cannot branch its parameter, so immutable-param is redundant there by construction). This is callee-side only, matching Phase 1b stage 2a.
+> - **Redundant** `//gormreuse:immutable-param` - directive is signature-valid but has no effect: the parameter is never reused, so even treated as mutable it would produce no violation to suppress. Reported at the function declaration. Skipped when combined with `//gormreuse:pure` (a valid pure function cannot branch its parameter, so immutable-param is redundant there by construction). This is callee-side only: callers are not checked for it.
 > - For combined directives (`//gormreuse:pure,immutable-return`), if either part is used, no unused warning is reported
 
 ## Architecture
 
 ```
 gormreuse/
-├── analyzer.go                 # Public analyzer definition (go/analysis entry point)
-├── analyzer_test.go            # Integration tests using analysistest
-├── cmd/gormreuse/main.go       # CLI entry point (singlechecker)
-├── plugin/plugin.go            # golangci-lint module plugin (no settings; shares Analyzer)
+├── analyzer.go                  # Public Analyzer: file filtering, directive scans, buildssa, then internal.RunSSA
+├── analyzer_test.go             # analysistest runs over the testdata packages
+├── analyzer_internal_test.go    # Generated-file decision (cgo output)
+├── golden_test.go               # .golden/.diff fixtures: check, compile, regenerate
+├── convergence_test.go          # TestFixesConverge: one pass of fixes leaves no diagnostic
+├── determinism_test.go          # TestDeterministicDiagnostics: same output on every run
+├── limitation_test.go           # Every [LIMITATION] fixture is listed in Known Limitations
+├── cmd/gormreuse/
+│   ├── main.go                  # CLI entry point (singlechecker)
+│   └── *_test.go                # Build the command and run it (go vet, //line, facts, inspector paths)
+├── plugin/plugin.go             # golangci-lint module plugin (no settings; shares Analyzer)
 │
-├── internal/                   # Internal implementation
-│   ├── analyzer.go             # SSA analysis orchestrator (RunSSA entry point)
-│   │
-│   ├── directive/              # Comment directive handling
-│   │   ├── directive.go        # Directive parsing and problems (parse, FindDirectiveProblems, IsIgnore/IsPure)
-│   │   ├── ignore.go           # //gormreuse:ignore - Ignores scope rule, IgnoreMap, unused tracking
-│   │   └── funcset.go          # DirectiveFuncSet - directive-marked function sets
-│   │
-│   ├── facts/                  # Directive facts exported to importing packages (#195)
-│   │
-│   ├── scopeswarn/             # TEMPORARY Session-returned-from-Scopes warning (GORM bug #7592)
-│   │
-│   ├── ssa/                    # SSA-based analysis (modular subpackages)
-│   │   ├── analyzer.go         # Analyzer - orchestrates analysis phases
-│   │   │
-│   │   ├── tracer/             # Value tracing to find mutable roots
-│   │   │   └── root.go         # RootTracer - traces SSA values to mutable origins
-│   │   │
-│   │   ├── pollution/          # Pollution state tracking
-│   │   │   └── tracker.go      # Tracker - records uses, detects violations
-│   │   │
-│   │   ├── cfg/                # Control flow graph analysis
-│   │   │   └── analyzer.go     # Analyzer - loop detection, reachability
-│   │   │
-│   │   ├── handler/            # SSA instruction handlers
-│   │   │   └── call.go         # Handlers for Call, Go, Defer, Send, Store, etc.
-│   │   │
-│   │   └── purity/             # Pure function validation for //gormreuse:pure
-│   │       └── validator.go    # Validator.Validate - checks pure contracts
-│   │
-│   └── typeutil/               # Type utilities
-│       └── gorm.go             # IsGormDB, IsImmutableReturningBuiltin
+├── internal/
+│   ├── analyzer.go              # RunSSA: every package-level pass, panicGuard, fact export
+│   ├── directive/               # Comment directives
+│   │   ├── directive.go         # readDirective, FindDirectiveProblems
+│   │   ├── ignore.go            # //gormreuse:ignore scopes (Ignores), unused tracking
+│   │   ├── funcset.go           # DirectiveFuncSet: pure / immutable-return / immutable-param sets
+│   │   ├── immutable_input.go   # ImmutableInputSet: immutable-input(name) callbacks
+│   │   ├── func.go              # FuncKey, DeclaredFunc (generic instances, bound methods)
+│   │   ├── signature.go         # Signature checks per directive
+│   │   ├── gorm_db.go           # Does a type hold a *gorm.DB?
+│   │   └── typestr.go           # Type and receiver strings for matching
+│   ├── facts/facts.go           # facts.Func: directives exported to importing packages (#195)
+│   ├── fix/generator.go         # Suggested fixes: reassignment, Session, immutable-param
+│   ├── goldentest/goldentest.go # Shared golden machinery (ApplyFixes, UpdateCommand)
+│   ├── scopeswarn/scopeswarn.go # TEMPORARY Session-returned-from-Scopes warning (GORM bug #7592)
+│   ├── typeutil/gorm.go         # IsGormDB, IsImmutableReturningBuiltin, ImmutableBuiltinEffect
+│   └── ssa/
+│       ├── analyzer.go          # Per-function Analyzer: tracking, then detection
+│       ├── tracer/root.go       # RootTracer: mutable roots, aliases, callbacks, FuncVars
+│       ├── pollution/tracker.go # Tracker: records uses, DetectViolations
+│       ├── pollutionsource/     # Which uses leak a *gorm.DB; read-only query arguments
+│       ├── cfg/analyzer.go      # Loops and reachability
+│       ├── handler/call.go      # Instruction handlers: Call, Go, Defer, Send, Store, ...
+│       └── purity/              # Body contracts of the directives
+│           ├── validator.go     # pure (Validator, ReturnedParams)
+│           ├── immutable_return.go  # immutable-return (ImmutableReturnValidator)
+│           ├── immutable_input.go   # immutable-input(name) (ValidateImmutableInputs)
+│           └── violation.go     # Violation
 │
-├── testdata/src/               # Test fixtures
-│   ├── gormreuse/              # Analyzer test cases
-│   │   ├── basic.go            # Basic patterns
-│   │   ├── advanced.go         # Complex patterns
-│   │   ├── evil.go             # Edge cases with [LIMITATION] markers
-│   │   ├── ignore.go           # //gormreuse:ignore tests
-│   │   └── directive_validation.go  # Directive tests (pure, immutable-return)
-│   └── gorm.io/gorm/           # GORM stub for testing
-│
-└── e2e/internal/               # SQL behavior verification (separate module)
+├── testdata/src/                # See Testdata Organization
+└── e2e/internal/                # Runtime checks against real GORM with sqlmock (separate module)
 ```
 
 The `plugin` package registers `Analyzer` with golangci-lint's module plugin system. `Analyzer` reads no flags, so the plugin hands it over as it is and rejects any settings. It lives in the main module: `plugin-module-register` adds nothing beyond `golang.org/x/tools`, and a nested module would need its own tag per release.
@@ -261,16 +256,19 @@ The `plugin` package registers `Analyzer` with golangci-lint's module plugin sys
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                         analyzer.go (public)                            │
-│  Analyzer.Run() → buildssa → internal.RunSSA()                         │
+│  run(): directive sets, buildssa (only if gorm is reachable) → RunSSA   │
 └─────────────────────────────────────────────────────────────────────────┘
                                     │
                                     ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                      internal/analyzer.go                               │
-│  For each function:                                                     │
-│    1. Suppress reports by ignore scope (directive.Ignores)             │
-│    2. Validate pure functions (purity.Validator)                       │
-│    3. Detect violations (ssa.Analyzer)                                 │
+│                      internal/analyzer.go  RunSSA                       │
+│  Every report goes through directive.Ignores. Package-level passes:     │
+│    1. Validate pure functions to a fixed point (purity.Validator)       │
+│    2. Collect Scopes and immutable callbacks, DropReachableCallbacks    │
+│    3. Check immutable-input and immutable-return bodies                 │
+│    4. Scopes Session warning (scopeswarn)                               │
+│    5. For each function: detect violations (ssa.Analyzer), add fixes    │
+│    6. Redundant and unused directives, export facts, unused ignores     │
 └─────────────────────────────────────────────────────────────────────────┘
                                     │
                                     ▼
@@ -345,7 +343,7 @@ The linter marks `*gorm.DB` as polluted in these scenarios:
 - **Slice/Array storage**: `[]*gorm.DB{db}` marks db as polluted
 - **Map storage**: `map[string]*gorm.DB{"k": db}` marks db as polluted
 - **Interface conversion**: `interface{}(db)` marks db as polluted (type assertion may extract), except a read-only argument of a query method (#185)
-- **Function arguments**: Non-pure functions receiving `*gorm.DB` pollute if result is discarded (not assigned)
+- **Function arguments**: passing `*gorm.DB` to a function that is not trusted as pure is a branch. A `*gorm.DB` result assigned back in a merge is an assignment, as for a gorm method
 - **Struct field access**: `h.field.Find(nil)` traces back to the original value stored in field, including fields reached through embedding (`outer{db: q}`, where `db` is promoted from an embedded struct)
 
 Note: Simple struct literal storage (`_ = &S{db: q}`) without actual field usage does NOT pollute.
@@ -442,15 +440,18 @@ Reassignment Behavior:
 
 User-Defined Function Reassignment:
   q := db.Where("x")
-  q = buildQuery(q, "y")   <- Result assigned: treated like gorm method assignment
-  q = buildQuery(q, "z")   <- Result assigned: new mutable root (NO false positive)
+  q = buildQuery(q, "y")   <- first branch of q_1; q_2 is a new mutable root
+  q = buildQuery(q, "z")   <- first branch of q_2
   q.Find(nil)              <- First branch from latest q - OK
 
-  buildQuery(q, "w")       <- Result discarded: q is polluted
-  q.Find(nil)              <- VIOLATION (q was polluted by discarded call)
+  buildQuery(q, "w")       <- Result discarded: a branch of q
+  q.Find(nil)              <- VIOLATION: second branch
 
-  When user-defined function returns *gorm.DB and result is assigned,
-  it uses RecordAssignment (like gorm methods) instead of MarkPolluted.
+  r := buildQuery(q, "v")  <- a branch of q, as for r := q.Where("v")
+
+  When the function returns *gorm.DB and isAssignment finds a merge that
+  hands q's root back, checkFunctionCallPollution uses RecordAssignment,
+  as the gorm method handler does.
 ```
 
 ### Results the tracer cannot see through (#176)
@@ -523,6 +524,12 @@ SSA compiles the body of `for v := range seq` (Go 1.23+) into a synthetic closur
 The body reaches outer variables through `FreeVar`s, so `q = q.Where(v)` inside it is a `Store` to a `FreeVar`, not to an `Alloc`. `isAssignment` treats a `FreeVar` as a merge point like an `Alloc` (see the previous section). Its values are those of the captured variable, so the store is an assignment only when that variable can hold `root`. That is the in-place update of a plain loop. A store into another variable, such as `last = q.Where(v)`, still counts as a use of `q`.
 
 Only the body closure itself is treated as a loop. A closure nested inside the body (an IIFE, a `defer`) is not, which matches how a closure nested in a plain loop is handled.
+
+### Closure uses (#68, #179)
+
+**Ordering (#68).** A closure may be called at a *single* later call site (`f := func() { q.Find(nil) }; …; f()`). Then the uses inside it are ordered by that **call-site position**, not by the body's source position. So a closure defined early and called late is reported at the call site, and the earlier direct use is the first branch (`storedClosureReordered` in `evil.go`). Only this single-call case moves. IIFEs (called in place), deferred or spawned closures, and closures called from several sites keep their body positions.
+
+**Reachability (#179).** The same single invocation, and also an IIFE, gives the closure an invocation site: the block of its one plain call (`Tracker.RecordInvocationSite`). When two uses are in different functions, `isReachable` lifts each use through these sites to the innermost function that holds both, and asks the CFG whether the first site reaches the second. So `if c { f() } else { q.Count(nil) }`, `if c { f(); return }; q.Count(nil)` and one IIFE per branch are not reported. Positions still decide the order. If the two sites are the same block, or no common function is reached, the pair counts as reachable, as before #179. A closure with no single plain call (more than one call, `defer`, `go`, passed as an argument, stored) has no site, so its uses stay conservative. A nested closure without its own site does not inherit its parent's site either: it can escape the parent and run after it.
 
 ### Struct roots (#181)
 
@@ -797,10 +804,13 @@ go build -o bin/gormreuse ./cmd/gormreuse
 go vet -vettool=./bin/gormreuse ./...
 
 # Run E2E tests (SQL behavior verification)
-cd e2e/internal && go test -v
+cd e2e/internal && go test ./...
 
 # Regenerate the .golden and .diff fixtures after changing detection or fixes
 GORMREUSE_UPDATE_GOLDEN=1 go test -run TestGoldenFiles .
+
+# Run every check CI runs (declscope, both test suites, build, golangci-lint)
+./test_all.sh
 ```
 
 ## Releasing
@@ -823,6 +833,7 @@ Validate config changes with `goreleaser check`, and dry-run with `goreleaser re
 - Test structure:
   - `===== SHOULD REPORT =====` - Cases that should trigger warnings
   - `===== SHOULD NOT REPORT =====` - Negative cases
+- A fixture function that pins a known limitation carries `[LIMITATION]` in its doc comment or body, and is named in [Known Limitations](#known-limitations). `TestKnownLimitationsListed` checks this. Remove the marker and the entry when a fix makes the case work.
 
 ### Suggested-fix fixtures
 
@@ -852,15 +863,18 @@ This rewrites every `.golden` and `.diff` file and deletes the ones whose source
 
 ### Testdata Organization
 
-```
-testdata/src/gormreuse/
-├── basic.go         # Basic reuse patterns, Session at end/middle
-├── advanced.go      # Derived variables, helper functions, conditional reuse
-├── evil.go          # Edge cases: closures, defer, goroutines, struct fields, loops
-├── session_alias.go # Session/Debug copies sharing a Statement; Session{Initialized} (#174)
-├── subquery.go      # *gorm.DB as a subquery or condition argument (#185)
-└── ignore.go        # //gormreuse:ignore directive tests
-```
+| Directory under `testdata/src` | Test | Content |
+| --- | --- | --- |
+| `gormreuse/` | `TestAnalyzer`, the golden tests | The main fixtures, one file per topic, named after it (`basic.go`, `evil.go`, `session_alias.go`, `subquery.go`, `fix_*.go`, ...). Each has a `.golden` and a `.diff` |
+| `converge/` | `TestFixesConverge` | Code whose fixes must resolve every diagnostic in one pass |
+| `determinism/` | `TestDeterministicDiagnostics` | Several roots reused at one position |
+| `purelib/`, `externalpure/` | `TestCrossPackageDirectives` | Directives declared in one package and called from another |
+| `filefilter/` | `TestFileFilter` | The `-test` flag and generated files |
+| `linedirective/`, `linedirectivedep/` | `TestLineDirective` | `//line` directives |
+| `cgofile/` | `TestCgoFiles` | A cgo package. Skipped without a C compiler |
+| `noimport/`, `aliasimport/` | `TestSuggestedFixesWithImport`, `TestSuggestedFixesWithAlias` | How a fix names `gorm` |
+| `fakegorm/` | | A package that `gormreuse/fix_import_other.go` imports as `gorm` |
+| `gorm.io/gorm/`, `github.com/stretchr/testify/` | | Stubs of the real packages |
 
 Directives across packages are tested by `TestCrossPackageDirectives`: `testdata/src/purelib` declares them and `testdata/src/externalpure` calls them. Both packages' diagnostics and purelib's facts are checked. `TestCrossPackageFactsE2E` in `cmd/gormreuse` runs the same kind of pair through the built command and through `go vet -vettool`.
 
@@ -889,44 +903,40 @@ When refactoring code, follow these rules strictly:
 
 ## Known Limitations
 
-- **Closure assignment**: `f := func() { q = db.Where(...) }; f()` - cross-closure assignment not tracked
-- **Defer inside for loop**: `for range items { defer func() { q.Find(nil) }() }` - closure deferred multiple times not fully tracked
-- **Nested defer/goroutine**: `go func() { defer q.Find(nil) }()` - deep nested defer/goroutine chains not fully tracked
-- **IIFE/closure stored result**: When IIFE/closure result is stored (not directly chained), branch tracking differs from runtime order
+Each fixture function marked `[LIMITATION]` under `testdata/src` pins one of these cases. `TestKnownLimitationsListed` fails when a marked function is not named in this section. The README lists the same cases for users.
 
-- **immutable-param through an interface**: `var a applier = repo{}; a.apply(q)` calls an interface method, so the callee and its directive are unknown and the caller-side contract is not checked. The same holds for a call through a func-typed parameter
-- **Package-level variables (#183)**: a load of a `*gorm.DB` global sees only the stores in its own function, so a global that the function never stores to is immutable. A call through an exported, reassigned or address-taken `var f = func(...)` does not honour the closure's directives. See [Package-level variables](#package-level-variables-183)
+**Missed reuse (false negatives).** The fixture has no `want` at the missed use.
 
-These are documented in `testdata/src/gormreuse/evil.go` with `[LIMITATION]` markers.
+| Case | Fixtures | Cause |
+| --- | --- | --- |
+| A closure assigns a captured variable: `f := func() { q = db.Where(...) }; f()` | `closureModifiesCaptured` | The store in the closure is not a root the caller's uses resolve to |
+| `defer` inside a `go` closure, or `defer` → `go` → `defer` | `deferInsideGoroutine`, `nestedDeferGoroutineDefer` | A deferred call nested in a spawned closure is not recorded as a use |
+| A method value merged by a Phi: `if c { find = q.Find } else { find = q.Find }; find(nil)` | `methodValueConditional`, `methodValuePhiWithNil`, `boundMethodWithPhiOnePollutedReverse` | The bound-method receiver is not traced through the Phi. In the reversed case, block order hides the earlier branch |
+| Closures stored in a slice and called in a loop | `closureCapturingLoopVar` | The closure body has one use of `q`. Nothing tells the analyzer that the closure runs more than once |
+| A derived variable that flows back: `if c { q2 = q.Where("a") }; if d { q = q2 }` | `derivedThenMergedBack` | `isAssignment` asks whether a merge *can* hand back the root, not whether it does on that path ([Which merges are reassignments](#which-merges-are-reassignments-175)) |
+| A field rebuilt in a loop after it was copied: `p.db = q; for … { p.db = p.db.Where(c) }; q.Find(nil)` | `fsoLoopRebuildOfAliasedValue` | `isLoopFieldRebuild` makes the rebuild an assignment, so the first iteration's read of `q` is not a branch (#182) |
+| A pure function that returns a `Session` copy of its argument | `paCopyHidden` | The copy is not in `PureVerdicts.Returned` ([Session and Debug copies](#session-and-debug-copies-174)) |
+| A `*gorm.DB` global assigned in another function, a closure or the initializer | `pvInitializedAtPackageLevel`, `pvStoreInClosure` | A load sees only the stores in its own function ([Package-level variables](#package-level-variables-183)) |
+| The `immutable-param` caller contract through an interface or a func-typed parameter | `contractInterface` | No static callee |
 
-**Closure use ordering (#68)**: uses inside a closure that is invoked at a *single* later call site (`f := func() { q.Find(nil) }; …; f()`) are ordered by that **call-site position**, not the closure body's source position — so define-early/call-late reuse is reported at the call site and the earlier direct use is correctly treated as the first branch. This applies only to the unambiguous single-invocation case; IIFEs (invoked inline), deferred/spawned closures, and closures invoked from multiple sites keep their body positions.
+**Extra reports (false positives).**
 
-**Closure use reachability (#179)**: the same single invocation, and also an IIFE, gives the closure an invocation site: the block of its one plain call (`Tracker.RecordInvocationSite`). When two uses are in different functions, `isReachable` lifts each use through these sites to the innermost function that holds both, and asks the CFG whether the first site reaches the second. So `if c { f() } else { q.Count(nil) }`, `if c { f(); return }; q.Count(nil)` and one IIFE per branch are not reported. Positions still decide the order. If the two sites are the same block, or no common function is reached, the pair counts as reachable, as before #179. A closure with no single plain call (more than one call, `defer`, `go`, passed as an argument, stored) has no site, so its uses stay conservative. A nested closure without its own site does not inherit its parent's site either: it can escape the parent and run after it.
+| Case | Fixtures | Cause |
+| --- | --- | --- |
+| `a, b := pair(db)`, then `a.Find(nil); b.Find(nil)` | `opaqueTuplePairShared` | Every `*gorm.DB` of one tuple shares the call as its root (#176) |
+| `p := &q; (*p).Find(nil); *p = db.Where("y")`, then `q.Find(nil)` | `reassignPointerDeref` | The store through `p` is not seen as a reassignment of `q`, so `q` still resolves to the old root |
+| `G = db.Where("x"); if c { G = G.Where("a") }; G.Find(nil)` for a global or a field | `pvConditionalRebuildOfStore` | A store is not a merge point the way a local's Phi is |
 
-### IIFE/Closure Stored Result Limitation
+**Wrong position.** Uses in a deferred closure are ordered by their source position, not by when they run. `defer func() { q.Count(nil) }(); q.Find(nil)` is reported at `q.Find`, which runs first. A deferred call such as `defer q.Count(nil)` is ordered after the function's other uses and reported at the `defer`. Fixtures: `ifInsideDefer`, `ifElseInsideDefer`, `nestedIfInsideDefer`, `tripleNestingIfForDefer`, `tripleNestingForIfDefer`, `deferCapturingLoopVar`, `nestedDeferClosures`, `tripleNestedDeferClosures`, `nestedDeferWithFor`, `ultimateIfForDeferChaos`.
 
-When a closure result is stored (in a variable or struct field) rather than directly chained to a gorm method, branch tracking may differ from runtime behavior:
+Other limitations have no fixture marker. They are described with their design:
 
-```go
-// OK: IIFE result directly chained
-_ = func() *gorm.DB { return q.Where("y") }().Find(nil)  // ONE branch
-q.Count(nil)  // violation (second branch)
+- A struct field read through a parameter or a receiver is not a mutable root ([Struct roots](#struct-roots-181)).
+- A call through an exported, reassigned or address-taken `var f = func(...)` does not honour the closure's directives ([Package-level variables](#package-level-variables-183)).
+- A `go`/`defer` use of a `Session`/`Debug` copy is not an alias use. Neither is one of an outer chain that holds a subquery ([Session and Debug copies](#session-and-debug-copies-174), [Subquery and condition arguments](#subquery-and-condition-arguments-185)).
+- The limits of `-fix` are in the fix sections, from [Reassignment Fix Target](#reassignment-fix-target) to [Fixes That Compile](#fixes-that-compile-200).
 
-// LIMITATION: IIFE result stored - both q and q2 are treated as branching from q
-q2 := func() *gorm.DB { return q.Where("y") }()  // First branch from q
-q2.Find(nil)  // violation (q2 traces back to q, which is already used)
-q.Count(nil)  // also violation
-
-// LIMITATION: Stored closure with interleaved use
-fn := func() *gorm.DB { return q.Where("y") }
-q2 := fn()
-q.Count(nil)  // Expected: violation. Actual: may not detect correctly
-q2.Find(nil)  // Expected: OK. Actual: may report as violation
-```
-
-**Root Cause**: SSA analysis processes closure bodies before closure call sites. The branch tracking order differs from runtime execution order.
-
-### Scopes Session-family warning (temporary, #196)
+## Scopes Session-family warning (temporary, #196)
 
 `internal/scopeswarn` works around go-gorm/gorm#7592. It reports a `Session`/`WithContext`/`Debug` call only when its result is what a `Scopes` callback returns.
 
