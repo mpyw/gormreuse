@@ -91,7 +91,7 @@ type Analyzer struct {
 func NewAnalyzer(fn *ssa.Function, pureFuncs, immutableReturnFuncs, immutableParamFuncs *directive.DirectiveFuncSet, pure *tracer.PureVerdicts, scopesCallbacks, immutableCallbacks map[*ssa.Function]bool, needsImmutableParam func(*ssa.Function) bool, funcVars callsite.FuncVars) *Analyzer {
 	return &Analyzer{
 		fn:                  fn,
-		rootTracer:          tracer.New(pureFuncs, immutableReturnFuncs, immutableParamFuncs, pure, scopesCallbacks, immutableCallbacks, funcVars),
+		rootTracer:          tracer.NewRootTracer(pureFuncs, immutableReturnFuncs, immutableParamFuncs, pure, scopesCallbacks, immutableCallbacks, funcVars),
 		cfgAnalyzer:         cfg.NewAnalyzer(),
 		needsImmutableParam: needsImmutableParam,
 	}

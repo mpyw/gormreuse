@@ -255,7 +255,14 @@ gormreuse/
 │       │   ├── resolve.go       # resolveMayFuncs (may-hold), resolveExactFunc (exact): what a func value is
 │       │   ├── collect.go       # Scopes/Preload, Transaction/FindInBatches, immutable-input collectors; CollectedCallbackArgs
 │       │   └── reach.go         # DropReachableCallbacks: drop callbacks that something else calls (#191)
-│       ├── tracer/root.go       # RootTracer: mutable roots, aliases
+│       ├── tracer/              # Where a *gorm.DB value's mutable root is
+│       │   ├── root.go          # RootTracer, NewRootTracer, RootBlock: trace dispatch, aliases, IIFEs
+│       │   ├── store.go         # AllocStoredValues, FieldStoredValues: which stores reach a load
+│       │   ├── field.go         # FieldRoot, SameField: field paths and roots of returned structs
+│       │   ├── freevar.go       # FreeVarBinding: the value a closure captured
+│       │   ├── phi.go           # Loop variable swaps through Phis
+│       │   ├── pure.go          # PureVerdicts: what validating the pure functions found
+│       │   └── closure.go       # ClosureCapturesGormDB, stored closure results
 │       ├── pollution/tracker.go # Tracker: records uses, DetectViolations
 │       ├── pollutionsource/     # Which uses leak a *gorm.DB; read-only query arguments
 │       ├── cfg/                 # Control flow of one function
@@ -566,7 +573,7 @@ Three struct shapes lost the root before #181, so reuse through them was missed.
 | Promoted methods of an embedded `*gorm.DB`: `e := E{q}; e.Where("a")` | `t4 = *t0; t5 = t4.DB`: a `Field` of a struct in a register, not a `FieldAddr` | `fieldValueStoredValues` turns the `Field` chain over the load into (loaded address, field path) and matches stores as for a `FieldAddr` chain. Over a Phi, each edge is resolved the same way |
 | A field of a returned struct: `s := mk(db); s.DB.Where("a")` | `*t0 = mk(db)`, or `mk(db).DB` directly | The field is a `FieldRoot{call, path}` (below) |
 | A field of a returned pointer (#250): `p := mkPtr(db); p.DB.Where("a")` | `t1 = &t0.DB; *t1`, a `FieldAddr` chain on the call | `reachingFieldStores` matches stores through `t0` as for a local. When some path from the call reaches the load with no store, the field is also the `FieldRoot{call, path}` |
-| A struct captured by a closure: `f := func() { h.q.Where("b") }` | `&h.q` on a `FreeVar`; with `h := &T{...}`, `&(*h).q` on a fresh load of the captured pointer variable | `ClosureCapturesGormDB` looks through struct fields (`holdsGormDB`), so the closure is analyzed. `fieldBaseAddrs` maps a `FreeVar` to its binding and a load of a pointer variable to each pointer stored in it, and the stores are searched in the function that defines that address |
+| A struct captured by a closure: `f := func() { h.q.Where("b") }` | `&h.q` on a `FreeVar`; with `h := &T{...}`, `&(*h).q` on a fresh load of the captured pointer variable | `ClosureCapturesGormDB` looks through struct fields (`closureHoldsGormDB`), so the closure is analyzed. `fieldBaseAddrs` maps a `FreeVar` to its binding and a load of a pointer variable to each pointer stored in it, and the stores are searched in the function that defines that address |
 
 **`FieldRoot`.** A call returning `*gorm.DB` is a mutable root. A call returning a struct that holds one has no SSA value for "field `DB` of this call", and every read is a new instruction. So the tracer makes a `FieldRoot` that implements `ssa.Value` and interns one per (call, field path) in `RootTracer.fieldRoots`. Reads of the same field of the same call share it; another field or another call is a different root. Its position is the call's. A call to a builtin or a `//gormreuse:immutable-return` function yields no root.
 
