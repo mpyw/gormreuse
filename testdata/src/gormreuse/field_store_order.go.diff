@@ -1,6 +1,6 @@
 --- field_store_order.go	1970-01-01 00:00:00
 +++ field_store_order.go.golden	1970-01-01 00:00:00
-@@ -1,180 +1,180 @@
+@@ -1,192 +1,192 @@
  package internal
  
  import "gorm.io/gorm"
@@ -189,4 +189,16 @@
  		p.db = p.db.Where(c)
  	}
  	q.Find(nil)
+ }
+ 
+ // fsoLocalLoopCarried: the local form of the loop-carried read. Find on one
+ // iteration branches the value that the next iteration's Where extends.
+ // [LIMITATION] Not reported. The loop-carried check covers fields and globals
+ // only. For a local, the loop-header Phi makes `q = q.Where(c)` an assignment.
+ func fsoLocalLoopCarried(db *gorm.DB, conds []string) {
+ 	q := db.Where("x")
+ 	for _, c := range conds {
+ 		q = q.Where(c)
+ 		q.Find(nil)
+ 	}
  }
