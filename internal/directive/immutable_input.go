@@ -17,7 +17,7 @@ import (
 //
 // This directive declares that a callback parameter (named name) of a function
 // receives an immutable *gorm.DB — the function is a user-defined equivalent of
-// gorm's Transaction/Connection/FindInBatches. Inside such a callback, the
+// gorm's Transaction/FindInBatches. Inside such a callback, the
 // *gorm.DB parameter can be reused without triggering Phase 1b reuse detection,
 // and the declaring function's body must hand the callback an immutable value.
 

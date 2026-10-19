@@ -242,3 +242,65 @@ func TestCloneSemantics_TransactionCallbackIsolated(t *testing.T) {
 		t.Errorf("Transaction tx reuse must be independent: second query leaked 'a': %s", second)
 	}
 }
+
+// TestCloneSemantics_FindInBatchesCallbackIsolated asserts that the tx handed
+// to a FindInBatches callback is fresh: gorm builds it with
+// Session(&Session{NewDB: true}), so branching it twice inside the callback
+// yields independent queries. This is the runtime premise of the analyzer's
+// builtin FindInBatches exemption (#62, #173).
+func TestCloneSemantics_FindInBatchesCallbackIsolated(t *testing.T) {
+	db, captured := setupDB(t)
+
+	var batch []User
+	calls := 0
+	err := db.Model(&User{}).FindInBatches(&batch, 100, func(tx *gorm.DB, _ int) error {
+		calls++
+		tx.Where("a = ?", 10).Find(&[]User{})
+		tx.Where("b = ?", 20).Find(&[]User{})
+		return nil
+	}).Error
+	if err != nil {
+		t.Fatalf("FindInBatches returned error: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("Expected the callback to run once, got %d", calls)
+	}
+
+	// captured[0] is the batch query itself; the callback's two queries follow.
+	if len(*captured) < 3 {
+		t.Fatalf("Expected at least 3 queries, got %d: %v", len(*captured), *captured)
+	}
+	first, second := (*captured)[1], (*captured)[2]
+	if !strings.Contains(first, "a =") {
+		t.Errorf("first callback query should contain 'a': %s", first)
+	}
+	if strings.Contains(second, "a =") {
+		t.Errorf("FindInBatches tx reuse must be independent: second query leaked 'a': %s", second)
+	}
+}
+
+// TestCloneSemantics_ConnectionCallbackAccumulates asserts that, unlike
+// Transaction and FindInBatches, the tx handed to a Connection callback is NOT
+// fresh: gorm passes db.getInstance(), a clone==0 handle, so branching it twice
+// inside the callback accumulates conditions. This is why the analyzer does not
+// exempt Connection callbacks (#173).
+func TestCloneSemantics_ConnectionCallbackAccumulates(t *testing.T) {
+	db, captured := setupDB(t)
+
+	err := db.Connection(func(tx *gorm.DB) error {
+		tx.Model(&User{}).Where("a = ?", 10).Find(&[]User{})
+		tx.Model(&User{}).Where("b = ?", 20).Find(&[]User{})
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Connection returned error: %v", err)
+	}
+
+	if len(*captured) < 2 {
+		t.Fatalf("Expected at least 2 queries, got %d", len(*captured))
+	}
+	second := (*captured)[1]
+	if !strings.Contains(second, "a =") || !strings.Contains(second, "b =") {
+		t.Errorf("Connection tx is clone==0, so the second query should accumulate both 'a' and 'b': %s", second)
+	}
+}
