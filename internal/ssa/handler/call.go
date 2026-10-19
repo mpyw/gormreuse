@@ -36,6 +36,7 @@ package handler
 
 import (
 	"go/token"
+	"slices"
 	"strings"
 
 	"golang.org/x/tools/go/ssa"
@@ -99,51 +100,63 @@ func (c *Context) pos(raw token.Pos) token.Pos {
 // All uses are recorded, and violations are detected via CFG reachability.
 type callHandler struct{}
 
-// isAssignment checks if a call result is assigned to create a new root.
-// Returns true if the call result flows into a Phi node, Store to Alloc,
-// or is part of a chain where the final result is assigned.
+// isAssignment reports whether call reassigns the variable that holds root.
+// That is the case when the call's result, followed forward through chained
+// gorm calls and Phi nodes, reaches a merge point — a Phi node or a Store to an
+// Alloc — whose possible values include root.
 //
-// Assignment patterns (don't pollute):
-//   - q = q.Where("x")  → Phi node or Store to Alloc
-//   - for { q = q.Where() } → loop-header Phi
+// Assignment patterns (don't pollute root):
+//   - if c { q = q.Where("x") } → Phi(q, q.Where("x"))
+//   - for { q = q.Where() }     → loop-header Phi
 //   - q = q.Where("x").Where("y") → chain where final result is assigned
+//   - if a { q = q.Where("a"); if b { q = q.Where("b") }; q = q.Where("c") }
+//     → q.Where("a") reaches Phi(q, …) through the inner Phi and q.Where("c")
+//   - q = helper(q)             → same, for a function returning *gorm.DB
 //
-// Non-assignment patterns (pollute):
+// Non-assignment patterns (pollute root):
 //   - q.Find(nil) → direct use (finisher)
 //   - q.Where("x").Find(nil) → chained use where final result is NOT assigned
-func isAssignment(call *ssa.Call, ctx *Context) bool {
-	return isAssignmentRecursive(call, make(map[*ssa.Call]bool))
-}
+//   - if c { q2 = q.Where("a") } → Phi(nil, q.Where("a")): q2 never holds q (#175)
+//   - q2 := q.Where("a") captured by a closure → Store to q2's Alloc (#175)
+//   - q := db.Where("b"); if c { q = db.Where("a") } → Phi of two roots that
+//     are both branches of db, not db itself (#175)
+//
+// Only a merge that can yield root needs the exemption: a later use of the
+// merged value traces back to root, so polluting root here would report that
+// use as a false second branch. Any other merge is a different variable, and
+// the call is a branch of root like any other.
+func isAssignment(call *ssa.Call, root ssa.Value, ctx *Context) bool {
+	visited := map[ssa.Value]bool{call: true}
+	work := []ssa.Value{call}
+	for len(work) > 0 {
+		v := work[len(work)-1]
+		work = work[:len(work)-1]
 
-// isAssignmentRecursive checks if a call result eventually flows into an assignment.
-// Uses visited map to avoid infinite recursion in case of cycles.
-func isAssignmentRecursive(call *ssa.Call, visited map[*ssa.Call]bool) bool {
-	if visited[call] {
-		return false
-	}
-	visited[call] = true
-
-	if call.Referrers() == nil {
-		return false
-	}
-
-	for _, user := range *call.Referrers() {
-		// Phi node: control flow merge creates new SSA value (assignment)
-		if _, ok := user.(*ssa.Phi); ok {
-			return true
-		}
-
-		// Store to Alloc: direct variable assignment (q = ...)
-		if store, ok := user.(*ssa.Store); ok {
-			if _, ok := store.Addr.(*ssa.Alloc); ok {
+		for _, user := range *v.Referrers() {
+			var next, merge ssa.Value
+			switch u := user.(type) {
+			case *ssa.Phi:
+				// Control flow merge: q = ... on one path
+				next, merge = u, u
+			case *ssa.Store:
+				// A variable kept in memory, e.g. one captured by a closure
+				if alloc, ok := u.Addr.(*ssa.Alloc); ok {
+					merge = alloc
+				}
+			case *ssa.Call:
+				// Chain intermediate: q.Where("x").Where("y") is an assignment
+				// only if Where("y") is
+				if isChainedGormMethodCall(v, u) {
+					next = u
+				}
+			}
+			if merge != nil && slices.Contains(ctx.RootTracer.FindAllMutableRoots(merge, ctx.LoopInfo), root) {
 				return true
 			}
-		}
-
-		// Chain intermediate: check if the next call in chain eventually becomes assignment
-		// Example: q.Where("x").Where("y") - Where("x") is assignment only if Where("y") is
-		if nextCall, ok := user.(*ssa.Call); ok && isChainedGormMethodCall(call, nextCall) && isAssignmentRecursive(nextCall, visited) {
-			return true
+			if next != nil && !visited[next] {
+				visited[next] = true
+				work = append(work, next)
+			}
 		}
 	}
 
@@ -151,8 +164,8 @@ func isAssignmentRecursive(call *ssa.Call, visited map[*ssa.Call]bool) bool {
 }
 
 // isChainedGormMethodCall checks if nextCall is a gorm method call that uses
-// call's result as receiver (i.e., they form a method chain).
-func isChainedGormMethodCall(call *ssa.Call, nextCall *ssa.Call) bool {
+// v as receiver (i.e., they form a method chain).
+func isChainedGormMethodCall(v ssa.Value, nextCall *ssa.Call) bool {
 	// Check if nextCall is a gorm method call
 	callee := nextCall.Call.StaticCallee()
 	if callee == nil {
@@ -168,12 +181,12 @@ func isChainedGormMethodCall(call *ssa.Call, nextCall *ssa.Call) bool {
 		return false
 	}
 
-	// Check if call's result is nextCall's receiver (first argument)
+	// Check if v is nextCall's receiver (first argument)
 	if len(nextCall.Call.Args) == 0 {
 		return false
 	}
 
-	return nextCall.Call.Args[0] == call
+	return nextCall.Call.Args[0] == v
 }
 
 // handle processes a Call instruction and tracks *gorm.DB pollution.
@@ -228,7 +241,7 @@ func (h *callHandler) handle(call *ssa.Call, ctx *Context) {
 	if isImmutableReturning {
 		// Pure methods check for pollution but don't pollute
 		ctx.Tracker.RecordPureUse(root, call.Block(), pos)
-	} else if isAssignment(call, ctx) {
+	} else if isAssignment(call, root, ctx) {
 		// Assignment creates new root - record but doesn't pollute
 		ctx.Tracker.RecordAssignment(root, call.Block(), pos)
 	} else {
@@ -343,7 +356,7 @@ func (h *callHandler) checkFunctionCallPollution(call *ssa.Call, ctx *Context) {
 	// The assignment creates a new mutable root, so we shouldn't ADD pollution to args.
 	// However, we still need to CHECK if args are already polluted (to detect reuse).
 	// This enables patterns like: q = buildQuery(q, "filter")
-	isReassignment := typeutil.IsGormDB(call.Type()) && isAssignment(call, ctx)
+	returnsGormDB := typeutil.IsGormDB(call.Type())
 
 	// A method call carries its receiver as Args[0]; //gormreuse:immutable-param
 	// governs parameters, not the receiver, so the contract check below skips it.
@@ -369,7 +382,7 @@ func (h *callHandler) checkFunctionCallPollution(call *ssa.Call, ctx *Context) {
 			ctx.Tracker.AddMessageViolation(ctx.pos(call.Pos()), immutableParamContractMessage(callee))
 		}
 
-		if isReassignment {
+		if returnsGormDB && isAssignment(call, root, ctx) {
 			// For reassignment pattern: check if already polluted, but don't add pollution.
 			// This is similar to how gorm methods handle RecordAssignment.
 			ctx.Tracker.RecordAssignment(root, call.Block(), ctx.pos(call.Pos()))

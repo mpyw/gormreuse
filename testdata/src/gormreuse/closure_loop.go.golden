@@ -75,6 +75,11 @@ func iifeConditionalReturnSameRoot(db *gorm.DB) {
 }
 
 // iifeConditionalReturnDifferentRoots: IIFE with conditional returns from different roots
+//
+// immutable-param keeps the test off Phase 1b parameter branching: db is
+// branched more than once (#175).
+//
+//gormreuse:immutable-param
 func iifeConditionalReturnDifferentRoots(db *gorm.DB) {
 	q1 := db.Where("q1").Session(&gorm.Session{})
 	q2 := db.Where("q2")

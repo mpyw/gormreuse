@@ -2228,6 +2228,11 @@ func iifeArgumentAndFreeVarMixed(db *gorm.DB) {
 // Level 4: Argument (from level 3)
 // Level 5: FreeVar q3
 // Level 6: Argument (from level 5) + return
+//
+// immutable-param keeps the test off Phase 1b parameter branching: db is
+// branched more than once (#175).
+//
+//gormreuse:immutable-param
 func deepNestedMixedCapture(db *gorm.DB) {
 	q1 := db.Where("q1", 1).Session(&gorm.Session{})
 	q2 := db.Where("q2", 2).Session(&gorm.Session{})
@@ -2349,6 +2354,11 @@ func reassignInLoopSafe(db *gorm.DB, items []string) {
 
 // reassignConditionalPartial demonstrates partial reassignment in conditional.
 // Only one branch reassigns - other branch uses polluted value.
+//
+// immutable-param keeps the test off Phase 1b parameter branching: db is
+// branched more than once (#175).
+//
+//gormreuse:immutable-param
 func reassignConditionalPartial(db *gorm.DB, flag bool) {
 	q := db.Where("x = ?", 1)
 	q.Find(nil) // Pollutes q
@@ -2403,6 +2413,11 @@ func reassignShadowing(db *gorm.DB) {
 }
 
 // reassignInClosure demonstrates reassignment inside closure.
+//
+// immutable-param keeps the test off Phase 1b parameter branching: db is
+// branched more than once (#175).
+//
+//gormreuse:immutable-param
 func reassignInClosure(db *gorm.DB) {
 	q := db.Where("x = ?", 1).Session(&gorm.Session{})
 	q.Find(nil) // Pollutes q
@@ -2471,6 +2486,11 @@ func reassignMultipleTimes(db *gorm.DB) {
 
 // reassignInSwitch demonstrates reassignment in switch statement.
 // Only some branches reassign - default branch keeps polluted value.
+//
+// immutable-param keeps the test off Phase 1b parameter branching: db is
+// branched more than once (#175).
+//
+//gormreuse:immutable-param
 func reassignInSwitch(db *gorm.DB, mode int) {
 	q := db.Where("x = ?", 1)
 	q.Find(nil) // Pollutes q
@@ -2532,6 +2552,11 @@ func reassignDeferredUse(db *gorm.DB) {
 
 // reassignPointerDeref demonstrates reassignment through pointer.
 // [LIMITATION] Pointer dereference reassignment tracking not fully supported.
+//
+// immutable-param keeps the test off Phase 1b parameter branching: db is
+// branched more than once (#175).
+//
+//gormreuse:immutable-param
 func reassignPointerDeref(db *gorm.DB) {
 	q := db.Where("x = ?", 1)
 	p := &q
@@ -2552,6 +2577,11 @@ func reassignPointerDeref(db *gorm.DB) {
 // pointerPhiCase demonstrates pointer tracking through conditionally assigned pointer-to-pointer.
 // Due to SSA's Alloc/Store/Load pattern for local variables, this doesn't create a Phi
 // for the pointer itself, but exercises the traceAllAllocStores path.
+//
+// immutable-param keeps the test off Phase 1b parameter branching: db is
+// branched more than once (#175).
+//
+//gormreuse:immutable-param
 func pointerPhiCase(db *gorm.DB, flag bool) {
 	// Create two separate allocations
 	var q1, q2 *gorm.DB
@@ -3066,6 +3096,11 @@ func closureCapturesPhi(db *gorm.DB, cond bool) {
 
 // closureCaputresPhiOnePolluted demonstrates closure with Phi where only one branch is polluted.
 // [BUG DETECTOR] This test exposes if traceAll for FreeVar only returns one root.
+//
+// immutable-param keeps the test off Phase 1b parameter branching: db is
+// branched more than once (#175).
+//
+//gormreuse:immutable-param
 func closureCaputresPhiOnePolluted(db *gorm.DB, cond bool) {
 	q1 := db.Where("a")
 	q2 := db.Where("b")
@@ -3088,6 +3123,11 @@ func closureCaputresPhiOnePolluted(db *gorm.DB, cond bool) {
 }
 
 // closureCaputresPhiOnePollutedReverse demonstrates the reverse ordering.
+//
+// immutable-param keeps the test off Phase 1b parameter branching: db is
+// branched more than once (#175).
+//
+//gormreuse:immutable-param
 func closureCaputresPhiOnePollutedReverse(db *gorm.DB, cond bool) {
 	q1 := db.Where("a")
 	q2 := db.Where("b")

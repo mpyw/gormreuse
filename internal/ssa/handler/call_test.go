@@ -10,6 +10,7 @@ import (
 	"golang.org/x/tools/go/ssa"
 	"golang.org/x/tools/go/ssa/ssautil"
 
+	"github.com/mpyw/gormreuse/internal/ssa/tracer"
 	"github.com/mpyw/gormreuse/internal/typeutil"
 )
 
@@ -102,11 +103,17 @@ func TestIsAssignment(t *testing.T) {
 	calls := loadFixtureCalls(t)
 
 	// The fixtures contain both reassignments (q = q.Where(...); result flows to
-	// a Phi or Store-to-Alloc → assignment) and terminal uses (q.Find(nil);
-	// result discarded → not an assignment), so both branches must be exercised.
+	// a Phi or Store-to-Alloc that can yield q's root → assignment) and other
+	// uses (q.Find(nil), or q2 = q.Where(...) into another variable → not an
+	// assignment), so both branches must be exercised.
+	ctx := &Context{RootTracer: tracer.New(nil, nil, nil, nil, nil, nil)}
 	var sawTrue, sawFalse bool
 	for _, c := range calls {
-		if isAssignment(c, nil) { // ctx is unused by isAssignment
+		root := ctx.RootTracer.FindMutableRoot(c.Call.Args[0], nil)
+		if root == nil {
+			continue
+		}
+		if isAssignment(c, root, ctx) {
 			sawTrue = true
 		} else {
 			sawFalse = true

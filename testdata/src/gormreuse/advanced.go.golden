@@ -853,6 +853,11 @@ func consecutiveHelperCallsWithFind(db *gorm.DB, a, b bool) {
 
 // consecutiveHelperCallsWithFindReassign tests when Find result is used in reassignment pattern.
 // Find on chain, then reassign to q - should this be OK?
+//
+// immutable-param keeps the test off Phase 1b parameter branching: db is
+// branched more than once (#175).
+//
+//gormreuse:immutable-param
 func consecutiveHelperCallsWithFindReassign(db *gorm.DB, a, b bool) {
 	q := db.Where("base").Session(&gorm.Session{})
 

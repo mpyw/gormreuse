@@ -1,6 +1,6 @@
 --- closure_loop.go	1970-01-01 00:00:00
 +++ closure_loop.go.golden	1970-01-01 00:00:00
-@@ -1,164 +1,164 @@
+@@ -1,169 +1,169 @@
  package internal
  
  import "gorm.io/gorm"
@@ -79,6 +79,11 @@
  }
  
  // iifeConditionalReturnDifferentRoots: IIFE with conditional returns from different roots
+ //
+ // immutable-param keeps the test off Phase 1b parameter branching: db is
+ // branched more than once (#175).
+ //
+ //gormreuse:immutable-param
  func iifeConditionalReturnDifferentRoots(db *gorm.DB) {
 -	q1 := db.Where("q1")
 +	q1 := db.Where("q1").Session(&gorm.Session{})
