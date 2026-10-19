@@ -9,8 +9,9 @@ bin/
 # Test binary
 *.test
 
-# Output of the go coverage tool
+# Output of the go coverage tool (CI writes coverage.txt)
 *.out
+coverage.txt
 
 # Dependency directories
 vendor/

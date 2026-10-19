@@ -2,7 +2,13 @@ package internal
 
 import (
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"path/filepath"
+	"reflect"
 	"regexp"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -26,21 +32,7 @@ import (
 //     made disappear, such as q.Where("age > ?", x) after the loop's query.
 //   - No fixed query has a condition its buggy counterpart lacks.
 func TestFixPreservesQueries(t *testing.T) {
-	cases := []struct {
-		name          string
-		before, after func(*gorm.DB)
-	}{
-		{"MultiCall", before.MultiCall, after.MultiCall},
-		{"SingleCall", before.SingleCall, after.SingleCall},
-		{"SessionOnly", before.SessionOnly, after.SessionOnly},
-		{"Loop", before.Loop, after.Loop},
-		{"LoopOnly", before.LoopOnly, after.LoopOnly},
-		{"SessionLast", before.SessionLast, after.SessionLast},
-		{"Closure", before.Closure, after.Closure},
-		{"MethodValue", before.MethodValue, after.MethodValue},
-		{"MethodValueDiscarded", before.MethodValueDiscarded, after.MethodValueDiscarded},
-	}
-	for _, tc := range cases {
+	for _, tc := range fixsqlCases {
 		t.Run(tc.name, func(t *testing.T) {
 			buggy := fixsqlQueries(t, tc.before)
 			fixed := fixsqlQueries(t, tc.after)
@@ -48,6 +40,63 @@ func TestFixPreservesQueries(t *testing.T) {
 				t.Error(problem)
 			}
 		})
+	}
+}
+
+// fixsqlCase is a function of fixsql/before and its fixed copy in
+// fixsql/after.
+type fixsqlCase struct {
+	name          string
+	before, after func(*gorm.DB)
+}
+
+// fixsqlCases are the cases of TestFixPreservesQueries.
+// TestFixsqlCasesCoverBefore checks that they and fixPathsCases cover every
+// exported function of fixsql/before.
+var fixsqlCases = []fixsqlCase{
+	{"MultiCall", before.MultiCall, after.MultiCall},
+	{"SingleCall", before.SingleCall, after.SingleCall},
+	{"SessionOnly", before.SessionOnly, after.SessionOnly},
+	{"Loop", before.Loop, after.Loop},
+	{"LoopOnly", before.LoopOnly, after.LoopOnly},
+	{"SessionLast", before.SessionLast, after.SessionLast},
+	{"Closure", before.Closure, after.Closure},
+	{"MethodValue", before.MethodValue, after.MethodValue},
+	{"MethodValueDiscarded", before.MethodValueDiscarded, after.MethodValueDiscarded},
+}
+
+// TestFixsqlCasesCoverBefore checks that every exported function of
+// fixsql/before is a case of TestFixPreservesQueries or
+// TestFixPathsPreserveQueries, once, and that each case runs the functions it
+// is named for. The case lists are written by hand, so a new fixture would
+// otherwise run in no test (#264).
+func TestFixsqlCasesCoverBefore(t *testing.T) {
+	f, err := parser.ParseFile(token.NewFileSet(), filepath.Join("fixsql", "before", "before.go"), nil, 0)
+	if err != nil {
+		t.Fatalf("parse fixsql/before: %v", err)
+	}
+	var want []string
+	for _, decl := range f.Decls {
+		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Recv == nil && fn.Name.IsExported() {
+			want = append(want, fn.Name.Name)
+		}
+	}
+
+	var got []string
+	for _, tc := range slices.Concat(fixsqlCases, fixPathsCases) {
+		for pkg, fn := range map[string]func(*gorm.DB){"before": tc.before, "after": tc.after} {
+			full := runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
+			if name := full[strings.LastIndex(full, "/")+1:]; name != pkg+"."+tc.name {
+				t.Errorf("case %s runs %s, want %s.%s", tc.name, name, pkg, tc.name)
+			}
+		}
+		got = append(got, tc.name)
+	}
+
+	slices.Sort(want)
+	slices.Sort(got)
+	if !slices.Equal(got, want) {
+		t.Errorf("the cases are %q, want each exported function of fixsql/before once: %q", got, want)
 	}
 }
 

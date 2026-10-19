@@ -10,8 +10,9 @@ import (
 	"go/types"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
-	"strings"
+	"sync"
 	"testing"
 
 	"golang.org/x/tools/go/analysis"
@@ -170,7 +171,7 @@ func TestGoldenFilesE2E(t *testing.T) {
 }
 
 // TestEachFixCompiles applies the suggested fix of each diagnostic in the
-// fix_*.go fixtures on its own and type-checks the package. An editor applies
+// gormreuse fixtures on its own and type-checks the package. An editor applies
 // one quick fix at a time, so a fix must not rely on an edit, such as the gorm
 // import, that only another diagnostic's fix carries (#200).
 // TestGoldenFilesCompile checks all fixes applied together.
@@ -190,47 +191,80 @@ func TestEachFixCompiles(t *testing.T) {
 		return nil, fmt.Errorf("%s is not imported by the fixtures", path)
 	})
 
-	checked := 0
-	for _, diag := range results[0].Diagnostics {
-		filename := pass.Fset.File(diag.Pos).Name()
-		if !strings.HasPrefix(filepath.Base(filename), "fix_") || len(diag.SuggestedFixes) == 0 {
-			continue
-		}
-		src, err := os.ReadFile(filename)
+	// The unchanged files are parsed once and shared by every check. go/types
+	// does not modify the syntax it checks, so the checks run in parallel.
+	fset := token.NewFileSet()
+	var unchanged []*ast.File
+	for _, f := range pass.Files {
+		parsed, err := parser.ParseFile(fset, pass.Fset.File(f.Pos()).Name(), nil, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
-		edits := slices.Clone(diag.SuggestedFixes[0].TextEdits)
-		slices.SortFunc(edits, func(a, b analysis.TextEdit) int { return cmp.Compare(b.Pos, a.Pos) })
-		fixed := src
-		for _, e := range edits {
-			start, end := pass.Fset.Position(e.Pos).Offset, pass.Fset.Position(e.End).Offset
-			fixed = slices.Concat(fixed[:start], e.NewText, fixed[end:])
-		}
+		unchanged = append(unchanged, parsed)
+	}
 
-		fset := token.NewFileSet()
-		var files []*ast.File
-		for _, f := range pass.Files {
-			name := pass.Fset.File(f.Pos()).Name()
-			var content any
-			if name == filename {
-				content = fixed
-			}
-			parsed, err := parser.ParseFile(fset, name, content, 0)
-			if err != nil {
-				t.Fatalf("%s: the fix does not parse: %v", pass.Fset.Position(diag.Pos), err)
-			}
-			files = append(files, parsed)
-		}
-		conf := types.Config{Importer: importer}
-		if _, err := conf.Check("gormreuse", fset, files, nil); err != nil {
-			t.Errorf("%s: this diagnostic's fix alone does not compile: %v", pass.Fset.Position(diag.Pos), err)
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, runtime.GOMAXPROCS(0))
+	checked := 0
+	for _, diag := range results[0].Diagnostics {
+		if len(diag.SuggestedFixes) == 0 {
+			continue
 		}
 		checked++
+		wg.Go(func() {
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			at := pass.Fset.Position(diag.Pos)
+			files, err := eachFixApply(fset, pass.Fset, unchanged, diag.SuggestedFixes[0].TextEdits)
+			if err != nil {
+				t.Errorf("%s: the fix does not parse: %v", at, err)
+				return
+			}
+			conf := types.Config{Importer: importer}
+			if _, err := conf.Check("gormreuse", fset, files, nil); err != nil {
+				t.Errorf("%s: this diagnostic's fix alone does not compile: %v", at, err)
+			}
+		})
 	}
+	wg.Wait()
 	if checked == 0 {
-		t.Fatal("no diagnostic in the fix_*.go fixtures has a fix")
+		t.Fatal("no diagnostic in the fixtures has a fix")
 	}
+}
+
+// eachFixApply returns the files of unchanged, parsed into fset, with edits
+// applied. editFset holds the edits' positions. A fix may edit a file other
+// than the diagnostic's, so each edit is applied to the file it targets.
+func eachFixApply(fset, editFset *token.FileSet, unchanged []*ast.File, edits []analysis.TextEdit) ([]*ast.File, error) {
+	edits = slices.Clone(edits)
+	slices.SortFunc(edits, func(a, b analysis.TextEdit) int { return cmp.Compare(b.Pos, a.Pos) })
+	fixedFiles := map[string][]byte{}
+	for _, e := range edits {
+		name := editFset.File(e.Pos).Name()
+		fixed, ok := fixedFiles[name]
+		if !ok {
+			var err error
+			if fixed, err = os.ReadFile(name); err != nil {
+				return nil, err
+			}
+		}
+		start, end := editFset.Position(e.Pos).Offset, editFset.Position(e.End).Offset
+		fixedFiles[name] = slices.Concat(fixed[:start], e.NewText, fixed[end:])
+	}
+
+	files := slices.Clone(unchanged)
+	for i, f := range files {
+		fixed, ok := fixedFiles[fset.File(f.Pos()).Name()]
+		if !ok {
+			continue
+		}
+		parsed, err := parser.ParseFile(fset, fset.File(f.Pos()).Name(), fixed, 0)
+		if err != nil {
+			return nil, err
+		}
+		files[i] = parsed
+	}
+	return files, nil
 }
 
 // importerFunc imports a package by calling the function.
