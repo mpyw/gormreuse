@@ -548,7 +548,7 @@ GORM's internal `clone` field decides whether reuse is safe. A handle with `clon
 
 A repository interface whose method returns a fresh handle is reported when its result is branched twice. No directive applies to an interface method. Isolate the result with `repo.DB().Session(&gorm.Session{})`.
 
-Transaction and FindInBatches callbacks (e.g. `tx` in `db.Transaction(func(tx *gorm.DB) error {...})`) are exempt. Their `tx` is a fresh handle. A Connection callback is **not** exempt: gorm passes it a `clone == 0` handle, so branching its `tx` twice is reported. Declare your own such helpers with [`//gormreuse:immutable-input(name)`](#gormreuseimmutable-inputname).
+Transaction and FindInBatches callbacks (e.g. `tx` in `db.Transaction(func(tx *gorm.DB) error {...})`) are exempt, also when the call runs under `go` or `defer`. Their `tx` is a fresh handle. A Connection callback is **not** exempt: gorm passes it a `clone == 0` handle, so branching its `tx` twice is reported. Declare your own such helpers with [`//gormreuse:immutable-input(name)`](#gormreuseimmutable-inputname).
 
 > [!NOTE]
 > A **named** function or method is exempt only when every use of it in the package passes it as such a callback. Otherwise its parameter is treated as mutable like any other parameter. That is the case when it is also called directly, stored, returned, passed as an ordinary argument, or exported (another package could call it). The packages that import an exported function are analyzed after its own package, so its own package cannot see their calls. To keep it exempt, mark it [`//gormreuse:immutable-param`](#gormreuseimmutable-param): then each direct caller, in its package or in another one, must pass an isolated value.

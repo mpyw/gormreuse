@@ -146,6 +146,8 @@ Decisions and limitations:
 
 Also: gorm's built-in `Transaction` (via `Begin`) and `FindInBatches` (via `Session(&Session{NewDB: true})`) pass a fresh (`clone>0`) handle to their callbacks, so reuse inside those callbacks is always allowed. `Connection` is deliberately **not** in this set: it calls `fc(db.getInstance())`, which is a `clone==0` handle, so its callback's `tx` is an ordinary mutable parameter and reuse inside it is reported (#173). `e2e/internal` guards all three premises against real gorm.
 
+**Callbacks under `go` and `defer` (#256).** The callee hands the callback the same value however the callee itself is invoked. So the callback collectors (`CollectImmutableCallbacks`, `CollectImmutableInputCallbacks` and the Scopes/Preload resolver) read the call of every `CallInstruction`, not only `*ssa.Call`, through `walkCalls`. Before #256, `go db.Transaction(func(tx *gorm.DB) error {...})` and `defer withFresh(db, cb)` lost the exemption, and a callback of a deferred `Scopes` call lost the Session warning. `DropReachableCallbacks`, the immutable-param caller check and the immutable-input body check already read every `CallInstruction`.
+
 **Named callbacks (#191).** The callback sets are keyed by the declared function, not by the call that passes it. A function's `*gorm.DB` parameter receives a fresh value only when every caller is a callback position, so `DropReachableCallbacks` runs after both collectors and removes a function from the set when:
 
 | Case | Why |

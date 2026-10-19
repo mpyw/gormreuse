@@ -2243,7 +2243,7 @@ func CollectScopesOnlyCallbacks(funcs []*ssa.Function) map[*ssa.Function]bool {
 // treatment (#60 SC103, #62).
 func CollectImmutableCallbacks(funcs []*ssa.Function) map[*ssa.Function]bool {
 	set := make(map[*ssa.Function]bool)
-	walkCalls(funcs, func(call *ssa.Call) {
+	walkCalls(funcs, func(call *ssa.CallCommon) {
 		collectImmutableCallbacksFromCall(call, set)
 	})
 	return set
@@ -2258,12 +2258,12 @@ func CollectImmutableInputCallbacks(funcs []*ssa.Function, set *directive.Immuta
 	if set == nil || into == nil {
 		return
 	}
-	walkCalls(funcs, func(call *ssa.Call) {
-		callee := call.Call.StaticCallee()
+	walkCalls(funcs, func(call *ssa.CallCommon) {
+		callee := call.StaticCallee()
 		if callee == nil {
 			return
 		}
-		args := call.Call.Args
+		args := call.Args
 		for _, idx := range immutableInputArgIndices(callee, set, len(args)) {
 			if fn := callbackFuncValue(args[idx]); fn != nil {
 				into[fn] = true
@@ -2526,12 +2526,14 @@ func cloneVisited(visited map[ssa.Value]bool) map[ssa.Value]bool {
 	return clone
 }
 
-// walkCalls visits every *ssa.Call in funcs and their nested anonymous functions
-// exactly once. Shared by the Scopes/Preload and Transaction callback collectors.
-func walkCalls(funcs []*ssa.Function, visit func(*ssa.Call)) {
+// walkCalls visits the call of every call, go and defer statement in funcs and
+// their nested anonymous functions exactly once. Shared by the Scopes/Preload,
+// Transaction and immutable-input callback collectors: the callee hands the
+// callback the same value however the callee itself is invoked (#256).
+func walkCalls(funcs []*ssa.Function, visit func(*ssa.CallCommon)) {
 	walkInstrs(funcs, func(instr ssa.Instruction) {
-		if call, ok := instr.(*ssa.Call); ok {
-			visit(call)
+		if call, ok := instr.(ssa.CallInstruction); ok {
+			visit(call.Common())
 		}
 	})
 }
@@ -2636,13 +2638,13 @@ func (vars FuncVars) Callee(common *ssa.CallCommon) *ssa.Function {
 func collectCallbacksPassedTo(funcs []*ssa.Function, match func(*ssa.Function) bool) map[*ssa.Function]bool {
 	set := make(map[*ssa.Function]bool)
 	r := &scopesCallbackResolver{funcs: funcs, set: set, seen: make(map[ssa.Value]bool)}
-	walkCalls(funcs, func(call *ssa.Call) {
-		callee := call.Call.StaticCallee()
+	walkCalls(funcs, func(call *ssa.CallCommon) {
+		callee := call.StaticCallee()
 		if callee == nil || !match(callee) {
 			return
 		}
 		// The variadic callbacks arrive as a slice in the last argument.
-		if args := call.Call.Args; len(args) > 0 {
+		if args := call.Args; len(args) > 0 {
 			r.addSliceElems(args[len(args)-1])
 		}
 	})
@@ -2820,12 +2822,12 @@ func isGormDBMethod(callee *ssa.Function) bool {
 // argument position per method (Transaction: first argument; FindInBatches:
 // third), so scan for the func-typed argument whose
 // signature takes a *gorm.DB rather than hard-coding an index.
-func collectImmutableCallbacksFromCall(call *ssa.Call, set map[*ssa.Function]bool) {
-	callee := call.Call.StaticCallee()
+func collectImmutableCallbacksFromCall(call *ssa.CallCommon, set map[*ssa.Function]bool) {
+	callee := call.StaticCallee()
 	if callee == nil || !IsImmutableCallbackMethod(callee) {
 		return
 	}
-	for _, arg := range call.Call.Args {
+	for _, arg := range call.Args {
 		cb := callbackFuncValue(arg)
 		if cb != nil && cb.Signature != nil && directive.HasGormDBParameter(cb.Signature) {
 			set[cb] = true
