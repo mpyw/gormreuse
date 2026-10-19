@@ -460,7 +460,7 @@ Each fixture `testdata/src/gormreuse/X.go` has two committed files that record i
 
 | File | Content | Checked by |
 | --- | --- | --- |
-| `X.go.golden` | The source with every suggested fix applied | `TestSuggestedFixes` and `TestGoldenFiles` |
+| `X.go.golden` | The source with every suggested fix applied | `TestSuggestedFixes`, `TestGoldenFiles`, and `TestGoldenFilesCompile` (the whole package must type-check with every `.golden` swapped in) |
 | `X.go.diff` | A full-context unified diff from `X.go` to `X.go.golden`, for review | `TestGoldenFiles` |
 
 A plain `go test` only compares these files. It never writes them, so CI fails when they are stale. To regenerate them after a change to detection or fixes:
