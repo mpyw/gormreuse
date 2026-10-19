@@ -103,7 +103,7 @@ func containsGormDBWithCache(t types.Type, cache map[types.Type]*gormDBCacheEntr
 		// *gorm.DB type), so a purely interface-typed signature genuinely does
 		// nothing — reporting it as unused is the correct, actionable signal
 		// (issue #72 gap4). NOTE: containsGormDB is used ONLY for unused
-		// detection; the SSA tracer uses its own containsGormDBThroughPointers.
+		// detection; the SSA tracer uses its own holdsGormDB.
 		result = false
 	case *types.Struct:
 		for field := range typ.Fields() {

@@ -1,0 +1,233 @@
+package internal
+
+import "gorm.io/gorm"
+
+// Struct shapes that used to lose the mutable root (#181).
+
+type srEmbeddedDB struct{ *gorm.DB }
+
+// embeddedPromotedMethods reuses a mutable chain through methods promoted
+// from an embedded *gorm.DB.
+func embeddedPromotedMethods(db *gorm.DB) {
+	e := srEmbeddedDB{db.Where("x").Session(&gorm.Session{})}
+	e.Where("a").Find(nil)
+	e.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// embeddedPromotedMethodsAddressTaken is the same with &e taken, so e lives
+// in memory instead of a register.
+func embeddedPromotedMethodsAddressTaken(db *gorm.DB) {
+	e := srEmbeddedDB{db.Where("x").Session(&gorm.Session{})}
+	p := &e
+	_ = p
+	e.Where("a").Find(nil)
+	e.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// embeddedThroughPointer reuses the chain through a pointer to the struct.
+func embeddedThroughPointer(db *gorm.DB) {
+	p := &srEmbeddedDB{db.Where("x").Session(&gorm.Session{})}
+	p.Where("a").Find(nil)
+	p.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// embeddedSingleUse uses the chain once: no report.
+func embeddedSingleUse(db *gorm.DB) {
+	e := srEmbeddedDB{db.Where("x")}
+	e.Where("a").Find(nil)
+}
+
+// embeddedImmutable holds a Session-terminated chain: reuse is safe.
+func embeddedImmutable(db *gorm.DB) {
+	e := srEmbeddedDB{db.Where("x").Session(&gorm.Session{})}
+	e.Where("a").Find(nil)
+	e.Where("b").Find(nil)
+}
+
+type srTwoDB struct {
+	DB    *gorm.DB
+	Other *gorm.DB
+}
+
+func makeSrTwoDB() srTwoDB {
+	return srTwoDB{DB: DB.Where("x"), Other: DB.Where("y")}
+}
+
+// fieldOfReturnedStruct reuses a field of a struct value returned by a call.
+func fieldOfReturnedStruct(db *gorm.DB) {
+	s := makeSrTwoDB()
+	s.DB.Where("a").Find(nil)
+	s.DB.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fieldsOfReturnedStructDistinct uses two different fields once each: no report.
+func fieldsOfReturnedStructDistinct(db *gorm.DB) {
+	s := makeSrTwoDB()
+	s.DB.Where("a").Find(nil)
+	s.Other.Where("b").Find(nil)
+}
+
+// fieldOfDistinctCalls reads the same field of two different call results: no report.
+func fieldOfDistinctCalls(db *gorm.DB) {
+	makeSrTwoDB().DB.Where("a").Find(nil)
+	makeSrTwoDB().DB.Where("b").Find(nil)
+}
+
+type srWrapDB struct{ inner srTwoDB }
+
+func makeSrWrapDB() srWrapDB {
+	return srWrapDB{inner: makeSrTwoDB()}
+}
+
+// nestedFieldOfReturnedStruct reuses a nested field of a returned struct.
+func nestedFieldOfReturnedStruct(db *gorm.DB) {
+	w := makeSrWrapDB()
+	w.inner.DB.Where("a").Find(nil)
+	w.inner.DB.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// nestedFieldsOfReturnedStructDistinct uses two different nested fields: no report.
+func nestedFieldsOfReturnedStructDistinct(db *gorm.DB) {
+	w := makeSrWrapDB()
+	w.inner.DB.Where("a").Find(nil)
+	w.inner.Other.Where("b").Find(nil)
+}
+
+type srHolder struct{ q *gorm.DB }
+
+// closureCapturesStruct reuses a field of a struct captured by a closure.
+func closureCapturesStruct(db *gorm.DB) {
+	h := srHolder{q: db.Where("x").Session(&gorm.Session{})}
+	h.q.Where("a").Find(nil)
+	f := func() { h.q.Where("b").Find(nil) }
+	f() // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// closureCapturesStructOnly uses the field only inside the closure: no report.
+func closureCapturesStructOnly(db *gorm.DB) {
+	h := srHolder{q: db.Where("x")}
+	f := func() { h.q.Where("b").Find(nil) }
+	f()
+}
+
+type srOuterHolder struct{ h srHolder }
+
+// closureCapturesNestedStruct reuses a field of a nested struct captured by a closure.
+func closureCapturesNestedStruct(db *gorm.DB) {
+	o := srOuterHolder{h: srHolder{q: db.Where("x").Session(&gorm.Session{})}}
+	o.h.q.Where("a").Find(nil)
+	f := func() { o.h.q.Where("b").Find(nil) }
+	f() // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// closureCapturesPointerToStruct reuses through a captured *srHolder.
+func closureCapturesPointerToStruct(db *gorm.DB) {
+	h := &srHolder{q: db.Where("x").Session(&gorm.Session{})}
+	h.q.Where("a").Find(nil)
+	f := func() { h.q.Where("b").Find(nil) }
+	f() // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// closureCapturesEmbedded reuses through a captured struct embedding *gorm.DB.
+func closureCapturesEmbedded(db *gorm.DB) {
+	e := srEmbeddedDB{db.Where("x").Session(&gorm.Session{})}
+	e.Where("a").Find(nil)
+	f := func() { e.Where("b").Find(nil) }
+	f() // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+//gormreuse:immutable-return
+func makeSrTwoDBImmutable() srTwoDB {
+	return srTwoDB{DB: DB.Session(&gorm.Session{}), Other: DB.Session(&gorm.Session{})}
+}
+
+// fieldOfImmutableReturnedStruct reads a field of a struct from an
+// immutable-return function: reuse is safe.
+func fieldOfImmutableReturnedStruct() {
+	s := makeSrTwoDBImmutable()
+	s.DB.Where("a").Find(nil)
+	s.DB.Where("b").Find(nil)
+}
+
+// fieldOfStructParam reads a field of a struct parameter. Like a field read
+// through a pointer parameter or receiver, it is not a mutable root, so reuse
+// is not reported.
+func fieldOfStructParam(s srTwoDB) {
+	s.DB.Where("a").Find(nil)
+	s.DB.Where("b").Find(nil)
+}
+
+// fieldOfReceivedStruct reads a field of a struct received from a channel: the
+// value has no stores or call to trace, so reuse is not reported.
+func fieldOfReceivedStruct(ch chan srTwoDB, ptrs chan *srTwoDB) {
+	(<-ch).DB.Find(nil)
+	(<-ptrs).DB.Find(nil)
+}
+
+// closureCapturesReturnedStruct reuses a field of a returned struct inside a
+// closure.
+func closureCapturesReturnedStruct() {
+	s := makeSrTwoDB()
+	s.DB.Where("a").Find(nil)
+	f := func() { s.DB.Where("b").Find(nil) }
+	f() // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// embeddedReassigned replaces the embedded chain between the uses. Each use
+// sees only the store that reaches it (#182), so no report.
+func embeddedReassigned(db *gorm.DB) {
+	e := srEmbeddedDB{db.Where("x")}
+	e.Where("a").Find(nil)
+	e.DB = DB.Where("y")
+	e.Where("b").Find(nil)
+}
+
+type srOuterEmbedded struct{ e srEmbeddedDB }
+
+// nestedEmbeddedPromotedMethods reuses through methods promoted from an
+// embedded *gorm.DB of a nested struct.
+func nestedEmbeddedPromotedMethods(db *gorm.DB) {
+	o := srOuterEmbedded{e: srEmbeddedDB{db.Where("x").Session(&gorm.Session{})}}
+	o.e.Where("a").Find(nil)
+	o.e.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+var srGlobalEmbedded srEmbeddedDB
+
+// embeddedGlobal reuses through promoted methods of a global struct. The
+// stores into the global are searched in the function that reads it.
+func embeddedGlobal(db *gorm.DB) {
+	srGlobalEmbedded = srEmbeddedDB{db.Where("x").Session(&gorm.Session{})}
+	srGlobalEmbedded.Where("a").Find(nil)
+	srGlobalEmbedded.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// embeddedFromPhi reuses through promoted methods of a struct that a Phi
+// merges. Either edge holds a mutable chain.
+func embeddedFromPhi(db *gorm.DB, c bool) {
+	e := srEmbeddedDB{db.Where("x").Session(&gorm.Session{})}
+	if c {
+		e = srEmbeddedDB{DB.Where("y")}
+	}
+	e.Where("a").Find(nil)
+	e.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fieldOfPhiReturnedStructs reads one field of a struct that either of two
+// calls returned, once: no report.
+func fieldOfPhiReturnedStructs(c bool) {
+	s := makeSrTwoDB()
+	if c {
+		s = makeSrTwoDB()
+	}
+	s.DB.Where("a").Find(nil)
+}
+
+// returnedStructReassigned reads the field of two call results through one
+// variable: no report.
+func returnedStructReassigned() {
+	s := makeSrTwoDB()
+	s.DB.Where("a").Find(nil)
+	s = makeSrTwoDB()
+	s.DB.Where("b").Find(nil)
+}

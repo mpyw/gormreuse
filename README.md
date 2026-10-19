@@ -269,6 +269,15 @@ The linter conservatively marks [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB)
 | Non-pure function call   | `helper(db)` - Unless marked with `//gormreuse:pure`     |
 | Struct field access      | `h.db.Find(nil)` - Traces back to the stored value       |
 
+A struct field is followed in these forms:
+
+- A field of a struct literal or variable, including nested fields and fields reached through embedding.
+- Methods promoted from an embedded `*gorm.DB`: `e := E{db.Where("x")}; e.Where("a")`.
+- A field of a struct value that a function returned: `s := mk(db); s.DB.Where("a")`. Each field of each call is its own mutable root, like a function that returns `*gorm.DB`. No fix is suggested for it, because the `Session` belongs inside the function.
+- A struct captured by a closure, also through a pointer.
+
+A field read through a parameter or a receiver, by value or by pointer, is not a mutable root. Only the stores to it in the same function are followed.
+
 Note: Simple struct literal storage (`_ = &S{db: q}`) without actual field usage does NOT pollute.
 
 A field read sees only the stores that can run before it. So the builder idiom `r.db = r.db.Where(...)` in a pointer-receiver method, followed by one use of `r.db`, is not reported. A second use of `r.db` is.

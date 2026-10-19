@@ -462,6 +462,26 @@ The body reaches outer variables through `FreeVar`s, so `q = q.Where(v)` inside 
 
 Only the body closure itself is treated as a loop. A closure nested inside the body (an IIFE, a `defer`) is not, which matches how a closure nested in a plain loop is handled.
 
+### Struct roots (#181)
+
+Three struct shapes lost the root before #181, so reuse through them was missed.
+
+| Shape | SSA | Handling |
+| --- | --- | --- |
+| Promoted methods of an embedded `*gorm.DB`: `e := E{q}; e.Where("a")` | `t4 = *t0; t5 = t4.DB`: a `Field` of a struct in a register, not a `FieldAddr` | `fieldValueStoredValues` turns the `Field` chain over the load into (loaded address, field path) and matches stores as for a `FieldAddr` chain. Over a Phi, each edge is resolved the same way |
+| A field of a returned struct: `s := mk(db); s.DB.Where("a")` | `*t0 = mk(db)`, or `mk(db).DB` directly | The field is a `FieldRoot{call, path}` (below) |
+| A struct captured by a closure: `f := func() { h.q.Where("b") }` | `&h.q` on a `FreeVar`; with `h := &T{...}`, `&(*h).q` on a fresh load of the captured pointer variable | `ClosureCapturesGormDB` looks through struct fields (`holdsGormDB`), so the closure is analyzed. `fieldBaseAddrs` maps a `FreeVar` to its binding and a load of a pointer variable to each pointer stored in it, and the stores are searched in the function that defines that address |
+
+**`FieldRoot`.** A call returning `*gorm.DB` is a mutable root. A call returning a struct that holds one has no SSA value for "field `DB` of this call", and every read is a new instruction. So the tracer makes a `FieldRoot` that implements `ssa.Value` and interns one per (call, field path) in `RootTracer.fieldRoots`. Reads of the same field of the same call share it; another field or another call is a different root. Its position is the call's. A call to a builtin or a `//gormreuse:immutable-return` function yields no root.
+
+Decisions and limitations:
+
+- No fix is suggested for a `FieldRoot`. `Session()` cannot be appended to a call that returns a struct. It belongs where the function builds the struct.
+- A field read through a parameter or a receiver is still not a mutable root, whether the struct is passed by value or by pointer. That trade-off is unchanged. A closure capturing such a parameter sees only the stores in the enclosing function, as the function itself does.
+- A captured pointer variable is resolved like a captured `*gorm.DB` variable: the single-root trace takes the first pointer stored into it. After `h = &T{q: b}`, a use of `h.q` can still be matched to the first value, as `q = db.Where("b")` on a captured `q` already is.
+- A struct value that a Phi merges (`e := E{a}; if c { e = E{b} }`) yields the field of every edge. The single-root trace takes the first edge, so the suggested fix makes only that edge immutable. A struct from a channel receive, or a map or slice element, is not followed.
+- A `Field` read over a load uses the CFG-ordered store matching of #182 (`fieldStores`), so `e.DB = other` between two promoted calls is not a second branch. A read inside a closure has no CFG path to the stores in the enclosing function, so it matches all of them, and the single-root trace takes the first. This keeps reuse reported when the closure may run before a later store.
+
 ## Pure Contract Validation
 
 `purity.Validator` checks the body of every `//gormreuse:pure` function. It follows "parameter-derived" values and reports when one is polluted or escapes.

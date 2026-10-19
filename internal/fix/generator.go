@@ -53,6 +53,7 @@ import (
 
 	"github.com/mpyw/gormreuse/internal/ssa/cfg"
 	"github.com/mpyw/gormreuse/internal/ssa/pollution"
+	"github.com/mpyw/gormreuse/internal/ssa/tracer"
 	"github.com/mpyw/gormreuse/internal/typeutil"
 )
 
@@ -114,6 +115,13 @@ func (g *Generator) Generate(v pollution.Violation) []analysis.SuggestedFix {
 	// value is not the *gorm.DB itself (#176). Appending Session() to it would
 	// not compile, so no fix is offered.
 	if !typeutil.IsGormDB(root.Type()) {
+		return nil
+	}
+
+	// A field of a struct a call returned (#181) has no chain expression to
+	// append Session() to: the call returns the struct, not a *gorm.DB. The fix
+	// belongs where the function builds the struct, so none is offered.
+	if _, ok := root.(*tracer.FieldRoot); ok {
 		return nil
 	}
 
