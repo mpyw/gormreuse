@@ -8,6 +8,7 @@ import (
 
 	"github.com/mpyw/gormreuse/internal/directive"
 	"github.com/mpyw/gormreuse/internal/ssa/callsite"
+	"github.com/mpyw/gormreuse/internal/typeutil"
 )
 
 // CollectScopesCallbacks returns the set of functions passed as callbacks to
@@ -91,7 +92,7 @@ func CollectedCallbackArgs(site callsite.Site, inputs *directive.ImmutableInputS
 		params := site.Declared.Signature.Params()
 		for i := range args {
 			if p := site.ArgParam(i); p >= 0 && p < params.Len() {
-				if sig, ok := params.At(p).Type().Underlying().(*types.Signature); ok && directive.HasGormDBParameter(sig) {
+				if sig, ok := params.At(p).Type().Underlying().(*types.Signature); ok && typeutil.HasGormDBParameter(sig) {
 					idxs = append(idxs, i)
 				}
 			}

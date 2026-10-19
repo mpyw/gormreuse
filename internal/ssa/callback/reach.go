@@ -8,6 +8,7 @@ import (
 
 	"github.com/mpyw/gormreuse/internal/directive"
 	"github.com/mpyw/gormreuse/internal/ssa/callsite"
+	"github.com/mpyw/gormreuse/internal/ssa/origin"
 )
 
 // DropReachableCallbacks removes from set every callback whose *gorm.DB
@@ -53,7 +54,7 @@ func DropReachableCallbacks(funcs []*ssa.Function, vars callsite.FuncVars, input
 			if name, ok := reachedInterfaceMethod(ref); ok {
 				invoked = append(invoked, name)
 			}
-			if fn := directive.DeclaredFunc(ref); set[fn] && !refReachesOnlyCallback(instr, ref, inputs, h) {
+			if fn := origin.Declared(ref); set[fn] && !refReachesOnlyCallback(instr, ref, inputs, h) {
 				delete(set, fn)
 			}
 		}

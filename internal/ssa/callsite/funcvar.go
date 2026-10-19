@@ -5,7 +5,7 @@ import (
 
 	"golang.org/x/tools/go/ssa"
 
-	"github.com/mpyw/gormreuse/internal/directive"
+	"github.com/mpyw/gormreuse/internal/ssa/origin"
 )
 
 // FuncVars maps each package-level variable that always holds one function to
@@ -99,7 +99,7 @@ func (vars FuncVars) varOf(fn *ssa.Function) *ssa.Global {
 // "m$bound" or "m$thunk", and the generic function of an instance instead of
 // "f[int]". Every diagnostic that names a called function goes through it.
 func (vars FuncVars) FuncName(fn *ssa.Function) string {
-	fn = directive.DeclaredFunc(fn)
+	fn = origin.Declared(fn)
 	if g := vars.varOf(fn); g != nil {
 		return g.Name()
 	}
