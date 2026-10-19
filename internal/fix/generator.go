@@ -173,6 +173,9 @@ func (g *Generator) Generate(v pollution.Violation) []analysis.SuggestedFix {
 	// Phase 2: Simulate reassignments and find roots needing Session
 	virtualUses := g.simulateReassignments(root, allUses, reassigned)
 	rootsNeedingSession := g.findRootsNeedingSession(virtualUses, reassigned, usesOrdered(v))
+	if reassignsInClosure(root, allUses, reassigned) && !slices.ContainsFunc(rootsNeedingSession, func(vr virtualRootKey) bool { return vr.isOriginal }) {
+		rootsNeedingSession = append(rootsNeedingSession, virtualRootKey{isOriginal: true, pos: root.Pos()})
+	}
 
 	// Generate TextEdits
 	var edits []analysis.TextEdit
@@ -194,7 +197,7 @@ func (g *Generator) Generate(v pollution.Violation) []analysis.SuggestedFix {
 		case vr.isOriginal && isParam:
 			sites = append(sites, g.paramSessionSite(p))
 		case vr.isOriginal:
-			for _, pos := range g.sessionPositionsForRoot(vr.pos, root) {
+			for _, pos := range g.sessionPositionsForRoot(vr.pos, root, allUses) {
 				sites = append(sites, sessionSite{pos: pos})
 			}
 		case !g.endsImmutable(vr):
@@ -759,6 +762,19 @@ func (g *Generator) findRootsNeedingSession(virtualUses map[virtualRootKey][]pol
 	return roots
 }
 
+// reassignsInClosure reports whether one of reassigned is in a closure of the
+// function that defines root, such as `func() { q.Where("a") }()` or the body
+// of a range-over-func loop. The reassignment writes the captured variable,
+// and detection does not follow a store in a closure (see
+// closureModifiesCaptured): the uses after it still read root. So root gets a
+// Session too, or the next pass would add it (#247).
+func reassignsInClosure(root ssa.Value, uses []pollution.UsageInfo, reassigned map[token.Pos]token.Pos) bool {
+	return slices.ContainsFunc(uses, func(use pollution.UsageInfo) bool {
+		_, ok := reassigned[use.Pos]
+		return ok && use.Block.Parent() != root.Parent()
+	})
+}
+
 // usesConflict reports whether two of uses, which are sorted by position,
 // may both run on one path: the earlier one can reach the later one, and the
 // earlier one is not a reassignment. The uses are in one function.
@@ -951,48 +967,34 @@ func (g *Generator) gormNameAt(file *ast.File, positions []token.Pos) (qualifier
 
 // sessionPositionsForRoot returns where Sessions go to make root immutable.
 // For a Phi node it returns a position for each incoming edge that can take
-// one. Otherwise it returns the position after the call at pos and, for a
-// root that is an edge of a Phi, those of the Phi's other edges.
+// one. Otherwise it returns the position after the call at pos and those of
+// the other values its uses may read instead of it (see mergedEdges).
 //
 // The root's own Session is needed even when the Phi it flows into is used
 // once: the root has 2+ uses, and some of them may come before the merge, as
 // in `q := db.Where("x"); q.Find(nil); q.Count(nil); if c { q = db.Where("z") }`
 // (#202).
-func (g *Generator) sessionPositionsForRoot(pos token.Pos, root ssa.Value) []token.Pos {
-	// Check if root is a Phi node
+func (g *Generator) sessionPositionsForRoot(pos token.Pos, root ssa.Value, uses []pollution.UsageInfo) []token.Pos {
 	if phi, isPhi := root.(*ssa.Phi); isPhi {
-		return g.phiEdgeSessionPositions(phi)
+		if !phiUsedTwice(phi) {
+			return nil
+		}
+		return g.edgeSessionPositions(phi.Edges)
 	}
 
 	var positions []token.Pos
 	if end := g.sessionEndAfterCall(pos); end.IsValid() {
 		positions = append(positions, end)
 	}
-
-	// Check if root is part of a Phi (root is an edge). The other edges need
-	// a Session when the Phi's result branches.
-	if phi := g.findPhiUsingValue(root); phi != nil {
-		positions = append(positions, g.phiEdgeSessionPositions(phi)...)
-	}
-	return positions
+	return append(positions, g.edgeSessionPositions(mergedEdges(root, uses))...)
 }
 
-// phiEdgeSessionPositions returns where Sessions go on the edges of a Phi
-// node. Only edges that don't already have Session get one, and only an edge
-// defined by a *gorm.DB call can (see sessionEndAfterCall).
-// OPTIMIZATION: Only add Session if the Phi result is used multiple times.
-func (g *Generator) phiEdgeSessionPositions(phi *ssa.Phi) []token.Pos {
-	// Count how many times the Phi RESULT is used
-	phiUseCount := g.countPhiResultUses(phi)
-
-	// If Phi result is used only once, no Session needed on any edges
-	if phiUseCount <= 1 {
-		return nil
-	}
-
-	// If Phi result is used 2+ times, add Session to all mutable edges
+// edgeSessionPositions returns where Sessions go on edges, the values that
+// merge with a root. Only edges that don't already have Session get one, and
+// only an edge defined by a *gorm.DB call can (see sessionEndAfterCall).
+func (g *Generator) edgeSessionPositions(edges []ssa.Value) []token.Pos {
 	var positions []token.Pos
-	for _, edge := range phi.Edges {
+	for _, edge := range edges {
 		// Skip nil constants
 		if c, ok := edge.(*ssa.Const); ok && c.Value == nil {
 			continue
@@ -1006,112 +1008,91 @@ func (g *Generator) phiEdgeSessionPositions(phi *ssa.Phi) []token.Pos {
 			continue
 		}
 
-		// Get the position of this edge's definition
-		edgePos := edge.Pos()
-		if edgePos == token.NoPos {
-			continue
-		}
-
-		if end := g.sessionEndAfterCall(edgePos); end.IsValid() {
+		if end := g.sessionEndAfterCall(edge.Pos()); end.IsValid() {
 			positions = append(positions, end)
 		}
 	}
 	return positions
 }
 
-// countPhiResultUses counts how many times the Phi result is used.
-func (g *Generator) countPhiResultUses(phi *ssa.Phi) int {
-	if phi.Referrers() == nil {
-		return 0
-	}
-	return len(*phi.Referrers())
+// phiUsedTwice reports whether the result of phi is used more than once.
+func phiUsedTwice(phi *ssa.Phi) bool {
+	return len(*phi.Referrers()) > 1
 }
 
-// findPhiUsingValue finds a Phi node that uses the given value as an edge,
-// or finds all values stored to the same Alloc (implicit Phi through memory).
-// Returns a Phi node if found, or synthesizes one from Alloc stores.
-func (g *Generator) findPhiUsingValue(v ssa.Value) *ssa.Phi {
-	if v == nil {
+// mergedEdges returns the other values that the uses of root may read
+// instead of it, when they are read twice:
+//   - the edges of a Phi that takes root, when the Phi's result is used twice;
+//   - for a variable that a closure captures, which SSA keeps in memory with
+//     no Phi, the other values stored to it whose store may run before two of
+//     uses. The tracer resolves each read of the variable to its first store
+//     (see tracer.AllocStoredValues), so uses holds every read of it.
+//
+// So in `if c { q = db.Where("a") } else { q = db.Where("b") }` with q read
+// twice in a goroutine, both stores get a Session, not only the root's (#247).
+func mergedEdges(root ssa.Value, uses []pollution.UsageInfo) []ssa.Value {
+	instr, ok := root.(ssa.Instruction)
+	if !ok {
 		return nil
 	}
-
-	// Get the function containing this value
-	var fn *ssa.Function
-	switch val := v.(type) {
-	case ssa.Instruction:
-		fn = val.Parent()
-	case *ssa.Parameter:
-		fn = val.Parent()
-	default:
-		return nil
-	}
-
-	if fn == nil {
-		return nil
-	}
-
-	// Case 1: Direct Phi node (value flows through SSA values)
+	fn := instr.Parent()
 	for _, block := range fn.Blocks {
 		for _, instr := range block.Instrs {
-			phi, ok := instr.(*ssa.Phi)
-			if !ok {
-				continue
-			}
-
-			// Check if v is one of the Phi's edges
-			if slices.Contains(phi.Edges, v) {
-				return phi
+			if phi, ok := instr.(*ssa.Phi); ok && slices.Contains(phi.Edges, root) {
+				if !phiUsedTwice(phi) {
+					return nil
+				}
+				return phi.Edges
 			}
 		}
 	}
 
-	// Case 2: Implicit Phi through Alloc/Store (var q *gorm.DB with conditional stores)
-	// Find if this value is stored to an Alloc that has multiple stores
-	var targetAlloc *ssa.Alloc
-	for _, block := range fn.Blocks {
-		for _, instr := range block.Instrs {
-			store, ok := instr.(*ssa.Store)
-			if !ok || store.Val != v {
-				continue
-			}
-			// Found a store of v to an Alloc
-			if alloc, ok := store.Addr.(*ssa.Alloc); ok {
-				targetAlloc = alloc
-				break
-			}
-		}
-		if targetAlloc != nil {
-			break
-		}
-	}
-
-	if targetAlloc == nil {
+	alloc := storedTo(fn, root)
+	if alloc == nil {
 		return nil
 	}
-
-	// Find all values stored to this Alloc
-	var storedValues []ssa.Value
+	var edges []ssa.Value
 	for _, block := range fn.Blocks {
 		for _, instr := range block.Instrs {
-			store, ok := instr.(*ssa.Store)
-			if !ok || store.Addr != targetAlloc {
-				continue
+			if store, ok := instr.(*ssa.Store); ok && store.Addr == alloc && store.Val != root && storeReadTwice(store, uses) {
+				edges = append(edges, store.Val)
 			}
-			storedValues = append(storedValues, store.Val)
 		}
 	}
+	return edges
+}
 
-	// If multiple values are stored (conditional branches), create synthetic Phi
-	if len(storedValues) > 1 {
-		phi := &ssa.Phi{
-			Edges: storedValues,
+// storedTo returns the variable of fn that v is stored to, or nil.
+func storedTo(fn *ssa.Function, v ssa.Value) *ssa.Alloc {
+	for _, block := range fn.Blocks {
+		for _, instr := range block.Instrs {
+			if store, ok := instr.(*ssa.Store); ok && store.Val == v {
+				alloc, _ := store.Addr.(*ssa.Alloc)
+				return alloc
+			}
 		}
-		// Set the phi's register to match the function (needed for Parent())
-		// We can't fully initialize it, but the Edges are enough for fix generation
-		return phi
 	}
-
 	return nil
+}
+
+// storeReadTwice reports whether two of uses may run after store. A use in
+// another function, such as a closure, may run after it whatever its block.
+func storeReadTwice(store *ssa.Store, uses []pollution.UsageInfo) bool {
+	a := cfg.New()
+	after := 0
+	for _, use := range uses {
+		switch {
+		case use.Block.Parent() != store.Parent():
+		case use.Block == store.Block():
+			if use.Pos < store.Pos() && !inCycle(a, use.Block) {
+				continue
+			}
+		case !a.CanReach(store.Block(), use.Block):
+			continue
+		}
+		after++
+	}
+	return after >= 2
 }
 
 // =============================================================================

@@ -238,7 +238,7 @@ func fixTargetStoredClosure(db *gorm.DB) {
 // fixTargetInlineClosure: a closure called inline runs in program order, so
 // the captured q is reassigned.
 func fixTargetInlineClosure(db *gorm.DB) {
-	q := db.Where("x")
+	q := db.Where("x").Session(&gorm.Session{})
 	func() {
 		q = q.Where("a").Session(&gorm.Session{})
 	}()

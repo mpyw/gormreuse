@@ -279,7 +279,7 @@ q.Where("d").Find(nil)
 > [!TIP]
 > Run `gormreuse -fix -diff ./...` to review the fixes, then `gormreuse -fix ./...` to apply them. Some diagnostics have no fix (see the IMPORTANT note above and [Parameter Roots](#parameter-roots)). Fix those by hand.
 
-When several roots are reused at the same place, such as `use(q, r)`, that place gets one diagnostic. Its message names the root that appears first in the source, and its fix covers every root reused there. The output is the same on every run.
+When several roots are reused at the same place, such as `use(q, r)`, that place gets one diagnostic. Its message names the root that appears first in the source, and its fix covers every root reused there. A different problem at the same place, such as a [condition argument](#subqueries-and-condition-arguments) read after it changed, gets its own diagnostic. The output is the same on every run.
 
 ## Detection Model: Mutable Branching
 
@@ -948,6 +948,8 @@ gormreuse reports a reuse only when it can follow the value. These cases are kno
 | `G = db.Where("x"); if c { G = G.Where("a") }; G.Find(nil)` for a global or a field `G` | A store is not a merge point, so `Where("a")` counts as a branch of the stored root |
 
 **Wrong position:** a use inside a deferred closure runs at function exit. gormreuse orders it by its source position. So `defer func() { q.Count(nil) }(); q.Find(nil)` is reported at `q.Find`, which runs first.
+
+**Fixes that need a second pass:** a reassignment in a `for` statement's post statement, as in `for i := 0; i < 2; q.Where("a") { q.Find(nil); i++ }`, is ordered before the body. The first `-fix` pass leaves the root without a Session, and a second pass adds it.
 
 See [Known Limitations](./design/implementation.md#known-limitations) in the implementation notes for the fixtures and the reasons.
 
