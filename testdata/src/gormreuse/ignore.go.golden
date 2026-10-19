@@ -35,6 +35,25 @@ func ignoreWithReason(db *gorm.DB) {
 }
 
 // =============================================================================
+// SHOULD REPORT - A trailing ignore covers only its own line (#189)
+// =============================================================================
+
+func trailingIgnoreDoesNotCoverNextLine(db *gorm.DB) {
+	q := db.Where("active = ?", true)
+	q.Find(nil)
+	q.Count(nil)  //gormreuse:ignore
+	q.Delete(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+func trailingIgnoreAfterBraceDoesNotCoverNextLine(db *gorm.DB) {
+	q := db.Where("active = ?", true).Session(&gorm.Session{})
+	q.Find(nil)
+	if q != nil { //gormreuse:ignore // want `unused gormreuse:ignore directive`
+		q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	}
+}
+
+// =============================================================================
 // SHOULD NOT REPORT - Function-level ignore
 // =============================================================================
 

@@ -113,10 +113,21 @@ func TestIgnoreMapShouldIgnore(t *testing.T) {
 		t.Parallel()
 
 		m := make(IgnoreMap)
-		m[20] = &ignoreEntry{pos: token.Pos(200), used: false}
+		m[20] = &ignoreEntry{pos: token.Pos(200), nextLine: true}
 
 		if !m.ShouldIgnore(21) {
 			t.Error("ShouldIgnore(21) should return true (previous line has ignore)")
+		}
+	})
+
+	t.Run("trailing comment does not cover next line", func(t *testing.T) {
+		t.Parallel()
+
+		m := make(IgnoreMap)
+		m[20] = &ignoreEntry{pos: token.Pos(200)}
+
+		if m.ShouldIgnore(21) {
+			t.Error("ShouldIgnore(21) should return false (trailing ignore on line 20)")
 		}
 	})
 
@@ -223,6 +234,47 @@ func foo() {}
 	m := BuildIgnoreMap(fset, file)
 	if len(m) == 0 {
 		t.Error("Expected non-empty ignore map")
+	}
+}
+
+func TestBuildIgnoreMapNextLine(t *testing.T) {
+	t.Parallel()
+
+	src := `package test
+
+func foo(a, b int) {
+	//gormreuse:ignore
+	_ = a
+	_ = b //gormreuse:ignore
+	_ = a
+	if a > b { //gormreuse:ignore
+		_ = b
+	}
+	_ = []int{
+		//gormreuse:ignore
+		a,
+		b, //gormreuse:ignore
+		a,
+	}
+}
+`
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "test.go", src, parser.ParseComments)
+	if err != nil {
+		t.Fatalf("Failed to parse: %v", err)
+	}
+
+	m := BuildIgnoreMap(fset, file)
+	want := map[int]bool{4: true, 6: false, 8: false, 12: true, 14: false}
+	for line, nextLine := range want {
+		entry, ok := m[line]
+		if !ok {
+			t.Errorf("line %d: no ignore entry", line)
+			continue
+		}
+		if entry.nextLine != nextLine {
+			t.Errorf("line %d: nextLine = %v, want %v", line, entry.nextLine, nextLine)
+		}
 	}
 }
 
