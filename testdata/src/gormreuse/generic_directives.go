@@ -132,6 +132,11 @@ func genPassMutable(root *gorm.DB) {
 	genBranch[int](root.Session(&gorm.Session{}).Where("x")) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of genBranch`
 }
 
+// genDeferMutable: the same under defer (#192).
+func genDeferMutable(root *gorm.DB) {
+	defer genBranch[int](root.Session(&gorm.Session{}).Where("x")) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of genBranch`
+}
+
 // genPassIsolated: an isolated value satisfies the contract.
 func genPassIsolated(root *gorm.DB) {
 	genBranch[int](root.Session(&gorm.Session{})) // OK: isolated
