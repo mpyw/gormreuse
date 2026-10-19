@@ -11,6 +11,9 @@ import (
 
 	"golang.org/x/tools/go/ast/inspector"
 	"golang.org/x/tools/go/ssa"
+
+	"github.com/mpyw/gormreuse/internal/ssa/origin"
+	"github.com/mpyw/gormreuse/internal/typeutil"
 )
 
 // =============================================================================
@@ -162,13 +165,13 @@ func (s *ImmutableInputSet) Import(imported func(fn *ssa.Function) []ImmutableIn
 // Callbacks returns the registered immutable-input callbacks for fn, used to
 // exempt callback arguments (case 2.2) and to validate the declaring function's
 // body contract (cases 2.3/2.4). fn may be a closure, a generic instance or a
-// bound method wrapper (see DeclaredFunc); ParamIdx never counts a receiver,
+// bound method wrapper (see origin.Declared); ParamIdx never counts a receiver,
 // so it indexes the arguments of a call to any of them.
 func (s *ImmutableInputSet) Callbacks(fn *ssa.Function) []ImmutableInputCallback {
 	if s == nil || fn == nil {
 		return nil
 	}
-	fn = DeclaredFunc(fn)
+	fn = origin.Declared(fn)
 	switch syntax := fn.Syntax().(type) {
 	case *ast.FuncLit:
 		return slices.Clone(s.closures[syntax.Pos()])
@@ -267,7 +270,7 @@ func (s *ImmutableInputSet) resolveImmutableInputRef(ft *ast.FuncType, ref immut
 	if funcSig == nil {
 		return ImmutableInputCallback{}, fmt.Sprintf("unused gormreuse:immutable-input directive: parameter %q is not a function type", ref.name)
 	}
-	if !hasGormDBParameter(funcSig) {
+	if !typeutil.HasGormDBParameter(funcSig) {
 		return ImmutableInputCallback{}, fmt.Sprintf("unused gormreuse:immutable-input directive: callback %q has no *gorm.DB parameter", ref.name)
 	}
 	return ImmutableInputCallback{ParamIdx: idx, ParamName: ref.name}, ""

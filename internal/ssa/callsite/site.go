@@ -15,7 +15,7 @@ import (
 
 	"golang.org/x/tools/go/ssa"
 
-	"github.com/mpyw/gormreuse/internal/directive"
+	"github.com/mpyw/gormreuse/internal/ssa/origin"
 	"github.com/mpyw/gormreuse/internal/typeutil"
 )
 
@@ -72,7 +72,7 @@ type Site struct {
 	// other dynamic call.
 	Callee *ssa.Function
 	// Declared is the function the call stands for. For a method value or a
-	// method expression it is the declared method (directive.DeclaredFunc);
+	// method expression it is the declared method (origin.Declared);
 	// otherwise it is Callee. A generic instance stays as it is. The wrapper
 	// of an interface method has no declared method, so it stays too.
 	Declared *ssa.Function
@@ -120,7 +120,7 @@ func SiteOf(instr ssa.CallInstruction, vars FuncVars) Site {
 	if s.Kind == SiteThunk || s.Kind == SiteFuncVar && isSiteWrapper(s.Callee, "$thunk") {
 		// A method expression, called in place or through a variable that
 		// holds it.
-		s.Declared = directive.DeclaredFunc(s.Callee)
+		s.Declared = origin.Declared(s.Callee)
 	}
 	if s.Declared != nil && s.Declared.Signature.Recv() != nil && len(s.Args) > 0 {
 		s.Recv, s.Args = s.Args[0], s.Args[1:]
@@ -157,7 +157,7 @@ func BoundSite(mc *ssa.MakeClosure) (s Site, ok bool) {
 	if !isFunc || len(mc.Bindings) == 0 || !isSiteWrapper(fn, "$bound") {
 		return Site{}, false
 	}
-	return Site{Kind: SiteBound, Callee: fn, Declared: directive.DeclaredFunc(fn), Recv: mc.Bindings[0]}, true
+	return Site{Kind: SiteBound, Callee: fn, Declared: origin.Declared(fn), Recv: mc.Bindings[0]}, true
 }
 
 // EachSite calls visit with the Site of every call, go and defer instruction in

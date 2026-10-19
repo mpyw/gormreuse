@@ -43,9 +43,9 @@ import (
 
 	"golang.org/x/tools/go/ssa"
 
-	"github.com/mpyw/gormreuse/internal/directive"
 	"github.com/mpyw/gormreuse/internal/ssa/callsite"
 	"github.com/mpyw/gormreuse/internal/ssa/cfg"
+	"github.com/mpyw/gormreuse/internal/ssa/origin"
 	"github.com/mpyw/gormreuse/internal/ssa/pollution"
 	"github.com/mpyw/gormreuse/internal/ssa/pollutionsource"
 	"github.com/mpyw/gormreuse/internal/ssa/tracer"
@@ -535,10 +535,10 @@ func recordCallAliasUses(v ssa.Value, block *ssa.BasicBlock, pos token.Pos, ctx 
 
 // checksImmutableParamArg reports whether argument i of the call breaks the
 // caller-side //gormreuse:immutable-param contract: its callee (or the
-// function it stands in for, see directive.DeclaredFunc) branches its
+// function it stands in for, see origin.Declared) branches its
 // parameters, and the argument breaks the contract (see BreaksImmutableParam).
 func checksImmutableParamArg(site callsite.Site, i int, ctx *Context) bool {
-	if site.Callee == nil || ctx.NeedsImmutableParam == nil || !ctx.NeedsImmutableParam(directive.DeclaredFunc(site.Callee)) {
+	if site.Callee == nil || ctx.NeedsImmutableParam == nil || !ctx.NeedsImmutableParam(origin.Declared(site.Callee)) {
 		return false
 	}
 	return BreaksImmutableParam(site, i, ctx.RootTracer, ctx.LoopInfo)

@@ -58,6 +58,7 @@ import (
 	ssautil "github.com/mpyw/gormreuse/internal/ssa"
 	"github.com/mpyw/gormreuse/internal/ssa/callback"
 	"github.com/mpyw/gormreuse/internal/ssa/callsite"
+	"github.com/mpyw/gormreuse/internal/ssa/origin"
 	"github.com/mpyw/gormreuse/internal/ssa/pollution"
 	"github.com/mpyw/gormreuse/internal/ssa/purity"
 	"github.com/mpyw/gormreuse/internal/ssa/tracer"
@@ -491,14 +492,14 @@ func validatePureFuncs(
 // pureCallers maps each function to the functions in targets whose
 // validation may read its verdict: those that call it or refer to it, in
 // their own body or in a closure inside it. Verdicts are kept by declared
-// function (directive.DeclaredFunc), so a generic instance or a bound method
+// function (origin.Declared), so a generic instance or a bound method
 // wrapper counts as the function it stands for.
 func pureCallers(targets []*ssa.Function, funcVars callsite.FuncVars) map[*ssa.Function][]*ssa.Function {
 	callers := make(map[*ssa.Function][]*ssa.Function)
 	for _, target := range targets {
 		seen := make(map[*ssa.Function]bool)
 		add := func(fn *ssa.Function) {
-			if fn = directive.DeclaredFunc(fn); fn != nil && !seen[fn] {
+			if fn = origin.Declared(fn); fn != nil && !seen[fn] {
 				seen[fn] = true
 				callers[fn] = append(callers[fn], target)
 			}
@@ -715,7 +716,7 @@ func computeNeedsImmutableParam(
 		if skip(fn) || !immutableParamFuncs.Contains(fn) {
 			continue
 		}
-		if fn.Signature == nil || !directive.HasGormDBParameter(fn.Signature) {
+		if fn.Signature == nil || !typeutil.HasGormDBParameter(fn.Signature) {
 			continue
 		}
 		if pureFuncs != nil && pureFuncs.Contains(fn) {
@@ -770,7 +771,7 @@ func reportRedundantImmutableParam(
 		if skip(fn) || !immutableParamFuncs.Contains(fn) {
 			continue
 		}
-		if fn.Signature == nil || !directive.HasGormDBParameter(fn.Signature) {
+		if fn.Signature == nil || !typeutil.HasGormDBParameter(fn.Signature) {
 			continue // signature-invalid: handled by reportUnusedDirectiveFuncs
 		}
 		// pure ⇒ param never branched ⇒ redundant by construction (not flagged)

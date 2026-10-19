@@ -7,6 +7,7 @@ import (
 	"golang.org/x/tools/go/ssa"
 
 	"github.com/mpyw/gormreuse/internal/directive"
+	"github.com/mpyw/gormreuse/internal/ssa/origin"
 	"github.com/mpyw/gormreuse/internal/ssa/tracer"
 	"github.com/mpyw/gormreuse/internal/typeutil"
 )
@@ -466,7 +467,7 @@ func immutableReturnProof(fn *ssa.Function, accept func(*ssa.Function) bool, rt 
 		if rt.IsImmutableCall(call) {
 			return
 		}
-		callee := directive.DeclaredFunc(rt.Site(call).Declared)
+		callee := origin.Declared(rt.Site(call).Declared)
 		switch {
 		case callee == nil:
 			unprovable = true

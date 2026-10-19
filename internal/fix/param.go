@@ -7,9 +7,9 @@ import (
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/ssa"
 
-	"github.com/mpyw/gormreuse/internal/directive"
 	"github.com/mpyw/gormreuse/internal/ssa/cfg"
 	"github.com/mpyw/gormreuse/internal/ssa/handler"
+	"github.com/mpyw/gormreuse/internal/ssa/origin"
 	"github.com/mpyw/gormreuse/internal/typeutil"
 )
 
@@ -26,7 +26,7 @@ import (
 //
 //declscope:shared // generator.go's Generate withholds a parameter's fix with it
 func (g *Generator) canFixParam(p *ssa.Parameter) bool {
-	fn := directive.DeclaredFunc(p.Parent())
+	fn := origin.Declared(p.Parent())
 	if g.scopesCallbacks[fn] {
 		return false
 	}
@@ -51,7 +51,7 @@ func (g *Generator) canFixParam(p *ssa.Parameter) bool {
 //
 //declscope:shared // generator.go's Generate chooses immutable-param with it
 func (g *Generator) paramCallersIsolate(p *ssa.Parameter) bool {
-	fn := directive.DeclaredFunc(p.Parent())
+	fn := origin.Declared(p.Parent())
 	if !g.seesAllCallers(fn.Pos()) || !g.calledOnlyDirectly(fn) {
 		return false
 	}
@@ -65,7 +65,7 @@ func (g *Generator) paramCallersIsolate(p *ssa.Parameter) bool {
 					continue
 				}
 				site := g.tracer.Site(call)
-				if directive.DeclaredFunc(site.Callee) != fn {
+				if origin.Declared(site.Callee) != fn {
 					continue
 				}
 				if loopInfo == nil {

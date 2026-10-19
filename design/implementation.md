@@ -200,7 +200,7 @@ Problems are reported by `FindDirectiveProblems` through `pass.Reportf`, at the 
 
 Directives can be combined with commas: `//gormreuse:pure,immutable-return`
 
-**Generic instances and method values (#180).** A call can resolve to a stand-in for the function the directive is written on: an instance of a generic function or method (`genBranch[int]`), a bound method wrapper (`f := r.m`, named `m$bound`), or a method expression thunk (`T.m(r, x)`, named `m$thunk`, #258). The directive sets and the maps keyed by `*ssa.Function` (`PureVerdicts.Failed`, `needsImmutableParam`, the Scopes and immutable callback sets) are keyed by the declared function. `directive.DeclaredFunc` maps a stand-in to it: an instance to its `Origin()`, a bound wrapper or a thunk to the declared method (`Prog.FuncValue`). Every lookup goes through it: `DirectiveFuncSet.Contains`, `ImmutableInputSet.Callbacks`, the `PureVerdicts.HasFailed` check in `IsPureFunction`, the immutable-param caller check, and the callback collectors (`callback/resolve.go`: `resolveMayFuncs` for Scopes/Preload, `resolveExactFunc` for Transaction/FindInBatches and immutable-input). Code that reads the arguments of a call reads them from `callsite.Site`, which aligns them to the declared method: a bound wrapper has no receiver argument, and a thunk takes the receiver as its first one. An interface method value or expression has no declared body, so `DeclaredFunc` leaves it unchanged and it carries no directive.
+**Generic instances and method values (#180).** A call can resolve to a stand-in for the function the directive is written on: an instance of a generic function or method (`genBranch[int]`), a bound method wrapper (`f := r.m`, named `m$bound`), or a method expression thunk (`T.m(r, x)`, named `m$thunk`, #258). The directive sets and the maps keyed by `*ssa.Function` (`PureVerdicts.Failed`, `needsImmutableParam`, the Scopes and immutable callback sets) are keyed by the declared function. `origin.Declared` maps a stand-in to it: an instance to its `Origin()`, a bound wrapper or a thunk to the declared method (`Prog.FuncValue`). Every lookup goes through it: `DirectiveFuncSet.Contains`, `ImmutableInputSet.Callbacks`, the `PureVerdicts.HasFailed` check in `IsPureFunction`, the immutable-param caller check, and the callback collectors (`callback/resolve.go`: `resolveMayFuncs` for Scopes/Preload, `resolveExactFunc` for Transaction/FindInBatches and immutable-input). Code that reads the arguments of a call reads them from `callsite.Site`, which aligns them to the declared method: a bound wrapper has no receiver argument, and a thunk takes the receiver as its first one. An interface method value or expression has no declared body, so `origin.Declared` leaves it unchanged and it carries no directive.
 
 All internal positions (file keys, ignore lines, directive placement, the generated-file skip, fix offsets) use `PositionFor(pos, false)`, so `//line` directives cannot move them (#151, #152, #153). This includes the line and column that indent the parameter Session fix: a `//line` without a column sets every adjusted column to 0 (#244). Only the `root at file:line` text in messages stays adjusted, to match the position the driver prints. `TestNoAdjustedPositions` in `internal/position_guard_test.go` fails on any other `Position` call, or `PositionFor` without `false`, in non-test code under `internal/`. Its allowlist names the message function `Tracker.loc`.
 
@@ -256,10 +256,9 @@ gormreuse/
 │   │   ├── ignore.go            # //gormreuse:ignore scopes (Ignores), unused tracking
 │   │   ├── funcset.go           # DirectiveFuncSet: pure / immutable-return / immutable-param sets, Infer
 │   │   ├── immutable_input.go   # ImmutableInputSet: immutable-input(name) callbacks
-│   │   ├── func.go              # FuncKey, DeclaredFunc (generic instances, method values, method expressions)
+│   │   ├── func.go              # FuncKey: a function as a directive names it
 │   │   ├── removal.go           # Removals: fixes that delete a directive name (#248)
 │   │   ├── signature.go         # Signature checks per directive
-│   │   ├── gorm_db.go           # Does a type hold a *gorm.DB?
 │   │   └── typestr.go           # Type and receiver strings for matching
 │   ├── facts/facts.go           # facts.Func: directives exported to importing packages (#195)
 │   ├── fix/                     # Suggested fixes
@@ -277,9 +276,10 @@ gormreuse/
 │   │   └── stmt.go              # The innermost statement at a position
 │   ├── goldentest/goldentest.go # Shared golden machinery (ApplyFixes, UpdateCommand)
 │   ├── scopeswarn/scopeswarn.go # TEMPORARY Session-returned-from-Scopes warning (GORM bug #7592)
-│   ├── typeutil/gorm.go         # IsGormDB, IsImmutableReturningBuiltin
+│   ├── typeutil/gorm.go         # IsGormDB, IsImmutableReturningBuiltin, and whether a type holds a *gorm.DB
 │   └── ssa/
 │       ├── analyzer.go          # Per-function Analyzer: tracking, then detection
+│       ├── origin/origin.go     # Declared: the declared function behind a generic instance, a method value or a method expression
 │       ├── callsite/            # What a call, go or defer instruction runs
 │       │   ├── site.go          # Site, SiteOf, EachSite: callee, receiver, arguments
 │       │   ├── session.go       # SessionEffect: what a Session/Debug call shares (#174)
@@ -549,7 +549,7 @@ Limitation: every `*gorm.DB` element of one tuple shares the call as its root. `
 
 ### Calls through a method value (#178)
 
-The tracer resolves a call `w(x)` through a method value `w := r.m` as the call `r.m(x)`. `callsite.SiteOf` reads it as a `SiteBound` site: `Declared` is the declared method (`directive.DeclaredFunc` of the `m$bound` wrapper), `Recv` the receiver (`MakeClosure.Bindings[0]`), and `Args` the other arguments. `traceCall`, `traceAll`, `isImmutableSource`, `pureReturnedArgs` and the Session/Debug copy checks (`aliasSharesStatement`, `Site.SessionEffect`, `collectAliasedRoots`) all read the call through it. The call handler (for a plain call, `go` and `defer`), the pure validator and `pollutionsource.CallReadOnlyArgs` read it the same way. Since #257 so does every other reader: the immutable-input body check, the immutable-return body check, the callback collectors and `DropReachableCallbacks`, the Scopes warning, the read-only stdlib check, the closure-result check and the fix generator. So:
+The tracer resolves a call `w(x)` through a method value `w := r.m` as the call `r.m(x)`. `callsite.SiteOf` reads it as a `SiteBound` site: `Declared` is the declared method (`origin.Declared` of the `m$bound` wrapper), `Recv` the receiver (`MakeClosure.Bindings[0]`), and `Args` the other arguments. `traceCall`, `traceAll`, `isImmutableSource`, `pureReturnedArgs` and the Session/Debug copy checks (`aliasSharesStatement`, `Site.SessionEffect`, `collectAliasedRoots`) all read the call through it. The call handler (for a plain call, `go` and `defer`), the pure validator and `pollutionsource.CallReadOnlyArgs` read it the same way. Since #257 so does every other reader: the immutable-input body check, the immutable-return body check, the callback collectors and `DropReachableCallbacks`, the Scopes warning, the read-only stdlib check, the closure-result check and the fix generator. So:
 
 | Code | Result |
 | --- | --- |
@@ -565,7 +565,7 @@ The tracer resolves a call `w(x)` through a method value `w := r.m` as the call 
 
 **Rejected: trace into the wrapper as an IIFE.** This was the old behavior. The wrapper's body is one `r.m(x)` call, so every call through `w` traced to that one call. They shared one root: two calls through a method value of an immutable receiver were a false second branch, and on a mutable receiver the chained use was reported again, with no root position, since the wrapper call has none.
 
-An interface method value has no declared method, so `DeclaredFunc` keeps the wrapper. Its signature has no receiver, so a call through it is handled like any other call whose result holds a `*gorm.DB`: a mutable root, as for an interface call `r.Query()` (#176).
+An interface method value has no declared method, so `origin.Declared` keeps the wrapper. Its signature has no receiver, so a call through it is handled like any other call whose result holds a `*gorm.DB`: a mutable root, as for an interface call `r.Query()` (#176).
 
 A method value's wrapper is never analyzed as a closure of its caller, even when its receiver holds a `*gorm.DB` and so the `MakeClosure` captures one (`processFunction`, `isMethodValue`). Analyzing it read the wrapper's parameter as a mutable parameter and reported its forwarding call to an `immutable-param` method at no position (#255). As a last guard, `Analyzer.Analyze` moves a violation without a position to its call, then to the analyzed function (`positionedViolation`). A diagnostic at no position cannot be suppressed, and golangci-lint drops it.
 
@@ -573,7 +573,7 @@ Suggested fixes: a second branch made through a method value (`w := q.Where; w("
 
 ### Calls through a method expression (#258)
 
-A method expression `T.m(r, x)`, or `(*T).m`, is a call of a synthetic `m$thunk` function whose first parameter is the receiver. `callsite.SiteOf` reads it as a `SiteThunk` site: `Declared` is the declared method (`directive.DeclaredFunc`), `Recv` the first argument and `Args` the rest, as for the static call `r.m(x)`. A package-level variable that holds a method expression (`var find = (*Repo).find`) is read the same way (#257). So every directive of `m` applies (pure, immutable-return, immutable-param, immutable-input, the returned arguments of a pure method), also for a method of another package, and `(*gorm.DB).Find(q, nil)` is a gorm method call on `q`. The immutable-param isolation fix counts the receiver argument of a method expression (`receiverArgs`). `callback.DropReachableCallbacks` reads a thunk through `DeclaredFunc` too.
+A method expression `T.m(r, x)`, or `(*T).m`, is a call of a synthetic `m$thunk` function whose first parameter is the receiver. `callsite.SiteOf` reads it as a `SiteThunk` site: `Declared` is the declared method (`origin.Declared`), `Recv` the first argument and `Args` the rest, as for the static call `r.m(x)`. A package-level variable that holds a method expression (`var find = (*Repo).find`) is read the same way (#257). So every directive of `m` applies (pure, immutable-return, immutable-param, immutable-input, the returned arguments of a pure method), also for a method of another package, and `(*gorm.DB).Find(q, nil)` is a gorm method call on `q`. The immutable-param isolation fix counts the receiver argument of a method expression (`receiverArgs`). `callback.DropReachableCallbacks` reads a thunk through `origin.Declared` too.
 
 The thunk of a method promoted through an embedded field (`type W struct{ *gorm.DB }; W.Find(w, nil)`) selects the field inside its body. `Recv` is then `w`, not `w.DB`, and the tracer does not follow it to the field, so reuse through it is missed (`exprPromoted`). An interface method expression has no declared method, so it is a call of an unknown function.
 

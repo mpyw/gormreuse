@@ -3,9 +3,9 @@ package tracer
 import (
 	"golang.org/x/tools/go/ssa"
 
-	"github.com/mpyw/gormreuse/internal/directive"
 	"github.com/mpyw/gormreuse/internal/facts"
 	"github.com/mpyw/gormreuse/internal/ssa/callsite"
+	"github.com/mpyw/gormreuse/internal/ssa/origin"
 	"github.com/mpyw/gormreuse/internal/typeutil"
 )
 
@@ -36,7 +36,7 @@ func (p *PureVerdicts) HasFailed(fn *ssa.Function) bool {
 	if p == nil {
 		return false
 	}
-	declared := directive.DeclaredFunc(fn)
+	declared := origin.Declared(fn)
 	return p.Failed[declared] || p.Imported.Of(declared).PureFailed
 }
 
@@ -50,7 +50,7 @@ func (p *PureVerdicts) ReturnedArgs(fn *ssa.Function, args []ssa.Value) []ssa.Va
 	if p == nil {
 		return nil
 	}
-	declared := directive.DeclaredFunc(fn)
+	declared := origin.Declared(fn)
 	indexes := p.Returned[declared]
 	if len(indexes) == 0 {
 		indexes = p.Imported.Of(declared).Returned
@@ -142,7 +142,7 @@ func (t *RootTracer) PureReturnsOnlyParams(fn *ssa.Function) bool {
 //declscope:shared // root.go's traceCall decides a pure call with immutable arguments with it
 func (t *RootTracer) pureReturnsOnlyParams(fn *ssa.Function) bool {
 	// An instance or a bound method wrapper runs the declared body.
-	fn = directive.DeclaredFunc(fn)
+	fn = origin.Declared(fn)
 	if only, ok := t.onlyParams[fn]; ok {
 		return only
 	}

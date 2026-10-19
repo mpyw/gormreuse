@@ -14,8 +14,8 @@ import (
 
 	"golang.org/x/tools/go/ssa"
 
-	"github.com/mpyw/gormreuse/internal/directive"
 	"github.com/mpyw/gormreuse/internal/ssa/callsite"
+	"github.com/mpyw/gormreuse/internal/ssa/origin"
 	"github.com/mpyw/gormreuse/internal/ssa/tracer"
 )
 
@@ -133,7 +133,7 @@ func (r *funcResolver) addFunc(v ssa.Value) {
 
 	switch x := v.(type) {
 	case *ssa.Function:
-		r.found(directive.DeclaredFunc(x))
+		r.found(origin.Declared(x))
 		return
 	case *ssa.MakeClosure:
 		fn, ok := x.Fn.(*ssa.Function)
@@ -146,7 +146,7 @@ func (r *funcResolver) addFunc(v ssa.Value) {
 		if r.may {
 			r.found(fn)
 		}
-		r.found(directive.DeclaredFunc(fn))
+		r.found(origin.Declared(fn))
 		return
 	case *ssa.MakeInterface:
 		r.addFunc(x.X)

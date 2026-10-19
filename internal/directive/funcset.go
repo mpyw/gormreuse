@@ -10,6 +10,9 @@ import (
 	"golang.org/x/tools/go/ast/astutil"
 	"golang.org/x/tools/go/ast/inspector"
 	"golang.org/x/tools/go/ssa"
+
+	"github.com/mpyw/gormreuse/internal/ssa/origin"
+	"github.com/mpyw/gormreuse/internal/typeutil"
 )
 
 // DirectiveFuncSet is a generic set of functions matching a directive.
@@ -40,21 +43,21 @@ type DirectiveFuncSet struct {
 // NewPureFuncSet creates a DirectiveFuncSet for //gormreuse:pure.
 // The typesInfo parameter is used to validate that functions have *gorm.DB parameters.
 func NewPureFuncSet(fset *token.FileSet, typesInfo *types.Info) *DirectiveFuncSet {
-	return newDirectiveFuncSet(fset, typesInfo, isPureDirective, hasGormDBParameter)
+	return newDirectiveFuncSet(fset, typesInfo, isPureDirective, typeutil.HasGormDBParameter)
 }
 
 // NewImmutableReturnFuncSet creates a DirectiveFuncSet for //gormreuse:immutable-return.
 // The typesInfo parameter is used to validate that functions return *gorm.DB.
 func NewImmutableReturnFuncSet(fset *token.FileSet, typesInfo *types.Info) *DirectiveFuncSet {
-	return newDirectiveFuncSet(fset, typesInfo, isImmutableReturnDirective, hasGormDBReturn)
+	return newDirectiveFuncSet(fset, typesInfo, isImmutableReturnDirective, typeutil.HasGormDBReturn)
 }
 
 // NewImmutableParamFuncSet creates a DirectiveFuncSet for //gormreuse:immutable-param.
 // Like pure, the directive is only meaningful on a function with a *gorm.DB
-// parameter, so it reuses hasGormDBParameter for signature validation (an
+// parameter, so it reuses typeutil.HasGormDBParameter for signature validation (an
 // immutable-param directive on a parameter-less function is reported unused).
 func NewImmutableParamFuncSet(fset *token.FileSet, typesInfo *types.Info) *DirectiveFuncSet {
-	return newDirectiveFuncSet(fset, typesInfo, isImmutableParamDirective, hasGormDBParameter)
+	return newDirectiveFuncSet(fset, typesInfo, isImmutableParamDirective, typeutil.HasGormDBParameter)
 }
 
 // newDirectiveFuncSet creates a new DirectiveFuncSet with the given directive checker and signature validator.
@@ -116,7 +119,7 @@ func (s *DirectiveFuncSet) Infer(fn *ssa.Function) {
 
 // Inferred reports whether Contains reports fn only because Infer added it.
 func (s *DirectiveFuncSet) Inferred(fn *ssa.Function) bool {
-	return s != nil && fn != nil && s.inferred[DeclaredFunc(fn)]
+	return s != nil && fn != nil && s.inferred[origin.Declared(fn)]
 }
 
 // Add adds a function key to the set.
@@ -156,14 +159,14 @@ func (s *DirectiveFuncSet) IsUsed(pos token.Pos) bool {
 }
 
 // Contains checks if the given SSA function is in the set or has the directive.
-// fn may be a generic instance or a bound method wrapper (see DeclaredFunc).
+// fn may be a generic instance or a bound method wrapper (see origin.Declared).
 func (s *DirectiveFuncSet) Contains(fn *ssa.Function) bool {
 	if fn == nil {
 		return false
 	}
 	// A generic instance or a bound method wrapper carries the directive of
 	// the function it stands for (#180).
-	fn = DeclaredFunc(fn)
+	fn = origin.Declared(fn)
 
 	if s.Inferred(fn) {
 		return true
@@ -187,7 +190,7 @@ func (s *DirectiveFuncSet) Contains(fn *ssa.Function) bool {
 // the directive edits these comments.
 func (s *DirectiveFuncSet) CommentsOf(fn *ssa.Function) []token.Pos {
 	var positions []token.Pos
-	switch syntax := DeclaredFunc(fn).Syntax().(type) {
+	switch syntax := origin.Declared(fn).Syntax().(type) {
 	case *ast.FuncDecl:
 		if syntax.Doc != nil {
 			for _, c := range syntax.Doc.List {

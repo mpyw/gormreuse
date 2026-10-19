@@ -102,7 +102,7 @@ func (t *RootTracer) isClosureResultStoredRecursive(call *ssa.Call, visited map[
 // type (**gorm.DB, ...), or a struct with such a field, embedded or not (#181). seen stops recursive
 // struct types.
 //
-// Unlike containsGormDB in the directive package, this does NOT check:
+// Unlike typeutil's containsGormDB, this does NOT check:
 //   - interface{} (would cause false positives in SSA analysis)
 //   - slices, maps, channels (SSA handles these differently)
 func closureHoldsGormDB(t types.Type, seen map[types.Type]bool) bool {

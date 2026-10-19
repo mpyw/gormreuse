@@ -19,6 +19,7 @@ import (
 	"golang.org/x/tools/go/ssa"
 
 	"github.com/mpyw/gormreuse/internal/directive"
+	"github.com/mpyw/gormreuse/internal/ssa/origin"
 )
 
 // Func is the fact exported for a function or method. The zero value means
@@ -93,12 +94,12 @@ func NewTable(pass *analysis.Pass) *Table {
 
 // Of returns the fact of fn, or the zero Func when fn is declared in the
 // package being analyzed, has no fact, or is not a declared function. fn may be
-// a generic instance or a bound method wrapper (see directive.DeclaredFunc).
+// a generic instance or a bound method wrapper (see origin.Declared).
 func (t *Table) Of(fn *ssa.Function) Func {
 	if t == nil || fn == nil {
 		return Func{}
 	}
-	obj, ok := directive.DeclaredFunc(fn).Object().(*types.Func)
+	obj, ok := origin.Declared(fn).Object().(*types.Func)
 	if !ok {
 		return Func{}
 	}
