@@ -368,13 +368,12 @@ func pureFactoryFunction() *gorm.DB {
 	return DB.WithContext(nil) // Returns immutable
 }
 
-// pureFactoryUsage demonstrates that user-defined pure function return values are MUTABLE.
-// Pure functions only guarantee they don't pollute arguments - return values may be mutable.
-// Callers must treat return values as mutable roots.
+// pureFactoryUsage: pure says nothing about the result, but the body returns
+// WithContext, so the function is inferred immutable-return (#261).
 func pureFactoryUsage() {
 	db := pureFactoryFunction()
 	db.Find(nil)
-	db.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	db.Find(nil) // OK: inferred immutable-return
 }
 
 // =============================================================================
@@ -2616,17 +2615,17 @@ type OrmWrapper struct{}
 // GetDB is a pure method that returns a new *gorm.DB.
 //
 //gormreuse:pure // want `unused gormreuse:pure directive`
-func (o *OrmWrapper) GetDB() *gorm.DB { // want GetDB:"gormreuse pure"
+func (o *OrmWrapper) GetDB() *gorm.DB { // want GetDB:"gormreuse pure immutable-return"
 	return DB.WithContext(nil)
 }
 
-// pureMethodUsage demonstrates that user-defined pure method return values are MUTABLE.
-// Pure methods only guarantee they don't pollute arguments - return values may be mutable.
+// pureMethodUsage: GetDB returns WithContext, so it is inferred
+// immutable-return (#261) and exports the fact.
 func pureMethodUsage() {
 	wrapper := &OrmWrapper{}
 	db := wrapper.GetDB()
 	db.Find(nil)
-	db.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	db.Find(nil) // OK: inferred immutable-return
 }
 
 // =============================================================================

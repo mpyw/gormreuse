@@ -41,6 +41,7 @@ import (
 	"fmt"
 	"go/token"
 	"go/types"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -60,6 +61,7 @@ import (
 	"github.com/mpyw/gormreuse/internal/ssa/pollution"
 	"github.com/mpyw/gormreuse/internal/ssa/purity"
 	"github.com/mpyw/gormreuse/internal/ssa/tracer"
+	"github.com/mpyw/gormreuse/internal/typeutil"
 )
 
 // =============================================================================
@@ -150,6 +152,10 @@ func RunSSA(
 	// Only the immutable-param functions that branch a parameter export a
 	// fact, and only those matter to a caller (#255).
 	immutableParamFuncs.Import(func(fn *ssa.Function) bool { return table.Of(fn).BranchesImmutableParam })
+
+	// Treat a function as immutable-return when its body proves it (#261),
+	// before any pass reads the set.
+	inferredReturns := inferImmutableReturns(funcs, immutableReturnFuncs, funcVars, skip)
 
 	// PASS 1: validate pure function contracts and collect the functions that
 	// definitively broke them, and the parameters each trusted one may return.
@@ -248,7 +254,7 @@ func RunSSA(
 		immutableReturnFuncs: immutableReturnFuncs,
 		immutableInputSet:    immutableInputSet,
 		pureVerdicts:         pureVerdicts,
-		failedReturn:         failedReturn,
+		distrustedReturn:     distrustedReturns(failedReturn, inferredReturns, immutableReturnFuncs, funcVars),
 		failedInput:          failedInput,
 		needsImmutableParam:  needsImmutableParam,
 		tracer:               inputTracer,
@@ -551,13 +557,74 @@ func reportImmutableReturnViolations(
 	return failed
 }
 
+// inferImmutableReturns adds to set the functions of funcs that have no
+// immutable-return directive but whose body proves that every *gorm.DB they
+// return is immutable (#261), and returns them in the order of funcs. A
+// function of a skipped file is not inferred, since its body is not analyzed.
+//
+// Here a function marked immutable-return counts as immutable even when its
+// body breaks the contract, as everywhere else in the package: that body is
+// reported once, at its declaration. distrustedReturns keeps such trust out
+// of the facts.
+func inferImmutableReturns(funcs []*ssa.Function, set *directive.DirectiveFuncSet, funcVars callsite.FuncVars, skip func(*ssa.Function) bool) []*ssa.Function {
+	var candidates []*ssa.Function
+	for _, fn := range funcs {
+		if !skip(fn) && !set.Contains(fn) && immutableReturnCandidate(fn) {
+			candidates = append(candidates, fn)
+		}
+	}
+	builtins := tracer.NewRootTracer(nil, nil, nil, nil, nil, nil, funcVars)
+	inferred := purity.InferImmutableReturns(candidates, set.Contains, builtins)
+	var out []*ssa.Function
+	for _, fn := range candidates {
+		if inferred[fn] {
+			set.Infer(fn)
+			out = append(out, fn)
+		}
+	}
+	return out
+}
+
+// immutableReturnCandidate reports whether fn has a *gorm.DB result, which
+// inference needs.
+func immutableReturnCandidate(fn *ssa.Function) bool {
+	for v := range fn.Signature.Results().Variables() {
+		if typeutil.IsGormDB(v.Type()) {
+			return true
+		}
+	}
+	return false
+}
+
+// distrustedReturns returns the immutable-return functions that another
+// package must not trust: those whose body breaks the contract, and those
+// inferred only because they return the result of one (#261). The inferred
+// functions are proved again with the broken ones distrusted.
+func distrustedReturns(failed map[*ssa.Function]bool, inferred []*ssa.Function, set *directive.DirectiveFuncSet, funcVars callsite.FuncVars) map[*ssa.Function]bool {
+	if len(failed) == 0 || len(inferred) == 0 {
+		return failed
+	}
+	trusted := func(fn *ssa.Function) bool {
+		return set.Contains(fn) && !set.Inferred(fn) && !failed[fn]
+	}
+	builtins := tracer.NewRootTracer(nil, nil, nil, nil, nil, nil, funcVars)
+	kept := purity.InferImmutableReturns(inferred, trusted, builtins)
+	distrusted := maps.Clone(failed)
+	for _, fn := range inferred {
+		if !kept[fn] {
+			distrusted[fn] = true
+		}
+	}
+	return distrusted
+}
+
 // factSources is what exportFacts reads: the directive sets and what
 // validating each contract found.
 type factSources struct {
 	pureFuncs, immutableReturnFuncs *directive.DirectiveFuncSet
 	immutableInputSet               *directive.ImmutableInputSet
 	pureVerdicts                    *tracer.PureVerdicts
-	failedReturn, failedInput       map[*ssa.Function]bool
+	distrustedReturn, failedInput   map[*ssa.Function]bool
 	needsImmutableParam             map[*ssa.Function]bool
 	tracer                          *tracer.RootTracer
 }
@@ -568,7 +635,8 @@ type factSources struct {
 //
 //   - pure, whether the body broke the contract, and which parameters the
 //     result may be;
-//   - immutable-return, only when the body keeps the contract;
+//   - immutable-return, declared or inferred, only when the body keeps the
+//     contract without relying on a function whose body breaks it;
 //   - immutable-param, only when the function branches a parameter, which is
 //     when its callers must pass an isolated value;
 //   - immutable-input(name), only when the body keeps the contract.
@@ -596,7 +664,7 @@ func exportFacts(pass *analysis.Pass, ssaInfo *buildssa.SSA, src factSources, sk
 				f.Returned = src.pureVerdicts.Returned[fn]
 				f.ReturnsOnlyParams = len(f.Returned) > 0 && src.tracer.PureReturnsOnlyParams(fn)
 			}
-			f.ImmutableReturn = src.immutableReturnFuncs.Contains(fn) && !src.failedReturn[fn]
+			f.ImmutableReturn = src.immutableReturnFuncs.Contains(fn) && !src.distrustedReturn[fn]
 			f.BranchesImmutableParam = src.needsImmutableParam[fn]
 			if !src.failedInput[fn] {
 				f.ImmutableInput = src.immutableInputSet.Callbacks(fn)

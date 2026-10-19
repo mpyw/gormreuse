@@ -622,7 +622,7 @@ GORM's internal `clone` field decides whether reuse is safe. A handle with `clon
 | Mid-chain ([`Where`](https://pkg.go.dev/gorm.io/gorm#DB.Where), [`Order`](https://pkg.go.dev/gorm.io/gorm#DB.Order), …) | `== 0` | ❌ shares Statement |
 | [`Connection`](https://pkg.go.dev/gorm.io/gorm#DB.Connection) callback `tx` | `== 0` | ❌ shares Statement |
 | A [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) **parameter** | unknown | ❌ treated as mutable |
-| The result of a helper, a func-typed value (`f(db)`) or an interface method (`repo.DB()`), alone or in a tuple such as `(*gorm.DB, error)` | unknown | ❌ treated as mutable, unless the helper is [`//gormreuse:immutable-return`](#gormreuseimmutable-return) |
+| The result of a helper, a func-typed value (`f(db)`) or an interface method (`repo.DB()`), alone or in a tuple such as `(*gorm.DB, error)` | unknown | ❌ treated as mutable, unless the helper is [`//gormreuse:immutable-return`](#gormreuseimmutable-return), declared or [inferred](#inferred-immutable-return) |
 
 A repository interface whose method returns a fresh handle is reported when its result is branched twice. No directive applies to an interface method. Isolate the result with `repo.DB().Session(&gorm.Session{})`.
 
@@ -803,7 +803,7 @@ helper2 := func(q *gorm.DB) { //gormreuse:pure
 > | --- | --- | --- |
 > | `helper(q)`, result discarded or not a `*gorm.DB` | A branch of `q` | |
 > | `q = helper(q)`, result assigned back to `q` | Like `q = q.Where(...)`, also under a condition or in a loop | A new mutable root |
-> | `r := helper(q)` | A branch of `q` | A new mutable root |
+> | `r := helper(q)` | A branch of `q` | A new mutable root, unless `helper` is [inferred immutable-return](#inferred-immutable-return) |
 >
 > Add `//gormreuse:pure` to a helper that does not change its argument, so that passing it does not branch it.
 
@@ -875,6 +875,47 @@ func useIt() {
 > }
 > ```
 > Put [`Session`](https://pkg.go.dev/gorm.io/gorm#DB.Session) at the **end** of the chain (`globalDB.Where("x").Session(&gorm.Session{})`) so the returned value is isolated. Only provably-mutable returns are reported: a value whose root is a gorm chain method like `Where`, or `Session(&gorm.Session{Initialized: true})`. The check follows IIFEs, local closures, and values that a deferred closure writes to a named result. It also follows unexported package-level variables whose every assignment in the package is mutable. These get the benefit of the doubt: a bare parameter, a value from an unmarked named helper, and a `Session` config the linter can't read. So does an exported or address-taken package-level variable.
+
+#### Inferred immutable-return
+
+A function or closure without the directive is treated as `immutable-return` when its body proves that every [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) it returns is immutable. So most connection helpers need no directive:
+
+```go
+func (r *repo) conn(ctx context.Context) *gorm.DB {
+    return r.db.WithContext(ctx)
+}
+
+func OpenTestConnection(cfg *gorm.Config) (db *gorm.DB, err error) {
+    db, err = gorm.Open(sqlite.Open("test.db"), cfg)
+    if err != nil {
+        return nil, err
+    }
+    return db, nil
+}
+
+func useIt(r *repo, ctx context.Context) {
+    q := r.conn(ctx)
+    q.Where("a").Find(&users)
+    q.Where("b").Find(&admins) // OK - conn is inferred immutable-return
+}
+```
+
+Each `*gorm.DB` result, in a `(*gorm.DB, error)` result too, must be one of these on every path:
+
+| Returned value | Example |
+| --- | --- |
+| A call whose **last** method is [`Session`](https://pkg.go.dev/gorm.io/gorm#DB.Session), [`WithContext`](https://pkg.go.dev/gorm.io/gorm#DB.WithContext) or [`Debug`](https://pkg.go.dev/gorm.io/gorm#DB.Debug) | `db.Where("x").Session(&gorm.Session{})` |
+| A [`Begin`](https://pkg.go.dev/gorm.io/gorm#DB.Begin) or [`gorm.Open`](https://pkg.go.dev/gorm.io/gorm#Open) result | `db.Begin()` |
+| `nil` | `return nil, err` |
+| The result of another `immutable-return` function, declared or inferred, in this package or another | `return r.conn(ctx)` |
+
+Anything else turns inference off for the function: a parameter, a field, a captured or deferred-to variable, a func-typed value, a call to an unmarked helper, a chain after `Session` (`Session(...).Where(...)`), or a `Session` config that is not a `&gorm.Session{...}` literal with `Initialized` unset or false.
+
+- An exported inferred function exports the same fact as a declared one, so other packages trust it too.
+- A function that returns its own result (recursion) is never inferred. Add the directive.
+- A function in a generated file is never inferred, since its body is not analyzed.
+- A function inferred only because it returns the result of a declared `immutable-return` function whose body breaks the contract is trusted in its own package, like that function. Another package does not trust it.
+- A declared `immutable-return` on a function that would be inferred anyway is not reported as unused. It also documents the intent, and keeps the guarantee checked if the body changes.
 
 ### `//gormreuse:immutable-param`
 
@@ -1051,6 +1092,7 @@ gormreuse reports a reuse only when it can follow the value. These cases are kno
 | --- | --- |
 | `a, b := pair(db)`, then `a.Find(nil); b.Find(nil)` | Both results of one call share the call as their root |
 | `G = db.Where("x"); if c { G = G.Where("a") }; G.Find(nil)` for a global or a field `G` | A store is not a merge point, so `Where("a")` counts as a branch of the stored root |
+| A recursive helper whose every path ends in `Session(...)`, branched twice | A function that returns its own result is never [inferred](#inferred-immutable-return) `immutable-return`. Add the directive |
 
 **Wrong position:** a use inside a deferred closure runs at function exit. gormreuse orders it by its source position. So `defer func() { q.Count(nil) }(); q.Find(nil)` is reported at `q.Find`, which runs first.
 

@@ -213,8 +213,8 @@ func nestedClosureInnerImmutableReturn(db *gorm.DB) {
 	q := db.Where("base")
 	result := outer(q)
 	q.Find(nil)      // OK - outer is pure
-	result.Find(nil) // outer's return is NOT immutable-return
-	result.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	result.Find(nil) // outer returns inner's result, so it is inferred immutable-return (#261)
+	result.Count(nil) // OK
 }
 
 // nestedClosurePureImmutableReturnBoth: Outer has both directives
@@ -330,7 +330,8 @@ func complexDirective04(db *gorm.DB) {
 	result.Count(nil) // OK - result is immutable
 }
 
-// complexDirective05: pure only - result should be mutable
+// complexDirective05: pure only, but the body returns Session, so helper is
+// inferred immutable-return (#261)
 func complexDirective05(db *gorm.DB) {
 	//gormreuse:pure
 	helper := func(q *gorm.DB) *gorm.DB {
@@ -341,7 +342,7 @@ func complexDirective05(db *gorm.DB) {
 	result := helper(base)
 	base.Find(nil) // OK - helper is pure
 	result.Find(nil)
-	result.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	result.Count(nil) // OK - inferred immutable-return
 }
 
 // complexDirective06: immutable-return only - argument should be polluted

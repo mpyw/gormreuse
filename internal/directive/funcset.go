@@ -23,6 +23,7 @@ type DirectiveFuncSet struct {
 	typesInfo           *types.Info                 // Type info for signature validation
 	files               map[string]*ast.File        // Original parsed files (from analysis)
 	imported            func(fn *ssa.Function) bool // Directive of a function without syntax (another package)
+	inferred            map[*ssa.Function]bool      // Functions the analysis proved to keep the contract (#261)
 	isDirective         directiveChecker            // Checks if comment is this directive
 	validateSignature   signatureValidator          // Checks if signature is valid for this directive
 	invalidDirectives   map[token.Pos]struct{}      // Directives on functions with invalid signatures
@@ -103,6 +104,21 @@ func (s *DirectiveFuncSet) Import(imported func(fn *ssa.Function) bool) {
 	}
 }
 
+// Infer adds fn, a declared function of the package that has no directive,
+// because the analysis proved that its body keeps the directive's contract
+// (#261). Contains reports it, and nothing reports it unused.
+func (s *DirectiveFuncSet) Infer(fn *ssa.Function) {
+	if s.inferred == nil {
+		s.inferred = make(map[*ssa.Function]bool)
+	}
+	s.inferred[fn] = true
+}
+
+// Inferred reports whether Contains reports fn only because Infer added it.
+func (s *DirectiveFuncSet) Inferred(fn *ssa.Function) bool {
+	return s != nil && fn != nil && s.inferred[DeclaredFunc(fn)]
+}
+
 // Add adds a function key to the set.
 func (s *DirectiveFuncSet) Add(key FuncKey) {
 	if s != nil && s.known != nil {
@@ -148,6 +164,10 @@ func (s *DirectiveFuncSet) Contains(fn *ssa.Function) bool {
 	// A generic instance or a bound method wrapper carries the directive of
 	// the function it stands for (#180).
 	fn = DeclaredFunc(fn)
+
+	if s.Inferred(fn) {
+		return true
+	}
 
 	// First, check the pre-built set (for current package)
 	if s != nil && s.known != nil {
