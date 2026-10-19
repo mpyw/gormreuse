@@ -186,8 +186,7 @@
  // The argument is still a branch when the method is not known to only read it.
  func subqueryPassedToModelIsBranch(db *gorm.DB) {
  	db = db.Session(&gorm.Session{})
--	sub := db.Model(&User{}).Select("id")
-+	sub := db.Model(&User{}).Select("id").Session(&gorm.Session{})
+ 	sub := db.Model(&User{}).Select("id")
  	db.Model(sub).Find(&[]User{})
  	db.Where("id IN (?)", sub).Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
  }
@@ -203,8 +202,7 @@
  // A slice that is also kept elsewhere is not only read.
  func subquerySpreadArgsKeptIsBranch(db *gorm.DB) {
  	db = db.Session(&gorm.Session{})
--	sub := db.Model(&User{}).Select("id")
-+	sub := db.Model(&User{}).Select("id").Session(&gorm.Session{})
+ 	sub := db.Model(&User{}).Select("id")
  	args := []interface{}{sub}
  	db.Where("id IN (?)", args...).Find(&[]User{})
  	keepSubqueryArgs(args)

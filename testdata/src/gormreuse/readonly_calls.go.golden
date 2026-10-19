@@ -49,7 +49,7 @@ func readonlyTestingLog(db *gorm.DB, t *testing.T) {
 func userVariadicSink(args ...interface{}) {}
 
 func userVariadicPollutes(db *gorm.DB) {
-	q := db.Where("x = ?", 1).Session(&gorm.Session{})
+	q := db.Where("x = ?", 1)
 	userVariadicSink(q)
 	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
 }
@@ -59,7 +59,7 @@ func userVariadicPollutes(db *gorm.DB) {
 func concreteVariadicSink(dbs ...*gorm.DB) {}
 
 func concreteVariadicPollutes(db *gorm.DB) {
-	q := db.Where("x = ?", 1).Session(&gorm.Session{})
+	q := db.Where("x = ?", 1)
 	concreteVariadicSink(q)
 	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
 }
@@ -67,7 +67,7 @@ func concreteVariadicPollutes(db *gorm.DB) {
 // A func-value (dynamic) variadic call has no static callee, so it is not on the
 // read-only allow-list and still pollutes.
 func funcValueVariadicPollutes(db *gorm.DB, sink func(...interface{})) {
-	q := db.Where("x = ?", 1).Session(&gorm.Session{})
+	q := db.Where("x = ?", 1)
 	sink(q)
 	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
 }
@@ -75,7 +75,7 @@ func funcValueVariadicPollutes(db *gorm.DB, sink func(...interface{})) {
 // A user composite slice literal escapes the value and still pollutes; it does
 // not flow into a variadic call, so the read-only exemption does not apply.
 func sliceLiteralPollutes(db *gorm.DB) {
-	q := db.Where("x = ?", 1).Session(&gorm.Session{})
+	q := db.Where("x = ?", 1)
 	_ = []interface{}{q}
 	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
 }

@@ -203,7 +203,7 @@ func pvCallPureClosure(db *gorm.DB) {
 // pvCallLeakingPureClosure: a pure closure that breaks its contract is not
 // trusted at its call sites.
 func pvCallLeakingPureClosure(db *gorm.DB) {
-	q := db.Where("x").Session(&gorm.Session{})
+	q := db.Where("x")
 	pvLeakingPureClosure(q)
 	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
@@ -228,7 +228,7 @@ func pvReassignClosure() {
 
 // pvCallReassignedClosure: the callee is not known, so the call pollutes.
 func pvCallReassignedClosure(db *gorm.DB) {
-	q := db.Where("x").Session(&gorm.Session{})
+	q := db.Where("x")
 	pvReassignedClosure(q)
 	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
@@ -241,7 +241,7 @@ var PvExportedPureClosure = func(q *gorm.DB) { _ = q }
 // pvCallExportedPureClosure: an exported variable may hold another function
 // when it is called, so the call pollutes.
 func pvCallExportedPureClosure(db *gorm.DB) {
-	q := db.Where("x").Session(&gorm.Session{})
+	q := db.Where("x")
 	PvExportedPureClosure(q)
 	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
@@ -262,10 +262,10 @@ func pvTakeClosureAddr() *func(*gorm.DB) { return &pvAddressTakenClosure }
 // pvCallAddressTakenClosures: neither callee is known, so both calls pollute.
 func pvCallAddressTakenClosures(db *gorm.DB) {
 	base := db.Session(&gorm.Session{})
-	q := base.Where("x").Session(&gorm.Session{})
+	q := base.Where("x")
 	pvAddressTakenClosure(q)
 	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
-	r := base.Where("y").Session(&gorm.Session{})
+	r := base.Where("y")
 	pvStoredAddressClosure(r)
 	r.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }

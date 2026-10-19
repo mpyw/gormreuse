@@ -83,8 +83,7 @@
  
  // go127BoundGenericMethodValue: a bound method value of a generic method.
  func go127BoundGenericMethodValue(db *gorm.DB) {
--	q := db.Where("x")
-+	q := db.Where("x").Session(&gorm.Session{})
+ 	q := db.Where("x")
  	r := go127Repo{}
  	find := r.findAll[int]
  	var out int

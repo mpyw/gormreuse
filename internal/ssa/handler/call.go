@@ -512,7 +512,8 @@ func (h *callHandler) checkFunctionCallPollution(call *ssa.Call, ctx *Context) {
 		if returnsGormDB && isAssignment(call, root, ctx) {
 			// For reassignment pattern: check if already polluted, but don't add pollution.
 			// This is similar to how gorm methods handle RecordAssignment.
-			ctx.Tracker.RecordAssignment(root, pollution.UsageInfo{Block: call.Block(), Pos: ctx.pos(call.Pos())})
+			// The function may still change the argument in place.
+			ctx.Tracker.RecordAssignment(root, pollution.UsageInfo{Block: call.Block(), Pos: ctx.pos(call.Pos()), Escapes: true})
 		} else {
 			// Mark polluted (function may use the value)
 			ctx.Tracker.MarkPolluted(root, call.Block(), ctx.pos(call.Pos()))

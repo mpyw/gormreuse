@@ -78,8 +78,18 @@ func fixTargetAliasReceiver(db *gorm.DB) {
 
 // fixTargetArgumentModel: q is an argument of base.Model. Rebinding base would
 // not address q, so the root gets a Session instead. (A read-only argument,
-// as of base.Or, is not a branch: #185.)
+// as of base.Or, is not a branch: #185.) The argument is q's last use. Before
+// another use, base.Model could change q in place, and a Session at q would
+// drop that change, so there would be no fix (#243).
 func fixTargetArgumentModel(db, base *gorm.DB) {
+	q := db.Where("x")
+	q.Where("b").Find(nil)
+	base.Model(q) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixTargetArgumentBeforeUse: base.Model takes q before another use, so no
+// fix is offered (#243).
+func fixTargetArgumentBeforeUse(db, base *gorm.DB) {
 	q := db.Where("x")
 	base.Model(q)
 	q.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
@@ -91,8 +101,8 @@ func fixTargetArgumentModel(db, base *gorm.DB) {
 //gormreuse:immutable-param
 func fixTargetArgumentOfReceiver(db *gorm.DB) {
 	q := db.Where("x")
-	db.Model(q)
-	q.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	q.Where("b").Find(nil)
+	db.Model(q) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // fixTargetGoroutine: q is captured by a goroutine. Writing q inside it while

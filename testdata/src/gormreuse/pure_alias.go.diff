@@ -185,8 +185,7 @@
  // A pure function that branches another pure function's result breaks its own
  // contract, so its callers no longer trust it.
  func paCallsBrokenPure(db *gorm.DB) {
--	q := db.Session(&gorm.Session{}).Where("x")
-+	q := db.Session(&gorm.Session{}).Where("x").Session(&gorm.Session{})
+ 	q := db.Session(&gorm.Session{}).Where("x")
  	paPureBranchesResult(q)
  	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  }

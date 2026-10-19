@@ -39,7 +39,7 @@ func genLeak[T any](db *gorm.DB, ch chan *gorm.DB) {
 
 // genUseFailedPure: the failed pure contract is revoked for the instance too.
 func genUseFailedPure(db *gorm.DB, ch chan *gorm.DB) {
-	q := db.Where("x").Session(&gorm.Session{})
+	q := db.Where("x")
 	genLeak[int](q, ch)
 	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
@@ -51,7 +51,7 @@ func (r genRepo) leak[T any](db *gorm.DB, ch chan *gorm.DB) {
 
 // genUseFailedPureMethod: the same for a generic method.
 func genUseFailedPureMethod(db *gorm.DB, ch chan *gorm.DB) {
-	q := db.Where("x").Session(&gorm.Session{})
+	q := db.Where("x")
 	genRepo{}.leak[int](q, ch)
 	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
@@ -75,7 +75,7 @@ type genApplier interface{ apply(db *gorm.DB) }
 // genInterfaceMethodValue: an interface method has no declared body, so its
 // method value carries no directive and consumes its argument.
 func genInterfaceMethodValue(db *gorm.DB, a genApplier) {
-	q := db.Where("x").Session(&gorm.Session{})
+	q := db.Where("x")
 	f := a.apply
 	f(q)
 	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`

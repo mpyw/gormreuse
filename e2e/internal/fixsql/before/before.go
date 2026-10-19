@@ -147,3 +147,138 @@ func PhiAfterUsesTaken(db *gorm.DB) { phiAfterUses(db, true) }
 
 // PhiAfterUsesSkipped runs phiAfterUses past its if.
 func PhiAfterUsesSkipped(db *gorm.DB) { phiAfterUses(db, false) }
+
+// applyTenant changes tx in place, and its callers rely on that: it returns
+// nothing through which they could see a change (#243).
+func applyTenant(tx *gorm.DB, tenant int) {
+	tx.Where("tenant_id = ?", tenant)
+	tx.Where("deleted_at IS NULL")
+}
+
+// Helper hands q to applyTenant, which adds the tenant filter to q in place
+// (#243).
+func Helper(db *gorm.DB) {
+	q := db.Model(&User{})
+	applyTenant(q, 7)
+	q.Where("name = ?", "x").Find(&[]User{})
+	q.Where("name = ?", "y").Find(&[]User{})
+}
+
+// addTenant discards one statement on tx. It is not a reuse by itself.
+func addTenant(tx *gorm.DB) {
+	tx.Where("tenant_id = ?", 7)
+}
+
+// HelperDiscard hands q to addTenant (#243).
+func HelperDiscard(db *gorm.DB) {
+	q := db.Model(&User{})
+	addTenant(q)
+	q.Where("name = ?", "x").Find(&[]User{})
+	q.Where("name = ?", "y").Find(&[]User{})
+}
+
+// ClosureArg hands q to a closure that changes it in place (#243).
+func ClosureArg(db *gorm.DB) {
+	q := db.Model(&User{})
+	apply := func(d *gorm.DB) { d.Where("tenant_id = ?", 7) }
+	apply(q)
+	q.Where("name = ?", "x").Find(&[]User{})
+	q.Where("name = ?", "y").Find(&[]User{})
+}
+
+// Slice stores q in a slice and changes it through the slice (#243).
+func Slice(db *gorm.DB) {
+	q := db.Model(&User{})
+	qs := []*gorm.DB{q}
+	qs[0].Where("tenant_id = ?", 7)
+	q.Where("name = ?", "x").Find(&[]User{})
+	q.Where("name = ?", "y").Find(&[]User{})
+}
+
+// Map stores q in a map and changes it through the map (#243).
+func Map(db *gorm.DB) {
+	q := db.Model(&User{})
+	qs := map[string]*gorm.DB{}
+	qs["q"] = q
+	qs["q"].Where("tenant_id = ?", 7)
+	q.Where("name = ?", "x").Find(&[]User{})
+	q.Where("name = ?", "y").Find(&[]User{})
+}
+
+// Chan sends q on a channel and changes it through the channel (#243).
+func Chan(db *gorm.DB) {
+	q := db.Model(&User{})
+	ch := make(chan *gorm.DB, 1)
+	ch <- q
+	(<-ch).Where("tenant_id = ?", 7)
+	q.Where("name = ?", "x").Find(&[]User{})
+	q.Where("name = ?", "y").Find(&[]User{})
+}
+
+// ErrorRead reads the Error of a chain that changes q in place (#243).
+func ErrorRead(db *gorm.DB) {
+	q := db.Model(&User{})
+	if err := q.Where("tenant_id = ?", 7).Error; err != nil {
+		return
+	}
+	q.Where("name = ?", "x").Find(&[]User{})
+	q.Where("name = ?", "y").Find(&[]User{})
+}
+
+// withTenant adds the tenant filter to tx and returns it.
+func withTenant(tx *gorm.DB) *gorm.DB {
+	return tx.Where("tenant_id = ?", 7)
+}
+
+// ResultDiscarded discards the result of withTenant, which changes q in place
+// (#243).
+func ResultDiscarded(db *gorm.DB) {
+	q := db.Model(&User{})
+	_ = withTenant(q)
+	q.Where("name = ?", "x").Find(&[]User{})
+	q.Where("name = ?", "y").Find(&[]User{})
+}
+
+// EscapeLast hands q to applyTenant after its last query. Nothing sees what
+// applyTenant changes, so the root gets a Session (#243).
+func EscapeLast(db *gorm.DB) {
+	q := db.Model(&User{})
+	q.Where("name = ?", "x").Find(&[]User{})
+	q.Where("name = ?", "y").Find(&[]User{})
+	applyTenant(q, 7)
+}
+
+// ErrorOfFinisher reads the Error of a query's own result, so the root gets a
+// Session (#243).
+func ErrorOfFinisher(db *gorm.DB) {
+	q := db.Model(&User{})
+	if err := q.Where("name = ?", "x").Find(&[]User{}).Error; err != nil {
+		return
+	}
+	q.Where("name = ?", "y").Find(&[]User{})
+}
+
+// tenantAdults changes tx in place and returns a chain on it, which carries
+// the change back to the caller. Its discarded statement is reassigned (#243).
+func tenantAdults(tx *gorm.DB) *gorm.DB {
+	tx.Where("tenant_id = ?", 7)
+	tx.Where("name = ?", "x").Find(&[]User{})
+	return tx.Where("age > ?", 20)
+}
+
+// ParamResult runs a query on the result of tenantAdults.
+func ParamResult(db *gorm.DB) {
+	tenantAdults(db.Model(&User{})).Find(&[]User{})
+}
+
+// ErrorPropagation reads q.Error, which collects the errors of the queries
+// that ran on q in place. The second query scans a row of several columns
+// into an int, so it fails, and a third query reports the error (#243).
+func ErrorPropagation(db *gorm.DB) {
+	q := db.Model(&User{})
+	q.Find(&[]User{})
+	q.Where("age > ?", 20).Table("").Find(new(int))
+	if q.Error != nil {
+		db.Model(&User{}).Where("failed = ?", true).Find(&[]User{})
+	}
+}

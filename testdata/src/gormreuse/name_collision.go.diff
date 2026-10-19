@@ -33,8 +33,7 @@
  func Debug(db *gorm.DB) { db.Find(&[]User{}) }
  
  func collisionFreeFuncDebug(db *gorm.DB) {
--	q := db.Where("x = ?", 1)
-+	q := db.Where("x = ?", 1).Session(&gorm.Session{})
+ 	q := db.Where("x = ?", 1)
  	Debug(q)
  	q.Count(new(int64)) // want `\*gorm\.DB reused: second branch from mutable root`
  }

@@ -92,8 +92,7 @@
  // helperResultIntoOtherVar: a helper result assigned to a different variable
  // under a condition is a branch of its argument, like a gorm method.
  func helperResultIntoOtherVar(db *gorm.DB, c bool) {
--	q := db.Where("x")
-+	q := db.Where("x").Session(&gorm.Session{})
+ 	q := db.Where("x")
  	var q2 *gorm.DB
  	if c {
  		q2 = mergeHelper(q)

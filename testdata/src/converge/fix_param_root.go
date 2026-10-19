@@ -36,11 +36,16 @@ func paramCallsIsolated(db *gorm.DB) {
 	paramIsolatedCaller(db.Where("scoped").Session(&gorm.Session{}))
 }
 
-// ParamDiscarded changes its parameter in place.
-func ParamDiscarded(tx *gorm.DB) {
+// paramDiscardedResult changes its parameter in place, and returns a
+// *gorm.DB that carries the change back to its caller (#243).
+func paramDiscardedResult(tx *gorm.DB) *gorm.DB {
 	tx.Where("a")
-	tx.Find(nil)  // want `\*gorm\.DB reused: second branch from mutable root`
-	tx.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	tx.Find(nil)
+	return tx.Where("b") // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+func paramCallsDiscardedResult(db *gorm.DB) {
+	paramDiscardedResult(db.Where("scoped")).Find(nil)
 }
 
 // phiSessionMidChain is the issue's repro: Where after the Session makes the

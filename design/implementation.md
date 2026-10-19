@@ -732,7 +732,9 @@ A parameter root has no call to append a Session to. `Generate` used to declare 
 | `callersAllIsolate`: `calledOnlyDirectly`, and the tracer finds no mutable root in the argument of any call to the function in the pass's source functions | `//gormreuse:immutable-param` |
 | Otherwise | `tx = tx.Session(&gorm.Session{})` before the body's first statement (`paramSessionSite`, written by `sessionEdits` with the same gorm name resolution and import as every other Session), then the rest of the local-root fix |
 
-`calledOnlyDirectly` needs an unexported function, not a method (a method can be called through an interface), whose every reference is the function of a call (`f(x)`, `f[T](x)`, `(f)(x)`). In the Session case the parameter is the reassignment target (`findRootVar` returns its variable), so a discarded `tx.Where("a")` becomes `tx = tx.Where("a")` and keeps its effect. The Session goes at the top of the body, so it also covers uses through an alias.
+`calledOnlyDirectly` needs an unexported function, not a method (a method can be called through an interface), whose every reference is the function of a call (`f(x)`, `f[T](x)`, `(f)(x)`). In the Session case the parameter is the reassignment target (`findRootVar` returns its variable), so a discarded `tx.Where("a")` becomes `tx = tx.Where("a")` and keeps its effect inside the function. The Session goes at the top of the body, so it also covers uses through an alias.
+
+A discarded statement on a parameter also changes the caller's value, and a helper such as `func applyTenant(tx *gorm.DB) { tx.Where("tenant_id = ?", t) }` exists for exactly that. Reassigning it keeps the change inside the function only, and makes the helper lint-clean, so nothing reports the change a caller's Session then drops (#243). `Generate` therefore offers no Session-case fix for a parameter with a discarded statement, unless the function has a `*gorm.DB` result that can carry the change back to the caller.
 
 A function that returns a `*gorm.DB` and may be called by unknown code may be a Scopes callback. A Session result returned from one leaks gorm's transaction (go-gorm/gorm#7592), and the fix does not tell which results are Session results. It gets no fix.
 
@@ -770,6 +772,30 @@ Limitations:
 
 - A discarded statement whose effect no later query sees still blocks the fix, such as a final `q.Where("after")` when a stored closure captures `q` (`whereOnlyStoredClosure` in `evil.go`). Proving that no later use exists would need alias and loop analysis.
 - Other ways of keeping a chain's effect away from its root, such as `_ = q.Where("a")`, are not treated as discarded statements.
+
+## In-Place Changes Outside the Variable (#243)
+
+The #199 rule covers a discarded statement written on the root's variable. Other code can change the root's Statement in place too, and a Session at the root makes it change a copy. The tenant filter of `applyTenant(q, 7); q.Find(&users)` then disappears, and the re-lint is clean. `changedElsewhere` in `internal/fix/generator.go` withholds the whole fix when:
+
+| Case | Example | How it is found |
+| --- | --- | --- |
+| The root is handed to other code, and a later use may see the change | `applyTenant(q)`, `apply(q)` for a closure, `_ = withTenant(q)`, `qs := []*gorm.DB{q}`, `m["q"] = q`, `ch <- q` | `UsageInfo.Escapes`, set by `Tracker.MarkPolluted` (a call argument, slice or map store, send) and by `q = helper(q)`. `escapeSeen` decides whether a later use exists |
+| The `Error`, `RowsAffected` or `Statement` field is read from the root, or from a chain on it that runs no query | `return q.Error`, `if err := q.Where("a").Error; ...`, `q.Where("a").Limit(1).Statement` | A `FieldAddr` in the root's function or its closures, whose operand `readsRootState` walks down a chain of non-finisher, non-Session-family `*gorm.DB` methods to the root |
+| A go statement hands the root to a call | `go applyTenant(q)` | An `*ssa.Go` whose argument traces to the root. The goroutine may change it while the uses after the statement run |
+
+`escapeSeen` keeps the fix of an escape that nothing can observe: the last use of the root, in no loop, when every use is in order (`usesOrdered`). `q.Find(&a); render(q)` keeps its Session. An argument of a call that returns a `*gorm.DB`, other than a `*gorm.DB` method, always counts: `q = withTenant(q)` may return `q` itself, so the uses of its result see the change. A `*gorm.DB` method such as `base.Model(q)` returns a chain on its receiver. Read-only uses do not escape: a subquery (`RecordPureUse`), a `//gormreuse:pure` function, and the `fmt`/`log`/`testing` variadics.
+
+The field read on a finisher's result, as in `q.Where("a").Find(&x).Error`, is that query's own outcome, and keeps the fix. A read of the root's own field counts wherever it is, even before the first use: telling the two apart needs ordering against the closures that may read it.
+
+A reassignment-only fix (`q = q.Where("a")` with no Session) would not change behaviour, since a mutable root's method returns the root itself. It is withheld too: the check runs before the fix is built, and a reassignment whose chain ends in a Session does change the root.
+
+`TestFixEscapePreservesQueries` in `e2e/internal/fix_escape_test.go` runs each case of the issue from `fixsql/before` and `fixsql/after` against real GORM. `TestFixEscapeDetectsSessionAtRoot` checks that the comparison fails for the fixes suggested before. In `ErrorPropagation` a query runs only when `q.Error` holds the error of a failed query, so a lost error shows up as a missing query. `testdata/src/gormreuse/fix_escape.go` holds the fixtures with and without a fix.
+
+Limitations:
+
+- An escape before a later use withholds the fix even when the callee only reads the value, such as `voidFunc(q)` with an empty body, or a `*gorm.DB` method argument (`base.Model(q)`). Mark a read-only helper `//gormreuse:pure`, or pass it an isolated value.
+- A parameter's body Session still drops the in-place changes of the function's queries, such as the errors in the caller's `q.Error` after `helper(q)`. See [Parameter-Root Fix](#parameter-root-fix-201).
+- A deferred call that takes the root, as in `defer applyTenant(q)`, keeps the fix. It runs after every use the fix orders, so only another deferred call could see its change.
 
 ## Where Sessions Go (#202)
 
