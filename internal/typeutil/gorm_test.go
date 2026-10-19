@@ -145,6 +145,43 @@ func TestIsGormDB(t *testing.T) {
 	})
 }
 
+func TestHasGormDBResult(t *testing.T) {
+	t.Parallel()
+
+	gormPkg := types.NewPackage("gorm.io/gorm", "gorm")
+	dbTypeName := types.NewTypeName(0, gormPkg, "DB", nil)
+	dbPtr := types.NewPointer(types.NewNamed(dbTypeName, types.NewStruct(nil, nil), nil))
+	errType := types.Universe.Lookup("error").Type()
+	result := func(ts ...types.Type) *types.Tuple {
+		vars := make([]*types.Var, len(ts))
+		for i, typ := range ts {
+			vars[i] = types.NewVar(0, nil, "", typ)
+		}
+		return types.NewTuple(vars...)
+	}
+
+	tests := []struct {
+		name string
+		typ  types.Type
+		want bool
+	}{
+		{"*gorm.DB", dbPtr, true},
+		{"error", errType, false},
+		{"(*gorm.DB, error)", result(dbPtr, errType), true},
+		{"(error, *gorm.DB)", result(errType, dbPtr), true},
+		{"(int, error)", result(types.Typ[types.Int], errType), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := HasGormDBResult(tt.typ); got != tt.want {
+				t.Errorf("HasGormDBResult(%s) = %v, want %v", tt.typ, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestIsGormDBNamed(t *testing.T) {
 	t.Parallel()
 

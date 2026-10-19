@@ -411,6 +411,9 @@ A closure called from more than one place, deferred, run with `go`, passed to a 
 | Mid-chain ([`Where`](https://pkg.go.dev/gorm.io/gorm#DB.Where), [`Order`](https://pkg.go.dev/gorm.io/gorm#DB.Order), …) | `== 0` | ❌ shares Statement |
 | [`Connection`](https://pkg.go.dev/gorm.io/gorm#DB.Connection) callback `tx` | `== 0` | ❌ shares Statement |
 | A [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) **parameter** | unknown | ❌ treated as mutable |
+| The result of a helper, a func-typed value (`f(db)`) or an interface method (`repo.DB()`), alone or in a tuple such as `(*gorm.DB, error)` | unknown | ❌ treated as mutable, unless the helper is [`//gormreuse:immutable-return`](#gormreuseimmutable-return) |
+
+A repository interface whose method returns a fresh handle is reported when its result is branched twice. No directive applies to an interface method. Isolate the result with `repo.DB().Session(&gorm.Session{})`.
 
 Transaction and FindInBatches callbacks (e.g. `tx` in `db.Transaction(func(tx *gorm.DB) error {...})`) are exempt — their `tx` is a fresh forkable handle. A Connection callback is **not** exempt: gorm passes it a `clone == 0` handle, so branching its `tx` twice is reported. Declare your own such helpers with [`//gormreuse:immutable-input(name)`](#gormreuseimmutable-inputname).
 
@@ -609,6 +612,8 @@ func useIt() {
 
 > [!TIP]
 > Use this directive for DB connection helpers that return a fresh, immutable [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) instance. This allows callers to reuse the returned value freely without worrying about pollution.
+>
+> It also covers a [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) in a multi-value result, such as `func Open() (*gorm.DB, error)`. The body contract applies to that result.
 
 > [!WARNING]
 > **Body contract.** If the function actually returns a *mutable* value, the directive is reported at the declaration — otherwise the linter would trust it and silently allow unsafe reuse of the return value at every call site:

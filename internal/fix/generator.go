@@ -108,6 +108,13 @@ func (g *Generator) Generate(v pollution.Violation) []analysis.SuggestedFix {
 		return g.generateImmutableParamFix(p)
 	}
 
+	// A call with a tuple result, such as q, err := helper(db), is a root whose
+	// value is not the *gorm.DB itself (#176). Appending Session() to it would
+	// not compile, so no fix is offered.
+	if !typeutil.IsGormDB(root.Type()) {
+		return nil
+	}
+
 	allUses := v.AllUses
 	if len(allUses) == 0 {
 		return nil // No uses to fix

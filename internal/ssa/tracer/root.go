@@ -58,6 +58,9 @@
 //	│  User-defined pure call │  Returns call as root (may be mutable),    │
 //	│                         │  or the argument's root when the result    │
 //	│                         │  may be that argument (#188)               │
+//	│  Dynamic/interface call │  Returns call as root (callee unknown)     │
+//	│  *ssa.Extract           │  Trace the tuple: a tuple-result call is   │
+//	│                         │  the root of its *gorm.DB elements         │
 //	└───────────────────────────────────────────────────────────────────────┘
 package tracer
 
@@ -349,10 +352,13 @@ func (t *RootTracer) trace(v ssa.Value, visited map[ssa.Value]bool, loopInfo *cf
 // traceCall handles *ssa.Call values during tracing.
 //
 // Four cases:
-//  1. Pure function whose result may be its argument: trace the argument
+//  1. Pure function whose result (alone or in a tuple) may be its argument:
+//     trace the argument
 //  2. IIFE (Immediately Invoked Function Expression): trace through returns
 //  3. Gorm method call: STOP - this call is the mutable root
-//  4. Non-gorm function returning *gorm.DB: treat as root if not pure
+//  4. Any other call whose result holds a *gorm.DB (alone or in a tuple),
+//     including dynamic and interface calls: treat as root unless the callee
+//     is known to return immutable
 //
 // Example IIFE tracing:
 //
@@ -389,28 +395,27 @@ func (t *RootTracer) traceCall(call *ssa.Call, visited map[ssa.Value]bool, loopI
 	}
 
 	callee := call.Call.StaticCallee()
-	if callee == nil {
-		return nil
+	if callee != nil && isGormDBMethod(callee) {
+		// This is a gorm method call - THIS CALL is the mutable root
+		// Don't trace further - each gorm call result is its own root
+		// This implements "variable assignment creates new root" semantics
+		return call
 	}
 
-	sig := callee.Signature
-	if sig == nil || sig.Recv() == nil || !typeutil.IsGormDB(sig.Recv().Type()) {
-		// Not a gorm method - if it returns *gorm.DB, treat as root
-		if typeutil.IsGormDB(call.Type()) {
-			// Builtin or //gormreuse:immutable-return function returns immutable.
-			if t.returnsImmutable(callee) {
-				return nil
-			}
-			// User-defined pure or non-pure function: treat call as mutable root
-			// (user-defined pure functions may return mutable values)
-			return call
-		}
+	// Not a gorm method: a user function, a dynamic call (a func-typed value)
+	// or an interface method. If its result carries a *gorm.DB, alone or in a
+	// tuple such as (*gorm.DB, error) reached through an Extract, the call is
+	// a mutable root (#176). A dynamic or interface callee is unknown, so its
+	// result is conservatively mutable too.
+	if !typeutil.HasGormDBResult(call.Type()) {
 		return nil
 	}
-
-	// This is a gorm method call - THIS CALL is the mutable root
-	// Don't trace further - each gorm call result is its own root
-	// This implements "variable assignment creates new root" semantics
+	// Builtin or //gormreuse:immutable-return function returns immutable.
+	if t.returnsImmutable(callee) {
+		return nil
+	}
+	// User-defined pure or non-pure function: treat call as mutable root
+	// (user-defined pure functions may return mutable values)
 	return call
 }
 
@@ -1741,8 +1746,12 @@ func builtinCallEffect(call *ssa.Call) typeutil.BuiltinEffect {
 // immutable, or the tracer cannot follow them), the result is immutable only
 // if the function returns nothing else (returnsOnlyParams). Otherwise the call
 // stays its own root: the function may also return a fresh mutable chain.
+//
+// A tuple result such as (*gorm.DB, error) follows the same rule (#176): its
+// *gorm.DB elements share the call as their root, so they are traced to the
+// returned arguments together.
 func (t *RootTracer) pureReturnedArgs(call *ssa.Call) []ssa.Value {
-	if !typeutil.IsGormDB(call.Type()) {
+	if !typeutil.HasGormDBResult(call.Type()) {
 		return nil
 	}
 	callee := call.Call.StaticCallee()
@@ -1769,12 +1778,18 @@ func (t *RootTracer) returnsOnlyParams(fn *ssa.Function) bool {
 	for _, block := range fn.Blocks {
 		for _, instr := range block.Instrs {
 			ret, ok := instr.(*ssa.Return)
-			if !ok || len(ret.Results) == 0 {
+			if !ok {
 				continue
 			}
-			for _, root := range t.traceAll(ret.Results[0], make(map[ssa.Value]bool), nil) {
-				if p, isParam := root.(*ssa.Parameter); !isParam || p.Parent() != fn {
-					only = false
+			// Every *gorm.DB result counts, in any position of a tuple (#176).
+			for _, res := range ret.Results {
+				if !typeutil.IsGormDB(res.Type()) {
+					continue
+				}
+				for _, root := range t.traceAll(res, make(map[ssa.Value]bool), nil) {
+					if p, isParam := root.(*ssa.Parameter); !isParam || p.Parent() != fn {
+						only = false
+					}
 				}
 			}
 		}

@@ -76,6 +76,22 @@ func IsGormDB(t types.Type) bool {
 	return isGormDBNamed(t)
 }
 
+// HasGormDBResult reports whether a call result of type t carries a *gorm.DB:
+// t is *gorm.DB itself, or a tuple (a multi-value result such as
+// (*gorm.DB, error)) with a *gorm.DB element.
+func HasGormDBResult(t types.Type) bool {
+	tuple, ok := t.(*types.Tuple)
+	if !ok {
+		return IsGormDB(t)
+	}
+	for v := range tuple.Variables() {
+		if IsGormDB(v.Type()) {
+			return true
+		}
+	}
+	return false
+}
+
 // IsGormPackage reports whether pkg is exactly the gorm.io/gorm package.
 //
 // This is used to distinguish genuine gorm builtins (e.g. the package-level

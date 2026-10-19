@@ -113,8 +113,9 @@ type callHandler struct{}
 //   - if a { q = q.Where("a"); if b { q = q.Where("b") }; q = q.Where("c") }
 //     → q.Where("a") reaches Phi(q, …) through the inner Phi and q.Where("c")
 //   - q = helper(q)             → same, for a function returning *gorm.DB
+//   - q, err = helper(q)        → same, through the Extract of a tuple result
 //   - for { r.db = r.db.Where() } → the field form of the loop rebuild
-//     (see isLoopFieldRebuild)
+//     (see isLoopFieldRebuild), also as r.db, err = helper(r.db)
 //
 // Non-assignment patterns (pollute root):
 //   - q.Find(nil) → direct use (finisher)
@@ -144,6 +145,11 @@ func isAssignment(call *ssa.Call, root ssa.Value, ctx *Context) bool {
 			case *ssa.Phi:
 				// Control flow merge: q = ... on one path
 				next, merge = u, u
+			case *ssa.Extract:
+				// The *gorm.DB of a tuple result: q, err = helper(q) (#176)
+				if typeutil.IsGormDB(u.Type()) {
+					next = u
+				}
 			case *ssa.Store:
 				// A variable kept in memory, e.g. one captured by a closure. A
 				// store to a FreeVar is the same assignment made from inside
@@ -205,17 +211,22 @@ func isLoopFieldRebuild(call *ssa.Call, ctx *Context) bool {
 	return storesIntoField(call, loadFA)
 }
 
-// storesIntoField reports whether the result of call, directly or at the end of
-// a gorm chain, is stored into the same field as fa.
-func storesIntoField(call *ssa.Call, fa *ssa.FieldAddr) bool {
-	for _, user := range *call.Referrers() {
+// storesIntoField reports whether the result v of a call, directly, through
+// the *gorm.DB Extract of a tuple result (#176), or at the end of a gorm chain,
+// is stored into the same field as fa.
+func storesIntoField(v ssa.Value, fa *ssa.FieldAddr) bool {
+	for _, user := range *v.Referrers() {
 		switch u := user.(type) {
 		case *ssa.Store:
-			if storeFA, ok := u.Addr.(*ssa.FieldAddr); ok && u.Val == call && tracer.SameField(storeFA, fa) {
+			if storeFA, ok := u.Addr.(*ssa.FieldAddr); ok && u.Val == v && tracer.SameField(storeFA, fa) {
+				return true
+			}
+		case *ssa.Extract:
+			if typeutil.IsGormDB(u.Type()) && storesIntoField(u, fa) {
 				return true
 			}
 		case *ssa.Call:
-			if isChainedGormMethodCall(call, u) && storesIntoField(u, fa) {
+			if isChainedGormMethodCall(v, u) && storesIntoField(u, fa) {
 				return true
 			}
 		}
@@ -439,7 +450,8 @@ func (h *callHandler) checkFunctionCallPollution(call *ssa.Call, ctx *Context) {
 	// The assignment creates a new mutable root, so we shouldn't ADD pollution to args.
 	// However, we still need to CHECK if args are already polluted (to detect reuse).
 	// This enables patterns like: q = buildQuery(q, "filter")
-	returnsGormDB := typeutil.IsGormDB(call.Type())
+	// A tuple result such as (*gorm.DB, error) counts too: q, err = helper(q).
+	returnsGormDB := typeutil.HasGormDBResult(call.Type())
 
 	for i, arg := range call.Call.Args {
 		// Check if arg is *gorm.DB (directly or wrapped in MakeInterface)
