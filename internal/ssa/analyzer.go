@@ -40,6 +40,7 @@ import (
 	"golang.org/x/tools/go/ssa"
 
 	"github.com/mpyw/gormreuse/internal/directive"
+	"github.com/mpyw/gormreuse/internal/ssa/callsite"
 	"github.com/mpyw/gormreuse/internal/ssa/cfg"
 	"github.com/mpyw/gormreuse/internal/ssa/handler"
 	"github.com/mpyw/gormreuse/internal/ssa/pollution"
@@ -87,7 +88,7 @@ type Analyzer struct {
 //     It may be nil
 //   - funcVars: Package-level variables that hold one function, so a call through one
 //     honours that function's directives (#183)
-func NewAnalyzer(fn *ssa.Function, pureFuncs, immutableReturnFuncs, immutableParamFuncs *directive.DirectiveFuncSet, pure *tracer.PureVerdicts, scopesCallbacks, immutableCallbacks map[*ssa.Function]bool, needsImmutableParam func(*ssa.Function) bool, funcVars tracer.FuncVars) *Analyzer {
+func NewAnalyzer(fn *ssa.Function, pureFuncs, immutableReturnFuncs, immutableParamFuncs *directive.DirectiveFuncSet, pure *tracer.PureVerdicts, scopesCallbacks, immutableCallbacks map[*ssa.Function]bool, needsImmutableParam func(*ssa.Function) bool, funcVars callsite.FuncVars) *Analyzer {
 	return &Analyzer{
 		fn:                  fn,
 		rootTracer:          tracer.New(pureFuncs, immutableReturnFuncs, immutableParamFuncs, pure, scopesCallbacks, immutableCallbacks, funcVars),

@@ -77,6 +77,7 @@ import (
 
 	"github.com/mpyw/gormreuse/internal/directive"
 	"github.com/mpyw/gormreuse/internal/facts"
+	"github.com/mpyw/gormreuse/internal/ssa/callsite"
 	"github.com/mpyw/gormreuse/internal/ssa/cfg"
 	"github.com/mpyw/gormreuse/internal/ssa/pollutionsource"
 	"github.com/mpyw/gormreuse/internal/typeutil"
@@ -117,7 +118,7 @@ type RootTracer struct {
 	scopesCallbacks      map[*ssa.Function]bool      // Scopes/Preload callbacks (params are mutable roots)
 	immutableCallbacks   map[*ssa.Function]bool      // Transaction/FindInBatches callbacks (fresh tx)
 	fieldRoots           map[fieldRootKey]*FieldRoot // Interned FieldRoots (one per call and field path)
-	funcVars             FuncVars                    // Package-level variables that hold one function (#183)
+	funcVars             callsite.FuncVars           // Package-level variables that hold one function (#183)
 }
 
 // PureVerdicts is what validating the //gormreuse:pure functions found. The
@@ -202,7 +203,7 @@ func (p *PureVerdicts) ReturnedArgs(fn *ssa.Function, args []ssa.Value) []ssa.Va
 //
 // funcVars resolves a call through a package-level variable that holds one
 // function to that function, so its directives apply (#183). It may be nil.
-func New(pureFuncs, immutableReturnFuncs, immutableParamFuncs *directive.DirectiveFuncSet, pure *PureVerdicts, scopesCallbacks, immutableCallbacks map[*ssa.Function]bool, funcVars FuncVars) *RootTracer {
+func New(pureFuncs, immutableReturnFuncs, immutableParamFuncs *directive.DirectiveFuncSet, pure *PureVerdicts, scopesCallbacks, immutableCallbacks map[*ssa.Function]bool, funcVars callsite.FuncVars) *RootTracer {
 	return &RootTracer{
 		pureFuncs:            pureFuncs,
 		immutableReturnFuncs: immutableReturnFuncs,
@@ -279,11 +280,10 @@ func (t *RootTracer) IsPureFunction(fn *ssa.Function) bool {
 	return t.pureFuncs.Contains(fn)
 }
 
-// Callee returns the function that common calls: its static callee, or the
-// function a package-level variable holds (see FuncVars). It returns nil when
-// neither is known.
-func (t *RootTracer) Callee(common *ssa.CallCommon) *ssa.Function {
-	return t.funcVars.Callee(common)
+// Site reads instr as a callsite.Site, resolving a call through a
+// package-level variable that holds one function (#183).
+func (t *RootTracer) Site(instr ssa.CallInstruction) callsite.Site {
+	return callsite.SiteOf(instr, t.funcVars)
 }
 
 // IsScopesCallbackFunc reports whether fn is a Scopes/Preload callback. The
@@ -406,35 +406,34 @@ func (t *RootTracer) trace(v ssa.Value, visited map[ssa.Value]bool, loopInfo *cf
 //	      │                        └─── Inner call is traced
 //	      └─── Outer IIFE call triggers traceIIFEReturns
 func (t *RootTracer) traceCall(call *ssa.Call, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) ssa.Value {
+	site := t.Site(call)
+
 	// The result of a pure function may be its argument (#188).
-	if args := t.pureReturnedArgs(call); len(args) > 0 {
+	if args := t.pureReturnedArgs(site); len(args) > 0 {
 		for _, arg := range args {
 			if root := t.trace(arg, cloneVisited(visited), loopInfo); root != nil {
 				return root
 			}
 		}
-		if callee, _, _ := t.calledFunc(call); t.returnsOnlyParams(callee) {
+		if t.returnsOnlyParams(site.Declared) {
 			return nil
 		}
 	}
 
 	// Handle closures (IIFE)
-	if mc, ok := call.Call.Value.(*ssa.MakeClosure); ok && !isMethodValueCall(call) {
-		if closureFn, ok := mc.Fn.(*ssa.Function); ok {
-			if root := t.traceIIFEReturns(closureFn, visited, loopInfo); root != nil {
-				// If closure result is stored in a variable (Extract instruction),
-				// treat each call as independent root.
-				// Only trace through IIFE when result is directly chained.
-				if isClosureResultStored(call) {
-					return call
-				}
-				return root
+	if site.Kind == callsite.SiteClosure {
+		if root := t.traceIIFEReturns(site.Callee, visited, loopInfo); root != nil {
+			// If closure result is stored in a variable (Extract instruction),
+			// treat each call as independent root.
+			// Only trace through IIFE when result is directly chained.
+			if isClosureResultStored(call) {
+				return call
 			}
+			return root
 		}
 	}
 
-	callee, _, _ := t.calledFunc(call)
-	if callee != nil && isGormDBMethod(callee) {
+	if site.IsGormMethod() {
 		// This is a gorm method call - THIS CALL is the mutable root
 		// Don't trace further - each gorm call result is its own root
 		// This implements "variable assignment creates new root" semantics
@@ -450,7 +449,7 @@ func (t *RootTracer) traceCall(call *ssa.Call, visited map[ssa.Value]bool, loopI
 		return nil
 	}
 	// Builtin or //gormreuse:immutable-return function returns immutable.
-	if t.returnsImmutable(callee) {
+	if t.returnsImmutable(site.Declared) {
 		return nil
 	}
 	// User-defined pure or non-pure function: treat call as mutable root
@@ -1369,7 +1368,7 @@ type fieldRootKey struct {
 // the call returns immutable values (a builtin or //gormreuse:immutable-return
 // function).
 func (t *RootTracer) internFieldRoot(r *FieldRoot) ssa.Value {
-	if callee, _, _ := t.calledFunc(r.Call); t.returnsImmutable(callee) {
+	if t.returnsImmutable(t.Site(r.Call).Declared) {
 		return nil
 	}
 	key := fieldRootKey{call: r.Call, path: r.pathString()}
@@ -1833,8 +1832,9 @@ func (t *RootTracer) traceAll(v ssa.Value, visited map[ssa.Value]bool, loopInfo 
 		// The result of a pure function may be any argument it returns (#188).
 		// Like a Session result, a call that trace() finds immutable may stay
 		// in this list: nothing branches it, so it is never polluted.
+		site := t.Site(val)
 		var argRoots []ssa.Value
-		for _, arg := range t.pureReturnedArgs(val) {
+		for _, arg := range t.pureReturnedArgs(site) {
 			argRoots = append(argRoots, t.traceAll(arg, cloneVisited(visited), loopInfo)...)
 		}
 		if len(argRoots) > 0 {
@@ -1842,15 +1842,13 @@ func (t *RootTracer) traceAll(v ssa.Value, visited map[ssa.Value]bool, loopInfo 
 		}
 		// Handle closure calls (IIFE) - collect ALL roots from all returns. A
 		// call through a method value is a call of its own (see traceCall).
-		if mc, ok := val.Call.Value.(*ssa.MakeClosure); ok && !isMethodValueCall(val) {
-			if closureFn, ok := mc.Fn.(*ssa.Function); ok {
-				if roots := t.traceAllIIFEReturns(closureFn, visited, loopInfo); len(roots) > 0 {
-					// If closure result is stored, treat call itself as root
-					if isClosureResultStored(val) {
-						return []ssa.Value{val}
-					}
-					return roots
+		if site.Kind == callsite.SiteClosure {
+			if roots := t.traceAllIIFEReturns(site.Callee, visited, loopInfo); len(roots) > 0 {
+				// If closure result is stored, treat call itself as root
+				if isClosureResultStored(val) {
+					return []ssa.Value{val}
 				}
+				return roots
 			}
 		}
 		// Non-closure call - treat as potential root
@@ -2019,11 +2017,11 @@ func (t *RootTracer) isImmutableSource(v ssa.Value) bool {
 		// Builtin or //gormreuse:immutable-return call yields an immutable value,
 		// except a Session call that may set Initialized: it returns a clone==0
 		// handle, so the call is a mutable root like a chain method (#174).
-		callee, _, _ := t.calledFunc(val)
-		if t.isImmutableReturningBuiltin(callee) {
-			return !t.builtinCallEffect(val).ReturnsMutable
+		site := t.Site(val)
+		if t.isImmutableReturningBuiltin(site.Declared) {
+			return !t.builtinCallEffect(site).ReturnsMutable
 		}
-		return t.returnsImmutable(callee)
+		return t.returnsImmutable(site.Declared)
 	default:
 		return false
 	}
@@ -2103,81 +2101,45 @@ func (t *RootTracer) collectAliasedRoots(v ssa.Value, loopInfo *cfg.LoopInfo, co
 		}
 		// A call through a method value (w := q.Where; w(x, sub)) is read as
 		// the method call it stands for (#178).
-		callee, recv, args := t.calledFunc(call)
-		if callee == nil || !isGormDBMethod(callee) || recv == nil {
+		site := t.Site(call)
+		if !site.IsGormMethod() || site.Recv == nil {
 			continue
 		}
 		seen[aliasVisit{call, copies}] = true
-		isCopy := copies && t.sharesReceiverStatement(call)
+		isCopy := copies && t.sharesReceiverStatement(site)
 		if isCopy {
-			if r := t.FindMutableRoot(recv, loopInfo); r != nil {
+			if r := t.FindMutableRoot(site.Recv, loopInfo); r != nil {
 				*roots = append(*roots, AliasedRoot{Root: r, Copy: call})
 			}
 		}
-		for _, arg := range pollutionsource.ReadOnlyGormArgs(callee, args) {
+		for _, arg := range pollutionsource.ReadOnlyGormArgs(site.Declared, site.Args) {
 			if r := t.FindMutableRoot(arg, loopInfo); r != nil {
 				*roots = append(*roots, AliasedRoot{Root: r, Copy: call, Argument: true})
 			}
 			t.collectAliasedRoots(arg, loopInfo, true, seen, roots)
 		}
-		t.collectAliasedRoots(recv, loopInfo, isCopy, seen, roots)
+		t.collectAliasedRoots(site.Recv, loopInfo, isCopy, seen, roots)
 	}
 }
 
-// sharesReceiverStatement reports whether call is a gorm Session or Debug
+// sharesReceiverStatement reports whether site is a gorm Session or Debug
 // method call whose result may share its receiver's Statement.
-func (t *RootTracer) sharesReceiverStatement(call *ssa.Call) bool {
-	callee, recv, _ := t.calledFunc(call)
-	if !t.isImmutableReturningBuiltin(callee) || recv == nil {
+func (t *RootTracer) sharesReceiverStatement(site callsite.Site) bool {
+	if !t.isImmutableReturningBuiltin(site.Declared) || site.Recv == nil {
 		return false
 	}
-	return t.builtinCallEffect(call).SharesStatement
+	return t.builtinCallEffect(site).SharesStatement
 }
 
 // builtinCallEffect returns the effect of a call to a gorm builtin, passing
 // the *gorm.Session argument of a Session method call. The caller must make
 // sure the callee is a gorm builtin.
-func (t *RootTracer) builtinCallEffect(call *ssa.Call) typeutil.BuiltinEffect {
-	callee, _, args := t.calledFunc(call)
+func (t *RootTracer) builtinCallEffect(site callsite.Site) typeutil.BuiltinEffect {
 	var sessionConfig ssa.Value
-	if len(args) > 0 {
-		sessionConfig = args[0]
+	if len(site.Args) > 0 {
+		sessionConfig = site.Args[0]
 	}
-	return typeutil.ImmutableBuiltinEffect(callee.Name(), sessionConfig)
-}
-
-// calledFunc returns the function call runs, its receiver, and its other
-// arguments. For a static method call r.m(x) that is m, r and [x]; for a
-// static function call f(x) it is f, nil and [x].
-//
-// A call through a method value (f := r.m; f(x)) is resolved the same way as
-// r.m(x): SSA builds f as MakeClosure(m$bound, [r]), so the receiver is the
-// closure's binding and the method is the one the synthetic wrapper stands
-// for (directive.DeclaredFunc). Without this, the wrapper's own m call would
-// be the root of every call through f (#178). A call through a package-level
-// variable that holds one function is resolved to it (see FuncVars, #183). The
-// callee is nil for any other dynamic call.
-func (t *RootTracer) calledFunc(call *ssa.Call) (callee *ssa.Function, recv ssa.Value, args []ssa.Value) {
-	if isMethodValueCall(call) {
-		mc := call.Call.Value.(*ssa.MakeClosure)
-		return directive.DeclaredFunc(mc.Fn.(*ssa.Function)), mc.Bindings[0], call.Call.Args
-	}
-	callee = t.Callee(&call.Call)
-	if callee != nil && callee.Signature.Recv() != nil && len(call.Call.Args) > 0 {
-		return callee, call.Call.Args[0], call.Call.Args[1:]
-	}
-	return callee, nil, call.Call.Args
-}
-
-// isMethodValueCall reports whether call calls a method value directly: its
-// callee is a MakeClosure over a synthetic "m$bound" wrapper.
-func isMethodValueCall(call *ssa.Call) bool {
-	mc, ok := call.Call.Value.(*ssa.MakeClosure)
-	if !ok || len(mc.Bindings) == 0 {
-		return false
-	}
-	fn, ok := mc.Fn.(*ssa.Function)
-	return ok && fn.Synthetic != "" && strings.HasSuffix(fn.Name(), "$bound")
+	return typeutil.ImmutableBuiltinEffect(site.Declared.Name(), sessionConfig)
 }
 
 // pureReturnedArgs returns the arguments of a call to a trusted
@@ -2192,18 +2154,18 @@ func isMethodValueCall(call *ssa.Call) bool {
 // A tuple result such as (*gorm.DB, error) follows the same rule (#176): its
 // *gorm.DB elements share the call as their root, so they are traced to the
 // returned arguments together.
-func (t *RootTracer) pureReturnedArgs(call *ssa.Call) []ssa.Value {
-	if !typeutil.HasGormDBResult(call.Type()) {
+func (t *RootTracer) pureReturnedArgs(site callsite.Site) []ssa.Value {
+	if !typeutil.HasGormDBResult(site.Instr.(*ssa.Call).Type()) {
 		return nil
 	}
 	// A call through a method value passes its receiver as a binding, not
 	// as an argument; put it back so a pure method returning it is followed.
-	callee, recv, args := t.calledFunc(call)
-	if recv != nil {
-		args = append([]ssa.Value{recv}, args...)
+	args := site.Args
+	if site.Recv != nil {
+		args = append([]ssa.Value{site.Recv}, args...)
 	}
-	args = t.pure.ReturnedArgs(callee, args)
-	if len(args) == 0 || !t.IsPureFunction(callee) {
+	args = t.pure.ReturnedArgs(site.Declared, args)
+	if len(args) == 0 || !t.IsPureFunction(site.Declared) {
 		return nil
 	}
 	return args
@@ -2321,7 +2283,10 @@ func CollectScopesOnlyCallbacks(funcs []*ssa.Function) map[*ssa.Function]bool {
 // treatment (#60 SC103, #62).
 func CollectImmutableCallbacks(funcs []*ssa.Function) map[*ssa.Function]bool {
 	set := make(map[*ssa.Function]bool)
-	walkCalls(funcs, func(call *ssa.CallCommon) {
+	// Go and defer statements count too: the callee hands the callback the
+	// same value however the callee itself is invoked (#256).
+	callsite.EachSite(funcs, nil, func(s callsite.Site) {
+		call := s.Instr.Common()
 		collectImmutableCallbacksFromCall(call, set)
 	})
 	return set
@@ -2336,7 +2301,10 @@ func CollectImmutableInputCallbacks(funcs []*ssa.Function, set *directive.Immuta
 	if set == nil || into == nil {
 		return
 	}
-	walkCalls(funcs, func(call *ssa.CallCommon) {
+	// Go and defer statements count too: the callee hands the callback the
+	// same value however the callee itself is invoked (#256).
+	callsite.EachSite(funcs, nil, func(s callsite.Site) {
+		call := s.Instr.Common()
 		callee := call.StaticCallee()
 		if callee == nil {
 			return
@@ -2403,7 +2371,7 @@ func DropReachableCallbacks(funcs []*ssa.Function, inputs *directive.ImmutableIn
 		}
 	}
 	var invoked []string
-	walkInstrs(scan, func(instr ssa.Instruction) {
+	callsite.WalkInstrs(scan, func(instr ssa.Instruction) {
 		if call, ok := instr.(ssa.CallInstruction); ok && call.Common().IsInvoke() {
 			invoked = append(invoked, call.Common().Method.Name())
 		}
@@ -2604,119 +2572,16 @@ func cloneVisited(visited map[ssa.Value]bool) map[ssa.Value]bool {
 	return clone
 }
 
-// walkCalls visits the call of every call, go and defer statement in funcs and
-// their nested anonymous functions exactly once. Shared by the Scopes/Preload,
-// Transaction and immutable-input callback collectors: the callee hands the
-// callback the same value however the callee itself is invoked (#256).
-func walkCalls(funcs []*ssa.Function, visit func(*ssa.CallCommon)) {
-	walkInstrs(funcs, func(instr ssa.Instruction) {
-		if call, ok := instr.(ssa.CallInstruction); ok {
-			visit(call.Common())
-		}
-	})
-}
-
-// walkInstrs visits every instruction in funcs and their nested anonymous
-// functions, visiting each function exactly once.
-func walkInstrs(funcs []*ssa.Function, visit func(ssa.Instruction)) {
-	visited := make(map[*ssa.Function]bool)
-	var rec func(fn *ssa.Function)
-	rec = func(fn *ssa.Function) {
-		if fn == nil || visited[fn] {
-			return
-		}
-		visited[fn] = true
-		for _, block := range fn.Blocks {
-			for _, instr := range block.Instrs {
-				visit(instr)
-			}
-		}
-		for _, af := range fn.AnonFuncs {
-			rec(af)
-		}
-	}
-	for _, fn := range funcs {
-		rec(fn)
-	}
-}
-
-// FuncVars maps each package-level variable that always holds one function to
-// that function, such as `var helper = func(db *gorm.DB) { ... }` (#183). A
-// call through such a variable has no static callee, so without this map it
-// would carry none of the directives written on the closure.
-//
-// A variable is in the map only when the package stores to it exactly once, the
-// stored value is a function, its address is used only to load and store it,
-// and it is unexported. Any other variable may hold another function when it
-// is called: a second assignment, a write through a pointer, or, for an
-// exported one, an assignment in another package.
-type FuncVars map[*ssa.Global]*ssa.Function
-
-// CollectFuncVars builds the FuncVars of the package that funcs belong to.
-// funcs must hold every function of the package with a body, including the
-// package initializer, which runs package-level `var x = ...` initializers.
-// Nested anonymous functions are visited too.
-func CollectFuncVars(funcs []*ssa.Function) FuncVars {
-	stored := make(map[*ssa.Global][]ssa.Value)
-	escaped := make(map[*ssa.Global]bool)
-	walkInstrs(funcs, func(instr ssa.Instruction) {
-		switch x := instr.(type) {
-		case *ssa.Store:
-			if g, ok := x.Addr.(*ssa.Global); ok {
-				stored[g] = append(stored[g], x.Val)
-			}
-			if g, ok := x.Val.(*ssa.Global); ok {
-				escaped[g] = true
-			}
-			return
-		case *ssa.UnOp:
-			if x.Op == token.MUL {
-				return
-			}
-		case *ssa.DebugRef:
-			return
-		}
-		for _, op := range instr.Operands(nil) {
-			if g, ok := (*op).(*ssa.Global); ok {
-				escaped[g] = true
-			}
-		}
-	})
-
-	vars := make(FuncVars)
-	for g, vals := range stored {
-		if escaped[g] || len(vals) != 1 || g.Object() == nil || g.Object().Exported() {
-			continue
-		}
-		if fn, ok := vals[0].(*ssa.Function); ok {
-			vars[g] = fn
-		}
-	}
-	return vars
-}
-
-// Callee returns the function that common calls: its static callee, or the
-// function held by the package-level variable it loads. It returns nil when
-// neither is known.
-func (vars FuncVars) Callee(common *ssa.CallCommon) *ssa.Function {
-	if fn := common.StaticCallee(); fn != nil {
-		return fn
-	}
-	if load, ok := common.Value.(*ssa.UnOp); ok && load.Op == token.MUL {
-		if g, ok := load.X.(*ssa.Global); ok {
-			return vars[g]
-		}
-	}
-	return nil
-}
-
 // collectCallbacksPassedTo returns every function passed as a variadic
 // callback to a call whose static callee satisfies match, resolved by a
 // scopesCallbackResolver.
 func collectCallbacksPassedTo(funcs []*ssa.Function, match func(*ssa.Function) bool) map[*ssa.Function]bool {
 	set := make(map[*ssa.Function]bool)
 	r := &scopesCallbackResolver{funcs: funcs, set: set, seen: make(map[ssa.Value]bool)}
-	walkCalls(funcs, func(call *ssa.CallCommon) {
+	// Go and defer statements count too: the callee hands the callback the
+	// same value however the callee itself is invoked (#256).
+	callsite.EachSite(funcs, nil, func(s callsite.Site) {
+		call := s.Instr.Common()
 		callee := call.StaticCallee()
 		if callee == nil || !match(callee) {
 			return
@@ -2863,7 +2728,7 @@ func (r *scopesCallbackResolver) globalStoredValues(g *ssa.Global) []ssa.Value {
 				funcs = append(funcs, init)
 			}
 		}
-		walkInstrs(funcs, func(instr ssa.Instruction) {
+		callsite.WalkInstrs(funcs, func(instr ssa.Instruction) {
 			if store, ok := instr.(*ssa.Store); ok {
 				if sg, ok := store.Addr.(*ssa.Global); ok {
 					r.globalStores[sg] = append(r.globalStores[sg], store.Val)

@@ -95,7 +95,7 @@ A `*gorm.DB` passed as an argument of a query method used to count as a branch, 
 | Group condition `Where(sub)`, `Or(sub)`, `Not(sub)` | At the call | `BuildCondition` copies the `WHERE` expressions. It also runs `sub`'s pending `Scopes`. Running them on a `clone == 0` value changes it in place, but a second run finds them already applied, so the result is the same |
 | `Joins("Company", cond)` | At the call | `joins` copies `Selects`, `Omits` and the `WHERE` clause |
 
-`pollutionsource.readOnlyArgMethods` lists the methods and the first parameter that only reads. Every later parameter reads too. `Find`/`First`/`Last`/`Take`/`Delete` take a destination or model first, which GORM writes to or parses, so that parameter is not in the list. Neither are `Model`, `Order`, `Clauses`, `Assign`, `Attrs`, `FirstOrInit` and `FirstOrCreate`. A call through a method value (`where := db.Where; where("id IN (?)", sub)`) is read as the method call it stands for: `collectAliasedRoots` resolves it with `calledFunc`, and `pollutionsource.CallReadOnlyArgs` does the same for the handler and `Leak` (#178).
+`pollutionsource.readOnlyArgMethods` lists the methods and the first parameter that only reads. Every later parameter reads too. `Find`/`First`/`Last`/`Take`/`Delete` take a destination or model first, which GORM writes to or parses, so that parameter is not in the list. Neither are `Model`, `Order`, `Clauses`, `Assign`, `Attrs`, `FirstOrInit` and `FirstOrCreate`. A call through a method value (`where := db.Where; where("id IN (?)", sub)`) is read as the method call it stands for: `collectAliasedRoots` resolves it with `callsite.Site`, and `pollutionsource.CallReadOnlyArgs` does the same for the handler and `Leak` (#178).
 
 The model, as the issue proposed: an argument is a read at some point between the call and the end of the outer chain.
 
@@ -236,7 +236,11 @@ gormreuse/
 │   ├── typeutil/gorm.go         # IsGormDB, IsImmutableReturningBuiltin, ImmutableBuiltinEffect
 │   └── ssa/
 │       ├── analyzer.go          # Per-function Analyzer: tracking, then detection
-│       ├── tracer/root.go       # RootTracer: mutable roots, aliases, callbacks, FuncVars
+│       ├── callsite/            # What a call, go or defer instruction runs
+│       │   ├── site.go          # Site, SiteOf, EachSite: callee, receiver, arguments
+│       │   ├── funcvar.go       # FuncVars: package-level variables that hold one function
+│       │   └── walk.go          # WalkInstrs: every instruction, nested closures included
+│       ├── tracer/root.go       # RootTracer: mutable roots, aliases, callbacks
 │       ├── pollution/tracker.go # Tracker: records uses, DetectViolations
 │       ├── pollutionsource/     # Which uses leak a *gorm.DB; read-only query arguments
 │       ├── cfg/analyzer.go      # Loops and reachability
@@ -480,7 +484,7 @@ Limitation: every `*gorm.DB` element of one tuple shares the call as its root. `
 
 ### Calls through a method value (#178)
 
-The tracer resolves a call `w(x)` through a method value `w := r.m` as the call `r.m(x)`. `calledFunc` returns the declared method (`directive.DeclaredFunc` of the `m$bound` wrapper), the receiver (`MakeClosure.Bindings[0]`), and the other arguments. `traceCall`, `traceAll`, `isImmutableSource`, `pureReturnedArgs` and the Session/Debug copy checks (`sharesReceiverStatement`, `builtinCallEffect`, `collectAliasedRoots`) all read the call through it. So:
+The tracer resolves a call `w(x)` through a method value `w := r.m` as the call `r.m(x)`. `callsite.SiteOf` reads it as a `SiteBound` site: `Declared` is the declared method (`directive.DeclaredFunc` of the `m$bound` wrapper), `Recv` the receiver (`MakeClosure.Bindings[0]`), and `Args` the other arguments. `traceCall`, `traceAll`, `isImmutableSource`, `pureReturnedArgs` and the Session/Debug copy checks (`sharesReceiverStatement`, `builtinCallEffect`, `collectAliasedRoots`) all read the call through it. So:
 
 | Code | Result |
 | --- | --- |
@@ -596,7 +600,7 @@ Limitations:
 **Package-level closures.** buildssa puts only declared functions and their literals in `SrcFuncs`. The closure of `var f = func(...)` belongs to the synthetic package `init`, so before #183 its body was never analyzed, a `//gormreuse:pure` on it was never validated, and a call through `f` carried none of its directives. Now:
 
 - `analyzedFuncs` adds the anonymous functions of `init`, nested ones included, to every pass. Their bodies get reuse detection and directive validation like any closure.
-- `tracer.CollectFuncVars` maps a variable to its closure, and `FuncVars.Callee` resolves a call through it. The tracer, the call handler (plain, `go` and `defer` calls) and the pure validator use it, so `pure`, `immutable-return` and the `immutable-param` caller contract apply at the call site.
+- `callsite.CollectFuncVars` maps a variable to its closure, and `FuncVars.Callee` resolves a call through it (`callsite.SiteOf` reads such a call as a `SiteFuncVar` site). The tracer, the call handler (plain, `go` and `defer` calls) and the pure validator use it, so `pure`, `immutable-return` and the `immutable-param` caller contract apply at the call site.
 
 A variable is resolved only when the package stores to it once, the stored value is a function, its address is used only to load and store it, and it is unexported. Otherwise the call may run another function: a second assignment, a write through a pointer, or an assignment in another package. An unresolved call stays a dynamic call: it pollutes its arguments, and its result is a mutable root (#176).
 

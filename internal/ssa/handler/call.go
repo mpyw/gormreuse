@@ -441,7 +441,7 @@ func (h *callHandler) processBoundMethodCall(call *ssa.Call, mc *ssa.MakeClosure
 //	pureHelper(q)  // does NOT pollute
 //	q.Count(nil)   // OK (first use)
 func (h *callHandler) checkFunctionCallPollution(call *ssa.Call, ctx *Context) {
-	callee := ctx.RootTracer.Callee(&call.Call)
+	callee := ctx.RootTracer.Site(call).Callee
 
 	// A Session/Debug copy passed to a function may be read there, pure or not.
 	// The receiver of a gorm method is handled in handle.
@@ -594,7 +594,7 @@ type goHandler struct{}
 // handle processes a Go instruction.
 func (h *goHandler) handle(g *ssa.Go, ctx *Context) {
 	block := g.Block()
-	processGormDBCallCommonWith(&g.Call, g.Pos(), block, ctx, func(root ssa.Value) bool {
+	processGormDBCallCommonWith(g, block, ctx, func(root ssa.Value) bool {
 		return ctx.Tracker.IsPollutedAt(root, block)
 	})
 }
@@ -605,7 +605,7 @@ type deferHandler struct{}
 // handle processes a Defer instruction.
 // Defer uses IsPollutedAnywhere because it executes at function exit.
 func (h *deferHandler) handle(d *ssa.Defer, ctx *Context) {
-	processGormDBCallCommonWith(&d.Call, d.Pos(), d.Block(), ctx, func(root ssa.Value) bool {
+	processGormDBCallCommonWith(d, d.Block(), ctx, func(root ssa.Value) bool {
 		return ctx.Tracker.IsPollutedAnywhere(root)
 	})
 }
@@ -760,8 +760,9 @@ func DispatchGo(g *ssa.Go, ctx *Context) {
 // observe an earlier one, so patterns whose ONLY uses are deferred/spawned —
 // e.g. `defer q.Find(nil); defer q.Count(nil)` — are detected. Branch uses are
 // excluded from position-ordered detection (see pollution.Tracker.branchUses).
-func processGormDBCallCommonWith(callCommon *ssa.CallCommon, pos token.Pos, block *ssa.BasicBlock, ctx *Context, isPolluted pollutionChecker) {
-	callee := ctx.RootTracer.Callee(callCommon)
+func processGormDBCallCommonWith(instr ssa.CallInstruction, block *ssa.BasicBlock, ctx *Context, isPolluted pollutionChecker) {
+	callCommon, pos := instr.Common(), instr.Pos()
+	callee := ctx.RootTracer.Site(instr).Callee
 	if callee == nil {
 		return
 	}
