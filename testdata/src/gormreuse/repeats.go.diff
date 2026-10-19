@@ -1,0 +1,295 @@
+--- repeats.go	1970-01-01 00:00:00
++++ repeats.go.golden	1970-01-01 00:00:00
+@@ -1,278 +1,278 @@
+ package internal
+ 
+ import "gorm.io/gorm"
+ 
+ // =============================================================================
+ // Uses that run more than once (#249, #252)
+ //
+ // A use that may run more than once for one run of its root's definition
+ // reuses the root, even when the source has only one use. That is so for a
+ // use in a loop that does not define the root, and for a use in a closure
+ // that may run more than once: it is called at two sites, or called, spawned,
+ // deferred, stored or passed to another function inside such a loop.
+ // =============================================================================
+ 
+ // repeatsGroup stands in for errgroup.Group: Go runs f in a goroutine.
+ type repeatsGroup struct{}
+ 
+ func (*repeatsGroup) Go(f func() error) { go func() { _ = f() }() }
+ 
+ // --- A closure that runs more than once (#249) ---
+ 
+ func repeatsClosureCalledTwice(db *gorm.DB) {
+-	q := db.Where("x")
++	q := db.Where("x").Session(&gorm.Session{})
+ 	f := func() {
+ 		q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ 	}
+ 	f()
+ 	f()
+ }
+ 
+ func repeatsClosurePassedTwice(db *gorm.DB) {
+-	q := db.Where("x")
++	q := db.Where("x").Session(&gorm.Session{})
+ 	var g repeatsGroup
+ 	f := func() error {
+ 		return q.Find(nil).Error // want `\*gorm\.DB reused: second branch from mutable root`
+ 	}
+ 	g.Go(f)
+ 	g.Go(f)
+ }
+ 
+ func repeatsClosureCalledInLoop(db *gorm.DB, ids []int) {
+-	q := db.Where("x")
++	q := db.Where("x").Session(&gorm.Session{})
+ 	f := func() {
+ 		q.Find(nil)
+ 	}
+ 	for range ids {
+ 		f() // want `\*gorm\.DB reused: second branch from mutable root`
+ 	}
+ }
+ 
+ func repeatsGoInLoop(db *gorm.DB, ids []int) {
+ 	q := db.Where("x")
+ 	for range ids {
+ 		go q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ 	}
+ }
+ 
+ func repeatsDeferInLoop(db *gorm.DB, ids []int) {
+ 	q := db.Where("x")
+ 	for range ids {
+ 		defer q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ 	}
+ }
+ 
+ func repeatsErrgroupInLoop(db *gorm.DB, ids []int) {
+-	q := db.Where("x")
++	q := db.Where("x").Session(&gorm.Session{})
+ 	var g repeatsGroup
+ 	for _, id := range ids {
+ 		g.Go(func() error {
+ 			return q.Where("id = ?", id).Find(nil).Error // want `\*gorm\.DB reused: second branch from mutable root`
+ 		})
+ 	}
+ }
+ 
+ func repeatsIIFEInLoop(db *gorm.DB, ids []int) {
+-	q := db.Where("x")
++	q := db.Where("x").Session(&gorm.Session{})
+ 	for range ids {
+ 		func() {
+ 			q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ 		}()
+ 	}
+ }
+ 
+ func repeatsGoClosureInLoop(db *gorm.DB, ids []int) {
+-	q := db.Where("x")
++	q := db.Where("x").Session(&gorm.Session{})
+ 	for range ids {
+ 		go func() {
+ 			q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ 		}()
+ 	}
+ }
+ 
+ func repeatsDeferClosureInLoop(db *gorm.DB, ids []int) {
+-	q := db.Where("x")
++	q := db.Where("x").Session(&gorm.Session{})
+ 	for range ids {
+ 		defer func() {
+ 			q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ 		}()
+ 	}
+ }
+ 
+ // A closure inside a closure that is called twice runs twice too.
+ func repeatsNestedClosureCalledTwice(db *gorm.DB) {
+-	q := db.Where("x")
++	q := db.Where("x").Session(&gorm.Session{})
+ 	f := func() {
+ 		func() {
+ 			q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ 		}()
+ 	}
+ 	f()
+ 	f()
+ }
+ 
+ // A closure called through a captured variable is followed through it.
+ func repeatsCapturedClosureCalledTwice(db *gorm.DB) {
+-	q := db.Where("x")
++	q := db.Where("x").Session(&gorm.Session{})
+ 	f := func() {
+ 		q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ 	}
+ 	g := func() { f() }
+ 	f()
+ 	g()
+ }
+ 
+ // --- A closure that runs at most once ---
+ 
+ // One call at each of two exclusive branches runs once.
+ func repeatsClosureCalledOnEachBranch(db *gorm.DB, c bool) {
+ 	q := db.Where("x")
+ 	f := func() {
+ 		q.Find(nil)
+ 	}
+ 	if c {
+ 		f()
+ 	} else {
+ 		f()
+ 	}
+ }
+ 
+ // Passed once to another function outside a loop: it is not known to run
+ // more than once.
+ func repeatsClosurePassedOnce(db *gorm.DB) {
+ 	q := db.Where("x")
+ 	var g repeatsGroup
+ 	g.Go(func() error {
+ 		return q.Find(nil).Error
+ 	})
+ }
+ 
+ // repeatsClosurePassedToRepeater: [LIMITATION] each runs f many times, but a
+ // closure passed once to another function outside a loop is taken to run
+ // once.
+ func repeatsClosurePassedToRepeater(db *gorm.DB, ids []int) {
+ 	q := db.Where("x")
+ 	repeatsEach(ids, func(int) {
+ 		q.Find(nil)
+ 	})
+ }
+ 
+ func repeatsEach(ids []int, f func(int)) {
+ 	for _, id := range ids {
+ 		f(id)
+ 	}
+ }
+ 
+ // A root defined in the loop body is a new root on each iteration.
+ func repeatsClosureRootInLoop(db *gorm.DB, ids []int) {
+ 	for range ids {
+ 		q := db.Session(&gorm.Session{}).Where("x")
+ 		func() {
+ 			q.Find(nil)
+ 		}()
+ 	}
+ }
+ 
+ // A root defined in a closure called twice is a new root on each call.
+ func repeatsClosureOwnRoot(db *gorm.DB) {
+ 	f := func() {
+ 		q := db.Session(&gorm.Session{}).Where("x")
+ 		q.Find(nil)
+ 	}
+ 	f()
+ 	f()
+ }
+ 
+ // A closure called twice only reads a Session copy.
+ func repeatsClosureSessionCopy(db *gorm.DB) {
+ 	q := db.Where("x").Session(&gorm.Session{})
+ 	f := func() {
+ 		q.Find(nil)
+ 	}
+ 	f()
+ 	f()
+ }
+ 
+ // A root an IIFE returns is defined on each iteration that calls it.
+ func repeatsIIFERootInLoop(db *gorm.DB, ids []int) {
+ 	for range ids {
+ 		q := func() *gorm.DB { return db.Session(&gorm.Session{}).Where("x") }()
+ 		q.Find(nil)
+ 	}
+ }
+ 
+ // The blocks before a `for cond` loop are not in it, although go/ssa puts
+ // the loop's header after its body (#252).
+ func repeatsBeforeForCond(db *gorm.DB, n int) {
+ 	q := db.Where("x")
+ 	func() {
+ 		q.Find(nil)
+ 		for n > 0 {
+ 			n--
+ 		}
+ 	}()
+ }
+ 
+ // --- Nested and different loops (#252) ---
+ 
+ func repeatsNestedLoopOuterUse(db *gorm.DB, n int) {
+-	q := db.Where("x")
++	q := db.Where("x").Session(&gorm.Session{})
+ 	for i := 0; i < n; i++ {
+ 		if i > 2 {
+ 			q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ 		}
+ 		for j := 0; j < n; j++ {
+ 		}
+ 	}
+ }
+ 
+ // A root defined in the outer loop and used in the inner loop is used on each
+ // inner iteration.
+ func repeatsNestedLoopInnerUse(db *gorm.DB, n int) {
+ 	for i := 0; i < n; i++ {
+-		q := db.Session(&gorm.Session{}).Where("x")
++		q := db.Session(&gorm.Session{}).Where("x").Session(&gorm.Session{})
+ 		for j := 0; j < n; j++ {
+ 			q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ 		}
+ 	}
+ }
+ 
+ // A root defined in the inner loop and used after it in the outer loop is
+ // defined again before each use.
+ func repeatsNestedLoopDefInner(db *gorm.DB, n int) {
+ 	for i := 0; i < n; i++ {
+ 		var q *gorm.DB
+ 		for j := 0; j < n; j++ {
+ 			q = db.Session(&gorm.Session{}).Where("x")
+ 		}
+ 		if q != nil {
+ 			q.Find(nil)
+ 		}
+ 	}
+ }
+ 
+ // A root defined in the outer loop and used in a closure called in the inner
+ // loop is used on each inner iteration.
+ func repeatsNestedLoopClosure(db *gorm.DB, n int) {
+ 	for i := 0; i < n; i++ {
+-		q := db.Session(&gorm.Session{}).Where("x")
++		q := db.Session(&gorm.Session{}).Where("x").Session(&gorm.Session{})
+ 		f := func() {
+ 			q.Find(nil)
+ 		}
+ 		for j := 0; j < n; j++ {
+ 			f() // want `\*gorm\.DB reused: second branch from mutable root`
+ 		}
+ 	}
+ }
+ 
+ // A root defined in one loop and used in a later loop is used on each
+ // iteration of the later loop.
+ func repeatsLaterLoop(db *gorm.DB, ids []int) {
+-	q := db.Where("x")
++	q := db.Where("x").Session(&gorm.Session{})
+ 	for _, id := range ids {
+-		q = q.Where("id = ?", id)
++		q = q.Where("id = ?", id).Session(&gorm.Session{})
+ 	}
+ 	for range ids {
+ 		q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ 	}
+ }

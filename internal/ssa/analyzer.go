@@ -117,7 +117,7 @@ func (a *Analyzer) Analyze() []Violation {
 
 	// PHASE 1: TRACKING
 	// Process all instructions and record usages
-	a.processFunction(a.fn, tracker, make(map[*ssa.Function]bool), token.NoPos)
+	a.processFunction(a.fn, tracker, make(map[*ssa.Function]bool), token.NoPos, nil)
 
 	// PHASE 2: DETECTION
 	// Detect violations using CFG reachability
@@ -162,7 +162,13 @@ func positionedViolation(v Violation, fn *ssa.Function) token.Pos {
 // invoked; uses recorded while analyzing fn adopt it instead of their body
 // position, so define-early/call-late reuse orders by execution, not source,
 // position (#68).
-func (a *Analyzer) processFunction(fn *ssa.Function, tracker *pollution.Tracker, visited map[*ssa.Function]bool, posOverride token.Pos) {
+//
+// parent, when not nil, is the Repeats of the function that declares fn, so
+// a use in fn is asked whether fn runs more than once there (#249). The
+// function the analysis starts from has none: a closure analysed on its own
+// asks only its own loops, so a reuse it shares with its parent's analysis
+// is not reported twice.
+func (a *Analyzer) processFunction(fn *ssa.Function, tracker *pollution.Tracker, visited map[*ssa.Function]bool, posOverride token.Pos, parent *cfg.Repeats) {
 	if fn == nil || fn.Blocks == nil {
 		return
 	}
@@ -171,15 +177,20 @@ func (a *Analyzer) processFunction(fn *ssa.Function, tracker *pollution.Tracker,
 	}
 	visited[fn] = true
 
-	// Detect loops for special handling of loop-external roots
+	// Detect loops for special handling of loop-external roots. A closure
+	// also runs again when its parent runs it more than once (#249).
 	loopInfo := a.cfgAnalyzer.DetectLoops(fn)
+	repeats := cfg.NewRepeats(fn, loopInfo)
+	if parent != nil {
+		repeats = parent.Closure(fn, loopInfo)
+	}
 
 	// Create handler context shared across all instruction handlers
 	ctx := &handler.Context{
 		Tracker:             tracker,
 		RootTracer:          a.rootTracer,
 		LoopInfo:            loopInfo,
-		Repeats:             cfg.NewRepeats(loopInfo),
+		Repeats:             repeats,
 		CurrentFn:           fn,
 		PosOverride:         posOverride,
 		NeedsImmutableParam: a.needsImmutableParam,
@@ -217,7 +228,7 @@ func (a *Analyzer) processFunction(fn *ssa.Function, tracker *pollution.Tracker,
 						if call != nil {
 							tracker.RecordInvocationSite(closureFn, call.Block())
 						}
-						a.processFunction(closureFn, tracker, visited, childOverride)
+						a.processFunction(closureFn, tracker, visited, childOverride, repeats)
 					}
 				}
 				continue

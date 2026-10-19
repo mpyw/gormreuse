@@ -1606,7 +1606,7 @@ func tripleNestingIfForDefer(db *gorm.DB, flag bool, items []string) {
 	if flag {
 		for range items {
 			defer func() {
-				q.Count(nil)
+				q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 			}()
 		}
 	}
@@ -1622,7 +1622,7 @@ func tripleNestingForIfDefer(db *gorm.DB, items []int) {
 	for _, item := range items {
 		if item > 0 {
 			defer func(i int) {
-				q.Where("item = ?", i).Count(nil)
+				q.Where("item = ?", i).Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 			}(item)
 		}
 	}
@@ -1871,18 +1871,18 @@ func foreverLoopWithBreak(db *gorm.DB, ch chan bool) {
 
 // closureCapturingLoopVar demonstrates closure capturing loop variable.
 func closureCapturingLoopVar(db *gorm.DB, items []string) {
-	q := db.Where("x = ?", 1)
+	q := db.Where("x = ?", 1).Session(&gorm.Session{})
 
 	var funcs []func()
 	for _, item := range items {
 		item := item // Capture
 		funcs = append(funcs, func() {
-			q.Where("item = ?", item).Find(nil)
+			q.Where("item = ?", item).Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 		})
 	}
 
 	for _, f := range funcs {
-		f() // [LIMITATION] FALSE NEGATIVE: each call branches q again
+		f()
 	}
 }
 
@@ -1893,7 +1893,8 @@ func deferCapturingLoopVar(db *gorm.DB, items []string) {
 	for _, item := range items {
 		item := item // Capture
 		defer func() {
-			q.Where("item = ?", item).Count(nil) // [LIMITATION] runs last, but q.Find below is reported
+			// [LIMITATION] runs last, but q.Find below is reported
+			q.Where("item = ?", item).Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 		}()
 	}
 
@@ -1939,7 +1940,8 @@ func nestedDeferWithFor(db *gorm.DB) {
 	defer func() {
 		for i := 0; i < 2; i++ {
 			defer func(n int) {
-				q.Where("n = ?", n).Count(nil) // [LIMITATION] runs last, but q.Find below is reported
+				// [LIMITATION] runs last, but q.Find below is reported
+				q.Where("n = ?", n).Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 			}(i)
 		}
 	}()
@@ -2012,7 +2014,8 @@ func ultimateIfForDeferChaos(db *gorm.DB, a, b bool, outer []int, inner []string
 					for _, i := range inner {
 						defer func(x int, y string) {
 							if b {
-								q.Where("x = ? AND y = ?", x, y).Count(nil) // [LIMITATION] runs last, but q.Find below is reported
+								// [LIMITATION] runs last, but q.Find below is reported
+								q.Where("x = ? AND y = ?", x, y).Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 							}
 						}(o, i)
 					}

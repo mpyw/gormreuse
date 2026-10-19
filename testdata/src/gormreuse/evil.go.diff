@@ -1,6 +1,6 @@
 --- evil.go	1970-01-01 00:00:00
 +++ evil.go.golden	1970-01-01 00:00:00
-@@ -1,3237 +1,3237 @@
+@@ -1,3240 +1,3240 @@
  package internal
  
  import "gorm.io/gorm"
@@ -1681,7 +1681,7 @@
  	if flag {
  		for range items {
  			defer func() {
- 				q.Count(nil)
+ 				q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  			}()
  		}
  	}
@@ -1698,7 +1698,7 @@
  	for _, item := range items {
  		if item > 0 {
  			defer func(i int) {
- 				q.Where("item = ?", i).Count(nil)
+ 				q.Where("item = ?", i).Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  			}(item)
  		}
  	}
@@ -1960,18 +1960,19 @@
  
  // closureCapturingLoopVar demonstrates closure capturing loop variable.
  func closureCapturingLoopVar(db *gorm.DB, items []string) {
- 	q := db.Where("x = ?", 1)
+-	q := db.Where("x = ?", 1)
++	q := db.Where("x = ?", 1).Session(&gorm.Session{})
  
  	var funcs []func()
  	for _, item := range items {
  		item := item // Capture
  		funcs = append(funcs, func() {
- 			q.Where("item = ?", item).Find(nil)
+ 			q.Where("item = ?", item).Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  		})
  	}
  
  	for _, f := range funcs {
- 		f() // [LIMITATION] FALSE NEGATIVE: each call branches q again
+ 		f()
  	}
  }
  
@@ -1983,7 +1984,8 @@
  	for _, item := range items {
  		item := item // Capture
  		defer func() {
- 			q.Where("item = ?", item).Count(nil) // [LIMITATION] runs last, but q.Find below is reported
+ 			// [LIMITATION] runs last, but q.Find below is reported
+ 			q.Where("item = ?", item).Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  		}()
  	}
  
@@ -2032,7 +2034,8 @@
  	defer func() {
  		for i := 0; i < 2; i++ {
  			defer func(n int) {
- 				q.Where("n = ?", n).Count(nil) // [LIMITATION] runs last, but q.Find below is reported
+ 				// [LIMITATION] runs last, but q.Find below is reported
+ 				q.Where("n = ?", n).Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  			}(i)
  		}
  	}()
@@ -2109,7 +2112,8 @@
  					for _, i := range inner {
  						defer func(x int, y string) {
  							if b {
- 								q.Where("x = ? AND y = ?", x, y).Count(nil) // [LIMITATION] runs last, but q.Find below is reported
+ 								// [LIMITATION] runs last, but q.Find below is reported
+ 								q.Where("x = ? AND y = ?", x, y).Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  							}
  						}(o, i)
  					}

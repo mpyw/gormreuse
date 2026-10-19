@@ -1,6 +1,9 @@
 package cfg
 
 import (
+	"maps"
+	"slices"
+
 	"golang.org/x/tools/go/ssa"
 )
 
@@ -15,6 +18,11 @@ const rangeFuncLoopSynthetic = "range-over-func yield"
 type LoopInfo struct {
 	loopBlocks  map[*ssa.BasicBlock]bool // Blocks that are part of any loop
 	loopHeaders map[*ssa.BasicBlock]bool // Blocks that are loop headers
+
+	// loops holds the blocks of each loop, one set per header. The back-edges
+	// of one header (a continue and the end of the body) make one loop. A
+	// range-over-func body is one loop with no header.
+	loops []map[*ssa.BasicBlock]bool
 }
 
 // IsInLoop returns true if the block is inside a loop.
@@ -29,26 +37,13 @@ func (l *LoopInfo) IsLoopHeader(block *ssa.BasicBlock) bool {
 	return l.loopHeaders[block]
 }
 
-// IsDefinedOutsideLoop checks if a value whose defining block is def is
-// defined outside the loop.
-//
-// Used to detect the pattern:
-//
-//	q := db.Where("x")        // Defined OUTSIDE loop
-//	for _, item := range items {
-//	    q.Where(item).Find(nil)  // Used INSIDE loop - VIOLATION
-//	}
-//
-// When a mutable root is defined outside a loop but used inside, each
-// iteration reuses the same root, which is always a violation. The caller
-// passes the root's defining block (tracer.RootBlock), so that a root that is
-// not an instruction, such as a field of a struct a call returned, is placed
-// by the instruction that defines it (#250). A nil block (no definition, such
-// as a global) is outside, and so is a block of another function, such as
-// the function that declares a closure: l holds only its own function's
-// loops.
-func (l *LoopInfo) IsDefinedOutsideLoop(def *ssa.BasicBlock) bool {
-	return def == nil || !l.IsInLoop(def)
+// IsInLoopWithout reports whether block is in a loop that does not hold def,
+// so it runs again without def running again. A nil def, or a def of
+// another function, is in none of the loops.
+func (l *LoopInfo) IsInLoopWithout(block, def *ssa.BasicBlock) bool {
+	return slices.ContainsFunc(l.loops, func(loop map[*ssa.BasicBlock]bool) bool {
+		return loop[block] && !loop[def]
+	})
 }
 
 // DetectLoops analyzes the function and returns loop information.
@@ -68,18 +63,20 @@ func (l *LoopInfo) IsDefinedOutsideLoop(def *ssa.BasicBlock) bool {
 // has no header, because values from earlier iterations reach it through
 // captured variables, not Phi nodes.
 func (a *Analyzer) DetectLoops(fn *ssa.Function) *LoopInfo {
-	loopBlocks := make(map[*ssa.BasicBlock]bool)
-	loopHeaders := make(map[*ssa.BasicBlock]bool)
+	info := &LoopInfo{
+		loopBlocks:  make(map[*ssa.BasicBlock]bool),
+		loopHeaders: make(map[*ssa.BasicBlock]bool),
+	}
 	if fn.Blocks == nil {
-		return &LoopInfo{
-			loopBlocks:  loopBlocks,
-			loopHeaders: loopHeaders,
-		}
+		return info
 	}
 	if fn.Synthetic == rangeFuncLoopSynthetic {
+		body := make(map[*ssa.BasicBlock]bool)
 		for _, b := range fn.Blocks {
-			loopBlocks[b] = true
+			body[b] = true
+			info.loopBlocks[b] = true
 		}
+		info.loops = append(info.loops, body)
 	}
 
 	// Build block index map (for back-edge detection)
@@ -90,20 +87,26 @@ func (a *Analyzer) DetectLoops(fn *ssa.Function) *LoopInfo {
 
 	// Detect back-edges that create cycles
 	// A back-edge goes from a higher-indexed block to a lower-indexed block
+	byHeader := make(map[*ssa.BasicBlock]map[*ssa.BasicBlock]bool)
 	for _, block := range fn.Blocks {
 		for _, succ := range block.Succs {
 			// Potential back-edge: verify it creates a cycle
 			if blockIndex[succ] <= blockIndex[block] && a.CanReach(succ, block) {
-				a.markLoopBlocks(fn, succ, block, loopBlocks)
-				loopHeaders[succ] = true // succ is the loop header
+				loop := byHeader[succ]
+				if loop == nil {
+					loop = make(map[*ssa.BasicBlock]bool)
+					byHeader[succ] = loop
+					info.loops = append(info.loops, loop)
+				}
+				a.markLoopBlocks(fn, succ, block, loop)
+				info.loopHeaders[succ] = true // succ is the loop header
 			}
 		}
 	}
-
-	return &LoopInfo{
-		loopBlocks:  loopBlocks,
-		loopHeaders: loopHeaders,
+	for _, loop := range info.loops {
+		maps.Copy(info.loopBlocks, loop)
 	}
+	return info
 }
 
 // markLoopBlocks marks blocks that are part of the loop whose header is loopHead
@@ -120,27 +123,58 @@ func (a *Analyzer) DetectLoops(fn *ssa.Function) *LoopInfo {
 // living inside a switch arm (issue #113): such a block was then treated as
 // in-loop, and the "externally-defined root used in a loop" heuristic fired a
 // spurious reuse violation.
+//
+// loopBlocks holds the blocks of this loop only: the walk uses it as its
+// visited set. A set shared by every loop stopped the walk of an outer loop
+// at the header of an inner one marked before, so the blocks of the outer
+// loop before the inner loop were left out (#252).
 func (a *Analyzer) markLoopBlocks(_ *ssa.Function, loopHead, loopTail *ssa.BasicBlock, loopBlocks map[*ssa.BasicBlock]bool) {
 	// Standard natural-loop body for the back-edge loopTail -> loopHead: the
 	// header plus every block that can reach loopTail without passing through the
 	// header. Found by a single reverse walk from loopTail over predecessors,
 	// bounded by the (pre-marked) header. This excludes loop-exit blocks — they
 	// cannot reach loopTail — which the old index-interval marking wrongly
-	// included (#113). O(V+E), reusing loopBlocks with no extra allocation.
+	// included (#113). O(V+E).
+	//
+	// The walk keeps to the blocks that loopHead reaches. The back-edges are
+	// found by block index, so loopHead does not always dominate loopTail: go/ssa
+	// puts the header of `for cond { ... }` after its body, and the edge from the
+	// header to the body is taken as the back-edge. An unbounded walk from that
+	// header then went on through the blocks before the loop, up to the entry,
+	// and marked them in the loop (#252). When loopHead dominates loopTail, every
+	// block the walk finds is reachable from it, so the bound changes nothing.
 	loopBlocks[loopHead] = true
 	if loopTail == loopHead {
 		return
 	}
+	inLoop := loopReachable(loopHead)
 	loopBlocks[loopTail] = true
 	stack := []*ssa.BasicBlock{loopTail}
 	for len(stack) > 0 {
 		b := stack[len(stack)-1]
 		stack = stack[:len(stack)-1]
 		for _, p := range b.Preds {
-			if !loopBlocks[p] {
+			if !loopBlocks[p] && inLoop[p] {
 				loopBlocks[p] = true
 				stack = append(stack, p)
 			}
 		}
 	}
+}
+
+// loopReachable returns the blocks that head reaches, itself included.
+func loopReachable(head *ssa.BasicBlock) map[*ssa.BasicBlock]bool {
+	seen := map[*ssa.BasicBlock]bool{head: true}
+	stack := []*ssa.BasicBlock{head}
+	for len(stack) > 0 {
+		b := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		for _, succ := range b.Succs {
+			if !seen[succ] {
+				seen[succ] = true
+				stack = append(stack, succ)
+			}
+		}
+	}
+	return seen
 }
