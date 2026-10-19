@@ -315,9 +315,11 @@ The `plugin` package registers `Analyzer` with golangci-lint's module plugin sys
 The same input must give the same diagnostics and fixes on every run (#184). Golden tests, golangci-lint caching, and `-fix` depend on it. Two rules keep it so:
 
 - `Tracker.DetectViolations` visits roots in a fixed order, never in map order. The order is root position, then earliest use, then SSA name, function, and instruction text. The later keys only matter for roots without a position, such as Phi nodes.
-- The checker reports each position once. When several roots are reused at one position (`use2(q, r)`), the diagnostic takes the message of the first root in that order, which is the root that appears first in the source. It carries the fixes of every root there whose fix was not emitted yet, merged into one `SuggestedFix`, because drivers apply only the first fix of a diagnostic. Before #184, the first violation in map order won the position and the fixes of the other roots were dropped, so `-fix` needed several passes.
+- The checker reports each position once. When several roots are reused at one position (`use2(q, r)`), the diagnostic takes the message of the first root in that order, which is the root that appears first in the source. It carries the fixes of every root there, merged into one `SuggestedFix`, because drivers apply only the first fix of a diagnostic. Before #184, the first violation in map order won the position and the fixes of the other roots were dropped, so `-fix` needed several passes.
+- Every diagnostic of a root carries the root's fix, not only the first one (#246). Before, the root was marked fixed on its first violation, even when an ignore directive suppressed that diagnostic or another function had already reported the position, so the fix was lost. An editor also offered the quick fix only on the first diagnostic. Each fix is complete on its own (#200), so the copies are identical, and the drivers apply a shared edit once. The checker generates each root's fix once and reuses it.
+- `RunSSA` and the directive checks do not report in position order: the unused-directive reports come from map ranges. `internal.ReportInOrder` holds back every diagnostic of the pass and reports them sorted by file name, offset, and message (#273). The text output is sorted by the driver anyway, but `-json` lists diagnostics in report order. File names are compared, not `token.Pos`, because the loader parses files concurrently and their order in the file set can vary.
 
-`TestDeterministicDiagnostics` runs the analyzer 50 times over `testdata/src/determinism` and requires identical output. Range over a map only where the order cannot reach a diagnostic, or sort first.
+`TestDeterministicDiagnostics` runs the analyzer 50 times over `testdata/src/determinism` and requires identical output, reported in position order. `testdata/src/determinism/unused.go` holds unused directives of several kinds for the order check. Range over a map only where the order cannot reach a diagnostic, or sort first.
 
 ### Design Patterns
 
@@ -844,7 +846,7 @@ Every suggested fix must compile, applied with all the others (`-fix`) or alone 
 
 A Phi edge with no call is left without a Session, as an edge without a position always was. The fix is then partial, and the diagnostic can remain after it.
 
-The `-fix` driver and `analysistest.RunWithSuggestedFixes` merge identical edits from several fixes. `goldentest.ApplyFixes` does the same. `TestGoldenFilesCompile` type-checks the fixtures with all fixes applied, and `TestEachFixCompiles` type-checks each diagnostic's fix applied alone, in every file it edits. The cases are in `testdata/src/gormreuse/fix_result_type.go`, `fix_session_target.go` and `fix_import_*.go`, and in `testdata/src/converge/fix_compile.go`.
+The `-fix` driver and `analysistest.RunWithSuggestedFixes` merge identical edits from several fixes. `goldentest.ApplyFixes` does the same. `TestGoldenFilesCompile` type-checks the fixtures with all fixes applied, and `TestEachFixCompiles` type-checks each diagnostic's fix applied alone, in every file it edits. `TestEveryDiagnosticCarriesFix` requires each diagnostic in `fix_every_diagnostic.go` to carry its root's fix (#246). The cases are in `testdata/src/gormreuse/fix_result_type.go`, `fix_session_target.go` and `fix_import_*.go`, and in `testdata/src/converge/fix_compile.go`.
 
 ## Development Commands
 
@@ -931,7 +933,7 @@ A fixture of `testdata/src/gormreuse` whose fixes must also converge is listed i
 | --- | --- | --- |
 | `gormreuse/` | `TestAnalyzer`, the golden tests | The main fixtures, one file per topic, named after it (`basic.go`, `evil.go`, `session_alias.go`, `subquery.go`, `fix_*.go`, ...). Each has a `.golden` and a `.diff` |
 | `converge/` | `TestFixesConverge` | Code whose fixes must resolve every diagnostic in one pass |
-| `determinism/` | `TestDeterministicDiagnostics` | Several roots reused at one position |
+| `determinism/` | `TestDeterministicDiagnostics` | Several roots reused at one position, and unused directives for the report order |
 | `purelib/`, `externalpure/` | `TestCrossPackageDirectives` | Directives declared in one package and called from another |
 | `filefilter/` | `TestFileFilter` | The `-test` flag and generated files |
 | `linedirective/`, `linedirectivedep/` | `TestLineDirective` | `//line` directives |

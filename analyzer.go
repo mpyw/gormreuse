@@ -91,6 +91,10 @@ var Analyzer = &analysis.Analyzer{
 func run(pass *analysis.Pass) (any, error) {
 	insp := pass.ResultOf[inspect.Analyzer].(*inspector.Inspector)
 
+	// Report the diagnostics in position order, so that -json output is the
+	// same on every run (#273).
+	defer internal.ReportInOrder(pass)()
+
 	// SSA is built only where it can find something (see Analyzer). It needs
 	// the ctrlflow result, which this pass requires.
 	var ssaInfo *buildssa.SSA

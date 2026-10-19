@@ -244,6 +244,30 @@ func RunSSA(
 	reportUnusedIgnores(pass, ignores)
 }
 
+// ReportInOrder holds back every diagnostic pass reports until flush, which
+// reports them sorted by file, offset and message (#273). Some diagnostics come
+// from map ranges, such as the unused-directive ones, and the -json output
+// lists diagnostics in report order, unlike the text output, which the driver
+// sorts. Sorting them all keeps -json output the same on every run.
+//
+// Positions are compared by file name and offset, not as token.Pos: the
+// loader parses files concurrently, so their order in the file set can vary.
+func ReportInOrder(pass *analysis.Pass) (flush func()) {
+	report := pass.Report
+	var diags []analysis.Diagnostic
+	pass.Report = func(d analysis.Diagnostic) { diags = append(diags, d) }
+	return func() {
+		pass.Report = report
+		slices.SortStableFunc(diags, func(a, b analysis.Diagnostic) int {
+			pa, pb := pass.Fset.PositionFor(a.Pos, false), pass.Fset.PositionFor(b.Pos, false)
+			return cmp.Or(cmp.Compare(pa.Filename, pb.Filename), cmp.Compare(pa.Offset, pb.Offset), cmp.Compare(a.Message, b.Message))
+		})
+		for _, d := range diags {
+			report(d)
+		}
+	}
+}
+
 // reportUnusedImmutableInputs reports the immutable-input directives that name
 // no usable callback or are attached to no function.
 func reportUnusedImmutableInputs(set *directive.ImmutableInputSet, report func(token.Pos, string)) {
@@ -708,25 +732,36 @@ func (c *checker) checkFunction(fn *ssa.Function) {
 	analyzer := ssautil.NewAnalyzer(fn, c.pureFuncs, c.immutableReturnFuncs, c.immutableParamFuncs, c.pureVerdicts, c.scopesCallbacks, c.immutableCallbacks, c.needsImmutableParam, c.funcVars)
 	violations := analyzer.Analyze()
 
-	// Deduplicate violations by root to avoid generating duplicate fixes.
-	// Multiple violations from the same root (e.g., tripleUse) should only
-	// generate one set of fixes.
-	seenRoots := make(map[ssa.Value]bool)
+	// Every diagnostic of a root carries the root's fix, not only the first:
+	// the first may be suppressed by an ignore directive or already reported,
+	// and an editor offers a quick fix only on the diagnostic that carries it
+	// (#246). Each fix is complete on its own (#200), so the copies are
+	// identical, and the drivers apply an edit that several fixes share once.
+	// A root's fix is generated once, for the first diagnostic of the root that
+	// is reported. It depends only on the root and its uses.
+	fixes := make(map[ssa.Value][]analysis.SuggestedFix)
+	fixOf := func(v pollution.Violation) []analysis.SuggestedFix {
+		f, ok := fixes[v.Root]
+		if !ok {
+			f = c.fixGen.Generate(v)
+			fixes[v.Root] = f
+		}
+		return f
+	}
 
 	// Group violations by position. Several roots can be reused at one position
 	// (use2(q, r)), and only one diagnostic is reported there, so it carries the
-	// fix of every root in the group whose fix was not emitted yet. Otherwise
-	// only the first root would get a fix (#184).
+	// fix of every root in the group. Otherwise only the first root would get a
+	// fix (#184).
 	for _, group := range groupByPos(violations) {
 		var fixFor []pollution.Violation
 		for _, v := range group {
-			if v.Root == nil || seenRoots[v.Root] {
-				continue // No root to fix, or this root's fix was already emitted
+			if v.Root == nil || slices.ContainsFunc(fixFor, func(f pollution.Violation) bool { return f.Root == v.Root }) {
+				continue // No root to fix, or this root's fix is already in
 			}
-			seenRoots[v.Root] = true
 			fixFor = append(fixFor, v)
 		}
-		c.reportViolation(group[0], fixFor)
+		c.reportViolation(group[0], fixFor, fixOf)
 	}
 }
 
@@ -747,10 +782,10 @@ func groupByPos(violations []pollution.Violation) [][]pollution.Violation {
 	return groups
 }
 
-// reportViolation reports v with the suggested fixes for the roots of fixFor.
-// The fixes are merged into one, because drivers apply only the first
-// suggested fix of a diagnostic.
-func (c *checker) reportViolation(v pollution.Violation, fixFor []pollution.Violation) {
+// reportViolation reports v with the suggested fixes, given by fixOf, for the
+// roots of fixFor. The fixes are merged into one, because drivers apply only
+// the first suggested fix of a diagnostic.
+func (c *checker) reportViolation(v pollution.Violation, fixFor []pollution.Violation, fixOf func(pollution.Violation) []analysis.SuggestedFix) {
 	pos := v.Pos
 
 	// Deduplicate: same position may be reached multiple times
@@ -763,10 +798,9 @@ func (c *checker) reportViolation(v pollution.Violation, fixFor []pollution.Viol
 		return // Suppressed by ignore directive
 	}
 
-	// Generate SuggestedFix if possible
 	var suggestedFixes []analysis.SuggestedFix
 	for _, fv := range fixFor {
-		suggestedFixes = append(suggestedFixes, c.fixGen.Generate(fv)...)
+		suggestedFixes = append(suggestedFixes, fixOf(fv)...)
 	}
 
 	// Each diagnostic carries every edit its roots need, even one that another

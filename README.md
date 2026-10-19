@@ -155,7 +155,7 @@ gormreuse has no flags of its own. These come from the analysis driver:
 | `-test` | `true` | Analyze test files (`*_test.go`) |
 | `-fix` | `false` | Apply the suggested fixes to the files |
 | `-diff` | `false` | With `-fix`, print the fixes as a unified diff instead of writing them |
-| `-json` | `false` | Print the diagnostics as JSON |
+| `-json` | `false` | Print the diagnostics as JSON, sorted by file and position |
 | `-c=N` | `-1` | Print each reported line with `N` lines of context |
 | `-V=full` | | Print the version and exit (`go vet` uses this) |
 | `-flags` | | Print the flags as JSON and exit |
@@ -241,7 +241,7 @@ q.Where("b").Find(nil) // OK: independent chain from immutable root
 - Special handling for Phi nodes (conditional branches): adds Session to each incoming edge that is still mutable. An edge counts as immutable by the same rule as detection: its **last** call must return an immutable value. `db.Session(&gorm.Session{}).Where("y")` and `db.WithContext(ctx).Where("y")` are mutable, so they get a Session too
 - Session goes only after a call that returns `*gorm.DB`. An edge that has no such call gets none. Examples are a closure parameter (`if c { q = tx }`) and one result of `q, err := open()`
 
-`Session` is written with a name that refers to `gorm.io/gorm` where it is inserted. When the file has no such name, the fix adds an import: `"gorm.io/gorm"`, or `gormio "gorm.io/gorm"` when `gorm` is taken there, such as by a parameter or local variable named `gorm`, or by another package imported as `gorm`. A blank import (`_ "gorm.io/gorm"`) gives no name. Each diagnostic's fix carries its own import edit, so an editor can apply one quick fix alone.
+`Session` is written with a name that refers to `gorm.io/gorm` where it is inserted. When the file has no such name, the fix adds an import: `"gorm.io/gorm"`, or `gormio "gorm.io/gorm"` when `gorm` is taken there, such as by a parameter or local variable named `gorm`, or by another package imported as `gorm`. A blank import (`_ "gorm.io/gorm"`) gives no name. Each diagnostic's fix carries its own import edit, so an editor can apply one quick fix alone. Every diagnostic of a root carries the same fix, also when another diagnostic of the root is ignored.
 
 ### Parameter Roots
 

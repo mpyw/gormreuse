@@ -1,7 +1,9 @@
 package gormreuse_test
 
 import (
+	"cmp"
 	"fmt"
+	"go/token"
 	"os"
 	"strings"
 	"testing"
@@ -22,7 +24,8 @@ const determinismRuns = 50
 
 // TestDeterministicDiagnostics runs the analyzer many times over a fixture where
 // several roots are reused at the same position, and requires every run to
-// produce the same diagnostics: positions, messages, and suggested fixes (#184).
+// produce the same diagnostics: positions, messages, and suggested fixes (#184),
+// in position order (#273).
 // Output that changes between runs breaks golden tests, golangci-lint caching,
 // and -fix reproducibility.
 func TestDeterministicDiagnostics(t *testing.T) {
@@ -59,7 +62,9 @@ func TestDeterministicDiagnostics(t *testing.T) {
 }
 
 // analyzeOnce runs the analyzer over pkgs and renders every diagnostic with its
-// suggested fixes in report order, using file:line:column positions.
+// suggested fixes in report order, using file:line:column positions. The -json
+// output lists diagnostics in report order, so it fails unless they are
+// reported by file, then offset (#273).
 func analyzeOnce(t *testing.T, pkgs []*packages.Package) string {
 	t.Helper()
 	graph, err := checker.Analyze([]*analysis.Analyzer{gormreuse.Analyzer}, pkgs, nil)
@@ -73,7 +78,13 @@ func analyzeOnce(t *testing.T, pkgs []*packages.Package) string {
 			t.Fatalf("analyze %s: %v", act.Package.PkgPath, act.Err)
 		}
 		fset := act.Package.Fset
+		var prev token.Position
 		for _, d := range act.Diagnostics {
+			at := fset.Position(d.Pos)
+			if cmp.Or(cmp.Compare(at.Filename, prev.Filename), cmp.Compare(at.Offset, prev.Offset)) < 0 {
+				t.Fatalf("%s is reported after %s; diagnostics must be reported in position order", at, prev)
+			}
+			prev = at
 			fmt.Fprintf(&b, "%s: %s\n", fset.Position(d.Pos), d.Message)
 			for _, f := range d.SuggestedFixes {
 				fmt.Fprintf(&b, "  fix: %s\n", f.Message)
