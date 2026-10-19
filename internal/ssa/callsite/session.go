@@ -128,7 +128,7 @@ func readSessionLiteral(v ssa.Value) (fields map[string]sessionFieldState, ok bo
 				fields[name] = state
 			}
 		case *ssa.Call:
-			if SiteOf(r, nil).Method() != "Session" {
+			if SiteOfWithoutFuncVars(r).Method() != "Session" {
 				return nil, false
 			}
 		case *ssa.DebugRef:

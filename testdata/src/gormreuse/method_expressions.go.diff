@@ -1,6 +1,6 @@
 --- method_expressions.go	1970-01-01 00:00:00
 +++ method_expressions.go.golden	1970-01-01 00:00:00
-@@ -1,193 +1,193 @@
+@@ -1,203 +1,203 @@
  package internal
  
  import "gorm.io/gorm"
@@ -199,4 +199,15 @@
  	q := db.Where("x")
  	exprIface.Use(i, q)
  	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // exprBranchVar holds a method expression in a package-level variable (#183),
+ // so its calls take the receiver as their first argument too.
+ var exprBranchVar = exprRepo.branch
+ 
+ // exprPackageVarBranchMutable: the call through the variable is the same call.
+ // The fix isolates the *gorm.DB argument, not the receiver (#293).
+ func exprPackageVarBranchMutable(db *gorm.DB) {
+-	exprBranchVar(exprRepo{}, db.Where("x")) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of branch`
++	exprBranchVar(exprRepo{}, db.Where("x").Session(&gorm.Session{})) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of branch`
  }

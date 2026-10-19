@@ -285,7 +285,7 @@ func (g *Generator) GenerateIsolation(v pollution.Violation) []analysis.Suggeste
 // method that instr stands for: 1 for a method expression, whose function
 // takes the receiver as its first parameter, and 0 otherwise.
 func (g *Generator) receiverArgs(call *ast.CallExpr, instr ssa.CallInstruction) int {
-	declared := callsite.SiteOf(instr, nil).Declared
+	declared := callsite.SiteOf(instr, g.tracer.FuncVars()).Declared
 	sig, ok := g.pass.TypesInfo.TypeOf(call.Fun).Underlying().(*types.Signature)
 	if !ok || declared == nil {
 		return 0
