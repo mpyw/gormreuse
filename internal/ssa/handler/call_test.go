@@ -126,15 +126,3 @@ func TestIsAssignment(t *testing.T) {
 		t.Error("expected at least one call classified as a non-assignment")
 	}
 }
-
-func TestIsGormDBMethodCall(t *testing.T) {
-	t.Parallel()
-	h := &callHandler{}
-	// Every call collected by loadFixtureCalls is, by construction, a gorm
-	// method call; isGormDBMethodCall must agree.
-	for _, c := range loadFixtureCalls(t) {
-		if !h.isGormDBMethodCall(c) {
-			t.Errorf("collected call should be a gorm method call: %v", c)
-		}
-	}
-}

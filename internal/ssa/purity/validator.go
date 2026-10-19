@@ -38,7 +38,6 @@ import (
 	"go/token"
 	"go/types"
 	"slices"
-	"strings"
 
 	"golang.org/x/tools/go/ssa"
 
@@ -166,12 +165,8 @@ func (v *Validator) validateBody(fn *ssa.Function) []Violation {
 	for _, block := range fn.Blocks {
 		for _, instr := range block.Instrs {
 			switch i := instr.(type) {
-			case *ssa.Call:
-				violations = append(violations, v.checkCallPollution(&i.Call, i.Pos())...)
-			case *ssa.Go:
-				violations = append(violations, v.checkCallPollution(&i.Call, i.Pos())...)
-			case *ssa.Defer:
-				violations = append(violations, v.checkCallPollution(&i.Call, i.Pos())...)
+			case ssa.CallInstruction:
+				violations = append(violations, v.checkCallPollution(i)...)
 			case *ssa.MakeClosure:
 				violations = append(violations, v.checkClosure(i)...)
 			case *ssa.Store:
@@ -232,7 +227,7 @@ func (v *Validator) trackDerivation(instr ssa.Instruction) bool {
 		}
 
 	case *ssa.Call:
-		if v.callResultDerived(&i.Call) {
+		if v.callResultDerived(i) {
 			return v.markHolding(i)
 		}
 
@@ -319,19 +314,17 @@ func (v *Validator) markHolding(val ssa.Value) bool {
 // closure that returns a derived value it captures, a trusted pure function
 // that may return a derived argument, or any other call with a derived
 // argument.
-func (v *Validator) callResultDerived(common *ssa.CallCommon) bool {
+func (v *Validator) callResultDerived(call *ssa.Call) bool {
 	// An interface method call never has a *gorm.DB receiver (it is a
 	// concrete type), so it falls through to the regular-call rule below.
 
-	// Method value: f := db.Find; f(nil)
-	if method, recv, ok := v.boundGormMethod(common.Value); ok {
-		return v.paramDerived[recv] && !typeutil.IsImmutableReturningBuiltin(method)
+	// A gorm method, called directly or as a method value (f := db.Find; f(nil)).
+	site := callsite.SiteOf(call, v.funcVars)
+	if site.IsGormMethod() {
+		return v.paramDerived[site.Recv] && !typeutil.IsImmutableReturningBuiltin(site.Method())
 	}
 
-	callee := v.funcVars.Callee(common)
-	if recv, ok := v.gormMethodReceiver(common, callee); ok {
-		return v.paramDerived[recv] && !typeutil.IsImmutableReturningBuiltin(callee.Name())
-	}
+	common, callee := &call.Call, site.Callee
 
 	// Like Session, an immutable-return function hands back a fresh handle.
 	if v.immutableReturnFuncs != nil && v.immutableReturnFuncs.Contains(callee) {
@@ -370,30 +363,29 @@ func (v *Validator) seedClosure(mc *ssa.MakeClosure) bool {
 // =============================================================================
 
 // checkCallPollution checks a call, go or defer statement.
-func (v *Validator) checkCallPollution(common *ssa.CallCommon, pos token.Pos) []Violation {
+func (v *Validator) checkCallPollution(call ssa.CallInstruction) []Violation {
 	// Interface method calls (common.Method != nil) on *gorm.DB are not
 	// possible: IsGormDB only matches the concrete type, and GORM's DB is a
-	// struct, so all method calls go through StaticCallee.
+	// struct, so all method calls have a static callee.
+	site, pos := callsite.SiteOf(call, v.funcVars), call.Pos()
 
-	// Calling a method value is checked where the method value is created
-	// (checkClosure), so f := db.Find; f(nil) is reported once.
-	if _, _, ok := v.boundGormMethod(common.Value); ok {
-		return nil
-	}
-
-	callee := v.funcVars.Callee(common)
-
-	// gorm chain method on a param-derived receiver pollutes the argument.
-	if recv, ok := v.gormMethodReceiver(common, callee); ok {
-		if v.paramDerived[recv] && !typeutil.IsImmutableReturningBuiltin(callee.Name()) {
+	if site.IsGormMethod() {
+		// Calling a method value is checked where the method value is
+		// created (checkClosure), so f := db.Find; f(nil) is reported once.
+		if site.Kind == callsite.SiteBound {
+			return nil
+		}
+		// gorm chain method on a param-derived receiver pollutes the argument.
+		if v.paramDerived[site.Recv] && !typeutil.IsImmutableReturningBuiltin(site.Method()) {
 			return []Violation{{
 				Pos:        pos,
-				Message:    "pure function pollutes *gorm.DB argument by calling " + callee.Name(),
+				Message:    "pure function pollutes *gorm.DB argument by calling " + site.Method(),
 				Definitive: true,
 			}}
 		}
 		return nil
 	}
+	common, callee := call.Common(), site.Callee
 
 	// Any other call — a static function, a builtin (e.g. append, which is how
 	// slice storage lowers), or an indirect call through a func value — leaks a
@@ -407,11 +399,11 @@ func (v *Validator) checkCallPollution(common *ssa.CallCommon, pos token.Pos) []
 // (f := db.Find) pollutes it, and a closure capturing derived values must obey
 // the contract in its own body (IIFEs, go func() {...}(), stored closures).
 func (v *Validator) checkClosure(mc *ssa.MakeClosure) []Violation {
-	if method, recv, ok := v.boundGormMethod(mc); ok {
-		if v.paramDerived[recv] && !typeutil.IsImmutableReturningBuiltin(method) {
+	if site, ok := callsite.BoundSite(mc); ok && site.IsGormMethod() {
+		if v.paramDerived[site.Recv] && !typeutil.IsImmutableReturningBuiltin(site.Method()) {
 			return []Violation{{
 				Pos:        mc.Pos(),
-				Message:    "pure function pollutes *gorm.DB argument by taking method value " + method,
+				Message:    "pure function pollutes *gorm.DB argument by taking method value " + site.Method(),
 				Definitive: true,
 			}}
 		}
@@ -597,34 +589,6 @@ func (v *Validator) holdsGormDB(t types.Type) bool {
 	}
 	v.holdsCache[t] = result
 	return result
-}
-
-// gormMethodReceiver returns the receiver of a static call to a *gorm.DB
-// method.
-func (v *Validator) gormMethodReceiver(common *ssa.CallCommon, callee *ssa.Function) (ssa.Value, bool) {
-	if callee == nil || len(common.Args) == 0 {
-		return nil, false
-	}
-	sig := callee.Signature
-	if sig == nil || sig.Recv() == nil || !typeutil.IsGormDB(sig.Recv().Type()) {
-		return nil, false
-	}
-	return common.Args[0], true
-}
-
-// boundGormMethod recognizes a *gorm.DB method value (db.Find used as a
-// value). SSA builds it as MakeClosure(Find$bound, [db]); the wrapper has no
-// receiver, so the gorm-method check alone would miss it.
-func (v *Validator) boundGormMethod(val ssa.Value) (method string, recv ssa.Value, ok bool) {
-	mc, isClosure := val.(*ssa.MakeClosure)
-	if !isClosure || len(mc.Bindings) == 0 {
-		return "", nil, false
-	}
-	fn, isFunc := mc.Fn.(*ssa.Function)
-	if !isFunc || !strings.HasSuffix(fn.Name(), "$bound") || !typeutil.IsGormDB(mc.Bindings[0].Type()) {
-		return "", nil, false
-	}
-	return strings.TrimSuffix(fn.Name(), "$bound"), mc.Bindings[0], true
 }
 
 // addressRoot walks field and element addresses back to the base address.

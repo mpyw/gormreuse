@@ -61,10 +61,12 @@ func CollectFuncVars(funcs []*ssa.Function) FuncVars {
 	return vars
 }
 
-// Callee returns the function that common calls: its static callee, or the
+// callee returns the function that common calls: its static callee, or the
 // function held by the package-level variable it loads. It returns nil when
 // neither is known. vars may be nil.
-func (vars FuncVars) Callee(common *ssa.CallCommon) *ssa.Function {
+//
+//declscope:shared // SiteOf in site.go reads Site.Callee from it
+func (vars FuncVars) callee(common *ssa.CallCommon) *ssa.Function {
 	if fn := common.StaticCallee(); fn != nil {
 		return fn
 	}

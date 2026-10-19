@@ -7,6 +7,7 @@ import (
 	"golang.org/x/tools/go/ssa"
 
 	"github.com/mpyw/gormreuse/internal/directive"
+	"github.com/mpyw/gormreuse/internal/ssa/callsite"
 	"github.com/mpyw/gormreuse/internal/ssa/tracer"
 	"github.com/mpyw/gormreuse/internal/typeutil"
 )
@@ -164,14 +165,15 @@ func (v *ImmutableReturnValidator) rootMutable(root ssa.Value, seen map[ssa.Valu
 	if !ok {
 		return false
 	}
-	if callee := call.Call.StaticCallee(); callee != nil && callee.Signature != nil && callee.Signature.Recv() != nil {
-		if !typeutil.IsGormDB(callee.Signature.Recv().Type()) {
+	// A method value call is read as a call of its wrapper, a closure.
+	if site := callsite.SiteOf(call, nil).StaticSite(); site.Recv != nil {
+		if !site.IsGormMethod() {
 			return false
 		}
-		if !typeutil.IsImmutableReturningBuiltin(callee.Name()) {
+		if !typeutil.IsImmutableReturningBuiltin(site.Method()) {
 			return true
 		}
-		return callee.Name() == "Session" && len(call.Call.Args) > 1 && typeutil.SessionSetsInitialized(call.Call.Args[1])
+		return site.Method() == "Session" && site.SessionSetsInitialized()
 	}
 	// A closure marked immutable-return is checked on its own.
 	if closure := immutableReturnClosure(call.Call.Value); closure != nil && !v.set.Contains(closure) {

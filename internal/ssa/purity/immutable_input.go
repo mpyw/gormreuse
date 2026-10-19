@@ -9,6 +9,7 @@ import (
 	"golang.org/x/tools/go/ssa"
 
 	"github.com/mpyw/gormreuse/internal/directive"
+	"github.com/mpyw/gormreuse/internal/ssa/callsite"
 	"github.com/mpyw/gormreuse/internal/ssa/tracer"
 	"github.com/mpyw/gormreuse/internal/typeutil"
 )
@@ -196,32 +197,31 @@ func (f *immutableInputFlow) visitImmutableInputCall(v ssa.Value, call ssa.CallI
 				continue
 			}
 		}
-		if f.keepsImmutableInputPromise(common, idx) {
+		site := f.rt.Site(call).StaticSite()
+		if f.keepsImmutableInputPromise(site, idx) {
 			continue
 		}
-		f.escapeImmutableInput(call.Pos(), "passed to "+immutableInputCalleeName(common))
+		f.escapeImmutableInput(call.Pos(), "passed to "+immutableInputCalleeName(site))
 	}
 }
 
 // keepsImmutableInputPromise reports whether a call that receives the callback
 // as argument idx promises an immutable *gorm.DB to it too: gorm's
 // Transaction or FindInBatches, or a function declaring immutable-input for
-// that parameter.
-func (f *immutableInputFlow) keepsImmutableInputPromise(common *ssa.CallCommon, idx int) bool {
-	callee := common.StaticCallee()
+// that parameter. site is read from the static callee, so a method value call
+// is a call of its wrapper.
+func (f *immutableInputFlow) keepsImmutableInputPromise(site callsite.Site, idx int) bool {
+	callee := site.Callee
 	if callee == nil {
 		return false
 	}
 	if tracer.IsImmutableCallbackMethod(callee) {
 		return true
 	}
-	// A method call carries its receiver as Args[0]; ParamIdx counts from the
-	// first non-receiver parameter.
-	if callee.Signature.Recv() != nil {
-		idx--
-	}
+	// ParamIdx counts from the first non-receiver parameter.
+	param := site.ArgParam(idx)
 	return slices.ContainsFunc(f.set.Callbacks(callee), func(cb directive.ImmutableInputCallback) bool {
-		return cb.ParamIdx == idx
+		return cb.ParamIdx == param
 	})
 }
 
@@ -349,13 +349,14 @@ func immutableInputLocalRoot(addr ssa.Value) ssa.Value {
 	}
 }
 
-// immutableInputCalleeName names a call's target for an escape report.
-func immutableInputCalleeName(common *ssa.CallCommon) string {
-	if callee := common.StaticCallee(); callee != nil {
-		return callee.Name()
+// immutableInputCalleeName names a call's target for an escape report. site
+// is read from the static callee.
+func immutableInputCalleeName(site callsite.Site) string {
+	if site.Callee != nil {
+		return site.Callee.Name()
 	}
-	if common.IsInvoke() {
-		return common.Method.Name()
+	if site.Kind == callsite.SiteInvoke {
+		return site.Instr.Common().Method.Name()
 	}
 	return "a function value"
 }

@@ -76,12 +76,9 @@ func SiteOf(instr ssa.CallInstruction, vars FuncVars) Site {
 		s.Kind = SiteBuiltin
 		return s
 	case *ssa.MakeClosure:
-		if fn, ok := v.Fn.(*ssa.Function); ok && len(v.Bindings) > 0 && isSiteWrapper(fn, "$bound") {
-			s.Kind = SiteBound
-			s.Callee = fn
-			s.Declared = directive.DeclaredFunc(fn)
-			s.Recv = v.Bindings[0]
-			return s
+		if bound, ok := BoundSite(v); ok {
+			bound.Instr, bound.Args = instr, common.Args
+			return bound
 		}
 		s.Kind = SiteClosure
 	case *ssa.Function:
@@ -95,7 +92,7 @@ func SiteOf(instr ssa.CallInstruction, vars FuncVars) Site {
 			s.Kind = SiteInvoke
 		}
 	}
-	s.Callee = vars.Callee(common)
+	s.Callee = vars.callee(common)
 	if s.Kind == SiteDynamic && s.Callee != nil {
 		s.Kind = SiteFuncVar
 	}
@@ -104,6 +101,17 @@ func SiteOf(instr ssa.CallInstruction, vars FuncVars) Site {
 		s.Recv, s.Args = s.Args[0], s.Args[1:]
 	}
 	return s
+}
+
+// BoundSite reads the method value mc (r.m used as a value) as the Site of a
+// call to it, without Instr and Args. ok is false when mc is a function
+// literal.
+func BoundSite(mc *ssa.MakeClosure) (s Site, ok bool) {
+	fn, isFunc := mc.Fn.(*ssa.Function)
+	if !isFunc || len(mc.Bindings) == 0 || !isSiteWrapper(fn, "$bound") {
+		return Site{}, false
+	}
+	return Site{Kind: SiteBound, Callee: fn, Declared: directive.DeclaredFunc(fn), Recv: mc.Bindings[0]}, true
 }
 
 // EachSite calls visit with the Site of every call, go and defer instruction in
@@ -125,6 +133,43 @@ func (s Site) IsGormMethod() bool {
 	}
 	recv := s.Declared.Signature.Recv()
 	return recv != nil && typeutil.IsGormDB(recv.Type())
+}
+
+// Method returns the name of the function or method the call stands for,
+// such as "Find" for a call of the method value db.Find. It is empty when
+// Declared is nil.
+func (s Site) Method() string {
+	switch {
+	case s.Kind == SiteBound:
+		// The wrapper's object, not Declared: the wrapper of an interface
+		// method value has no declared method to stand for.
+		return s.Callee.Object().Name()
+	case s.Declared != nil:
+		return s.Declared.Name()
+	}
+	return ""
+}
+
+// ArgParam returns the index into Args of the instruction's argument i, the
+// index of the parameter of Declared it is passed to. It is -1 for the
+// receiver.
+func (s Site) ArgParam(i int) int {
+	return i - (len(s.Instr.Common().Args) - len(s.Args))
+}
+
+// StaticSite returns the Site read from the instruction's static callee alone:
+// a method value call is a call of its "m$bound" wrapper, which takes no
+// receiver, and a call through a package-level variable has no callee. Code
+// that still reads a call this way calls it, so each use is a place where it
+// and the Site disagree (#266).
+func (s Site) StaticSite() Site {
+	switch s.Kind {
+	case SiteBound:
+		s.Declared, s.Recv = s.Callee, nil
+	case SiteFuncVar:
+		s.Kind, s.Callee, s.Declared = SiteDynamic, nil, nil
+	}
+	return s
 }
 
 // isSiteWrapper reports whether fn is a synthetic wrapper with the given name

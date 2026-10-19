@@ -52,6 +52,7 @@ import (
 	"golang.org/x/tools/go/ssa"
 
 	"github.com/mpyw/gormreuse/internal/directive"
+	"github.com/mpyw/gormreuse/internal/ssa/callsite"
 	"github.com/mpyw/gormreuse/internal/ssa/cfg"
 	"github.com/mpyw/gormreuse/internal/ssa/pollution"
 	"github.com/mpyw/gormreuse/internal/ssa/pollutionsource"
@@ -272,13 +273,18 @@ func (g *Generator) callersAllIsolate(p *ssa.Parameter) bool {
 		for _, block := range caller.Blocks {
 			for _, instr := range block.Instrs {
 				call, ok := instr.(ssa.CallInstruction)
-				if !ok || directive.DeclaredFunc(call.Common().StaticCallee()) != fn {
+				if !ok {
+					continue
+				}
+				// fn is not a method, so the arguments are its parameters.
+				site := g.tracer.Site(call)
+				if directive.DeclaredFunc(site.Callee) != fn {
 					continue
 				}
 				if loopInfo == nil {
 					loopInfo = loops.DetectLoops(caller)
 				}
-				if g.tracer.FindMutableRoot(call.Common().Args[idx], loopInfo) != nil {
+				if g.tracer.FindMutableRoot(site.Args[idx], loopInfo) != nil {
 					return false
 				}
 			}
@@ -430,17 +436,9 @@ func escapeSeen(a *cfg.Analyzer, escape pollution.UsageInfo, uses []pollution.Us
 func returnsGormDBAt(use pollution.UsageInfo) bool {
 	return slices.ContainsFunc(use.Block.Instrs, func(instr ssa.Instruction) bool {
 		call, ok := instr.(*ssa.Call)
-		return ok && call.Pos() == use.Pos && typeutil.HasGormDBResult(call.Type()) && gormMethod(call) == nil
+		return ok && call.Pos() == use.Pos && typeutil.HasGormDBResult(call.Type()) &&
+			!callsite.SiteOf(call, nil).StaticSite().IsGormMethod()
 	})
-}
-
-// gormMethod returns the *gorm.DB method that call calls statically, or nil.
-func gormMethod(call *ssa.Call) *ssa.Function {
-	callee := call.Call.StaticCallee()
-	if callee == nil || callee.Signature.Recv() == nil || !typeutil.IsGormDB(callee.Signature.Recv().Type()) {
-		return nil
-	}
-	return callee
 }
 
 // withAnonFuncs returns fn and the closures it declares, at any depth.
@@ -467,11 +465,11 @@ func (g *Generator) readsRootState(root, x ssa.Value, loopInfo *cfg.LoopInfo) bo
 		if !ok {
 			return false
 		}
-		callee := gormMethod(call)
-		if callee == nil || isFinisher(callee.Name()) || typeutil.IsImmutableReturningBuiltin(callee.Name()) {
+		site := callsite.SiteOf(call, nil).StaticSite()
+		if !site.IsGormMethod() || isFinisher(site.Method()) || typeutil.IsImmutableReturningBuiltin(site.Method()) {
 			return false
 		}
-		x = call.Call.Args[0]
+		x = site.Recv
 	}
 }
 

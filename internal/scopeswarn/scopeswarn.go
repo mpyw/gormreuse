@@ -10,8 +10,8 @@ import (
 
 	"golang.org/x/tools/go/ssa"
 
+	"github.com/mpyw/gormreuse/internal/ssa/callsite"
 	"github.com/mpyw/gormreuse/internal/ssa/tracer"
-	"github.com/mpyw/gormreuse/internal/typeutil"
 )
 
 // =============================================================================
@@ -70,7 +70,7 @@ func Validate(callbacks map[*ssa.Function]bool, skip func(*ssa.Function) bool) [
 
 	warnings := make([]Warning, 0, len(found))
 	for call := range found {
-		warnings = append(warnings, Warning{Pos: call.Pos(), Message: message(getMethodName(call))})
+		warnings = append(warnings, Warning{Pos: call.Pos(), Message: message(callsite.SiteOf(call, nil).Method())})
 	}
 	slices.SortFunc(warnings, func(a, b Warning) int { return cmp.Compare(a.Pos, b.Pos) })
 	return warnings
@@ -190,9 +190,16 @@ func (t *returnTracer) load(f *frame, addr ssa.Value) {
 // call traces result idx of call. A Session-family *gorm.DB method is a
 // finding; any other *gorm.DB method returns a clone==0 value and ends the
 // trace; a helper or closure is followed into its return statements.
+//
+// A method value call is read as a call of its wrapper, which is followed like
+// a helper.
 func (t *returnTracer) call(f *frame, call *ssa.Call, idx int) {
-	if isGormDBMethodCall(call) {
-		switch getMethodName(call) {
+	site := callsite.SiteOf(call, nil).StaticSite()
+	// Only a *gorm.DB method is matched by name, so that an unrelated
+	// package's identically-named method doesn't trigger GORM-specific
+	// diagnostics.
+	if site.IsGormMethod() {
+		switch site.Method() {
 		case "Session", "WithContext", "Debug":
 			if idx == 0 {
 				t.found[call] = true
@@ -200,35 +207,9 @@ func (t *returnTracer) call(f *frame, call *ssa.Call, idx int) {
 		}
 		return
 	}
-	callee := call.Call.StaticCallee()
+	callee := site.Callee
 	if callee == nil || len(callee.Blocks) == 0 || f.depth >= maxCallDepth || f.onStack(callee) {
 		return
 	}
 	t.returns(&frame{fn: callee, args: call.Call.Args, caller: f, depth: f.depth + 1}, idx)
-}
-
-// getMethodName extracts the method name from a call instruction.
-func getMethodName(call *ssa.Call) string {
-	if call.Call.IsInvoke() {
-		return call.Call.Method.Name()
-	}
-	if callee := call.Call.StaticCallee(); callee != nil {
-		return callee.Name()
-	}
-	return ""
-}
-
-// isGormDBMethodCall reports whether call is dispatching to a method on
-// *gorm.DB. We need this whenever we key off a method *name*
-// (Session/WithContext/Debug) so that an unrelated package's
-// identically-named method doesn't trigger GORM-specific diagnostics.
-func isGormDBMethodCall(call *ssa.Call) bool {
-	if call.Call.IsInvoke() {
-		return typeutil.IsGormDB(call.Call.Value.Type())
-	}
-	callee := call.Call.StaticCallee()
-	if callee == nil || callee.Signature == nil || callee.Signature.Recv() == nil {
-		return false
-	}
-	return typeutil.IsGormDB(callee.Signature.Recv().Type())
 }
