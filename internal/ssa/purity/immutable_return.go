@@ -7,7 +7,6 @@ import (
 	"golang.org/x/tools/go/ssa"
 
 	"github.com/mpyw/gormreuse/internal/directive"
-	"github.com/mpyw/gormreuse/internal/ssa/callsite"
 	"github.com/mpyw/gormreuse/internal/ssa/tracer"
 	"github.com/mpyw/gormreuse/internal/typeutil"
 )
@@ -165,8 +164,8 @@ func (v *ImmutableReturnValidator) rootMutable(root ssa.Value, seen map[ssa.Valu
 	if !ok {
 		return false
 	}
-	// A method value call is read as a call of its wrapper, a closure.
-	if site := callsite.SiteOf(call, nil).StaticSite(); site.Recv != nil {
+	// A method value call is the call of its method.
+	if site := v.rt.Site(call); site.Recv != nil {
 		if !site.IsGormMethod() {
 			return false
 		}

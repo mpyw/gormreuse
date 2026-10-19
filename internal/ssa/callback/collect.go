@@ -1,6 +1,7 @@
 package callback
 
 import (
+	"go/types"
 	"slices"
 
 	"golang.org/x/tools/go/ssa"
@@ -21,16 +22,19 @@ import (
 // Scopes(funcs ...func(*DB) *DB) and Preload(query, args ...interface{}) are
 // variadic, so the callbacks are packed into a varargs array (the last call
 // argument is a slice of it); Preload additionally boxes them in interface{}.
-func CollectScopesCallbacks(funcs []*ssa.Function) map[*ssa.Function]bool {
-	return collectCallbacksPassedTo(funcs, "Scopes", "Preload")
+//
+// vars resolves calls through package-level function variables; it may be
+// nil. So do the other collectors.
+func CollectScopesCallbacks(funcs []*ssa.Function, vars callsite.FuncVars) map[*ssa.Function]bool {
+	return collectCallbacksPassedTo(funcs, vars, "Scopes", "Preload")
 }
 
 // CollectScopesOnlyCallbacks is CollectScopesCallbacks without Preload: the
 // functions passed to gorm's Scopes, resolved the same way. The temporary
 // Session-in-Scopes warning (go-gorm/gorm#7592) uses it, so it covers the same
 // callbacks as reuse detection (#196).
-func CollectScopesOnlyCallbacks(funcs []*ssa.Function) map[*ssa.Function]bool {
-	return collectCallbacksPassedTo(funcs, "Scopes")
+func CollectScopesOnlyCallbacks(funcs []*ssa.Function, vars callsite.FuncVars) map[*ssa.Function]bool {
+	return collectCallbacksPassedTo(funcs, vars, "Scopes")
 }
 
 // CollectImmutableCallbacks returns the set of function literals passed as the
@@ -43,9 +47,9 @@ func CollectScopesOnlyCallbacks(funcs []*ssa.Function) map[*ssa.Function]bool {
 // reuse inside the callback is safe (verified against gorm's clone semantics; see
 // the epic's pivotal finding). It must be exempted from the mutable-by-default
 // treatment (#60 SC103, #62).
-func CollectImmutableCallbacks(funcs []*ssa.Function) map[*ssa.Function]bool {
+func CollectImmutableCallbacks(funcs []*ssa.Function, vars callsite.FuncVars) map[*ssa.Function]bool {
 	set := make(map[*ssa.Function]bool)
-	addCollectedCallbacks(funcs, nil, set)
+	addCollectedCallbacks(funcs, vars, nil, set)
 	return set
 }
 
@@ -57,35 +61,39 @@ func CollectImmutableCallbacks(funcs []*ssa.Function) map[*ssa.Function]bool {
 //
 // It adds the callbacks of CollectImmutableCallbacks too, so into is meant to
 // hold that set already.
-func CollectImmutableInputCallbacks(funcs []*ssa.Function, set *directive.ImmutableInputSet, into map[*ssa.Function]bool) {
+func CollectImmutableInputCallbacks(funcs []*ssa.Function, vars callsite.FuncVars, set *directive.ImmutableInputSet, into map[*ssa.Function]bool) {
 	if set == nil || into == nil {
 		return
 	}
-	addCollectedCallbacks(funcs, set, into)
+	addCollectedCallbacks(funcs, vars, set, into)
 }
 
 // CollectedCallbackArgs returns the indices into the instruction's arguments
 // (receiver included) of the arguments of site that receive a fresh or
 // immutable *gorm.DB as a callback:
-//   - for gorm's Transaction or FindInBatches, every argument that is a
-//     function with a *gorm.DB parameter. The callback sits at a different
-//     position per method (Transaction: first argument; FindInBatches:
-//     third), so the arguments are scanned rather than an index hard-coded.
+//   - for gorm's Transaction or FindInBatches, every argument passed to a
+//     parameter of a function type with a *gorm.DB parameter. The callback
+//     sits at a different position per method (Transaction: first argument;
+//     FindInBatches: third), so the parameters are scanned rather than an
+//     index hard-coded.
 //   - for a function declaring //gormreuse:immutable-input, the declared
 //     callbacks in inputs.
 //
-// site is read from its static callee (Site.StaticSite), as every caller reads
-// it today: a method value call is a call of its wrapper.
+// A method value call is the call of its method, and a call through a
+// package-level variable is the call of the function it holds (#257).
 func CollectedCallbackArgs(site callsite.Site, inputs *directive.ImmutableInputSet) []int {
-	if site.Callee == nil {
+	if site.Declared == nil {
 		return nil
 	}
 	args := site.Instr.Common().Args
 	var idxs []int
 	if CollectsFreshCallbacks(site) {
-		for i, arg := range args {
-			if cb := resolveExactFunc(arg); cb != nil && cb.Signature != nil && directive.HasGormDBParameter(cb.Signature) {
-				idxs = append(idxs, i)
+		params := site.Declared.Signature.Params()
+		for i := range args {
+			if p := site.ArgParam(i); p >= 0 && p < params.Len() {
+				if sig, ok := params.At(p).Type().Underlying().(*types.Signature); ok && directive.HasGormDBParameter(sig) {
+					idxs = append(idxs, i)
+				}
 			}
 		}
 		return idxs
@@ -93,7 +101,7 @@ func CollectedCallbackArgs(site callsite.Site, inputs *directive.ImmutableInputS
 	// ParamIdx counts from the first non-receiver parameter, and a method
 	// call carries its receiver as the first argument.
 	shift := len(args) - len(site.Args)
-	for _, cb := range inputs.Callbacks(site.Callee) {
+	for _, cb := range inputs.Callbacks(site.Declared) {
 		if idx := cb.ParamIdx + shift; idx >= 0 && idx < len(args) {
 			idxs = append(idxs, idx)
 		}
@@ -118,14 +126,14 @@ func CollectsFreshCallbacks(site callsite.Site) bool {
 
 // addCollectedCallbacks adds, to set, the function passed at each
 // CollectedCallbackArgs position of every call in funcs.
-func addCollectedCallbacks(funcs []*ssa.Function, inputs *directive.ImmutableInputSet, set map[*ssa.Function]bool) {
+func addCollectedCallbacks(funcs []*ssa.Function, vars callsite.FuncVars, inputs *directive.ImmutableInputSet, set map[*ssa.Function]bool) {
+	h := collectHolders(funcs, vars)
 	// Go and defer statements count too: the callee hands the callback the
 	// same value however the callee itself is invoked (#256).
-	callsite.EachSite(funcs, nil, func(s callsite.Site) {
-		site := s.StaticSite()
+	callsite.EachSite(funcs, vars, func(site callsite.Site) {
 		args := site.Instr.Common().Args
 		for _, idx := range CollectedCallbackArgs(site, inputs) {
-			if fn := resolveExactFunc(args[idx]); fn != nil {
+			if fn := resolveExactFunc(args[idx], h); fn != nil {
 				set[fn] = true
 			}
 		}
@@ -134,12 +142,11 @@ func addCollectedCallbacks(funcs []*ssa.Function, inputs *directive.ImmutableInp
 
 // collectCallbacksPassedTo returns every function passed as a variadic
 // callback to a call of one of the gorm methods, resolved by resolveMayFuncs.
-func collectCallbacksPassedTo(funcs []*ssa.Function, methods ...string) map[*ssa.Function]bool {
+func collectCallbacksPassedTo(funcs []*ssa.Function, vars callsite.FuncVars, methods ...string) map[*ssa.Function]bool {
 	var vals []ssa.Value
 	// Go and defer statements count too: the callee hands the callback the
 	// same value however the callee itself is invoked (#256).
-	callsite.EachSite(funcs, nil, func(s callsite.Site) {
-		site := s.StaticSite()
+	callsite.EachSite(funcs, vars, func(site callsite.Site) {
 		if !site.IsGormMethod() || !slices.Contains(methods, site.Method()) {
 			return
 		}

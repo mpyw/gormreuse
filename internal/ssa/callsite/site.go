@@ -115,7 +115,9 @@ func SiteOf(instr ssa.CallInstruction, vars FuncVars) Site {
 		s.Kind = SiteFuncVar
 	}
 	s.Declared = s.Callee
-	if s.Kind == SiteThunk {
+	if s.Kind == SiteThunk || s.Kind == SiteFuncVar && isSiteWrapper(s.Callee, "$thunk") {
+		// A method expression, called in place or through a variable that
+		// holds it.
 		s.Declared = directive.DeclaredFunc(s.Callee)
 	}
 	if s.Declared != nil && s.Declared.Signature.Recv() != nil && len(s.Args) > 0 {
@@ -172,7 +174,7 @@ func (s Site) IsGormMethod() bool {
 // Declared is nil.
 func (s Site) Method() string {
 	switch {
-	case s.Kind == SiteBound || s.Kind == SiteThunk:
+	case s.Kind == SiteBound || s.Callee != nil && isSiteWrapper(s.Callee, "$thunk"):
 		// The wrapper's object, not Declared: the wrapper of an interface
 		// method value or expression has no declared method to stand for.
 		return s.Callee.Object().Name()
@@ -187,23 +189,6 @@ func (s Site) Method() string {
 // receiver.
 func (s Site) ArgParam(i int) int {
 	return i - (len(s.Instr.Common().Args) - len(s.Args))
-}
-
-// StaticSite returns the Site read from the instruction's static callee alone:
-// a method value call is a call of its "m$bound" wrapper, which takes no
-// receiver, and a call through a package-level variable has no callee. A
-// method expression passes its receiver first, as a static method call does,
-// so it stays the call of the method it stands for (#258). Code
-// that still reads a call this way calls it, so each use is a place where it
-// and the Site disagree (#266).
-func (s Site) StaticSite() Site {
-	switch s.Kind {
-	case SiteBound:
-		s.Declared, s.Recv = s.Callee, nil
-	case SiteFuncVar:
-		s.Kind, s.Callee, s.Declared = SiteDynamic, nil, nil
-	}
-	return s
 }
 
 // isSiteWrapper reports whether fn is a synthetic wrapper with the given name

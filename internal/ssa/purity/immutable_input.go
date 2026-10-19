@@ -199,7 +199,7 @@ func (f *immutableInputFlow) visitImmutableInputCall(v ssa.Value, call ssa.CallI
 			}
 		}
 		site := f.rt.Site(call)
-		if f.keepsImmutableInputPromise(site.StaticSite(), idx) {
+		if f.keepsImmutableInputPromise(site, idx) {
 			continue
 		}
 		f.escapeImmutableInput(call.Pos(), "passed to "+f.immutableInputCalleeName(site))
@@ -209,10 +209,11 @@ func (f *immutableInputFlow) visitImmutableInputCall(v ssa.Value, call ssa.CallI
 // keepsImmutableInputPromise reports whether a call that receives the callback
 // as argument idx promises an immutable *gorm.DB to it too: gorm's
 // Transaction or FindInBatches, or a function declaring immutable-input for
-// that parameter. site is read from the static callee, so a method value call
-// is a call of its wrapper.
+// that parameter. A method value call is the call of its method, and a call
+// through a package-level variable is the call of the function it holds
+// (#257).
 func (f *immutableInputFlow) keepsImmutableInputPromise(site callsite.Site, idx int) bool {
-	if site.Callee == nil {
+	if site.Declared == nil {
 		return false
 	}
 	// Any argument of a Transaction or FindInBatches call, not only one that

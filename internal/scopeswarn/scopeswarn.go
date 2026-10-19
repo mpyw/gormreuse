@@ -57,14 +57,15 @@ const maxCallDepth = 16
 // (callback.CollectScopesOnlyCallbacks). The returned value is followed through
 // Phi edges, variables, captured variables, and the returns of helpers and
 // closures the callback calls. The warnings are sorted by position, one per
-// call. analyzer.go (package internal) drives this check.
-func Validate(callbacks map[*ssa.Function]bool, skip func(*ssa.Function) bool) []Warning {
+// call. vars resolves calls through package-level function variables; it may
+// be nil. analyzer.go (package internal) drives this check.
+func Validate(callbacks map[*ssa.Function]bool, vars callsite.FuncVars, skip func(*ssa.Function) bool) []Warning {
 	found := make(map[*ssa.Call]bool)
 	for fn := range callbacks {
 		if skip(fn) {
 			continue
 		}
-		t := &returnTracer{found: found, seen: make(map[frameValue]bool)}
+		t := &returnTracer{found: found, seen: make(map[frameValue]bool), vars: vars}
 		t.returns(&frame{fn: fn}, 0)
 	}
 
@@ -126,6 +127,7 @@ type frameValue struct {
 type returnTracer struct {
 	found map[*ssa.Call]bool
 	seen  map[frameValue]bool
+	vars  callsite.FuncVars
 }
 
 // returns traces result idx of every return statement in f.fn.
@@ -191,10 +193,10 @@ func (t *returnTracer) load(f *frame, addr ssa.Value) {
 // finding; any other *gorm.DB method returns a clone==0 value and ends the
 // trace; a helper or closure is followed into its return statements.
 //
-// A method value call is read as a call of its wrapper, which is followed like
-// a helper.
+// A method value call is the call of its method, and a call through a
+// package-level variable is the call of the function it holds (#257).
 func (t *returnTracer) call(f *frame, call *ssa.Call, idx int) {
-	site := callsite.SiteOf(call, nil).StaticSite()
+	site := callsite.SiteOf(call, t.vars)
 	// Only a *gorm.DB method is matched by name, so that an unrelated
 	// package's identically-named method doesn't trigger GORM-specific
 	// diagnostics.
@@ -207,9 +209,14 @@ func (t *returnTracer) call(f *frame, call *ssa.Call, idx int) {
 		}
 		return
 	}
-	callee := site.Callee
+	callee := site.Declared
 	if callee == nil || len(callee.Blocks) == 0 || f.depth >= maxCallDepth || f.onStack(callee) {
 		return
 	}
-	t.returns(&frame{fn: callee, args: call.Call.Args, caller: f, depth: f.depth + 1}, idx)
+	// The callee's parameters start with its receiver.
+	args := site.Args
+	if site.Recv != nil {
+		args = append([]ssa.Value{site.Recv}, args...)
+	}
+	t.returns(&frame{fn: callee, args: args, caller: f, depth: f.depth + 1}, idx)
 }

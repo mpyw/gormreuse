@@ -455,7 +455,7 @@ func (g *Generator) changedElsewhere(v pollution.Violation) bool {
 	loops := cfg.NewAnalyzer()
 	ordered := usesOrdered(v)
 	for _, use := range v.AllUses {
-		if use.Escapes && escapeSeen(loops, use, v.AllUses, ordered) {
+		if use.Escapes && escapeSeen(loops, use, v.AllUses, ordered, g.tracer.FuncVars()) {
 			return true
 		}
 	}
@@ -488,9 +488,10 @@ func (g *Generator) changedElsewhere(v pollution.Violation) bool {
 // result of a call that returns a *gorm.DB, such as `q = withTenant(q)`: the
 // result may be the root itself. Without the order of every use (see
 // usesOrdered) the change is assumed to be seen. An escape that is the last
-// use, as in `q.Find(&a); render(q)`, keeps its fix.
-func escapeSeen(a *cfg.Analyzer, escape pollution.UsageInfo, uses []pollution.UsageInfo, ordered bool) bool {
-	if !ordered || inCycle(a, escape.Block) || returnsGormDBAt(escape) {
+// use, as in `q.Find(&a); render(q)`, keeps its fix. vars resolves calls
+// through package-level function variables.
+func escapeSeen(a *cfg.Analyzer, escape pollution.UsageInfo, uses []pollution.UsageInfo, ordered bool, vars callsite.FuncVars) bool {
+	if !ordered || inCycle(a, escape.Block) || returnsGormDBAt(escape, vars) {
 		return true
 	}
 	return slices.ContainsFunc(uses, func(use pollution.UsageInfo) bool {
@@ -503,12 +504,13 @@ func escapeSeen(a *cfg.Analyzer, escape pollution.UsageInfo, uses []pollution.Us
 
 // returnsGormDBAt reports whether use is an argument of a call that returns
 // a *gorm.DB, alone or in a tuple, other than a *gorm.DB method. A method
-// such as base.Model(q) returns a chain on its receiver.
-func returnsGormDBAt(use pollution.UsageInfo) bool {
+// such as base.Model(q) returns a chain on its receiver, also when it is
+// called as a method value.
+func returnsGormDBAt(use pollution.UsageInfo, vars callsite.FuncVars) bool {
 	return slices.ContainsFunc(use.Block.Instrs, func(instr ssa.Instruction) bool {
 		call, ok := instr.(*ssa.Call)
 		return ok && call.Pos() == use.Pos && typeutil.HasGormDBResult(call.Type()) &&
-			!callsite.SiteOf(call, nil).StaticSite().IsGormMethod()
+			!callsite.SiteOf(call, vars).IsGormMethod()
 	})
 }
 
@@ -536,7 +538,7 @@ func (g *Generator) readsRootState(root, x ssa.Value, loopInfo *cfg.LoopInfo) bo
 		if !ok {
 			return false
 		}
-		site := callsite.SiteOf(call, nil).StaticSite()
+		site := g.tracer.Site(call)
 		if !site.IsGormMethod() || isFinisher(site.Method()) || typeutil.IsImmutableReturningBuiltin(site.Method()) {
 			return false
 		}

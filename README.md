@@ -618,6 +618,15 @@ Transaction and FindInBatches callbacks (e.g. `tx` in `db.Transaction(func(tx *g
 
 > [!NOTE]
 > A **named** function or method is exempt only when every use of it in the package passes it as such a callback. Otherwise its parameter is treated as mutable like any other parameter. That is the case when it is also called directly, stored, returned, passed as an ordinary argument, or exported (another package could call it). The packages that import an exported function are analyzed after its own package, so its own package cannot see their calls. To keep it exempt, mark it [`//gormreuse:immutable-param`](#gormreuseimmutable-param): then each direct caller, in its package or in another one, must pass an isolated value.
+>
+> The callback may also be read from a variable or a field that holds one function:
+>
+> | Holder | Example | Condition |
+> | --- | --- | --- |
+> | Package-level variable | `var txBody = func(tx *gorm.DB) error {...}`, then `db.Transaction(txBody)` | Unexported, assigned only in its declaration, and its address is never taken |
+> | Struct field | `s := &svc{cb: func(tx *gorm.DB) error {...}}`, then `db.Transaction(s.cb)` | Unexported, assigned in one place in the package, its address is never taken, and its struct is never converted to another type |
+>
+> The function stays exempt only while every read of the variable or field passes it as such a callback. A read that calls it (`txBody(q)`) or passes it on as an ordinary argument makes its parameter mutable again. The same holds for an `immutable-input` callback. A call of `Transaction` or `FindInBatches` through a method value (`tx := db.Transaction; tx(cb)`) exempts its callback too.
 
 #### Closures
 
@@ -900,7 +909,7 @@ func useIt(db *gorm.DB) {
 >
 > A `func(**gorm.DB)` callback called with `&q` is checked against every value stored in `q`.
 >
-> Handing `cb` to another `immutable-input` function at its declared callback, or to gorm's `Transaction`/`FindInBatches`, keeps the promise. Any other flow cannot be checked, so it is reported:
+> Handing `cb` to another `immutable-input` function at its declared callback, or to gorm's `Transaction`/`FindInBatches`, keeps the promise. That function may be called directly, through a method value, or through a package-level variable that holds it (`var withFresh = func(...)`). Any other flow cannot be checked, so it is reported:
 >
 > | Flow | Message |
 > | --- | --- |

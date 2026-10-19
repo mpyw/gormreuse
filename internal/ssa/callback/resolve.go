@@ -44,30 +44,35 @@ func resolveMayFuncs(funcs []*ssa.Function, vals []ssa.Value) map[*ssa.Function]
 
 // resolveExactFunc returns the function that the value v passed as a callback
 // is: a MakeClosure (capturing closure), a bare *ssa.Function (named function
-// reference), or either boxed in an interface. A generic instance or a bound
-// method wrapper is mapped to the function whose body receives the argument
-// (#180). It is nil for anything else, such as a variable that holds a
-// function.
+// reference), either boxed in an interface, or a read of a holder that holds
+// one of those (#257). A generic instance or a bound method wrapper is mapped
+// to the function whose body receives the argument (#180). It is nil for
+// anything else, such as a parameter or a variable assigned twice. h may be
+// nil.
 //
-//declscope:shared // collect.go and reach.go read the Transaction and immutable-input callbacks with it
-func resolveExactFunc(v ssa.Value) *ssa.Function {
+//declscope:shared // collect.go reads the Transaction and immutable-input callbacks with it
+func resolveExactFunc(v ssa.Value, h *holders) *ssa.Function {
 	var found *ssa.Function
-	r := &funcResolver{found: func(fn *ssa.Function) { found = fn }}
+	r := &funcResolver{found: func(fn *ssa.Function) { found = fn }, held: h, seen: make(map[ssa.Value]bool)}
 	r.addFunc(v)
 	return found
 }
 
 // funcResolver walks a func-typed value back to the functions it can be, for
 // both queries. The exact query follows only the steps that keep one
-// function: a function, a closure and an interface conversion.
+// function: a function, a closure, an interface conversion and a read of a
+// holder.
 type funcResolver struct {
 	// may makes the walk follow every step of resolveMayFuncs.
 	may bool
 	// found receives each function the value can be.
 	found func(*ssa.Function)
-	// funcs, seen and globalStores are used by the may query only.
+	// held is the holders the exact query reads through. It may be nil.
+	held *holders
+	// seen stops cycles.
+	seen map[ssa.Value]bool
+	// funcs and globalStores are used by the may query only.
 	funcs        []*ssa.Function
-	seen         map[ssa.Value]bool
 	globalStores map[*ssa.Global][]ssa.Value // built on first use
 }
 
@@ -121,15 +126,10 @@ func (r *funcResolver) addSliceElems(v ssa.Value) {
 
 // addFunc adds the functions that the func value v may be.
 func (r *funcResolver) addFunc(v ssa.Value) {
-	if v == nil {
+	if v == nil || r.seen[v] {
 		return
 	}
-	if r.may {
-		if r.seen[v] {
-			return
-		}
-		r.seen[v] = true
-	}
+	r.seen[v] = true
 
 	switch x := v.(type) {
 	case *ssa.Function:
@@ -153,6 +153,7 @@ func (r *funcResolver) addFunc(v ssa.Value) {
 		return
 	}
 	if !r.may {
+		r.addFunc(r.held.heldValue(v))
 		return
 	}
 

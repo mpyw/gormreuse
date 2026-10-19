@@ -178,13 +178,13 @@ func TestResolveExactFunc(t *testing.T) {
 		t.Fatalf("want one call of use in funcPhi, got %d", len(vals))
 	}
 	// The varargs slice is not a function, and neither is the Phi stored in it.
-	if fn := resolveExactFunc(vals[0]); fn != nil {
+	if fn := resolveExactFunc(vals[0], nil); fn != nil {
 		t.Errorf("a slice should resolve to nil, got %v", fn)
 	}
-	if fn := resolveExactFunc(members["a1"]); fn != members["a1"] {
+	if fn := resolveExactFunc(members["a1"], nil); fn != members["a1"] {
 		t.Errorf("a function should resolve to itself, got %v", fn)
 	}
-	if fn := resolveExactFunc(nil); fn != nil {
+	if fn := resolveExactFunc(nil, nil); fn != nil {
 		t.Errorf("nil should resolve to nil, got %v", fn)
 	}
 }
