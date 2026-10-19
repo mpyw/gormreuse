@@ -351,7 +351,8 @@ func (g *Generator) paramSessionSite(p *ssa.Parameter) sessionSite {
 	// The parameter is used, so the body has a statement.
 	first := body.List[0]
 	sep := "; "
-	if line := g.fset.Position(first.Pos()); line.Line != g.fset.Position(body.Lbrace).Line {
+	// Unadjusted, so a //line directive cannot move the line or zero the column.
+	if line := g.fset.PositionFor(first.Pos(), false); line.Line != g.fset.PositionFor(body.Lbrace, false).Line {
 		sep = "\n" + strings.Repeat("\t", line.Column-1)
 	}
 	name := p.Name()
