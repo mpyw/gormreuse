@@ -1030,8 +1030,7 @@
 +	q := db.Where("base").Session(&gorm.Session{})
  
  	if a {
--		q = immutableReturnOnlyHelper(q) // Assignment - q is now immutable
-+		q = immutableReturnOnlyHelper(q).Session(&gorm.Session{}) // Assignment - q is now immutable
+ 		q = immutableReturnOnlyHelper(q) // Assignment - q is now immutable
  	}
  
  	if b {
@@ -1082,8 +1081,7 @@
 +	q := db.Where("base").Session(&gorm.Session{})
  
  	if a {
--		q = pureAndImmutableReturnHelper(q) // Pure + immutable
-+		q = pureAndImmutableReturnHelper(q).Session(&gorm.Session{}) // Pure + immutable
+ 		q = pureAndImmutableReturnHelper(q) // Pure + immutable
  	}
  
  	if b {
@@ -1134,7 +1132,8 @@
  	q := db.Where("base").Session(&gorm.Session{}) // Session at END makes q immutable
  
  	if a {
- 		q = noPureHelper(q) // q (immutable) passed to non-pure - OK, result is new mutable root
+-		q = noPureHelper(q) // q (immutable) passed to non-pure - OK, result is new mutable root
++		q = noPureHelper(q).Session(&gorm.Session{}) // q (immutable) passed to non-pure - OK, result is new mutable root
  	}
  
  	if b {
@@ -1150,9 +1149,11 @@
  	q := db.Where("base").Session(&gorm.Session{}) // Session at END makes q immutable
  
  	if a {
- 		q = noPureHelper(q) // Result is mutable
+-		q = noPureHelper(q) // Result is mutable
++		q = noPureHelper(q).Session(&gorm.Session{}) // Result is mutable
  	} else {
- 		q = noPureHelper(q) // Result is mutable
+-		q = noPureHelper(q) // Result is mutable
++		q = noPureHelper(q).Session(&gorm.Session{}) // Result is mutable
  	}
  
  	// q is now mutable (from noPureHelper), but it's first use
@@ -1243,8 +1244,7 @@
 -		q = noPureHelper(q) // No directive - mutable result
 +		q = noPureHelper(q).Session(&gorm.Session{}) // No directive - mutable result
  	} else {
--		q = immutableReturnOnlyHelper(q) // Immutable-return - immutable result
-+		q = immutableReturnOnlyHelper(q).Session(&gorm.Session{}) // Immutable-return - immutable result
+ 		q = immutableReturnOnlyHelper(q) // Immutable-return - immutable result
  	}
  
  	// Phi(mutable, immutable) - need to be conservative

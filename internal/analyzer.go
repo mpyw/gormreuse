@@ -174,7 +174,10 @@ func RunSSA(
 	// Share a single fix generator across all violations (it caches AST
 	// inspectors). It needs scopesCallbacks to withhold the immutable-param fix on
 	// Scopes/Preload callbacks, whose parameters cannot be exempted (stage 2c).
-	fixGen := fix.New(pass, scopesCallbacks)
+	// inputTracer gives it the analysis' own mutability rule, and the source
+	// functions let it check every caller before it suggests immutable-param
+	// (#201).
+	fixGen := fix.New(pass, scopesCallbacks, inputTracer, ssaInfo.SrcFuncs)
 
 	// Determine which //gormreuse:immutable-param functions actually rely on
 	// immutability — they would reuse a *gorm.DB parameter if it were treated as

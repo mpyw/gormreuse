@@ -42,8 +42,8 @@
  
  // --- Passed as a callback AND called directly (the issue's repro) ---
  
-+//gormreuse:immutable-param
  func namedCallbackTxAndDirect(q *gorm.DB) error {
++	q = q.Session(&gorm.Session{})
  	q.Find(nil)
  	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  	return nil
@@ -60,8 +60,8 @@
  
  // --- Referenced through a goroutine ---
  
-+//gormreuse:immutable-param
  func namedCallbackTxAndGo(q *gorm.DB) error {
++	q = q.Session(&gorm.Session{})
  	q.Find(nil)
  	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  	return nil
@@ -74,8 +74,8 @@
  
  // --- Stored in a package-level variable ---
  
-+//gormreuse:immutable-param
  func namedCallbackTxAndGlobal(q *gorm.DB) error {
++	q = q.Session(&gorm.Session{})
  	q.Find(nil)
  	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  	return nil
@@ -90,8 +90,8 @@
  
  // --- Captured by a closure ---
  
-+//gormreuse:immutable-param
  func namedCallbackTxAndCaptured(q *gorm.DB) error {
++	q = q.Session(&gorm.Session{})
  	q.Find(nil)
  	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  	return nil
@@ -106,8 +106,8 @@
  
  // --- Chosen by a branch: a Phi is not a callback position ---
  
-+//gormreuse:immutable-param
  func namedCallbackPhiA(q *gorm.DB) error {
++	q = q.Session(&gorm.Session{})
  	q.Find(nil)
  	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  	return nil
@@ -122,8 +122,8 @@
  	_ = cb(db.Where("x"))
  }
  
-+//gormreuse:immutable-param
  func namedCallbackTxOnly2(q *gorm.DB) error {
++	q = q.Session(&gorm.Session{})
  	q.Find(nil)
  	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  	return nil
@@ -174,8 +174,8 @@
  	return nil
  }
  
-+//gormreuse:immutable-param
  func namedCallbackInputAndDirect(q *gorm.DB) error {
++	q = q.Session(&gorm.Session{})
  	q.Find(nil)
  	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  	return nil
@@ -197,8 +197,8 @@
  	return cb(db.Session(&gorm.Session{}))
  }
  
-+//gormreuse:immutable-param
  func namedCallbackInputWrongSlot(q *gorm.DB) error {
++	q = q.Session(&gorm.Session{})
  	q.Find(nil)
  	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  	return nil
@@ -218,30 +218,30 @@
  	return nil
  }
  
-+//gormreuse:immutable-param
  func (namedCallbackRepo) txAndDirect(q *gorm.DB) error {
++	q = q.Session(&gorm.Session{})
  	q.Find(nil)
  	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  	return nil
  }
  
-+//gormreuse:immutable-param
  func (namedCallbackRepo) txAndExpr(q *gorm.DB) error {
++	q = q.Session(&gorm.Session{})
  	q.Find(nil)
  	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  	return nil
  }
  
-+//gormreuse:immutable-param
  func (namedCallbackRepo) txAndIface(q *gorm.DB) error {
++	q = q.Session(&gorm.Session{})
  	q.Find(nil)
  	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  	return nil
  }
  
  // TxExported is a method other packages can call.
-+//gormreuse:immutable-param
  func (namedCallbackRepo) TxExported(q *gorm.DB) error {
++	q = q.Session(&gorm.Session{})
  	q.Find(nil)
  	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  	return nil
@@ -264,8 +264,8 @@
  
  // --- Generic instances ---
  
-+//gormreuse:immutable-param
  func namedCallbackGenTx[T any](q *gorm.DB) error {
++	q = q.Session(&gorm.Session{})
  	q.Find(nil)
  	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  	return nil
@@ -278,8 +278,8 @@
  
  // --- Recursion is a direct call ---
  
-+//gormreuse:immutable-param
  func namedCallbackRecursive(q *gorm.DB) error {
++	q = q.Session(&gorm.Session{})
  	q.Find(nil)
  	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  	return namedCallbackRecursive(q) // want `\*gorm\.DB reused: second branch from mutable root`
@@ -293,8 +293,8 @@
  
  // NamedCallbackExported is only passed to Transaction here, but another
  // package may call it with a mutable value, so its parameter stays mutable.
-+//gormreuse:immutable-param
  func NamedCallbackExported(q *gorm.DB) error {
++	q = q.Session(&gorm.Session{})
  	q.Find(nil)
  	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  	return nil
@@ -322,8 +322,8 @@
  
  type namedCallbackIfaceValue interface{ txAndIfaceValue(*gorm.DB) error }
  
-+//gormreuse:immutable-param
  func (namedCallbackRepo) txAndIfaceValue(q *gorm.DB) error {
++	q = q.Session(&gorm.Session{})
  	q.Find(nil)
  	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  	return nil
@@ -340,15 +340,15 @@
  
  func namedCallbackApply(fn func(*gorm.DB) error, db *gorm.DB) error { return fn(db) }
  
-+//gormreuse:immutable-param
  func namedCallbackTxAndArg(q *gorm.DB) error {
++	q = q.Session(&gorm.Session{})
  	q.Find(nil)
  	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  	return nil
  }
  
-+//gormreuse:immutable-param
  func namedCallbackTxAndReturned(q *gorm.DB) error {
++	q = q.Session(&gorm.Session{})
  	q.Find(nil)
  	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  	return nil
@@ -365,8 +365,8 @@
  
  // Passed to a func value: the callee is unknown, so it may call it with
  // anything.
-+//gormreuse:immutable-param
  func namedCallbackTxAndDynamic(q *gorm.DB) error {
++	q = q.Session(&gorm.Session{})
  	q.Find(nil)
  	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  	return nil

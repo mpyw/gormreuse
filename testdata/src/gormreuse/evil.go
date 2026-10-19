@@ -2876,12 +2876,12 @@ func phiOneHasSession(db *gorm.DB, cond bool) {
 	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
-// phiSessionInMiddle demonstrates Session in the middle of a chain.
-// Should detect Session even when followed by more chain methods.
+// phiSessionInMiddle demonstrates Session in the middle of a chain. The Where
+// after it returns a mutable value, so that edge needs a Session too (#201).
 func phiSessionInMiddle(db *gorm.DB, cond bool) {
 	var q *gorm.DB
 	if cond {
-		q = db.Where("branch1", 1).Session(&gorm.Session{}).Where("after") // Immutable (Session in chain)
+		q = db.Where("branch1", 1).Session(&gorm.Session{}).Where("after") // Mutable: Where is the last call
 	} else {
 		q = db.Where("branch2", 2) // Needs Session
 	}

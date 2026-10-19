@@ -210,10 +210,22 @@ q.Where("b").Find(nil) // OK: independent chain from immutable root
 
 **When applied:**
 - A root still has 2+ branches after simulating Phase 1 reassignments
-- Special handling for Phi nodes (conditional branches): adds Session to each incoming edge
+- Special handling for Phi nodes (conditional branches): adds Session to each incoming edge that is still mutable. An edge counts as immutable by the same rule as detection: its **last** call must return an immutable value. `db.Session(&gorm.Session{}).Where("y")` and `db.WithContext(ctx).Where("y")` are mutable, so they get a Session too
 - Session goes only after a call that returns `*gorm.DB`. An edge that has no such call, such as a closure parameter (`if c { q = tx }`) or one result of `q, err := open()`, gets none
 
 `Session` is written with a name that refers to `gorm.io/gorm` where it is inserted. When the file has no such name, the fix adds an import: `"gorm.io/gorm"`, or `gormio "gorm.io/gorm"` when `gorm` is taken there, such as by a parameter or local variable named `gorm`, or by another package imported as `gorm`. A blank import (`_ "gorm.io/gorm"`) gives no name. Each diagnostic's fix carries its own import edit, so an editor can apply one quick fix alone.
+
+### Parameter Roots
+
+A reused `*gorm.DB` parameter has no definition to append a Session to. The fix depends on whether gormreuse can check every caller:
+
+| Function | Fix |
+| --- | --- |
+| Unexported, not a method, only called directly in the package, and every caller passes an immutable value | Add [`//gormreuse:immutable-param`](#gormreuseimmutable-param). The caller-side check keeps the callers isolated |
+| Any other function: exported, a method, used as a function value, or with a caller that passes a mid-chain value | Rebind the parameter at the top of the body: `tx = tx.Session(&gorm.Session{})`. Discarded statements on it are reassigned as for a local root |
+| A Scopes/Preload callback, a function that returns a `*gorm.DB` and is not only called directly (it may be a Scopes callback), or a closure | **No fix** |
+
+`immutable-param` on an exported function would hide the reuse: callers in other packages are never checked. On a function with a mid-chain caller, it would move the report to that caller, where it has no fix.
 
 ### Combined Example
 

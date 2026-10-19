@@ -1933,6 +1933,16 @@ func (t *RootTracer) isImmutableSource(v ssa.Value) bool {
 	}
 }
 
+// IsImmutableCall reports whether v is a call whose result is immutable, by
+// the rule the tracer uses for a root: the call itself, the last call of its
+// chain, is an immutable-returning gorm builtin or a
+// //gormreuse:immutable-return function. So db.Session(s).Where("x") is
+// mutable, and so is a Session that may set Initialized.
+func (t *RootTracer) IsImmutableCall(v ssa.Value) bool {
+	call, ok := v.(*ssa.Call)
+	return ok && t.isImmutableSource(call)
+}
+
 // FindAliasedRoots returns the mutable roots whose Statement v may read later:
 // through a Session or Debug copy (#174), or as a read-only argument of a call
 // in v's chain, such as a subquery (#185).
