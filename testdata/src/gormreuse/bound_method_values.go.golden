@@ -123,7 +123,7 @@ func boundDiscardedChainThroughMethodValue(db *gorm.DB) {
 
 // boundOnMutableInLoop: every iteration branches q, defined outside the loop.
 func boundOnMutableInLoop(db *gorm.DB, items []string) {
-	q := db.Where("x")
+	q := db.Where("x").Session(&gorm.Session{})
 	w := q.Where
 	for _, item := range items {
 		w("name = ?", item).Find(nil) // want `\*gorm\.DB reused: second branch from mutable root \(root at [^)]+\)`

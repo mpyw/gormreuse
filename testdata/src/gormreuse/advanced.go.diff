@@ -198,7 +198,8 @@
  // conditionalExtendPartialWithPollution demonstrates conditional extension with initial pollution.
  // One branch extends polluted q - that extension is a violation.
  func conditionalExtendPartialWithPollution(db *gorm.DB, flag bool) {
- 	q := db.Where("x = ?", 1)
+-	q := db.Where("x = ?", 1)
++	q := db.Where("x = ?", 1).Session(&gorm.Session{})
  	q.Find(nil) // Pollutes q
  
  	if flag {
@@ -289,7 +290,7 @@
  func nonFinisherOnlyGeneratesFix(db *gorm.DB) {
  	q := db.Where("base")
 -	q.Where("filter1") // Non-finisher expr stmt - should get "q = q.Where("filter1")" fix
-+	q = q.Where("filter1").Session(&gorm.Session{}) // Non-finisher expr stmt - should get "q = q.Where("filter1")" fix
++	q = q.Where("filter1") // Non-finisher expr stmt - should get "q = q.Where("filter1")" fix
  	q.Find(nil)        // want `\*gorm\.DB reused: second branch from mutable root`
  }
  

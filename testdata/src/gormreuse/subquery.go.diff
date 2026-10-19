@@ -120,7 +120,8 @@
  func subqueryReadThroughPhiAfterBranch(db *gorm.DB, cond bool) {
  	db = db.Session(&gorm.Session{})
  	a := db.Model(&User{}).Select("id")
- 	b := db.Model(&User{}).Select("id")
+-	b := db.Model(&User{}).Select("id")
++	b := db.Model(&User{}).Select("id").Session(&gorm.Session{})
  	b.Where("age > 1").Find(&[]User{})
  	sub := a
  	if cond {

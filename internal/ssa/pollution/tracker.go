@@ -51,6 +51,12 @@ type Violation struct {
 	Message string
 	Root    ssa.Value   // mutable root that caused the violation (for fix generation)
 	AllUses []UsageInfo // all uses of this root, filled in by CollectViolations (for fix generation)
+
+	// HiddenUses is set when the root has uses that AllUses does not list:
+	// deferred or spawned calls, reads through a Session/Debug copy or a
+	// read-only argument, and loop-carried reads. The fix cannot order them,
+	// so it cannot prove that a Session is redundant (#202).
+	HiddenUses bool
 }
 
 // UsageInfo tracks a single usage of a root (exported for fix generation).
@@ -413,6 +419,7 @@ func (t *Tracker) CollectViolations() []Violation {
 	for i := range t.violations {
 		if root := t.violations[i].Root; root != nil {
 			t.violations[i].AllUses = t.getAllUses(root)
+			t.violations[i].HiddenUses = len(t.branchUses[root]) > 0 || len(t.aliasUses[root]) > 0 || len(t.loopCarriedUses[root]) > 0
 		}
 	}
 	return t.violations

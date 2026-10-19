@@ -209,7 +209,8 @@ q.Where("b").Find(nil) // OK: independent chain from immutable root
 ```
 
 **When applied:**
-- A root still has 2+ branches after simulating Phase 1 reassignments
+- A root, or a value that a reassignment creates, still has 2+ branches on one path after the reassignments. The paths come from the control flow, so in `if c { q.Where("a") }; q.Where("b").Find(nil); q.Where("c").Find(nil)` both the root and `q = q.Where("a")` get a Session. A reassigned value used once gets none, and neither does a chain that already ends in a Session
+- When the fix cannot see every use of the root in order, such as a `defer`/`go` use, a use inside a closure, or a read through a `Session` copy, every root or reassigned value with a later use gets a Session
 - Special handling for Phi nodes (conditional branches): adds Session to each incoming edge that is still mutable. An edge counts as immutable by the same rule as detection: its **last** call must return an immutable value. `db.Session(&gorm.Session{}).Where("y")` and `db.WithContext(ctx).Where("y")` are mutable, so they get a Session too
 - Session goes only after a call that returns `*gorm.DB`. An edge that has no such call, such as a closure parameter (`if c { q = tx }`) or one result of `q, err := open()`, gets none
 

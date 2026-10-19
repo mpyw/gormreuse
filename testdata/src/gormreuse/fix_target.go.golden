@@ -22,7 +22,7 @@ var fixTargetDB *gorm.DB
 func fixTargetPackageTransaction() error {
 	return fixTargetDB.Transaction(func(tx *gorm.DB) error {
 		q := tx.Model(nil).Where("tenant = ?", 1)
-		q = q.Where("active").Session(&gorm.Session{})
+		q = q.Where("active")
 		q.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 		return nil
 	})
@@ -32,7 +32,7 @@ func fixTargetPackageTransaction() error {
 func fixTargetParamTransaction(db *gorm.DB) error {
 	return db.Transaction(func(tx *gorm.DB) error {
 		q := tx.Model(nil).Where("tenant = ?", 1)
-		q = q.Where("active").Session(&gorm.Session{})
+		q = q.Where("active")
 		q.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 		return nil
 	})
@@ -42,7 +42,7 @@ func fixTargetParamTransaction(db *gorm.DB) error {
 func fixTargetTestingRun(t *testing.T, db *gorm.DB) {
 	t.Run("x", func(t *testing.T) {
 		q := db.Where("x").Session(&gorm.Session{}).Where("y")
-		q = q.Where("active").Session(&gorm.Session{})
+		q = q.Where("active")
 		q.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 	})
 }
@@ -52,7 +52,7 @@ func fixTargetWaitGroupGo(db *gorm.DB) {
 	var wg sync.WaitGroup
 	wg.Go(func() {
 		q := db.Where("x").Session(&gorm.Session{}).Where("y")
-		q = q.Where("active").Session(&gorm.Session{})
+		q = q.Where("active")
 		q.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 	})
 	wg.Wait()
@@ -62,7 +62,7 @@ func fixTargetWaitGroupGo(db *gorm.DB) {
 func fixTargetPackageCall(db *gorm.DB) {
 	fmt.Println(func() {
 		q := db.Where("x").Session(&gorm.Session{}).Where("y")
-		q = q.Where("active").Session(&gorm.Session{})
+		q = q.Where("active")
 		q.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 	})
 }
@@ -120,7 +120,7 @@ func fixTargetDefer(db *gorm.DB) {
 // fixTargetVarDecl: a root defined by `var q = <call>` is reassigned as usual.
 func fixTargetVarDecl(db *gorm.DB) {
 	var q = db.Where("x")
-	q = q.Where("a").Session(&gorm.Session{})
+	q = q.Where("a")
 	q.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
@@ -133,7 +133,7 @@ func fixTargetPhiSameVar(db *gorm.DB, c bool) {
 	if c {
 		q = db.Where("y")
 	}
-	q = q.Where("a").Session(&gorm.Session{})
+	q = q.Where("a")
 	q.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
@@ -144,7 +144,7 @@ func fixTargetPhiNilEdge(db *gorm.DB, c bool) {
 	if c {
 		q = db.Where("x")
 	}
-	q = q.Where("a").Session(&gorm.Session{})
+	q = q.Where("a")
 	q.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
@@ -159,7 +159,7 @@ func fixTargetPhiLoop(db *gorm.DB, n int) {
 			q = db.Where("y")
 		}
 	}
-	q = q.Where("a").Session(&gorm.Session{})
+	q = q.Where("a")
 	q.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 

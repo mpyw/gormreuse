@@ -53,7 +53,7 @@ func fixDiscardedLoopOnly(db *gorm.DB, xs []int) {
 // redundant Session.
 func fixDiscardedSessionLast(db *gorm.DB) {
 	q := db.Model(nil).Where("tenant_id = ?", 7)
-	q = q.Where("a").Session(&gorm.Session{}).Session(&gorm.Session{})
+	q = q.Where("a").Session(&gorm.Session{})
 	q.Where("x").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 	q.Where("y").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }

@@ -701,8 +701,32 @@ Two more changes make the reassignment see every statement:
 Limitations:
 
 - A discarded statement whose effect no later query sees still blocks the fix, such as a final `q.Where("after")` when a stored closure captures `q` (`whereOnlyStoredClosure` in `evil.go`). Proving that no later use exists would need alias and loop analysis.
-- A chain that ends in a Session gets a second, redundant Session (#202).
 - Other ways of keeping a chain's effect away from its root, such as `_ = q.Where("a")`, are not treated as discarded statements.
+
+## Where Sessions Go (#202)
+
+After the reassignments, `simulateReassignments` decides which root each use reads, and `findRootsNeedingSession` gives a Session to each root, original or created by a reassignment, that is still used twice. Three defects made `-fix` add Sessions it did not need, miss ones it did, or need a second pass:
+
+| Defect | Example | Change |
+| --- | --- | --- |
+| Every receiver use was recorded twice: by the gorm method handler and by `checkFunctionCallPollution`, which did not skip `Args[0]`. A reassigning call then counted as a use of the value it creates | `q.Where("a"); q.Where("b").Find(nil)` became `q = q.Where("a").Session(...)` | `checkFunctionCallPollution` skips the receiver of a gorm method. Detection is unchanged: the copies had the same block and position |
+| The simulation took uses in position order, so a use after an `if` without an `else` read only the reassignment in the `if` | `if c { q.Where("a") }; q.Where("b").Find(nil); q.Where("c").Find(nil)` left the root mutable on the path where `c` is false | A use reads each earlier reassignment that can reach it, back to the first whose block dominates it, and the original root when none does (`reassignmentReaches`) |
+| A root that flows into a Phi got Sessions only on the Phi's edges, and none when the Phi is used once | `q := db.Where("x"); q.Find(nil); q.Count(nil); if c { q = db.Where("z") }; q.Find(nil)` had no fix. With `q` captured by a closure, the synthetic Phi from its stores had the same result | `sessionPositionsForRoot` always puts a Session on the root itself, and adds the other edges when the Phi is used twice |
+
+`findRootsNeedingSession` counts two uses of one root as a reuse when the earlier one can reach the later one (`usesConflict`). A reassignment does not conflict with the uses after it: on any path through it, they read the new value. A root defined outside a loop and used in it, other than by a reassignment, gets a Session (`usedAgainInLoop`), as does a reassignment in a loop. A reassignment whose chain already ends in an immutable call, by the tracer's `IsImmutableCall`, gets no second Session (`endsImmutable`).
+
+These rules need every use of the root, in the function that defines it. `usesOrdered` checks that:
+
+- the tracker records no use outside `AllUses` (`Violation.HiddenUses`): no deferred or spawned call, no read through a Session/Debug copy or a subquery, no loop-carried read;
+- the reported position is one of `AllUses`. A use through a Phi is filed under one edge only, so a diagnostic for another edge can have no use of its own;
+- every use is in the defining function. A use in a closure, such as the body of a range-over-func loop, has no CFG path from the definition.
+
+When the check fails, a root gets a Session when it has a use other than the one reassignment that reads it, which is what the fix did before. Removing a Session from a reassignment never drops an effect: the statement is still reassigned, so #199 holds. `TestFixesConverge` applies one pass of fixes to each fixture in `testdata/src/converge`, including `fix_paths.go`, and re-lints the result. `testdata/src/gormreuse/fix_paths.go.golden` pins the output, and `TestFixPathsPreserveQueries` in `e2e/internal/fix_paths_test.go` compares the SQL before and after the fixes.
+
+Limitations:
+
+- The rules follow the CFG of one function, not the run-time order of deferred calls or closures. Those roots get the conservative Sessions above, some of them redundant.
+- A Phi edge with no call of its own still gets no Session (see [Fixes That Compile](#fixes-that-compile-200)).
 
 ## Fixes That Compile (#200)
 

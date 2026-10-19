@@ -143,7 +143,7 @@ func gormOrMethodReceiver(db *gorm.DB) {
 	base := db.Where("base")
 
 	// Or takes interface{} - base is polluted by method call
-	base = base.Or("x = ?", 1).Session(&gorm.Session{})
+	base = base.Or("x = ?", 1)
 
 	base.Find(nil) // want "\\*gorm\\.DB reused: second branch from mutable root"
 }
@@ -180,7 +180,7 @@ func gormOrMethodFresh(db *gorm.DB) {
 	base := db.Where("base")
 
 	// Fresh query passed to Or - no reuse issue for the fresh query
-	base = base.Or(db.Where("x")).Session(&gorm.Session{})
+	base = base.Or(db.Where("x"))
 
 	base.Find(nil) // want "\\*gorm\\.DB reused: second branch from mutable root"
 }
