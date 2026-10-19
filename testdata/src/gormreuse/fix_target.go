@@ -11,6 +11,8 @@ import (
 // Fixtures for issue #198: the reassignment fix must rewrite the variable that
 // holds the reused root, never the receiver of an enclosing call, an alias, a
 // call that takes the root as an argument, or a captured variable.
+// immutable-param on a fixture that calls db twice keeps db's own branches
+// out of it, so each fixture reports only the local root it is about.
 
 // fixTargetDB is a package-level handle. A closure passed to its Transaction
 // must not get `fixTargetDB = q.Where(...)`.
@@ -123,6 +125,8 @@ func fixTargetVarDecl(db *gorm.DB) {
 
 // fixTargetPhiSameVar: the uses join two roots, and each is assigned to q, so
 // q is reassigned.
+//
+//gormreuse:immutable-param
 func fixTargetPhiSameVar(db *gorm.DB, c bool) {
 	q := db.Where("x")
 	if c {
@@ -145,6 +149,8 @@ func fixTargetPhiNilEdge(db *gorm.DB, c bool) {
 
 // fixTargetPhiLoop: the uses join roots across a loop, and each is assigned
 // to q, so q is reassigned.
+//
+//gormreuse:immutable-param
 func fixTargetPhiLoop(db *gorm.DB, n int) {
 	q := db.Where("x")
 	for i := 0; i < n; i++ {
@@ -158,6 +164,8 @@ func fixTargetPhiLoop(db *gorm.DB, n int) {
 
 // fixTargetPhiOtherVars: the roots are held by a and b, and the uses go
 // through q, so nothing is reassigned.
+//
+//gormreuse:immutable-param
 func fixTargetPhiOtherVars(db *gorm.DB, c bool) {
 	a := db.Where("a")
 	b := db.Where("b")
@@ -185,6 +193,8 @@ func fixTargetField(db *gorm.DB) {
 // fixTargetLoopSwap: swapping a and b in a loop makes the first report's root
 // a Phi, not a call, so that report gets no reassignment. The second report's
 // root is the call assigned to a.
+//
+//gormreuse:immutable-param
 func fixTargetLoopSwap(db *gorm.DB, n int) {
 	a := db.Where("a")
 	b := db.Where("b")
