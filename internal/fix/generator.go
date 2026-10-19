@@ -54,6 +54,7 @@ import (
 	"github.com/mpyw/gormreuse/internal/directive"
 	"github.com/mpyw/gormreuse/internal/ssa/callsite"
 	"github.com/mpyw/gormreuse/internal/ssa/cfg"
+	"github.com/mpyw/gormreuse/internal/ssa/handler"
 	"github.com/mpyw/gormreuse/internal/ssa/pollution"
 	"github.com/mpyw/gormreuse/internal/ssa/pollutionsource"
 	"github.com/mpyw/gormreuse/internal/ssa/tracer"
@@ -68,16 +69,20 @@ type Generator struct {
 	cursors         map[*ast.File]inspector.Cursor // file cursors in the pass inspector
 	scopesCallbacks map[*ssa.Function]bool         // Scopes/Preload callbacks (no parameter-root fix)
 	tracer          *tracer.RootTracer             // the analysis' mutability rule
-	funcs           []*ssa.Function                // the pass's source functions, to find callers
+	funcs           []*ssa.Function                // the analysed functions, to find callers
+	seesAllCallers  func(token.Pos) bool           // whether this variant sees every caller of code at a position
 }
 
 // New creates a new fix Generator. scopesCallbacks lists Scopes/Preload callback
 // functions, whose *gorm.DB parameters cannot be made immutable-param, so the
 // parameter-root fix is withheld for them (stage 2c); it may be nil. rt
-// decides which values are already immutable, and funcs are the source
-// functions whose calls are checked before a parameter is declared
-// immutable-param (#201).
-func New(pass *analysis.Pass, scopesCallbacks map[*ssa.Function]bool, rt *tracer.RootTracer, funcs []*ssa.Function) *Generator {
+// decides which values are already immutable, and funcs are the analysed
+// functions, package-level closures included, whose calls are checked before
+// a parameter is declared immutable-param (#201, #245). seesAllCallers
+// reports whether the pass sees every file that may call a function declared
+// at a position: not so for a file other than a test file in a package with
+// test files, which the pass without them cannot see (#245).
+func New(pass *analysis.Pass, scopesCallbacks map[*ssa.Function]bool, rt *tracer.RootTracer, funcs []*ssa.Function, seesAllCallers func(token.Pos) bool) *Generator {
 	// Build token.File -> ast.File mapping
 	files := make(map[*token.File]*ast.File)
 	for _, f := range pass.Files {
@@ -101,6 +106,7 @@ func New(pass *analysis.Pass, scopesCallbacks map[*ssa.Function]bool, rt *tracer
 		scopesCallbacks: scopesCallbacks,
 		tracer:          rt,
 		funcs:           funcs,
+		seesAllCallers:  seesAllCallers,
 	}
 }
 
@@ -294,19 +300,23 @@ func (g *Generator) canFixParam(p *ssa.Parameter) bool {
 	return !typeutil.HasGormDBResult(fn.Signature.Results()) || g.calledOnlyDirectly(fn)
 }
 
-// callersAllIsolate reports whether every caller of the function that
-// declares p passes an immutable value for p, so declaring the function
-// //gormreuse:immutable-param keeps the reuse checked (#201). It must also
-// see every caller, so the function must be called only directly (see
-// calledOnlyDirectly). Declaring any other function would hide the reuse from
-// the callers it cannot see, or move it to a caller that the caller-side
-// check reports with no fix, so -fix would never end clean.
+// callersAllIsolate reports whether no call to the function that declares p
+// breaks the caller-side contract of //gormreuse:immutable-param, so
+// declaring it keeps the reuse checked (#201). Each argument of each call in
+// the analysed functions is checked as the caller-side check does
+// (handler.BreaksImmutableParam), not only p's (#245). It must also see every
+// caller, so the function must be called only directly (see
+// calledOnlyDirectly), and the pass must see every file of the package (see
+// New). Declaring any other function would hide the reuse from the callers it
+// cannot see, or move it to a caller that the caller-side check reports, so
+// -fix would not end clean. The variant of a package without its test files
+// and the test variant both take the body Session for a function outside the
+// test files, so their fixes agree.
 func (g *Generator) callersAllIsolate(p *ssa.Parameter) bool {
 	fn := directive.DeclaredFunc(p.Parent())
-	if !g.calledOnlyDirectly(fn) {
+	if !g.seesAllCallers(fn.Pos()) || !g.calledOnlyDirectly(fn) {
 		return false
 	}
-	idx := slices.Index(p.Parent().Params, p)
 	loops := cfg.NewAnalyzer()
 	for _, caller := range g.funcs {
 		var loopInfo *cfg.LoopInfo
@@ -316,7 +326,6 @@ func (g *Generator) callersAllIsolate(p *ssa.Parameter) bool {
 				if !ok {
 					continue
 				}
-				// fn is not a method, so the arguments are its parameters.
 				site := g.tracer.Site(call)
 				if directive.DeclaredFunc(site.Callee) != fn {
 					continue
@@ -324,8 +333,12 @@ func (g *Generator) callersAllIsolate(p *ssa.Parameter) bool {
 				if loopInfo == nil {
 					loopInfo = loops.DetectLoops(caller)
 				}
-				if g.tracer.FindMutableRoot(site.Args[idx], loopInfo) != nil {
-					return false
+				// Every argument, not only p's: the caller-side check
+				// asks the same of each one (#245).
+				for i := range call.Common().Args {
+					if handler.BreaksImmutableParam(site, i, g.tracer, loopInfo) {
+						return false
+					}
 				}
 			}
 		}

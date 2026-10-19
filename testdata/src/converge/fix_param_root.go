@@ -48,6 +48,33 @@ func paramCallsDiscardedResult(db *gorm.DB) {
 	paramDiscardedResult(db.Where("scoped")).Find(nil)
 }
 
+// paramTwoArgs is isolated through a, but its caller passes a mid-chain b.
+// Declaring it immutable-param would report that argument, so a gets the
+// body Session (#245).
+func paramTwoArgs(a, b *gorm.DB) {
+	a.Find(nil)
+	a.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	b.Find(nil)
+}
+
+func paramCallsTwoArgs(db *gorm.DB) {
+	paramTwoArgs(db.Session(&gorm.Session{}), db.Where("y"))
+}
+
+// paramClosureCaller is also called from a package-level closure, which
+// passes a mid-chain value (#245).
+func paramClosureCaller(q *gorm.DB) {
+	q.Where("a").Find(nil)
+	q.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+var paramRunClosure = func(db *gorm.DB) { paramClosureCaller(db.Where("x")) }
+
+func paramCallsClosureCaller(db *gorm.DB) {
+	paramClosureCaller(db.Session(&gorm.Session{}))
+	paramRunClosure(db)
+}
+
 // phiSessionMidChain is the issue's repro: Where after the Session makes the
 // edge mutable.
 //

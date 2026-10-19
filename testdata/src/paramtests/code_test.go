@@ -1,0 +1,20 @@
+// This fixture is intentionally named *_test.go: only the test variant, which
+// sees the whole package, analyzes a function declared here, so it may get
+// immutable-param (#245).
+package paramtests
+
+import "gorm.io/gorm"
+
+func paramTestsCaller(db *gorm.DB) {
+	paramTestsHelper(db.Where("x"))
+}
+
+// paramTestsTestHelper only gets isolated values.
+func paramTestsTestHelper(tx *gorm.DB) {
+	tx.Where("a").Find(nil)
+	tx.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+func paramTestsTestCode(db *gorm.DB) {
+	paramTestsTestHelper(db.Session(&gorm.Session{}))
+}

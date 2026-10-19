@@ -206,10 +206,10 @@ func RunSSA(
 	// Share a single fix generator across all violations (it caches AST
 	// inspectors). It needs scopesCallbacks to withhold the immutable-param fix on
 	// Scopes/Preload callbacks, whose parameters cannot be exempted (stage 2c).
-	// inputTracer gives it the analysis' own mutability rule, and the source
-	// functions let it check every caller before it suggests immutable-param
-	// (#201).
-	fixGen := fix.New(pass, scopesCallbacks, inputTracer, ssaInfo.SrcFuncs)
+	// inputTracer gives it the analysis' own mutability rule, and the analysed
+	// functions let it check every caller, in package-level closures too,
+	// before it suggests immutable-param (#201, #245).
+	fixGen := fix.New(pass, scopesCallbacks, inputTracer, funcs, seesWholePackage(pass))
 
 	// Determine which //gormreuse:immutable-param functions actually rely on
 	// immutability — they would reuse a *gorm.DB parameter if it were treated as
@@ -320,11 +320,20 @@ func reportUnusedIgnores(removals *directive.Removals, ignores *directive.Ignore
 // pass sees one variant only, so the pass without the test files cannot tell.
 // A test file is in the test variant alone, which sees the whole package.
 func ignoreRemovable(pass *analysis.Pass, internalError bool) func(token.Pos) bool {
+	if internalError {
+		return func(token.Pos) bool { return false }
+	}
+	return seesWholePackage(pass)
+}
+
+// seesWholePackage returns whether pass sees every file of the package that
+// may use the code at a position. It does for a test file, which only the
+// test variant analyzes, and for a file of a package without test files. A
+// pass of a package with test files may be the variant without them (#248,
+// #245).
+func seesWholePackage(pass *analysis.Pass) func(token.Pos) bool {
 	hasTests := make(map[string]bool) // By directory
 	return func(pos token.Pos) bool {
-		if internalError {
-			return false
-		}
 		filename := pass.Fset.PositionFor(pos, false).Filename
 		if strings.HasSuffix(filename, "_test.go") {
 			return true
