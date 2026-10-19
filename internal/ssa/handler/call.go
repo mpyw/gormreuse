@@ -451,13 +451,21 @@ func (h *callHandler) checkFunctionCallPollution(call *ssa.Call, ctx *Context) {
 		}
 	}
 
+	// A *gorm.DB passed to a read-only parameter of a gorm method, such as a
+	// subquery, is read, not branched (#185).
+	readOnlyArgs, readStart, hasReadOnly := pollutionsource.StaticReadOnlyArgs(&call.Call)
+	for _, v := range readOnlyArgs {
+		recordArgumentRead(v, call, ctx)
+	}
+
 	// Check if this is a pure function - pure functions don't pollute args
 	if callee != nil && ctx.RootTracer.IsPureFunction(callee) {
 		return
 	}
 
 	// Note: We don't skip gorm methods here because we need to pollute
-	// *gorm.DB arguments passed through interface{} (e.g., base.Or(q))
+	// *gorm.DB arguments passed through interface{} (e.g., base.Model(q)),
+	// except the read-only ones recorded above.
 	// The receiver is already handled by recordMutableReceiver.
 
 	// If the function returns *gorm.DB and result is assigned, treat like gorm method assignment.
@@ -468,6 +476,9 @@ func (h *callHandler) checkFunctionCallPollution(call *ssa.Call, ctx *Context) {
 	returnsGormDB := typeutil.HasGormDBResult(call.Type())
 
 	for i, arg := range call.Call.Args {
+		if hasReadOnly && i >= readStart {
+			continue // read above
+		}
 		// Check if arg is *gorm.DB (directly or wrapped in MakeInterface)
 		gormArg, ok := pollutionsource.UnwrapGormDB(arg)
 		if !ok {
@@ -499,11 +510,32 @@ func (h *callHandler) checkFunctionCallPollution(call *ssa.Call, ctx *Context) {
 }
 
 // recordCallAliasUses records a use, at pos, of every mutable root whose
-// Statement v shares through a Session/Debug copy (#174). Violations are found
-// later in DetectViolations.
+// Statement v reads: through a Session/Debug copy (#174), or as a read-only
+// argument of a call in v's chain (#185). Violations are found later in
+// DetectViolations.
 func recordCallAliasUses(v ssa.Value, block *ssa.BasicBlock, pos token.Pos, ctx *Context) {
 	for _, aliased := range ctx.RootTracer.FindAliasedRoots(v, ctx.LoopInfo) {
-		ctx.Tracker.RecordAliasUse(aliased.Root, aliased.Copy.Pos(), block, pos)
+		ctx.Tracker.RecordAliasUse(aliased.Root, aliased.Copy.Pos(), aliased.Argument, block, pos)
+	}
+}
+
+// recordArgumentRead records v, passed to a read-only parameter of the gorm
+// method call, as a pure use of its root (#185): a branch of the root before
+// the call shows up in the read. A change after the call is found from the
+// uses of the call's result, through FindAliasedRoots.
+func recordArgumentRead(v ssa.Value, call *ssa.Call, ctx *Context) {
+	block, pos := call.Block(), ctx.pos(call.Pos())
+	recordCallAliasUses(v, block, pos, ctx)
+
+	root := ctx.RootTracer.FindMutableRoot(v, ctx.LoopInfo)
+	if root == nil {
+		return
+	}
+	ctx.Tracker.RecordPureUse(root, pollution.UsageInfo{Block: block, Pos: pos})
+	for _, r := range ctx.RootTracer.FindAllMutableRoots(v, ctx.LoopInfo) {
+		if r != root && ctx.Tracker.IsPollutedAt(r, block) {
+			ctx.Tracker.AddViolationWithRoot(pos, r)
+		}
 	}
 }
 

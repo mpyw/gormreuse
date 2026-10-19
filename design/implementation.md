@@ -57,6 +57,7 @@ The linter detects when a mutable `*gorm.DB` branches into multiple code paths:
 2. **All other methods** on a mutable instance create a **branch** that consumes the instance
 3. **Second branch** from the same mutable root is a **violation**
 4. A **use of a `Session`/`Debug` copy** after its mutable root changed is a **violation** (see below)
+5. A `*gorm.DB` **argument** of a query method is a **read** of its root, and a use of the outer chain after the argument's root changed is a **violation** (see [Subquery and condition arguments](#subquery-and-condition-arguments-185))
 
 #### Session and Debug copies (#174)
 
@@ -82,6 +83,32 @@ Limitations:
 - `go`/`defer` uses of a copy are not alias uses.
 - A copy returned from a function, or stored in a struct field and read in another function, is not followed. A `//gormreuse:pure` function that returns a copy of its argument hides the sharing from its caller. The copy is not the argument itself, so it is not in `PureVerdicts.Returned` (see [Returned arguments](#returned-arguments-188)). Treating it as the argument would count each use of the copy as a branch, which the rejected approach above shows is wrong.
 - The fix generator's Phi-edge check treats `Session(&gorm.Session{Initialized: true})` as already immutable. The `//gormreuse:immutable-return` body check reports it (see [Immutable-return body contract](#immutable-return-body-contract-194)).
+
+#### Subquery and condition arguments (#185)
+
+A `*gorm.DB` passed as an argument of a query method used to count as a branch, through the varargs slice store or the interface conversion. So `db.Where("id IN (?)", sub)` twice was reported. GORM v1.31 never changes such an argument. `e2e/internal/subquery_test.go` checks each claim below.
+
+| Shape | When GORM reads the argument | How |
+| --- | --- | --- |
+| Subquery bound to `?` (`Where`, `Or`, `Not`, `Having`, `Table`, `Select`, `Joins` with SQL, `Find` conditions, `Update` value) | When the outer query builds its SQL: at its finisher | `Statement.AddVar` runs `v.Session(&Session{DryRun: true}).getInstance()`, a cloned Statement, or copies its `Statement.SQL` for a `Raw` argument |
+| `Raw`, `Exec` | At the call | The SQL is built at once |
+| Group condition `Where(sub)`, `Or(sub)`, `Not(sub)` | At the call | `BuildCondition` copies the `WHERE` expressions. It also runs `sub`'s pending `Scopes`. Running them on a `clone == 0` value changes it in place, but a second run finds them already applied, so the result is the same |
+| `Joins("Company", cond)` | At the call | `joins` copies `Selects`, `Omits` and the `WHERE` clause |
+
+`pollutionsource.readOnlyArgMethods` lists the methods and the first parameter that only reads. Every later parameter reads too. `Find`/`First`/`Last`/`Take`/`Delete` take a destination or model first, which GORM writes to or parses, so that parameter is not in the list. Neither are `Model`, `Order`, `Clauses`, `Assign`, `Attrs`, `FirstOrInit` and `FirstOrCreate`, or a method value (`where := db.Where`).
+
+The model, as the issue proposed: an argument is a read at some point between the call and the end of the outer chain.
+
+- **At the call** it is a pure use of its root (`recordArgumentRead`), like a `Session` call. A branch or a finisher of the root that reaches the call is reported as a second branch. A finisher counts too: it leaves `Dest`, `Model` (set from `Dest` when empty) and the parsed schema on a `clone == 0` Statement, so the read can differ. The issue listed `s.Count(&n)` before a subquery of `s` as a false positive; it stays reported.
+- **Later**, every use of the outer chain reads it again. `FindAliasedRoots` returns the argument's root for each use of a value whose chain holds such a call, with the call as `Copy` and `Argument` set. `DetectViolations` then treats it as a `Session`/`Debug` alias use: a polluting or assignment use of the root after the call and before the use, that reaches the use, is reported. It walks every gorm call of the chain, through `Session`/`WithContext` too, since a cloned Statement still holds the argument. A `Session`/`Debug` copy below another chain call is not an alias there: that call forked its own Statement. A subquery of a subquery is followed.
+- **The varargs array** is not a leak when its every slice goes only to read-only parameters (`pollutionsource.isReadOnlyGormVarargs`). `Leak` applies this to the main handler and to the `pure` validator alike. A `[]any{sub}` literal spread into `Where` is read; one that is also passed elsewhere still leaks.
+
+Decisions and limitations:
+
+- **Eager reads are treated as lazy.** `Raw`, `Exec`, group conditions and `Joins("Company", cond)` read at the call, so a change after the call does not reach them. They are still reported, as for a subquery. Telling them apart would need per-method timing for little gain, and the report is a false positive only for this order.
+- **One report per argument.** Each call of `x.Order("id").Find(nil)` is a use of `x`. A changed argument is reported once per call that took it, at the earliest use that sees the change. `Session`/`Debug` alias uses keep one report per use.
+- **No suggested fix** for the later-change report, as for alias uses. A `.Session(&gorm.Session{})` at the end of the argument's chain fixes both reports.
+- **Not followed:** an outer chain returned from a function, stored in a field and used elsewhere, or used in `go`/`defer`, as for `Session`/`Debug` copies. A `//gormreuse:pure` function may now take a `*gorm.DB` argument and pass it to `Where`, and its caller does not see that the result holds it.
 
 ### Directives
 
@@ -315,7 +342,7 @@ The linter marks `*gorm.DB` as polluted in these scenarios:
 - **Channel send**: `ch <- db` marks db as polluted
 - **Slice/Array storage**: `[]*gorm.DB{db}` marks db as polluted
 - **Map storage**: `map[string]*gorm.DB{"k": db}` marks db as polluted
-- **Interface conversion**: `interface{}(db)` marks db as polluted (type assertion may extract)
+- **Interface conversion**: `interface{}(db)` marks db as polluted (type assertion may extract), except a read-only argument of a query method (#185)
 - **Function arguments**: Non-pure functions receiving `*gorm.DB` pollute if result is discarded (not assigned)
 - **Struct field access**: `h.field.Find(nil)` traces back to the original value stored in field, including fields reached through embedding (`outer{db: q}`, where `db` is promoted from an embedded struct)
 
@@ -726,6 +753,7 @@ testdata/src/gormreuse/
 ├── advanced.go      # Derived variables, helper functions, conditional reuse
 ├── evil.go          # Edge cases: closures, defer, goroutines, struct fields, loops
 ├── session_alias.go # Session/Debug copies sharing a Statement; Session{Initialized} (#174)
+├── subquery.go      # *gorm.DB as a subquery or condition argument (#185)
 └── ignore.go        # //gormreuse:ignore directive tests
 ```
 
@@ -733,7 +761,7 @@ Directives across packages are tested by `TestCrossPackageDirectives`: `testdata
 
 ### E2E Tests
 
-The `e2e/internal/` directory contains tests that verify actual GORM SQL behavior using sqlmock. This is a separate Go module (its own `go.mod`) to avoid dependency conflicts, and CI tests and lints it on every PR (`cd e2e/internal && go test ./... && golangci-lint run ./...`). Dependabot covers it, so GORM bumps arrive as PRs; re-check go-gorm/gorm#7592 on each (see the README). Every test asserts (`t.Errorf`) — the suite guards the linter's core clone-semantics premise: mid-chain (`clone==0`) reuse accumulates conditions; root / `Session()` / `Transaction`- and `FindInBatches`-callback (`clone>0`) handles fork a fresh Statement and are safe; a `Connection`-callback handle is `clone==0` and accumulates. `scopes_session_test.go` pins which Session-family calls inside a `Scopes` callback leak the transaction (go-gorm/gorm#7592): only a returned one. It also pins the exceptions in [Session and Debug copies](#session-and-debug-copies-174): a `Session()`/`Debug()` copy of a mid-chain value sees later changes to it, and `Session{Initialized: true}` returns a mid-chain value. `fixsql_test.go` checks that suggested fixes keep every condition the code applied (see [Discarded Statements Under a Session Fix](#discarded-statements-under-a-session-fix-199)).
+The `e2e/internal/` directory contains tests that verify actual GORM SQL behavior using sqlmock. This is a separate Go module (its own `go.mod`) to avoid dependency conflicts, and CI tests and lints it on every PR (`cd e2e/internal && go test ./... && golangci-lint run ./...`). Dependabot covers it, so GORM bumps arrive as PRs; re-check go-gorm/gorm#7592 on each (see the README). Every test asserts (`t.Errorf`) — the suite guards the linter's core clone-semantics premise: mid-chain (`clone==0`) reuse accumulates conditions; root / `Session()` / `Transaction`- and `FindInBatches`-callback (`clone>0`) handles fork a fresh Statement and are safe; a `Connection`-callback handle is `clone==0` and accumulates. `scopes_session_test.go` pins which Session-family calls inside a `Scopes` callback leak the transaction (go-gorm/gorm#7592): only a returned one. It also pins the exceptions in [Session and Debug copies](#session-and-debug-copies-174): a `Session()`/`Debug()` copy of a mid-chain value sees later changes to it, and `Session{Initialized: true}` returns a mid-chain value. `subquery_test.go` pins that a subquery, group condition or Joins condition argument is only read, and that a change to it before the outer query runs leaks into that query (see [Subquery and condition arguments](#subquery-and-condition-arguments-185)). `fixsql_test.go` checks that suggested fixes keep every condition the code applied (see [Discarded Statements Under a Session Fix](#discarded-statements-under-a-session-fix-199)).
 
 ## Code Style
 

@@ -186,7 +186,7 @@ q.Where("b").Find(nil) // OK: first branch from new root
 - Non-finisher methods (chain builders like `Where`, `Order`, `Limit`)
 - Result is not assigned to a variable
 - Expression used as a statement. A chain such as `q.Where("a").Limit(10)` is reassigned as a whole, and a Session it needs goes after its last call
-- The receiver is the local variable that holds the reused root. Aliases (`r := q`), calls that take the root as an argument (`base.Or(q)`), package-level variables, and variables captured by a closure that is not called inline (`go func() { ... }()`, `defer func() { ... }()`) are not rewritten. The fix relies on a Session at the root instead, unless that would drop a discarded statement (see below)
+- The receiver is the local variable that holds the reused root. Aliases (`r := q`), calls that take the root as an argument (`base.Model(q)`), package-level variables, and variables captured by a closure that is not called inline (`go func() { ... }()`, `defer func() { ... }()`) are not rewritten. The fix relies on a Session at the root instead, unless that would drop a discarded statement (see below)
 - A reassignment inside a loop always gets a Session, since the next iteration uses it again
 
 > [!IMPORTANT]
@@ -245,6 +245,7 @@ This linter detects when a **mutable [`*gorm.DB`](https://pkg.go.dev/gorm.io/gor
 2. **All other methods** on a mutable instance create a **branch** that consumes the instance
 3. **Second branch** from the same mutable root is a **violation**
 4. A **`Session`/`Debug` copy** of a mutable instance still reads that instance's `Statement`, so using the copy **after the instance changed** is a **violation** (see [Session and Debug copies](#session-and-debug-copies))
+5. A mutable instance passed as a **subquery or condition argument** (`db.Where("id IN (?)", sub)`) is **read**, not branched. Running the outer query **after the argument changed** is a **violation** (see [Subqueries and condition arguments](#subqueries-and-condition-arguments))
 
 ### Method Classification
 
@@ -268,6 +269,8 @@ The linter conservatively marks [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB)
 | Interface conversion     | `interface{}(db)` - May be extracted via type assertion  |
 | Non-pure function call   | `helper(db)` - Unless marked with `//gormreuse:pure`     |
 | Struct field access      | `h.db.Find(nil)` - Traces back to the stored value       |
+
+A `*gorm.DB` passed as a subquery or condition argument of a query method is a read, not one of these. See [Subqueries and condition arguments](#subqueries-and-condition-arguments).
 
 A struct field is followed in these forms:
 
@@ -383,6 +386,40 @@ The linter reads the `&gorm.Session{...}` literal at the call. It treats an opti
 > // Option 2: Single chained expression
 > db.Where("base").Where("a").Where("b").Find(&users)  // OK - single chain
 > ```
+
+#### Subqueries and condition arguments
+
+GORM builds a subquery from a copy of the argument's `Statement`, so passing a `*gorm.DB` as an argument never changes it. The linter treats such an argument as a **read** of its root. You can pass one subquery to several queries:
+
+```go
+sub := db.Model(&User{}).Select("id") // sub is mutable
+db.Where("id IN (?)", sub).Find(&users)     // OK - reads sub
+db.Where("id NOT IN (?)", sub).Find(&others) // OK - reads sub again
+sub.Find(&ids)                               // OK - first branch of sub
+```
+
+This holds for these methods and parameters. A `*gorm.DB` passed anywhere else, such as `Model(sub)` or a `Find` destination, is still a branch.
+
+| Methods | Read-only parameters |
+| --- | --- |
+| `Where`, `Or`, `Not`, `Having`, `Joins`, `InnerJoins`, `Table`, `Select`, `Distinct`, `Raw`, `Exec` | Every parameter, including group conditions (`db.Where(sub)`) and `Joins("Company", cond)` |
+| `Find`, `First`, `Last`, `Take`, `Delete` | The conditions after the first parameter |
+| `Update`, `UpdateColumn` | The value |
+
+GORM reads the argument when the **outer query runs**, not when you pass it. So a change to the argument before that, by a branch or by reassignment, shows up in the outer query:
+
+```go
+sub := db.Model(&User{}).Select("id")
+sub.Where("age > 18").Find(&adults)    // first branch - changes sub in place
+db.Where("id IN (?)", sub).Find(&users) // VIOLATION: the subquery has age > 18
+
+sub := db.Model(&User{}).Select("id")
+x := db.Where("id IN (?)", sub)
+sub.Where("age > 18").Find(&adults)    // changes sub in place
+x.Find(&users)                          // VIOLATION: the subquery has age > 18
+```
+
+To fix it, end the argument's chain with `.Session(&gorm.Session{})` before you pass it. The second kind of violation is reported once per call that takes the argument, at the first use of the outer chain after the change, and carries no suggested fix.
 
 #### Scopes / Preload callbacks
 

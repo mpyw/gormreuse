@@ -69,10 +69,13 @@ type UsageInfo struct {
 }
 
 // aliasUse is a use of a Session/Debug copy, with the position of the call
-// that took the copy.
+// that took the copy. When argument is set, it is a use of a chain that holds
+// the root as a read-only argument, such as a subquery (#185), and copyPos is
+// the call that took the argument.
 type aliasUse struct {
 	UsageInfo
-	copyPos token.Pos
+	copyPos  token.Pos
+	argument bool
 }
 
 // Tracker tracks pollution state of mutable *gorm.DB roots.
@@ -112,6 +115,8 @@ type Tracker struct {
 	// clone==0 Statement in place). Only a change after the copy was taken
 	// counts: a change before it already makes the Session/Debug call itself a
 	// second branch. Copies never change the root, so these uses do not pollute.
+	// A chain that holds the root as a read-only argument reads it the same
+	// way when it runs (#185).
 	aliasUses map[ssa.Value][]aliasUse
 
 	// loopCarriedUses maps roots to the calls in a loop that read the root's
@@ -197,10 +202,12 @@ func (t *Tracker) RecordBranchUse(root ssa.Value, block *ssa.BasicBlock, pos tok
 }
 
 // RecordAliasUse records a use of a Session/Debug copy that shares root's
-// Statement (see the aliasUses field doc). copyPos is the position of the
-// Session/Debug call that took the copy. Caller must ensure root is not nil.
-func (t *Tracker) RecordAliasUse(root ssa.Value, copyPos token.Pos, block *ssa.BasicBlock, pos token.Pos) {
-	t.aliasUses[root] = append(t.aliasUses[root], aliasUse{Block: block, Pos: pos, copyPos: copyPos})
+// Statement, or of a chain that holds root as a read-only argument when
+// argument is set (see the aliasUses field doc). copyPos is the position of
+// the call that took the copy or the argument. Caller must ensure root is not
+// nil.
+func (t *Tracker) RecordAliasUse(root ssa.Value, copyPos token.Pos, argument bool, block *ssa.BasicBlock, pos token.Pos) {
+	t.aliasUses[root] = append(t.aliasUses[root], aliasUse{Block: block, Pos: pos, copyPos: copyPos, argument: argument})
 }
 
 // RecordLoopCarriedUse records a call in a loop that reads root's value from
@@ -277,12 +284,26 @@ func (t *Tracker) DetectViolations() {
 	// Check uses of a Session/Debug copy against changes to the root it shares
 	// a Statement with. These carry no suggested fix: the reuse-fix strategies
 	// rewrite the root's branches, not the copy.
+	//
+	// A read-only argument is reported once per call that took it, at the
+	// earliest use that sees the change: every call of a chain such as
+	// x.Order("id").Find(nil) is a use of x, and one statement needs one
+	// report.
 	for _, root := range sortedRoots(t, t.aliasUses) {
 		changes := slices.Concat(t.pollutingUses[root], t.assignmentUses[root])
+		argumentReads := make(map[token.Pos]Violation)
 		for _, use := range t.aliasUses[root] {
-			if change, ok := t.earlierReaching(changes, use.UsageInfo, use.copyPos); ok {
+			change, ok := t.earlierReaching(changes, use.UsageInfo, use.copyPos)
+			switch {
+			case !ok:
+			case !use.argument:
 				t.violations = append(t.violations, Violation{Pos: use.Pos, Message: t.aliasMessage(root, change.Pos)})
+			case argumentReads[use.copyPos].Pos == token.NoPos || use.Pos < argumentReads[use.copyPos].Pos:
+				argumentReads[use.copyPos] = Violation{Pos: use.Pos, Message: t.argumentMessage(root, change.Pos)}
 			}
+		}
+		for _, copyPos := range slices.Sorted(maps.Keys(argumentReads)) {
+			t.violations = append(t.violations, argumentReads[copyPos])
 		}
 	}
 
@@ -316,8 +337,14 @@ func (t *Tracker) earlierReaching(sources []UsageInfo, target UsageInfo, after t
 // aliasMessage builds the diagnostic for a use of a Session/Debug copy after
 // the root it shares a Statement with was changed at changePos.
 func (t *Tracker) aliasMessage(root ssa.Value, changePos token.Pos) string {
-	msg := "*gorm.DB reused: Session/Debug copy shares the Statement of a mutable root"
+	return "*gorm.DB reused: Session/Debug copy shares the Statement of a mutable root" +
+		t.changeLocs(root, changePos) +
+		", so the copy sees that change; end the root's chain with .Session(&gorm.Session{}) before copying it"
+}
 
+// changeLocs renders " (root at file:line, changed at file:line)" for the
+// alias diagnostics, leaving out a position that is unknown.
+func (t *Tracker) changeLocs(root ssa.Value, changePos token.Pos) string {
 	var locs []string
 	if root != nil && root.Pos().IsValid() {
 		locs = append(locs, "root at "+t.loc(root.Pos()))
@@ -325,11 +352,18 @@ func (t *Tracker) aliasMessage(root ssa.Value, changePos token.Pos) string {
 	if changePos.IsValid() {
 		locs = append(locs, "changed at "+t.loc(changePos))
 	}
-	if len(locs) > 0 && t.fset != nil {
-		msg += " (" + strings.Join(locs, ", ") + ")"
+	if len(locs) == 0 || t.fset == nil {
+		return ""
 	}
+	return " (" + strings.Join(locs, ", ") + ")"
+}
 
-	return msg + ", so the copy sees that change; end the root's chain with .Session(&gorm.Session{}) before copying it"
+// argumentMessage builds the diagnostic for a use of a chain that holds root
+// as a read-only argument, after root was changed at changePos (#185).
+func (t *Tracker) argumentMessage(root ssa.Value, changePos token.Pos) string {
+	return "*gorm.DB reused: mutable root passed as a query argument is read when the query runs" +
+		t.changeLocs(root, changePos) +
+		", so the query sees that change; end the root's chain with .Session(&gorm.Session{}) before passing it"
 }
 
 // sortedRoots returns the roots of uses ordered by root position, then by

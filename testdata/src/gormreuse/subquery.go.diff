@@ -1,0 +1,213 @@
+--- subquery.go	1970-01-01 00:00:00
++++ subquery.go.golden	1970-01-01 00:00:00
+@@ -1,206 +1,206 @@
+ package internal
+ 
+ import (
+ 	"context"
+ 
+ 	"gorm.io/gorm"
+ )
+ 
+ // Regression fixtures for #185.
+ //
+ // A *gorm.DB passed as an argument of a query-building method (a subquery, a
+ // group condition, a Joins condition) is only read: GORM builds the subquery
+ // from a cloned Statement. So using it as an argument is a read of its root,
+ // not a branch. The read happens when the outer query runs, so a change to
+ // the argument between the call that takes it and the outer query is reported.
+ 
+ // =============================================================================
+ // SHOULD NOT REPORT - the argument is only read
+ // =============================================================================
+ 
+ func subqueryReusedInTwoWheres(db *gorm.DB) {
+ 	db = db.Session(&gorm.Session{})
+ 	sub := db.Model(&User{}).Select("id")
+ 	db.Where("id IN (?)", sub).Find(&[]User{})
+ 	db.Where("id NOT IN (?)", sub).Find(&[]User{})
+ }
+ 
+ func subqueryReusedInEveryReadOnlyMethod(db *gorm.DB) {
+ 	db = db.Session(&gorm.Session{})
+ 	sub := db.Model(&User{}).Select("id")
+ 	db.Where("id IN (?)", sub).Find(&[]User{})
+ 	db.Or("id IN (?)", sub).Find(&[]User{})
+ 	db.Not("id IN (?)", sub).Find(&[]User{})
+ 	db.Having("id IN (?)", sub).Find(&[]User{})
+ 	db.Table("(?) as x", sub).Find(&[]User{})
+ 	db.Select("(?) AS n", sub).Find(&[]User{})
+ 	db.Distinct("(?) AS n", sub).Find(&[]User{})
+ 	db.Joins("JOIN (?) s ON s.id = users.id", sub).Find(&[]User{})
+ 	db.InnerJoins("JOIN (?) s ON s.id = users.id", sub).Find(&[]User{})
+ 	db.Raw("SELECT * FROM users WHERE id IN (?)", sub).Find(&[]User{})
+ 	db.Exec("DELETE FROM users WHERE id IN (?)", sub)
+ 	db.Find(&[]User{}, "id IN (?)", sub)
+ 	db.First(&User{}, "id IN (?)", sub)
+ 	db.Last(&User{}, "id IN (?)", sub)
+ 	db.Take(&User{}, "id IN (?)", sub)
+ 	db.Delete(&User{}, "id IN (?)", sub)
+ 	db.Model(&User{}).Update("age", sub)
+ 	db.Where(sub).Find(&[]User{})
+ 	db.Where(sub).Find(&[]User{})
+ }
+ 
+ func subqueryUsedThenRunOnItsOwn(db *gorm.DB) {
+ 	db = db.Session(&gorm.Session{})
+ 	sub := db.Model(&User{}).Select("id")
+ 	db.Where("id IN (?)", sub).Find(&[]User{})
+ 	sub.Find(&[]User{})
+ }
+ 
+ func subqueryChangedAfterOuterQueryRan(db *gorm.DB) {
+ 	db = db.Session(&gorm.Session{})
+ 	sub := db.Model(&User{}).Select("id")
+ 	db.Where("id IN (?)", sub).Find(&[]User{})
+ 	sub.Where("age > 1").Find(&[]User{})
+ }
+ 
+ func joinsConditionReused(db *gorm.DB) {
+ 	db = db.Session(&gorm.Session{})
+ 	j := db.Where("alive = ?", true)
+ 	db.Joins("Company", j).Find(&[]User{})
+ 	db.Joins("Company", j).Find(&[]User{})
+ }
+ 
+ func subqueryReadInLoop(db *gorm.DB, names []string) {
+ 	db = db.Session(&gorm.Session{})
+ 	sub := db.Model(&User{}).Select("id")
+ 	for _, n := range names {
+ 		db.Where("name = ? AND id IN (?)", n, sub).Find(&[]User{})
+ 	}
+ }
+ 
+ func subqueryOfImmutableChangedBeforeOuterQuery(db *gorm.DB) {
+ 	db = db.Session(&gorm.Session{})
+ 	sub := db.Model(&User{}).Select("id").Session(&gorm.Session{})
+ 	x := db.Where("id IN (?)", sub)
+ 	sub.Where("age > 1").Find(&[]User{})
+ 	x.Find(&[]User{})
+ }
+ 
+ func subqueryNestedReused(db *gorm.DB) {
+ 	db = db.Session(&gorm.Session{})
+ 	inner := db.Model(&User{}).Select("id")
+ 	outer := db.Model(&User{}).Select("id").Where("id IN (?)", inner)
+ 	db.Where("id IN (?)", outer).Find(&[]User{})
+ 	db.Where("id NOT IN (?)", outer).Find(&[]User{})
+ }
+ 
+ func subqueryOuterChainUsedTwice(db *gorm.DB) {
+ 	db = db.Session(&gorm.Session{})
+ 	sub := db.Model(&User{}).Select("id")
+ 	x := db.Where("id IN (?)", sub).Session(&gorm.Session{})
+ 	x.Find(&[]User{})
+ 	x.Count(new(int64))
+ }
+ 
+ // =============================================================================
+ // SHOULD REPORT - the argument changed before it was read
+ // =============================================================================
+ 
+ func subqueryReadAfterBranch(db *gorm.DB) {
+ 	db = db.Session(&gorm.Session{})
+-	sub := db.Model(&User{}).Select("id")
++	sub := db.Model(&User{}).Select("id").Session(&gorm.Session{})
+ 	sub.Where("age > 1").Find(&[]User{})
+ 	db.Where("id IN (?)", sub).Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ func subqueryReadThroughPhiAfterBranch(db *gorm.DB, cond bool) {
+ 	db = db.Session(&gorm.Session{})
+ 	a := db.Model(&User{}).Select("id")
+ 	b := db.Model(&User{}).Select("id")
+ 	b.Where("age > 1").Find(&[]User{})
+ 	sub := a
+ 	if cond {
+ 		sub = b
+ 	}
+ 	db.Where("id IN (?)", sub).Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ func subqueryReadAfterFinisher(db *gorm.DB) {
+ 	db = db.Session(&gorm.Session{})
+-	s := db.Model(&User{}).Select("id")
++	s := db.Model(&User{}).Select("id").Session(&gorm.Session{})
+ 	var n int64
+ 	s.Count(&n)
+ 	db.Where("id IN (?)", s).Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ func subqueryChangedBeforeOuterQuery(db *gorm.DB) {
+ 	db = db.Session(&gorm.Session{})
+ 	sub := db.Model(&User{}).Select("id")
+ 	x := db.Where("id IN (?)", sub)
+ 	sub.Where("age > 1").Find(&[]User{})
+ 	x.Find(&[]User{}) // want `\*gorm\.DB reused: mutable root passed as a query argument`
+ }
+ 
+ func subqueryReassignedBeforeOuterQuery(db *gorm.DB) {
+ 	db = db.Session(&gorm.Session{})
+ 	sub := db.Model(&User{}).Select("id")
+ 	x := db.Where("id IN (?)", sub)
+ 	sub = sub.Where("age > 1") // changes sub's Statement in place
+ 	sub.Find(&[]User{})
+ 	x.Find(&[]User{}) // want `\*gorm\.DB reused: mutable root passed as a query argument`
+ }
+ 
+ func subqueryChangedBeforeLaterChainLink(db *gorm.DB) {
+ 	db = db.Session(&gorm.Session{})
+ 	sub := db.Model(&User{}).Select("id")
+ 	x := db.Where("id IN (?)", sub).Order("id").WithContext(context.Background())
+ 	sub.Where("age > 1").Find(&[]User{})
+ 	x.Limit(1).Find(&[]User{}) // want `\*gorm\.DB reused: mutable root passed as a query argument`
+ }
+ 
+ func subqueryChangedBeforeHelperRunsOuterQuery(db *gorm.DB) {
+ 	db = db.Session(&gorm.Session{})
+ 	sub := db.Model(&User{}).Select("id")
+ 	x := db.Where("id IN (?)", sub)
+ 	sub.Where("age > 1").Find(&[]User{})
+ 	runSubqueryOuter(x) // want `\*gorm\.DB reused: mutable root passed as a query argument`
+ }
+ 
+ func runSubqueryOuter(q *gorm.DB) { q.Find(&[]User{}) }
+ 
+ func subqueryNestedChangedBeforeOuterQuery(db *gorm.DB) {
+ 	db = db.Session(&gorm.Session{})
+ 	inner := db.Model(&User{}).Select("id")
+ 	outer := db.Session(&gorm.Session{}).Model(&User{}).Select("id").Where("id IN (?)", inner)
+ 	x := db.Where("id IN (?)", outer)
+ 	inner.Where("age > 1").Find(&[]User{})
+ 	x.Find(&[]User{}) // want `\*gorm\.DB reused: mutable root passed as a query argument`
+ }
+ 
+ // The argument is still a branch when the method is not known to only read it.
+ func subqueryPassedToModelIsBranch(db *gorm.DB) {
+ 	db = db.Session(&gorm.Session{})
+-	sub := db.Model(&User{}).Select("id")
++	sub := db.Model(&User{}).Select("id").Session(&gorm.Session{})
+ 	db.Model(sub).Find(&[]User{})
+ 	db.Where("id IN (?)", sub).Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // A slice built by hand and passed as the variadic arguments is read too.
+ func subquerySpreadArgsReused(db *gorm.DB) {
+ 	db = db.Session(&gorm.Session{})
+ 	sub := db.Model(&User{}).Select("id")
+ 	db.Where("id IN (?)", []interface{}{sub}...).Find(&[]User{})
+ 	db.Where("id IN (?)", []interface{}{sub}...).Find(&[]User{})
+ }
+ 
+ // A slice that is also kept elsewhere is not only read.
+ func subquerySpreadArgsKeptIsBranch(db *gorm.DB) {
+ 	db = db.Session(&gorm.Session{})
+-	sub := db.Model(&User{}).Select("id")
++	sub := db.Model(&User{}).Select("id").Session(&gorm.Session{})
+ 	args := []interface{}{sub}
+ 	db.Where("id IN (?)", args...).Find(&[]User{})
+ 	keepSubqueryArgs(args)
+ 	sub.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ func keepSubqueryArgs([]interface{}) {}

@@ -27,6 +27,10 @@
 //     (fmt.Println(db), log.Printf("%v", db), t.Logf("%v", db)); these never
 //     retain or mutate their arguments. User-defined variadic functions stay
 //     conservatively polluting. See isReadOnlyVariadicArg.
+//   - Packing into the varargs array of a *gorm.DB method that only reads
+//     its *gorm.DB arguments (db.Where("id IN (?)", sub)), when the array
+//     goes nowhere else. The main handler records such an argument as a read
+//     of its root (#185). See ReadOnlyGormArgs.
 //   - A bare *ssa.MakeInterface with no downstream store/use. Interface
 //     conversion alone transfers no ownership; the value is only a leak once
 //     it is stored or passed somewhere, which the cases above already cover.
@@ -34,6 +38,8 @@
 package pollutionsource
 
 import (
+	"slices"
+
 	"golang.org/x/tools/go/ssa"
 
 	"github.com/mpyw/gormreuse/internal/typeutil"
@@ -93,7 +99,7 @@ func Leak(instr ssa.Instruction) (ssa.Value, Kind) {
 		if !ok {
 			return nil, KindNone
 		}
-		if isReadOnlyVariadicArg(idx, i.Val) {
+		if isReadOnlyVariadicArg(idx, i.Val) || isReadOnlyGormVarargs(idx.X) {
 			return nil, KindNone
 		}
 		return v, KindSliceStore
@@ -169,4 +175,148 @@ func isReadOnlyStdlibCallee(call *ssa.Call) bool {
 		return false
 	}
 	return readOnlyVariadicPkgs[callee.Object().Pkg().Path()]
+}
+
+// readOnlyArgMethods maps each *gorm.DB method that only reads a *gorm.DB
+// passed as an argument to the index of its first such parameter, not
+// counting the receiver. Every later parameter is read-only too. GORM reads
+// such an argument as a subquery, a group condition or a Joins condition,
+// from a cloned Statement, so it never changes the argument (#185, checked in
+// e2e/internal/subquery_test.go). Find's dest and Delete's value are written
+// to or parsed as a model, so they are not read-only.
+var readOnlyArgMethods = map[string]int{
+	"Where":        0,
+	"Or":           0,
+	"Not":          0,
+	"Having":       0,
+	"Joins":        0,
+	"InnerJoins":   0,
+	"Table":        0,
+	"Select":       0,
+	"Distinct":     0,
+	"Raw":          0,
+	"Exec":         0,
+	"Find":         1,
+	"First":        1,
+	"Last":         1,
+	"Take":         1,
+	"Delete":       1,
+	"Update":       1,
+	"UpdateColumn": 1,
+}
+
+// ReadOnlyArgStart returns the index of the first argument, not counting the
+// receiver, that a call to the *gorm.DB method callee passes to a read-only
+// parameter (see readOnlyArgMethods). Every later argument is read-only too.
+// It returns false when callee is not such a method. A caller that resolves a
+// call through a method value passes the method it stands for.
+func ReadOnlyArgStart(callee *ssa.Function) (int, bool) {
+	if callee == nil {
+		return 0, false
+	}
+	recv := callee.Signature.Recv()
+	if recv == nil || !typeutil.IsGormDB(recv.Type()) {
+		return 0, false
+	}
+	first, ok := readOnlyArgMethods[callee.Name()]
+	return first, ok
+}
+
+// ReadOnlyGormArgs returns the *gorm.DB values that a call to callee passes
+// to a read-only parameter (see ReadOnlyArgStart): directly, boxed in an
+// interface, or packed into a varargs array that goes nowhere else
+// (isReadOnlyGormVarargs). args are the call's arguments without the
+// receiver.
+func ReadOnlyGormArgs(callee *ssa.Function, args []ssa.Value) []ssa.Value {
+	start, ok := ReadOnlyArgStart(callee)
+	if !ok || start > len(args) {
+		return nil
+	}
+	var vals []ssa.Value
+	for _, arg := range args[start:] {
+		if v, ok := UnwrapGormDB(arg); ok {
+			vals = append(vals, v)
+			continue
+		}
+		slice, ok := arg.(*ssa.Slice)
+		if !ok || !isReadOnlyGormVarargs(slice.X) {
+			continue
+		}
+		for _, store := range arrayElementStores(slice.X) {
+			if v, ok := UnwrapGormDB(store.Val); ok {
+				vals = append(vals, v)
+			}
+		}
+	}
+	return vals
+}
+
+// StaticReadOnlyArgs returns the read-only *gorm.DB arguments of a static
+// *gorm.DB method call (see ReadOnlyGormArgs), and the index in common.Args
+// of the first read-only argument. ok is false for any other call. A call
+// through a method value has no receiver argument, so the main handler keeps
+// treating its arguments as branches.
+func StaticReadOnlyArgs(common *ssa.CallCommon) (vals []ssa.Value, start int, ok bool) {
+	callee := common.StaticCallee()
+	if callee == nil || len(common.Args) == 0 {
+		return nil, 0, false
+	}
+	first, ok := ReadOnlyArgStart(callee)
+	if !ok {
+		return nil, 0, false
+	}
+	return ReadOnlyGormArgs(callee, common.Args[1:]), first + 1, true
+}
+
+// isReadOnlyGormVarargs reports whether array is a local array whose every
+// slice is passed only to read-only parameters of *gorm.DB methods: the
+// varargs of db.Where("id IN (?)", sub), or a literal spread into them. An
+// array that is used any other way may be read elsewhere, so it is not.
+func isReadOnlyGormVarargs(array ssa.Value) bool {
+	alloc, ok := array.(*ssa.Alloc)
+	if !ok {
+		return false
+	}
+	passed := false
+	for _, r := range *alloc.Referrers() {
+		switch u := r.(type) {
+		case *ssa.IndexAddr:
+			continue
+		case *ssa.Slice:
+			if len(*u.Referrers()) == 0 {
+				return false
+			}
+			for _, sr := range *u.Referrers() {
+				call, ok := sr.(*ssa.Call)
+				if !ok {
+					return false
+				}
+				_, start, ok := StaticReadOnlyArgs(&call.Call)
+				if !ok || slices.Index(call.Call.Args, ssa.Value(u)) < start {
+					return false
+				}
+			}
+			passed = true
+		default:
+			return false
+		}
+	}
+	return passed
+}
+
+// arrayElementStores returns the stores into the elements of array.
+func arrayElementStores(array ssa.Value) []*ssa.Store {
+	var stores []*ssa.Store
+	for _, r := range *array.Referrers() {
+		idx, ok := r.(*ssa.IndexAddr)
+		if !ok {
+			continue
+		}
+		for _, ir := range *idx.Referrers() {
+			if store, ok := ir.(*ssa.Store); ok && store.Addr == idx {
+				stores = append(stores, store)
+			}
+		}
+	}
+	return stores
 }
