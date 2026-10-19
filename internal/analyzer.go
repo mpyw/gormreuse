@@ -115,28 +115,11 @@ func RunSSA(
 	}
 
 	// PASS 1: validate pure function contracts and collect the functions that
-	// definitively leaked their argument. Such a //gormreuse:pure function must
-	// not be trusted as pure at its call sites (issue #66), so this must complete
-	// for ALL functions before the analysis pass runs — a caller may be visited
+	// definitively broke them. Such a //gormreuse:pure function must not be
+	// trusted as pure at its call sites (issue #66), so this must complete for
+	// ALL functions before the analysis pass runs — a caller may be visited
 	// before its callee.
-	failedPure := make(map[*ssa.Function]bool)
-	for _, fn := range ssaInfo.SrcFuncs {
-		if skip(fn, false) {
-			continue
-		}
-		if pureFuncs != nil && pureFuncs.Contains(fn) {
-			recoverPerFunction(fn, func() {
-				for _, v := range purity.NewValidator(fn, pureFuncs).Validate() {
-					pass.Reportf(v.Pos, "%s", v.Message)
-					// Only a definitive escape revokes pure-trust at call sites;
-					// conservative func-arg violations do not (avoids FP cascades).
-					if v.Leak {
-						failedPure[fn] = true
-					}
-				}
-			})
-		}
-	}
+	failedPure := validatePureFuncs(pass, ssaInfo, pureFuncs, skip)
 
 	// Collect Scopes/Preload callbacks once: their *gorm.DB parameter receives a
 	// mid-chain (clone==0) value, so reuse inside them must be detected (#60).
@@ -225,6 +208,66 @@ func RunSSA(
 	}
 
 	reportUnusedDirectiveFuncs(pass, pureFuncs, immutableReturnFuncs, immutableParamFuncs)
+}
+
+// validatePureFuncs reports every //gormreuse:pure contract violation and
+// returns the pure functions that definitively broke the contract.
+//
+// Failure is transitive: a pure function that passes its argument to a failed
+// pure function fails too (issue #187). Validation therefore repeats until no
+// new function fails, and violations are reported only from the final round,
+// so each is reported once and sees the complete failed set.
+func validatePureFuncs(
+	pass *analysis.Pass,
+	ssaInfo *buildssa.SSA,
+	pureFuncs *directive.DirectiveFuncSet,
+	skip func(*ssa.Function, bool) bool,
+) map[*ssa.Function]bool {
+	failedPure := make(map[*ssa.Function]bool)
+	if pureFuncs == nil {
+		return failedPure
+	}
+	var targets []*ssa.Function
+	for _, fn := range ssaInfo.SrcFuncs {
+		if !skip(fn, false) && pureFuncs.Contains(fn) {
+			targets = append(targets, fn)
+		}
+	}
+
+	// The failed set only grows, and a larger set only adds violations, so
+	// this reaches a fixed point in at most len(targets) rounds.
+	for grew := true; grew; {
+		grew = false
+		for _, fn := range targets {
+			if failedPure[fn] {
+				continue
+			}
+			recoverPerFunction(fn, func() {
+				// Only a definitive violation revokes pure-trust at call sites;
+				// conservative func-arg violations do not (avoids FP cascades).
+				if slices.ContainsFunc(purity.NewValidator(fn, pureFuncs, failedPure).Validate(), func(v purity.Violation) bool { return v.Definitive }) {
+					failedPure[fn] = true
+					grew = true
+				}
+			})
+		}
+	}
+
+	// A closure body is validated both as its own pure function and as part of
+	// a pure function that creates it, so the same violation can come twice.
+	reported := make(map[purity.Violation]bool)
+	for _, fn := range targets {
+		recoverPerFunction(fn, func() {
+			for _, v := range purity.NewValidator(fn, pureFuncs, failedPure).Validate() {
+				if reported[v] {
+					continue
+				}
+				reported[v] = true
+				pass.Reportf(v.Pos, "%s", v.Message)
+			}
+		})
+	}
+	return failedPure
 }
 
 // reportImmutableReturnViolations enforces the body-side immutable-return

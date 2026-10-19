@@ -472,8 +472,13 @@ helper2 := func(q *gorm.DB) { //gormreuse:pure
 > ```
 >
 > Valid pure functions must:
-> - NOT call polluting methods ([`Where`](https://pkg.go.dev/gorm.io/gorm#DB.Where), [`Find`](https://pkg.go.dev/gorm.io/gorm#DB.Find), etc.) directly on [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) **arguments**
+> - NOT call polluting methods ([`Where`](https://pkg.go.dev/gorm.io/gorm#DB.Where), [`Find`](https://pkg.go.dev/gorm.io/gorm#DB.Find), etc.) on [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) **arguments**. This includes `go db.Find(nil)`, `defer db.Find(nil)`, a method value (`f := db.Find`), a closure the function creates (`func() { db.Find(nil) }()`), and an argument reached through a pointer, slice, variadic or struct parameter (`(*pp).Find`, `dbs[0].Find`, `h.db.Find`)
+> - NOT let an argument escape: channel send, slice/array or map store, a store to a package-level variable, or a store through a pointer (`h.db = db`)
+> - NOT pass an argument to a function that is not pure, or to a pure function that fails this contract itself
 > - MAY call polluting methods on **immutable values** (e.g., `db.Session(&gorm.Session{}).Where(...)` is OK)
+> - MAY pass an argument to `fmt`, `log` and `testing` output functions
+>
+> A pure function that pollutes or leaks its argument, or passes it to a failing pure function, is not trusted as pure at its call sites, so reuse after the call is reported too. Passing the argument to a function that is not marked pure is reported inside the pure function only. A method's receiver is not an argument, so `r.db.Where(...)` inside a pure method is allowed.
 >
 > **Note**: Pure functions MAY return mutable [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB). Callers must treat the return value as potentially mutable:
 > ```go
