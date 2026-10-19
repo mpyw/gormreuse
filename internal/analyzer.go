@@ -35,10 +35,12 @@
 package internal
 
 import (
+	"cmp"
 	"fmt"
 	"go/token"
 	"os"
 	"slices"
+	"strings"
 
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/analysis/passes/buildssa"
@@ -458,23 +460,44 @@ func (c *checker) checkFunction(fn *ssa.Function) {
 	// generate one set of fixes.
 	seenRoots := make(map[ssa.Value]bool)
 
-	for _, v := range violations {
-		// For fix generation, only process one violation per root
-		if v.Root != nil && seenRoots[v.Root] {
-			// Still report the violation, but don't generate duplicate fixes
-			c.reportViolationWithoutFix(v)
-			continue
-		}
-		if v.Root != nil {
+	// Group violations by position. Several roots can be reused at one position
+	// (use2(q, r)), and only one diagnostic is reported there, so it carries the
+	// fix of every root in the group whose fix was not emitted yet. Otherwise
+	// only the first root would get a fix (#184).
+	for _, group := range groupByPos(violations) {
+		var fixFor []pollution.Violation
+		for _, v := range group {
+			if v.Root == nil || seenRoots[v.Root] {
+				continue // No root to fix, or this root's fix was already emitted
+			}
 			seenRoots[v.Root] = true
+			fixFor = append(fixFor, v)
 		}
-
-		c.reportViolation(v)
+		c.reportViolation(group[0], fixFor)
 	}
 }
 
-// reportViolation reports a violation with SuggestedFix if possible.
-func (c *checker) reportViolation(v pollution.Violation) {
+// groupByPos groups violations by position. Groups keep the order in which
+// their position first appears, and violations keep their order in a group.
+func groupByPos(violations []pollution.Violation) [][]pollution.Violation {
+	var groups [][]pollution.Violation
+	index := make(map[token.Pos]int)
+	for _, v := range violations {
+		i, ok := index[v.Pos]
+		if !ok {
+			i = len(groups)
+			index[v.Pos] = i
+			groups = append(groups, nil)
+		}
+		groups[i] = append(groups[i], v)
+	}
+	return groups
+}
+
+// reportViolation reports v with the suggested fixes for the roots of fixFor.
+// The fixes are merged into one, because drivers apply only the first
+// suggested fix of a diagnostic.
+func (c *checker) reportViolation(v pollution.Violation, fixFor []pollution.Violation) {
 	pos := v.Pos
 
 	// Deduplicate: same position may be reached multiple times
@@ -490,12 +513,15 @@ func (c *checker) reportViolation(v pollution.Violation) {
 	}
 
 	// Generate SuggestedFix if possible
-	suggestedFixes := c.fixGen.Generate(v)
+	var suggestedFixes []analysis.SuggestedFix
+	for _, fv := range fixFor {
+		suggestedFixes = append(suggestedFixes, c.fixGen.Generate(fv)...)
+	}
 
 	// Deduplicate suggested fix edits globally
 	// This prevents the same edit from being applied multiple times
 	// when different violations suggest the same fix (e.g., for shared Phi edges)
-	suggestedFixes = c.deduplicateFixes(suggestedFixes)
+	suggestedFixes = mergeFixes(c.deduplicateFixes(suggestedFixes))
 
 	// Report with diagnostic
 	c.pass.Report(analysis.Diagnostic{
@@ -535,27 +561,20 @@ func (c *checker) deduplicateFixes(fixes []analysis.SuggestedFix) []analysis.Sug
 	return result
 }
 
-// reportViolationWithoutFix reports a violation without generating fixes.
-// Used for duplicate violations from the same root to avoid generating
-// duplicate fixes while still reporting all violation positions.
-func (c *checker) reportViolationWithoutFix(v pollution.Violation) {
-	pos := v.Pos
-
-	// Deduplicate: same position may be reached multiple times
-	if c.reported[pos] {
-		return
+// mergeFixes combines fixes into one fix. Its edits are sorted by position, and
+// its message joins the distinct messages in order.
+func mergeFixes(fixes []analysis.SuggestedFix) []analysis.SuggestedFix {
+	if len(fixes) <= 1 {
+		return fixes
 	}
-	c.reported[pos] = true
-
-	// Check if line is ignored
-	line := c.pass.Fset.PositionFor(pos, false).Line
-	if c.ignoreMap != nil && c.ignoreMap.ShouldIgnore(line) {
-		return // Suppressed by ignore directive
+	var messages []string
+	var edits []analysis.TextEdit
+	for _, f := range fixes {
+		if !slices.Contains(messages, f.Message) {
+			messages = append(messages, f.Message)
+		}
+		edits = append(edits, f.TextEdits...)
 	}
-
-	// Report without suggested fixes
-	c.pass.Report(analysis.Diagnostic{
-		Pos:     pos,
-		Message: v.Message,
-	})
+	slices.SortStableFunc(edits, func(a, b analysis.TextEdit) int { return cmp.Compare(a.Pos, b.Pos) })
+	return []analysis.SuggestedFix{{Message: strings.Join(messages, "; "), TextEdits: edits}}
 }

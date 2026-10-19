@@ -204,6 +204,15 @@ The `plugin` package registers `Analyzer` with golangci-lint's module plugin sys
                             └──────────────┘
 ```
 
+### Deterministic Reporting
+
+The same input must give the same diagnostics and fixes on every run (#184). Golden tests, golangci-lint caching, and `-fix` depend on it. Two rules keep it so:
+
+- `Tracker.DetectViolations` visits roots in a fixed order, never in map order. The order is root position, then earliest use, then SSA name, function, and instruction text. The later keys only matter for roots without a position, such as Phi nodes.
+- The checker reports each position once. When several roots are reused at one position (`use2(q, r)`), the diagnostic takes the message of the first root in that order, which is the root that appears first in the source. It carries the fixes of every root there whose fix was not emitted yet, merged into one `SuggestedFix`, because drivers apply only the first fix of a diagnostic. Before #184, the first violation in map order won the position and the fixes of the other roots were dropped, so `-fix` needed several passes.
+
+`TestDeterministicDiagnostics` runs the analyzer 50 times over `testdata/src/determinism` and requires identical output. Range over a map only where the order cannot reach a diagnostic, or sort first.
+
 ### Design Patterns
 
 1. **Composition over Inheritance**: `Analyzer` composes `RootTracer`, `cfg.Analyzer`, `pollution.Tracker`

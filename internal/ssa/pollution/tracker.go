@@ -34,7 +34,9 @@
 package pollution
 
 import (
+	"cmp"
 	"go/token"
+	"maps"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -176,9 +178,15 @@ func (t *Tracker) AddViolationWithRoot(pos token.Pos, root ssa.Value) {
 
 // DetectViolations performs violation detection after all uses are recorded.
 // For each root with multiple uses, check if an earlier use can reach a later one.
+//
+// Roots are visited in a fixed order (see sortedRoots), never in map order: the
+// order decides which root's violation comes first at a position shared by
+// several roots, and so which root the diagnostic names and which one carries
+// the suggested fix (#184).
 func (t *Tracker) DetectViolations() {
 	// Check violations between polluting uses (non-pure methods)
-	for root, uses := range t.pollutingUses {
+	for _, root := range t.sortedRoots(t.pollutingUses) {
+		uses := t.pollutingUses[root]
 		if len(uses) <= 1 {
 			continue // Need at least 2 polluting uses for a violation
 		}
@@ -188,25 +196,63 @@ func (t *Tracker) DetectViolations() {
 
 	// Check pure uses against polluting uses
 	// A pure use after a polluting use is a violation
-	for root, pureUses := range t.pureUses {
+	for _, root := range t.sortedRoots(t.pureUses) {
 		pollutingUses := t.pollutingUses[root]
 		if len(pollutingUses) == 0 {
 			continue
 		}
 		allUses := t.getAllUses(root)
-		t.checkViolationsBetween(pureUses, pollutingUses, root, allUses)
+		t.checkViolationsBetween(t.pureUses[root], pollutingUses, root, allUses)
 	}
 
 	// Check assignment uses against polluting uses
 	// An assignment use after a polluting use is a violation (using polluted root)
-	for root, assignmentUses := range t.assignmentUses {
+	for _, root := range t.sortedRoots(t.assignmentUses) {
 		pollutingUses := t.pollutingUses[root]
 		if len(pollutingUses) == 0 {
 			continue
 		}
 		allUses := t.getAllUses(root)
-		t.checkViolationsBetween(assignmentUses, pollutingUses, root, allUses)
+		t.checkViolationsBetween(t.assignmentUses[root], pollutingUses, root, allUses)
 	}
+}
+
+// sortedRoots returns the roots of uses ordered by root position, then by
+// earliest recorded use, then by SSA name, function, and instruction text. The
+// later keys only break ties between roots without a source position (such as
+// Phi nodes).
+func (t *Tracker) sortedRoots(uses map[ssa.Value][]UsageInfo) []ssa.Value {
+	roots := slices.Collect(maps.Keys(uses))
+	slices.SortFunc(roots, func(a, b ssa.Value) int {
+		return cmp.Or(
+			cmp.Compare(a.Pos(), b.Pos()),
+			cmp.Compare(t.earliestUse(a), t.earliestUse(b)),
+			strings.Compare(a.Name(), b.Name()),
+			strings.Compare(funcName(a), funcName(b)),
+			strings.Compare(a.String(), b.String()),
+		)
+	})
+	return roots
+}
+
+// earliestUse returns the smallest recorded use position of root.
+func (t *Tracker) earliestUse(root ssa.Value) token.Pos {
+	best := token.NoPos
+	for _, u := range t.getAllUses(root) {
+		if best == token.NoPos || u.Pos < best {
+			best = u.Pos
+		}
+	}
+	return best
+}
+
+// funcName names the function that defines v, or "" for a value outside any
+// function (a global or a constant).
+func funcName(v ssa.Value) string {
+	if fn := v.Parent(); fn != nil {
+		return fn.String()
+	}
+	return ""
 }
 
 // CollectViolations returns all detected violations.

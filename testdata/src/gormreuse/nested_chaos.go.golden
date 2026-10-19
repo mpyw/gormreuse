@@ -981,7 +981,7 @@ func chaosUltimateStressTest(db *gorm.DB, flags []bool) {
 				q.Find(nil)
 
 				if i > 5 {
-					temp = q.Where("temp_from_q") // want `\*gorm\.DB reused: second branch from mutable root`
+					temp = q.Where("temp_from_q").Session(&gorm.Session{}) // want `\*gorm\.DB reused: second branch from mutable root`
 					temp.Count(nil)
 					q = temp.Where("back_to_q").Session(&gorm.Session{}) // want `\*gorm\.DB reused: second branch from mutable root`
 				}
