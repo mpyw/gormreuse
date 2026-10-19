@@ -368,6 +368,8 @@ testdata/src/gormreuse/
 └── ignore.go        # //gormreuse:ignore directive tests
 ```
 
+Directives across packages are tested by `TestCrossPackageDirectives`: `testdata/src/purelib` declares them and `testdata/src/externalpure` calls them. Both packages' diagnostics are checked. The cases that are wrong today because the analyzer exports no facts (#195) assert the current behaviour and are marked `[LIMITATION] #195`. Update them when #195 is fixed.
+
 ### E2E Tests
 
 The `e2e/internal/` directory contains tests that verify actual GORM SQL behavior using sqlmock. This is a separate Go module (its own `go.mod`) to avoid dependency conflicts, and CI runs it on every PR (`cd e2e/internal && go test ./...`). Every test asserts (`t.Errorf`) — the suite guards the linter's core clone-semantics premise: mid-chain (`clone==0`) reuse accumulates conditions; root / `Session()` / `Transaction`- and `FindInBatches`-callback (`clone>0`) handles fork a fresh Statement and are safe; a `Connection`-callback handle is `clone==0` and accumulates.
@@ -398,7 +400,9 @@ When refactoring code, follow these rules strictly:
 - **Nested defer/goroutine**: `go func() { defer q.Find(nil) }()` - deep nested defer/goroutine chains not fully tracked
 - **IIFE/closure stored result**: When IIFE/closure result is stored (not directly chained), branch tracking differs from runtime order
 
-These are documented in `testdata/src/gormreuse/evil.go` with `[LIMITATION]` markers.
+- **Directives across packages (#195)**: a callee's `pure` and `immutable-return` are read back from its source on disk and trusted, even when its body breaks the contract. The `immutable-param` caller contract is not checked, and `immutable-input(name)` is ignored, for a callee in another package
+
+These are documented in `testdata/src/gormreuse/evil.go` and `testdata/src/externalpure/use.go` with `[LIMITATION]` markers.
 
 **Closure use ordering (#68)**: uses inside a closure that is invoked at a *single* later call site (`f := func() { q.Find(nil) }; …; f()`) are ordered by that **call-site position**, not the closure body's source position — so define-early/call-late reuse is reported at the call site and the earlier direct use is correctly treated as the first branch. This applies only to the unambiguous single-invocation case; IIFEs (invoked inline), deferred/spawned closures, and closures invoked from multiple sites keep their body positions.
 
