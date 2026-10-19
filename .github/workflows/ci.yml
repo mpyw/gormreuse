@@ -69,9 +69,16 @@ jobs:
         working-directory: e2e/internal
 
       # The tests only compare the .golden/.diff fixtures; they must never
-      # rewrite tracked files (#203).
-      - name: Check that the tests left tracked files unchanged
-        run: git diff --exit-code
+      # rewrite tracked files (#203) or leave new ones. git diff misses
+      # untracked files, so check git status as test_all.sh does (#264).
+      - name: Check that the tests left the working tree unchanged
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::error::the tests changed files in the working tree"
+            git status --short
+            git diff
+            exit 1
+          fi
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1

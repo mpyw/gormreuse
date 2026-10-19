@@ -99,23 +99,23 @@ func Analyze(testdata, pkg string, a *analysis.Analyzer) (*Analysis, error) {
 
 // ApplyFixes runs analyzer a over pkg (loaded from testdata) and returns
 // srcPath's original bytes together with the content produced by applying every
-// suggested-fix text edit targeting srcPath (see Analysis.applyFixes).
+// suggested-fix text edit targeting srcPath (see Analysis.ApplyFixes).
 func ApplyFixes(testdata, pkg, srcPath string, a *analysis.Analyzer) (original, fixed []byte, err error) {
 	run, err := Analyze(testdata, pkg, a)
 	if err != nil {
 		return nil, nil, err
 	}
-	return run.applyFixes(srcPath)
+	return run.ApplyFixes(srcPath)
 }
 
-// applyFixes returns srcPath's original bytes together with the content
+// ApplyFixes returns srcPath's original bytes together with the content
 // produced by applying every suggested-fix text edit of the run that targets
 // srcPath. Edits are matched to the file by their own position and applied
 // from the highest offset down so earlier offsets stay valid. Each
 // diagnostic's fix is complete on its own (#200), so two fixes may carry the
 // same edit, such as one gorm import. That edit is applied once, as the -fix
 // driver does.
-func (r *Analysis) applyFixes(srcPath string) (original, fixed []byte, err error) {
+func (r *Analysis) ApplyFixes(srcPath string) (original, fixed []byte, err error) {
 	original, err = os.ReadFile(srcPath)
 	if err != nil {
 		return nil, nil, err
@@ -169,7 +169,7 @@ func syncFixture(testdata, pkg, srcPath string, a *analysis.Analyzer, update boo
 
 // SyncFixture is the package-level syncFixture for a run that is already done.
 func (r *Analysis) SyncFixture(srcPath string, update bool) (stale []string, err error) {
-	original, fixed, err := r.applyFixes(srcPath)
+	original, fixed, err := r.ApplyFixes(srcPath)
 	if err != nil {
 		return nil, err
 	}
