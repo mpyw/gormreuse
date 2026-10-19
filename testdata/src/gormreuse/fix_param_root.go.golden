@@ -85,10 +85,11 @@ func (fixParamRepo) method(tx *gorm.DB) {
 }
 
 // FixParamDiscarded changes its parameter in place with a discarded
-// statement. The statement is reassigned, so "a" still applies to the
-// queries after it.
+// statement, which the caller's value also gets. The function returns
+// nothing that could carry the change back, so reassigning the statement
+// would drop it for the caller, and no fix is offered (#243).
 func FixParamDiscarded(tx *gorm.DB) {
-	tx = tx.Where("a").Session(&gorm.Session{})
+	tx.Where("a")
 	tx.Find(nil)  // want `\*gorm\.DB reused: second branch from mutable root`
 	tx.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }

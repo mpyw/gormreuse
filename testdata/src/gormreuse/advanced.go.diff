@@ -558,8 +558,7 @@
  // passQDirectlyToNonPure demonstrates passing q directly to non-pure function.
  // Non-pure function pollutes its argument, so q is polluted after the call.
  func passQDirectlyToNonPure(db *gorm.DB) {
--	q := db.Where("base")
-+	q := db.Where("base").Session(&gorm.Session{})
+ 	q := db.Where("base")
  	voidFunc(q)
  	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  }
@@ -588,8 +587,7 @@
  
  // passQDirectlyToMixedFunctions demonstrates passing q to both pure and non-pure functions.
  func passQDirectlyToMixedFunctions(db *gorm.DB) {
--	q := db.Where("base")
-+	q := db.Where("base").Session(&gorm.Session{})
+ 	q := db.Where("base")
  	pureReturnsDB(q) // OK: pure doesn't pollute
  	voidFunc(q)      // Pollutes q
  	q.Find(nil)      // want `\*gorm\.DB reused: second branch from mutable root`
@@ -869,8 +867,7 @@
  // consecutiveHelperCallsNoReassign tests calling helper without reassigning result.
  // SHOULD REPORT: q is passed to buildQuery without reassignment, then reused
  func consecutiveHelperCallsNoReassign(db *gorm.DB, a, b bool) {
--	q := db.Where("base")
-+	q := db.Where("base").Session(&gorm.Session{})
+ 	q := db.Where("base")
  
  	if a {
  		buildQuery(q, "a") // q passed but result discarded - q is polluted
@@ -886,12 +883,10 @@
  // consecutiveHelperCallsWithFind tests when Find breaks the chain.
  // SHOULD REPORT after Find: once Find is called, q is consumed
  func consecutiveHelperCallsWithFind(db *gorm.DB, a, b bool) {
--	q := db.Where("base")
-+	q := db.Where("base").Session(&gorm.Session{})
+ 	q := db.Where("base")
  
  	if a {
--		q = buildQuery(q, "a")
-+		q = buildQuery(q, "a").Session(&gorm.Session{})
+ 		q = buildQuery(q, "a")
  	}
  
  	q.Find(nil) // First use - OK, but now q is polluted
@@ -911,12 +906,10 @@
  //
  //gormreuse:immutable-param
  func consecutiveHelperCallsWithFindReassign(db *gorm.DB, a, b bool) {
--	q := db.Where("base")
-+	q := db.Where("base").Session(&gorm.Session{})
+ 	q := db.Where("base")
  
  	if a {
--		q = buildQuery(q, "a")
-+		q = buildQuery(q, "a").Session(&gorm.Session{})
+ 		q = buildQuery(q, "a")
  	}
  
  	q.Find(nil) // First use - pollutes q
@@ -977,8 +970,7 @@
  // testNoPureHelperNoReassign tests helper WITHOUT directive, result NOT reassigned.
  // SHOULD REPORT: q is polluted by first call, reused in second
  func testNoPureHelperNoReassign(db *gorm.DB, a, b bool) {
--	q := db.Where("base")
-+	q := db.Where("base").Session(&gorm.Session{})
+ 	q := db.Where("base")
  
  	if a {
  		noPureHelper(q) // Pollutes q (result discarded)
@@ -1027,8 +1019,7 @@
  // Return value is immutable, but function itself may pollute the argument.
  // Path-insensitive: if neither a nor b is true, q is still original mutable
  func testImmutableReturnOnlyHelperReassign(db *gorm.DB, a, b bool) {
--	q := db.Where("base")
-+	q := db.Where("base").Session(&gorm.Session{})
+ 	q := db.Where("base")
  
  	if a {
  		q = immutableReturnOnlyHelper(q) // Assignment - q is now immutable
@@ -1061,8 +1052,7 @@
  // testImmutableReturnOnlyHelperNoReassign tests helper with immutable-return directive.
  // SHOULD REPORT: without reassignment, function may pollute the argument
  func testImmutableReturnOnlyHelperNoReassign(db *gorm.DB, a, b bool) {
--	q := db.Where("base")
-+	q := db.Where("base").Session(&gorm.Session{})
+ 	q := db.Where("base")
  
  	if a {
  		immutableReturnOnlyHelper(q) // May pollute q (result discarded)
@@ -1133,8 +1123,7 @@
  	q := db.Where("base").Session(&gorm.Session{}) // Session at END makes q immutable
  
  	if a {
--		q = noPureHelper(q) // q (immutable) passed to non-pure - OK, result is new mutable root
-+		q = noPureHelper(q).Session(&gorm.Session{}) // q (immutable) passed to non-pure - OK, result is new mutable root
+ 		q = noPureHelper(q) // q (immutable) passed to non-pure - OK, result is new mutable root
  	}
  
  	if b {
@@ -1201,12 +1190,10 @@
  
  // testMixedHelperTypes tests mixing different helper types in same function.
  func testMixedHelperTypes(db *gorm.DB, a, b, c bool) {
--	q := db.Where("base")
-+	q := db.Where("base").Session(&gorm.Session{})
+ 	q := db.Where("base")
  
  	if a {
--		q = noPureHelper(q) // No directive - new mutable root
-+		q = noPureHelper(q).Session(&gorm.Session{}) // No directive - new mutable root
+ 		q = noPureHelper(q) // No directive - new mutable root
  	}
  
  	if b {

@@ -51,8 +51,8 @@ type fixsqlCase struct {
 }
 
 // fixsqlCases are the cases of TestFixPreservesQueries.
-// TestFixsqlCasesCoverBefore checks that they and fixPathsCases cover every
-// exported function of fixsql/before.
+// TestFixsqlCasesCoverBefore checks that they, fixPathsCases and
+// fixEscapeCases cover every exported function of fixsql/before.
 var fixsqlCases = []fixsqlCase{
 	{"MultiCall", before.MultiCall, after.MultiCall},
 	{"SingleCall", before.SingleCall, after.SingleCall},
@@ -83,7 +83,7 @@ func TestFixsqlCasesCoverBefore(t *testing.T) {
 	}
 
 	var got []string
-	for _, tc := range slices.Concat(fixsqlCases, fixPathsCases) {
+	for _, tc := range slices.Concat(fixsqlCases, fixPathsCases, fixEscapeCases) {
 		for pkg, fn := range map[string]func(*gorm.DB){"before": tc.before, "after": tc.after} {
 			full := runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
 			if name := full[strings.LastIndex(full, "/")+1:]; name != pkg+"."+tc.name {

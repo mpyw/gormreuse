@@ -249,19 +249,19 @@ func pcWrapperOfWrapper(db *gorm.DB) {
 // the call is reported.
 
 func pcCallerGo(db *gorm.DB) {
-	q := db.Where("x").Session(&gorm.Session{})
+	q := db.Where("x")
 	pcGo(q)
 	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 func pcCallerStructLocal(db *gorm.DB) {
-	q := db.Where("x").Session(&gorm.Session{})
+	q := db.Where("x")
 	pcStructLocal(q)
 	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 func pcCallerWrapperOfWrapper(db *gorm.DB) {
-	q := db.Where("x").Session(&gorm.Session{})
+	q := db.Where("x")
 	pcWrapperOfWrapper(q)
 	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }

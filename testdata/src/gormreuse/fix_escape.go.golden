@@ -1,0 +1,220 @@
+package internal
+
+import "gorm.io/gorm"
+
+// Fixtures for issue #243: a suggested fix must never make an in-place change
+// to the root disappear when code other than a discarded statement on its
+// variable makes it. Once the root gets a Session, that code changes a copy,
+// so these diagnostics carry no fix.
+
+// ===== NO FIX: the root escapes before a later use =====
+
+// fixEscapeApplyTenant changes tx in place. Its callers rely on that, and it
+// returns nothing that could carry the change back, so its discarded
+// statements are not reassigned.
+func fixEscapeApplyTenant(tx *gorm.DB, tenant int) {
+	tx.Where("tenant_id = ?", tenant)
+	tx.Where("deleted_at IS NULL") // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixEscapeHelper: applyTenant adds the tenant filter to q in place.
+func fixEscapeHelper(db *gorm.DB) {
+	q := db.Model(&User{})
+	fixEscapeApplyTenant(q, 7)
+	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixEscapeClosure: a closure changes q in place.
+func fixEscapeClosure(db *gorm.DB) {
+	q := db.Model(&User{})
+	apply := func(d *gorm.DB) { d.Where("b = 1") }
+	apply(q)
+	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixEscapeSlice: q is changed through a slice.
+func fixEscapeSlice(db *gorm.DB) {
+	q := db.Model(&User{})
+	qs := []*gorm.DB{q}
+	qs[0].Where("a = 1")
+	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixEscapeMap: q is changed through a map.
+func fixEscapeMap(db *gorm.DB) {
+	q := db.Model(&User{})
+	qs := map[string]*gorm.DB{"q": q}
+	qs["q"].Where("a = 1")
+	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixEscapeChan: q is changed through a channel.
+func fixEscapeChan(db *gorm.DB, ch chan *gorm.DB) {
+	q := db.Model(&User{})
+	ch <- q
+	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+func fixEscapeWithA(tx *gorm.DB) *gorm.DB { return tx.Where("a = 1") }
+
+// fixEscapeResultDiscarded: withA changes q in place, and its result is
+// discarded.
+func fixEscapeResultDiscarded(db *gorm.DB) {
+	q := db.Model(&User{})
+	_ = fixEscapeWithA(q)
+	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixEscapeReassignedThroughHelper: withA may change q in place and return
+// it, so the change is seen through its result, and q's root gets no Session.
+func fixEscapeReassignedThroughHelper(db *gorm.DB) {
+	q := db.Model(&User{})
+	q.Find(&[]User{})
+	q = fixEscapeWithA(q) // want `\*gorm\.DB reused: second branch from mutable root`
+	q.Find(&[]User{})
+}
+
+// fixEscapeInLoop: the escape is the last use in the body, but the next
+// iteration sees its change.
+func fixEscapeInLoop(db *gorm.DB, xs []int) {
+	q := db.Model(&User{})
+	for range xs {
+		q.Find(&[]User{})          // want `\*gorm\.DB reused: second branch from mutable root`
+		fixEscapeApplyTenant(q, 7) // want `\*gorm\.DB reused: second branch from mutable root`
+	}
+}
+
+// fixEscapeInBranch: the query after the if sees what applyTenant changes.
+func fixEscapeInBranch(db *gorm.DB, c bool) {
+	q := db.Model(&User{})
+	if c {
+		fixEscapeApplyTenant(q, 7)
+	}
+	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixEscapeGo: the goroutine may change q while the queries after the go
+// statement run.
+func fixEscapeGo(db *gorm.DB) {
+	q := db.Model(&User{})
+	go fixEscapeApplyTenant(q, 7) // want `\*gorm\.DB reused: second branch from mutable root`
+	q.Find(&[]User{})
+	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// ===== NO FIX: a state field is read =====
+
+// fixEscapeErrorOfChain: the chain's only result is its Error, so it changes
+// q in place, as a discarded statement does.
+func fixEscapeErrorOfChain(db *gorm.DB) error {
+	q := db.Model(&User{})
+	if err := q.Where("a = 1").Error; err != nil {
+		return err
+	}
+	q.Where("b = 1").Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+	q.Where("c = 1").Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+	return nil
+}
+
+// fixEscapeErrorOfRoot: q.Error collects the errors of the queries that ran
+// on q in place.
+func fixEscapeErrorOfRoot(db *gorm.DB) error {
+	q := db.Model(&User{})
+	q.Find(&[]User{})
+	q.Where("y = 1").Table("").Find(new(int)) // want `\*gorm\.DB reused: second branch from mutable root`
+	return q.Error
+}
+
+// fixEscapeRowsAffectedInClosure: a closure reads q.RowsAffected.
+func fixEscapeRowsAffectedInClosure(db *gorm.DB) func() int64 {
+	q := db.Model(&User{})
+	q.Where("a = 1").Find(&[]User{})
+	q.Where("b = 1").Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+	return func() int64 { return q.RowsAffected }
+}
+
+// fixEscapeStatementOfChain: the Statement of a chain on q.
+func fixEscapeStatementOfChain(db *gorm.DB) {
+	q := db.Model(&User{})
+	q.Find(&[]User{})
+	_ = q.Where("a = 1").Limit(1).Statement // want `\*gorm\.DB reused: second branch from mutable root`
+	q.Find(&[]User{})                       // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// ===== FIXED =====
+
+// fixEscapeLastUse: the escape is q's last use, so nothing sees what the
+// helper changes, and the root gets a Session.
+func fixEscapeLastUse(db *gorm.DB) {
+	q := db.Model(&User{}).Session(&gorm.Session{})
+	q.Find(&[]User{})
+	fixEscapeApplyTenant(q, 7) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixEscapeErrorOfFinisher: the Error of a finisher's result is that
+// query's own, so reading it keeps the fix.
+func fixEscapeErrorOfFinisher(db *gorm.DB) error {
+	q := db.Model(&User{}).Session(&gorm.Session{})
+	if err := q.Where("a = 1").Find(&[]User{}).Error; err != nil {
+		return err
+	}
+	return q.Where("b = 1").Find(&[]User{}).Error // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixEscapeErrorOfSession: the Error of a Session copy is the copy's.
+func fixEscapeErrorOfSession(db *gorm.DB) error {
+	q := db.Model(&User{}).Session(&gorm.Session{})
+	q.Where("a = 1").Find(&[]User{})
+	q.Where("b = 1").Find(&[]User{})        // want `\*gorm\.DB reused: second branch from mutable root`
+	return q.Session(&gorm.Session{}).Error // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixEscapeOtherBranch: the escape and the other use are on different
+// paths, so nothing sees what applyTenant changes.
+func fixEscapeOtherBranch(db *gorm.DB, c bool) {
+	q := db.Model(&User{}).Session(&gorm.Session{})
+	q.Find(&[]User{})
+	if c {
+		fixEscapeApplyTenant(q, 7) // want `\*gorm\.DB reused: second branch from mutable root`
+	} else {
+		q.Count(new(int64)) // want `\*gorm\.DB reused: second branch from mutable root`
+	}
+}
+
+// fixEscapeOtherFields: the fields read are not q's state.
+func fixEscapeOtherFields(db *gorm.DB, u *User) (string, error) {
+	q := db.Model(&User{}).Session(&gorm.Session{})
+	q.Where("a = 1").Find(&[]User{})
+	q.Where("b = 1").Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+	return u.Name, db.Error
+}
+
+// fixEscapeDefer: the deferred call runs after every query, so nothing sees
+// what it changes.
+func fixEscapeDefer(db *gorm.DB) {
+	q := db.Model(&User{}).Session(&gorm.Session{})
+	defer fixEscapeApplyTenant(q, 7) // want `\*gorm\.DB reused: second branch from mutable root`
+	q.Find(&[]User{})
+	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixEscapeSubquery: a subquery only reads q, so the root gets a Session.
+func fixEscapeSubquery(db, base *gorm.DB) {
+	q := db.Model(&User{}).Select("id").Session(&gorm.Session{})
+	q.Find(&[]User{})
+	base.Where("id IN (?)", q).Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+	q.Where("a = 1").Find(&[]User{})           // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixEscapeParamResult changes tx in place, and returns a *gorm.DB that
+// carries the change back to its callers, so its discarded statement is
+// reassigned.
+func fixEscapeParamResult(tx *gorm.DB) *gorm.DB {
+	tx = tx.Where("a = 1").Session(&gorm.Session{})
+	tx.Find(&[]User{})       // want `\*gorm\.DB reused: second branch from mutable root`
+	return tx.Where("b = 1") // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+func fixEscapeCallsParamResult(db *gorm.DB) {
+	fixEscapeParamResult(db.Model(&User{})).Find(&[]User{})
+}

@@ -76,8 +76,7 @@
  		_ = q
  	}
  
--	q := db.Where("base")
-+	q := db.Where("base").Session(&gorm.Session{})
+ 	q := db.Where("base")
  	impureHelper(q)
  	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  }
@@ -258,8 +257,7 @@
  		_ = q2
  	}; inner(q); _ = q }
  
--	q := db.Where("base")
-+	q := db.Where("base").Session(&gorm.Session{})
+ 	q := db.Where("base")
  	outer(q)    // outer is NOT pure (directive is for inner)
  	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  }
@@ -359,8 +357,7 @@
  		return q.Session(&gorm.Session{})
  	}
  
--	base := db.Where("x")
-+	base := db.Where("x").Session(&gorm.Session{})
+ 	base := db.Where("x")
  	result := helper(base)
  	base.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  	result.Find(nil)
@@ -448,8 +445,7 @@
  	a(q)
  	q.Find(nil) // OK - a is pure
  
--	q2 := db.Where("base2")
-+	q2 := db.Where("base2").Session(&gorm.Session{})
+ 	q2 := db.Where("base2")
  	b.Fn(q2)
  	q2.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  }
@@ -468,8 +464,7 @@
  	b(q2)
  	q2.Find(nil) // OK - b is pure
  
--	q3 := db.Where("base3")
-+	q3 := db.Where("base3").Session(&gorm.Session{})
+ 	q3 := db.Where("base3")
  	c(q3)
  	q3.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  }
@@ -485,8 +480,7 @@
  	a(q)
  	q.Find(nil) // OK - a is pure
  
--	q2 := db.Where("base2")
-+	q2 := db.Where("base2").Session(&gorm.Session{})
+ 	q2 := db.Where("base2")
  	b(q2)
  	q2.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  }
@@ -501,8 +495,7 @@
  	a(q)
  	q.Find(nil) // OK - a is pure
  
--	q2 := db.Where("base2")
-+	q2 := db.Where("base2").Session(&gorm.Session{})
+ 	q2 := db.Where("base2")
  	b(q2)
  	q2.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  }
@@ -574,8 +567,7 @@
  	a(q1)
  	q1.Find(nil) // OK - a is pure
  
--	q2 := db.Where("base2")
-+	q2 := db.Where("base2").Session(&gorm.Session{})
+ 	q2 := db.Where("base2")
  	b(q2)
  	q2.Find(nil) // want "reused"
  

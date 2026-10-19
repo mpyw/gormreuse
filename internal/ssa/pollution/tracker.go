@@ -72,6 +72,12 @@ type UsageInfo struct {
 	// find discarded statements (#199).
 	Method string
 	Call   token.Pos
+
+	// Escapes is set when the use hands the root to other code, which may
+	// change it in place: an argument of a function call, or a store into a
+	// slice or map, or a channel send. A Session at the root would make that
+	// code change a copy (#243).
+	Escapes bool
 }
 
 // aliasUse is a use of a Session/Debug copy, with the position of the call
@@ -230,10 +236,11 @@ func (t *Tracker) IsPollutedAt(root ssa.Value, targetBlock *ssa.BasicBlock) bool
 	return slices.ContainsFunc(t.pollutingUses[root], reaches) || slices.ContainsFunc(t.branchUses[root], reaches)
 }
 
-// MarkPolluted records a polluting usage (for channel send, slice storage, etc).
-// Caller must ensure root is not nil.
+// MarkPolluted records a polluting usage that hands the root to other code
+// (a function argument, channel send, slice storage, etc). See
+// UsageInfo.Escapes. Caller must ensure root is not nil.
 func (t *Tracker) MarkPolluted(root ssa.Value, block *ssa.BasicBlock, pos token.Pos) {
-	t.pollutingUses[root] = append(t.pollutingUses[root], UsageInfo{Block: block, Pos: pos})
+	t.pollutingUses[root] = append(t.pollutingUses[root], UsageInfo{Block: block, Pos: pos, Escapes: true})
 }
 
 // AddMessageViolation records a violation with a fixed message and no root, so it

@@ -5,7 +5,14 @@ import "context"
 
 // DB is the main database struct.
 type DB struct {
-	Error error
+	Error        error
+	RowsAffected int64
+	Statement    *Statement
+}
+
+// Statement holds the clauses of a query.
+type Statement struct {
+	Table string
 }
 
 // Session configuration

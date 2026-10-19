@@ -54,6 +54,7 @@ import (
 	"github.com/mpyw/gormreuse/internal/directive"
 	"github.com/mpyw/gormreuse/internal/ssa/cfg"
 	"github.com/mpyw/gormreuse/internal/ssa/pollution"
+	"github.com/mpyw/gormreuse/internal/ssa/pollutionsource"
 	"github.com/mpyw/gormreuse/internal/ssa/tracer"
 	"github.com/mpyw/gormreuse/internal/typeutil"
 )
@@ -144,6 +145,12 @@ func (g *Generator) Generate(v pollution.Violation) []analysis.SuggestedFix {
 		return nil // No uses to fix
 	}
 
+	// Code that changes the root in place, other than a discarded statement on
+	// its variable, would change a copy once the root gets a Session (#243).
+	if g.changedElsewhere(v) {
+		return nil
+	}
+
 	// The variable a reassignment rewrites. nil means no reassignment is safe,
 	// and the fix falls back to a Session at the root.
 	target := g.findReassignTarget(root, allUses)
@@ -151,6 +158,14 @@ func (g *Generator) Generate(v pollution.Violation) []analysis.SuggestedFix {
 	// Phase 1: Identify non-finisher uses that need reassignment
 	reassigned, ok := g.findReassignedChains(allUses, target)
 	if !ok {
+		return nil
+	}
+
+	// A discarded statement on a parameter also changes the caller's value,
+	// and the caller may rely on that. Reassigning it would change only the
+	// parameter, unless the function returns a *gorm.DB that can carry the
+	// change back (#243).
+	if isParam && len(reassigned) > 0 && !typeutil.HasGormDBResult(p.Parent().Signature.Results()) {
 		return nil
 	}
 
@@ -341,6 +356,132 @@ func (g *Generator) paramSessionSite(p *ssa.Parameter) sessionSite {
 	}
 	name := p.Name()
 	return sessionSite{pos: first.Pos(), prefix: name + " = " + name, suffix: sep}
+}
+
+// changedElsewhere reports whether a fix could make an in-place change to
+// v's root disappear, other than that of a discarded statement on its
+// variable (see findReassignedChains). That is so when:
+//   - a use hands the root to other code, such as a helper, a closure or a
+//     container, which may change it in place (see UsageInfo.Escapes), and
+//     a later use may see the change (see escapeSeen);
+//   - the Error, RowsAffected or Statement field is read from the root, or
+//     from a chain on it that runs no query. Such a read sees what the calls
+//     on the root left in it: the errors of its queries, or the conditions of
+//     a chain whose only result is the field, as in
+//     `if err := q.Where("a").Error; ...`;
+//   - a go statement hands the root to a call, as in `go applyTenant(q)`. The
+//     goroutine may change it while the uses after the statement run.
+//
+// A Session at the root makes each of them see a copy (#243).
+func (g *Generator) changedElsewhere(v pollution.Violation) bool {
+	loops := cfg.New()
+	ordered := usesOrdered(v)
+	for _, use := range v.AllUses {
+		if use.Escapes && escapeSeen(loops, use, v.AllUses, ordered) {
+			return true
+		}
+	}
+	for _, f := range withAnonFuncs(v.Root.Parent()) {
+		loopInfo := loops.DetectLoops(f)
+		for _, block := range f.Blocks {
+			for _, instr := range block.Instrs {
+				switch instr := instr.(type) {
+				case *ssa.FieldAddr:
+					if isGormStateField(instr) && g.readsRootState(v.Root, instr.X, loopInfo) {
+						return true
+					}
+				case *ssa.Go:
+					if slices.ContainsFunc(instr.Call.Args, func(arg ssa.Value) bool {
+						gormArg, ok := pollutionsource.UnwrapGormDB(arg)
+						return ok && g.tracer.FindMutableRoot(gormArg, loopInfo) == v.Root
+					}) {
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
+}
+
+// escapeSeen reports whether code may see what escape, a use that hands the
+// root to other code, changes in place. A use of the root may, when it is
+// reachable from escape or escape runs again in a loop. So may a use of the
+// result of a call that returns a *gorm.DB, such as `q = withTenant(q)`: the
+// result may be the root itself. Without the order of every use (see
+// usesOrdered) the change is assumed to be seen. An escape that is the last
+// use, as in `q.Find(&a); render(q)`, keeps its fix.
+func escapeSeen(a *cfg.Analyzer, escape pollution.UsageInfo, uses []pollution.UsageInfo, ordered bool) bool {
+	if !ordered || inCycle(a, escape.Block) || returnsGormDBAt(escape) {
+		return true
+	}
+	return slices.ContainsFunc(uses, func(use pollution.UsageInfo) bool {
+		if use.Block == escape.Block {
+			return use.Pos > escape.Pos
+		}
+		return a.CanReach(escape.Block, use.Block)
+	})
+}
+
+// returnsGormDBAt reports whether use is an argument of a call that returns
+// a *gorm.DB, alone or in a tuple, other than a *gorm.DB method. A method
+// such as base.Model(q) returns a chain on its receiver.
+func returnsGormDBAt(use pollution.UsageInfo) bool {
+	return slices.ContainsFunc(use.Block.Instrs, func(instr ssa.Instruction) bool {
+		call, ok := instr.(*ssa.Call)
+		return ok && call.Pos() == use.Pos && typeutil.HasGormDBResult(call.Type()) && gormMethod(call) == nil
+	})
+}
+
+// gormMethod returns the *gorm.DB method that call calls statically, or nil.
+func gormMethod(call *ssa.Call) *ssa.Function {
+	callee := call.Call.StaticCallee()
+	if callee == nil || callee.Signature.Recv() == nil || !typeutil.IsGormDB(callee.Signature.Recv().Type()) {
+		return nil
+	}
+	return callee
+}
+
+// withAnonFuncs returns fn and the closures it declares, at any depth.
+func withAnonFuncs(fn *ssa.Function) []*ssa.Function {
+	fns := []*ssa.Function{fn}
+	for i := 0; i < len(fns); i++ {
+		fns = append(fns, fns[i].AnonFuncs...)
+	}
+	return fns
+}
+
+// readsRootState reports whether x, a *gorm.DB whose state field is read, is
+// root or a chain on root of *gorm.DB methods that runs no query. The tracer
+// makes each call its own root, so the chain is walked down its receivers.
+// The walk stops at a finisher, whose result holds its own query's outcome, as
+// in q.Where("a").Find(&x).Error, and at a Session-family call, whose result
+// is a copy.
+func (g *Generator) readsRootState(root, x ssa.Value, loopInfo *cfg.LoopInfo) bool {
+	for {
+		if g.tracer.FindMutableRoot(x, loopInfo) == root {
+			return true
+		}
+		call, ok := x.(*ssa.Call)
+		if !ok {
+			return false
+		}
+		callee := gormMethod(call)
+		if callee == nil || isFinisher(callee.Name()) || typeutil.IsImmutableReturningBuiltin(callee.Name()) {
+			return false
+		}
+		x = call.Call.Args[0]
+	}
+}
+
+// isGormStateField reports whether fa takes the Error, RowsAffected or
+// Statement field of a *gorm.DB.
+func isGormStateField(fa *ssa.FieldAddr) bool {
+	if !typeutil.IsGormDB(fa.X.Type()) {
+		return false
+	}
+	name := fa.X.Type().Underlying().(*types.Pointer).Elem().Underlying().(*types.Struct).Field(fa.Field).Name()
+	return name == "Error" || name == "RowsAffected" || name == "Statement"
 }
 
 // findReassignedChains returns the discarded chains (see discardedChain)

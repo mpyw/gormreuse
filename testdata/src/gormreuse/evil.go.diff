@@ -337,8 +337,7 @@
  // interProceduralPollution demonstrates function call pollution detection.
  // Functions receiving *gorm.DB are assumed to pollute unless marked pure.
  func interProceduralPollution(db *gorm.DB) {
--	q := db.Where("x = ?", 1)
-+	q := db.Where("x = ?", 1).Session(&gorm.Session{})
+ 	q := db.Where("x = ?", 1)
  	helperPollute(q) // Marks q as polluted (function assumed to pollute)
  
  	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
@@ -410,8 +409,7 @@
  // interfaceMethodPollution demonstrates interface method pollution detection.
  // Interface methods taking *gorm.DB are assumed to pollute it.
  func interfaceMethodPollution(db *gorm.DB, repo Repository) {
--	q := db.Where("x = ?", 1)
-+	q := db.Where("x = ?", 1).Session(&gorm.Session{})
+ 	q := db.Where("x = ?", 1)
  	repo.Query(q) // Interface method assumed to pollute q
  
  	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
@@ -424,8 +422,7 @@
  // channelPollution demonstrates channel send pollution detection.
  // Sending *gorm.DB to channel is assumed to pollute it.
  func channelPollution(db *gorm.DB, ch chan *gorm.DB) {
--	q := db.Where("x = ?", 1)
-+	q := db.Where("x = ?", 1).Session(&gorm.Session{})
+ 	q := db.Where("x = ?", 1)
  	ch <- q // Sending to channel marks q as polluted
  
  	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
@@ -451,8 +448,7 @@
  // goroutineDirectMethodCall demonstrates direct method call in goroutine.
  // This tests the processCallCommonForGo path for method calls.
  func goroutineDirectMethodCall(db *gorm.DB) {
--	q := db.Where("x = ?", 1)
-+	q := db.Where("x = ?", 1).Session(&gorm.Session{})
+ 	q := db.Where("x = ?", 1)
  	q.Find(nil) // First use - pollutes q
  
  	go q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
@@ -461,8 +457,7 @@
  // goroutineFunctionCallWithDB demonstrates passing *gorm.DB to function in goroutine.
  // This tests the processCallCommonForGo path for function calls with *gorm.DB argument.
  func goroutineFunctionCallWithDB(db *gorm.DB) {
--	q := db.Where("x = ?", 1)
-+	q := db.Where("x = ?", 1).Session(&gorm.Session{})
+ 	q := db.Where("x = ?", 1)
  	q.Find(nil) // First use - pollutes q
  
  	go helperPollute(q) // want `\*gorm\.DB reused: second branch from mutable root`
@@ -472,8 +467,7 @@
  // Tests line 487: isPollutedAt cross-function pollution check.
  // Pollution happens in closure, then goroutine checks isPollutedAt.
  func goroutineCrossFunctionPollution(db *gorm.DB) {
--	q := db.Where("x = ?", 1)
-+	q := db.Where("x = ?", 1).Session(&gorm.Session{})
+ 	q := db.Where("x = ?", 1)
  
  	// Pollute q inside a closure (IIFE)
  	func() {
@@ -620,8 +614,7 @@
  
  // higherOrderGoroutine demonstrates go fn()() pattern.
  func higherOrderGoroutine(db *gorm.DB) {
--	q := db.Where("x = ?", 1)
-+	q := db.Where("x = ?", 1).Session(&gorm.Session{})
+ 	q := db.Where("x = ?", 1)
  
  	go makeWorker(q)() // Pollutes q through higher-order function
  
@@ -639,8 +632,7 @@
  
  // doubleHigherOrderGoroutine demonstrates go fn()()() pattern.
  func doubleHigherOrderGoroutine(db *gorm.DB) {
--	q := db.Where("x = ?", 1)
-+	q := db.Where("x = ?", 1).Session(&gorm.Session{})
+ 	q := db.Where("x = ?", 1)
  
  	go makeWorkerMaker(q)()() // Pollutes q through double higher-order
  
@@ -649,8 +641,7 @@
  
  // tripleHigherOrder demonstrates go fn()()()() pattern.
  func tripleHigherOrder(db *gorm.DB) {
--	q := db.Where("x = ?", 1)
-+	q := db.Where("x = ?", 1).Session(&gorm.Session{})
+ 	q := db.Where("x = ?", 1)
  
  	maker := func(d *gorm.DB) func() func() func() {
  		return func() func() func() {
@@ -810,8 +801,7 @@
  
  // iifeWithArgument demonstrates IIFE with argument passing.
  func iifeWithArgument(db *gorm.DB) {
--	q := db.Where("x = ?", 1)
-+	q := db.Where("x = ?", 1).Session(&gorm.Session{})
+ 	q := db.Where("x = ?", 1)
  
  	func(d *gorm.DB) {
  		d.Find(nil)
@@ -915,8 +905,7 @@
  // slicePollution demonstrates pollution through slice storage.
  // Storing *gorm.DB in slice is assumed to pollute it.
  func slicePollution(db *gorm.DB) {
--	q := db.Where("x = ?", 1)
-+	q := db.Where("x = ?", 1).Session(&gorm.Session{})
+ 	q := db.Where("x = ?", 1)
  	_ = []*gorm.DB{q} // Storing in slice marks q as polluted
  
  	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
@@ -925,8 +914,7 @@
  // mapPollution demonstrates pollution through map storage.
  // Storing *gorm.DB in map is assumed to pollute it.
  func mapPollution(db *gorm.DB) {
--	q := db.Where("x = ?", 1)
-+	q := db.Where("x = ?", 1).Session(&gorm.Session{})
+ 	q := db.Where("x = ?", 1)
  	_ = map[string]*gorm.DB{"main": q} // Storing in map marks q as polluted
  
  	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
@@ -1101,8 +1089,7 @@
  // variadicPollution demonstrates pollution through variadic function.
  // Passing *gorm.DB to variadic function is assumed to pollute it.
  func variadicPollution(db *gorm.DB) {
--	q := db.Where("x = ?", 1)
-+	q := db.Where("x = ?", 1).Session(&gorm.Session{})
+ 	q := db.Where("x = ?", 1)
  	processQueries(q) // Function call assumed to pollute q
  
  	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
@@ -1174,8 +1161,7 @@
  
  // interleavedCalls demonstrates interleaved function calls.
  func interleavedCalls(db *gorm.DB) {
--	q := db.Where("x = ?", 1)
-+	q := db.Where("x = ?", 1).Session(&gorm.Session{})
+ 	q := db.Where("x = ?", 1)
  
  	func(d *gorm.DB) {
  		func(d2 *gorm.DB) {
@@ -2296,8 +2282,7 @@
  // iifeArgumentReturnsChain demonstrates IIFE that receives *gorm.DB as argument and returns chain.
  // This pattern passes the value as parameter instead of capturing as FreeVar.
  func iifeArgumentReturnsChain(db *gorm.DB) {
--	q := db.Where("x = ?", 1)
-+	q := db.Where("x = ?", 1).Session(&gorm.Session{})
+ 	q := db.Where("x = ?", 1)
  
  	// First branch - IIFE with argument counts as single branch
  	_ = func(inner *gorm.DB) *gorm.DB {
@@ -2311,9 +2296,8 @@
  // iifeArgumentAndFreeVarMixed demonstrates IIFE with both argument and FreeVar.
  //gormreuse:immutable-param
  func iifeArgumentAndFreeVarMixed(db *gorm.DB) {
--	q1 := db.Where("q1", 1)
+ 	q1 := db.Where("q1", 1)
 -	q2 := db.Where("q2", 2)
-+	q1 := db.Where("q1", 1).Session(&gorm.Session{})
 +	q2 := db.Where("q2", 2).Session(&gorm.Session{})
  
  	// First branch from q1 (argument), first branch from q2 (FreeVar)
@@ -3361,8 +3345,7 @@
  func goStatementWithPhiOnePolluted(db *gorm.DB, flag bool) {
  	var q *gorm.DB
  	if flag {
--		q = db.Where("a")
-+		q = db.Where("a").Session(&gorm.Session{})
+ 		q = db.Where("a")
  		q.Find(nil) // pollutes q from this branch
  	} else {
  		q = db.Where("b")

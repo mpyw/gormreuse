@@ -244,16 +244,7 @@ const inspectorDiff = `--- $DIR/app.go (old)
  	q.Where("a").Find(nil)
  	q.Where("b").Find(nil)
  }
-@@ -30,7 +30,7 @@
- }
- 
- func usesNotPure(db *gorm.DB) {
--	q := db.Where("x")
-+	q := db.Where("x").Session(&gorm.Session{})
- 	notPureHelper(q)
- 	q.Find(nil)
- }
-@@ -44,10 +44,11 @@
+@@ -44,7 +44,8 @@
  	g := func(q *gorm.DB) { //gormreuse:pure
  	}
  	//gormreuse:pure
@@ -262,12 +253,8 @@ const inspectorDiff = `--- $DIR/app.go (old)
 +	c := func(q *gorm.DB) {}
  	h := func(q *gorm.DB) {}
  	_, _ = b, c
--	q := db.Where("x")
-+	q := db.Where("x").Session(&gorm.Session{})
- 	f(q)
- 	g(q)
- 	a(q)
-@@ -79,17 +78,18 @@
+ 	q := db.Where("x")
+@@ -79,17 +80,18 @@
  }
  
  func nested(db *gorm.DB, run func(func())) {

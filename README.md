@@ -203,7 +203,7 @@ q.Where("b").Find(nil) // OK: first branch from new root
 - Non-finisher methods (chain builders like `Where`, `Order`, `Limit`) whose result is a `*gorm.DB`. Calls that return something else are not reassigned: `AddError`, `DB()`, `Association`, `Migrator`, `AutoMigrate`. Neither are calls that run SQL or end a transaction: `FindInBatches`, `CreateInBatches`, `UpdateColumn(s)`, `Commit`, `Rollback`, `SavePoint`, `RollbackTo`
 - Result is not assigned to a variable
 - Expression used as a statement. A chain such as `q.Where("a").Limit(10)` is reassigned as a whole, and a Session it needs goes after its last call
-- The receiver is the local variable that holds the reused root. These are not rewritten: aliases (`r := q`), calls that take the root as an argument (`base.Model(q)`), and package-level variables. Neither are variables captured by a closure that is not called inline (`go func() { ... }()`, `defer func() { ... }()`). The fix relies on a Session at the root instead, unless that would drop a discarded statement (see below)
+- The receiver is the local variable that holds the reused root. These are not rewritten: aliases (`r := q`), calls that take the root as an argument (`base.Model(q)`), and package-level variables. Neither are variables captured by a closure that is not called inline (`go func() { ... }()`, `defer func() { ... }()`). The fix relies on a Session at the root instead, unless that would drop a discarded statement or another in-place change (see below)
 - A reassignment inside a loop always gets a Session, since the next iteration uses it again
 
 > [!IMPORTANT]
@@ -213,6 +213,11 @@ q.Where("b").Find(nil) // OK: first branch from new root
 > - a method value (`where := q.Where`)
 > - a variable captured by a closure
 > - a chain with a Session-family call before its last call (`q.Where("a").Session(s).Limit(1)`)
+>
+> Other code can change `q` in place too, and a Session at the root would drop that change as well. So the diagnostic also has **no fix** when:
+>
+> - `q` is handed to other code before a later use of `q`, or in a loop: an argument of a function that is not `//gormreuse:pure` (`applyTenant(q)`, `apply := func(d *gorm.DB) { ... }; apply(q)`, `_ = withTenant(q)`, `base.Model(q)`), or a store into a slice, map or channel. A function other than a `*gorm.DB` method that returns a `*gorm.DB` may return `q` itself, so its argument counts even as the last use (`q = withTenant(q)`), and so does an argument of a `go` statement. A subquery (`db.Where("id IN (?)", q)`) only reads `q`, and does not count
+> - the `Error`, `RowsAffected` or `Statement` field is read from `q` (`return q.Error`), or from a chain on `q` that runs no query (`if err := q.Where("a").Error; ...`). Each query adds its error to `q.Error`, and that chain changes `q` the same way a discarded statement does. Reading the field of a query's own result (`q.Where("a").Find(&x).Error`) is fine
 
 ### Strategy 2: Session (Making Roots Immutable)
 
@@ -247,6 +252,7 @@ A reused `*gorm.DB` parameter has no definition to append a Session to. The fix 
 | Unexported, not a method, only called directly in the package, and every caller passes an immutable value | Add [`//gormreuse:immutable-param`](#gormreuseimmutable-param). The caller-side check keeps the callers isolated |
 | Any other function: exported, a method, used as a function value, or with a caller that passes a mid-chain value | Rebind the parameter at the top of the body: `tx = tx.Session(&gorm.Session{})`. Discarded statements on it are reassigned as for a local root |
 | A Scopes/Preload callback, a function that returns a `*gorm.DB` and is not only called directly (it may be a Scopes callback), or a closure | **No fix** |
+| A function with a discarded statement on the parameter (`tx.Where("a")`) and no `*gorm.DB` result | **No fix**. The statement also changes the caller's value, and callers such as `applyTenant(q); q.Find(&users)` rely on that. With `tx = tx.Where("a")` the change would stay inside the function |
 
 `immutable-param` on an exported function would hide the reuse: callers in other packages are never checked. On a function with a mid-chain caller, it would move the report to that caller, where it has no fix.
 

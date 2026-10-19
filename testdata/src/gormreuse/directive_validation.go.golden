@@ -137,7 +137,7 @@ func pureLeaksViaInterfaceArg(db *gorm.DB) {
 // PV015: Reuse after a pure function that DEFINITIVELY leaks its argument is
 // reported at the call site — such a function loses its pure-trust (issue #66).
 func reuseAfterLeakingPure(db *gorm.DB, ch chan *gorm.DB) {
-	q := db.Where("x").Session(&gorm.Session{})
+	q := db.Where("x")
 	pureLeaksViaChanSend(q, ch) // leaks q → not trusted as pure here
 	q.Find(nil)                 // want `\*gorm\.DB reused: second branch from mutable root`
 }

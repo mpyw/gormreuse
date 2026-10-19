@@ -109,8 +109,7 @@
  }
  
  func ignoreScopeCallsLeakingPure(db *gorm.DB, ch chan *gorm.DB) {
--	q := db.Where("x")
-+	q := db.Where("x").Session(&gorm.Session{})
+ 	q := db.Where("x")
  	ignoreScopeLeakingPure(q, ch)
  	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  }

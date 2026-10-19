@@ -63,7 +63,7 @@ func multipleInterfaceConversions(db *gorm.DB) {
 // variadicInterfaceArgs: Passing to variadic interface{} function
 // Passing to non-pure function DOES pollute (handled by checkFunctionCallPollution)
 func variadicInterfaceArgs(db *gorm.DB) {
-	q := db.Where("x").Session(&gorm.Session{})
+	q := db.Where("x")
 
 	// Passing to non-pure function - marks q as polluted
 	acceptVariadic(q)
@@ -74,8 +74,8 @@ func variadicInterfaceArgs(db *gorm.DB) {
 // variadicInterfaceArgsMultiple: Multiple args to variadic
 //gormreuse:immutable-param
 func variadicInterfaceArgsMultiple(db *gorm.DB) {
-	q1 := db.Where("x").Session(&gorm.Session{})
-	q2 := db.Where("y").Session(&gorm.Session{})
+	q1 := db.Where("x")
+	q2 := db.Where("y")
 
 	// Both passed to non-pure function - both polluted
 	acceptVariadic(q1, q2)
@@ -87,7 +87,7 @@ func variadicInterfaceArgsMultiple(db *gorm.DB) {
 // variadicInterfaceArgsOnlyOne: Only one of multiple is passed
 //gormreuse:immutable-param
 func variadicInterfaceArgsOnlyOne(db *gorm.DB) {
-	q1 := db.Where("x").Session(&gorm.Session{})
+	q1 := db.Where("x")
 	q2 := db.Where("y")
 
 	// Only q1 is passed to function
@@ -192,7 +192,7 @@ func gormOrMethodFresh(db *gorm.DB) {
 // interfaceSliceLiteral: *gorm.DB in []interface{} literal
 // Storing in slice DOES pollute (handled by general slice storage)
 func interfaceSliceLiteral(db *gorm.DB) {
-	q := db.Where("x").Session(&gorm.Session{})
+	q := db.Where("x")
 
 	// Slice literal - storage pollutes
 	_ = []interface{}{q}
@@ -203,8 +203,8 @@ func interfaceSliceLiteral(db *gorm.DB) {
 // interfaceSliceMultiple: Multiple *gorm.DB in slice
 //gormreuse:immutable-param
 func interfaceSliceMultiple(db *gorm.DB) {
-	q1 := db.Where("x").Session(&gorm.Session{})
-	q2 := db.Where("y").Session(&gorm.Session{})
+	q1 := db.Where("x")
+	q2 := db.Where("y")
 
 	_ = []interface{}{q1, q2}
 
@@ -218,7 +218,7 @@ func interfaceSliceMultiple(db *gorm.DB) {
 
 // interfaceMapLiteral: *gorm.DB as map[string]interface{} value
 func interfaceMapLiteral(db *gorm.DB) {
-	q := db.Where("x").Session(&gorm.Session{})
+	q := db.Where("x")
 
 	_ = map[string]interface{}{"query": q}
 
@@ -248,7 +248,7 @@ func closureReturnsInterface(db *gorm.DB) {
 // closureAcceptsInterface: Closure accepting interface{} parameter
 // Passing to closure that takes interface{} - treated like function call
 func closureAcceptsInterface(db *gorm.DB) {
-	q := db.Where("x").Session(&gorm.Session{})
+	q := db.Where("x")
 
 	process := func(v interface{}) {
 		_ = v
@@ -319,7 +319,7 @@ func loopWithClosureAndInterfaceMultiReturn(db *gorm.DB, items []int) {
 
 // channelSendInterface: Send *gorm.DB to chan interface{}
 func channelSendInterface(db *gorm.DB) {
-	q := db.Where("x").Session(&gorm.Session{})
+	q := db.Where("x")
 
 	ch := make(chan interface{}, 1)
 	ch <- q // Channel send pollutes

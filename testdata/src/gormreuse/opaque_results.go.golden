@@ -96,7 +96,7 @@ func opaqueTupleSecondElement(db *gorm.DB) {
 // opaqueTupleArgPolluted: a tuple helper whose result is discarded still
 // pollutes its argument.
 func opaqueTupleArgPolluted(db *gorm.DB) {
-	q := db.Where("x").Session(&gorm.Session{})
+	q := db.Where("x")
 	_, _ = opaqueTuple(q)
 	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }

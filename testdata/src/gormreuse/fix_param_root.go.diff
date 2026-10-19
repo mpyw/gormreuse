@@ -1,6 +1,6 @@
 --- fix_param_root.go	1970-01-01 00:00:00
 +++ fix_param_root.go.golden	1970-01-01 00:00:00
-@@ -1,181 +1,190 @@
+@@ -1,182 +1,191 @@
  package internal
  
  import (
@@ -89,11 +89,11 @@
  }
  
  // FixParamDiscarded changes its parameter in place with a discarded
- // statement. The statement is reassigned, so "a" still applies to the
- // queries after it.
+ // statement, which the caller's value also gets. The function returns
+ // nothing that could carry the change back, so reassigning the statement
+ // would drop it for the caller, and no fix is offered (#243).
  func FixParamDiscarded(tx *gorm.DB) {
--	tx.Where("a")
-+	tx = tx.Where("a").Session(&gorm.Session{})
+ 	tx.Where("a")
  	tx.Find(nil)  // want `\*gorm\.DB reused: second branch from mutable root`
  	tx.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  }
