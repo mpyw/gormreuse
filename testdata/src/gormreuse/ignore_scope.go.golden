@@ -50,7 +50,7 @@ func ignoreScopeMultiLineIfHeader(db *gorm.DB) {
 
 // The ignore covers the statement only, not the next one.
 func ignoreScopeMultiLineNextStatement(db *gorm.DB) {
-	q := db.Where("x")
+	q := db.Where("x").Session(&gorm.Session{})
 	q.Find(nil)
 	//gormreuse:ignore
 	q.

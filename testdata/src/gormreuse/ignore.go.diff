@@ -42,7 +42,8 @@
  // =============================================================================
  
  func trailingIgnoreDoesNotCoverNextLine(db *gorm.DB) {
- 	q := db.Where("active = ?", true)
+-	q := db.Where("active = ?", true)
++	q := db.Where("active = ?", true).Session(&gorm.Session{})
  	q.Find(nil)
  	q.Count(nil)  //gormreuse:ignore
  	q.Delete(nil) // want `\*gorm\.DB reused: second branch from mutable root`

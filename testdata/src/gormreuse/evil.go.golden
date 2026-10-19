@@ -1424,7 +1424,7 @@ func deferInsideFor(db *gorm.DB, items []string) {
 
 // deferInsideForWithCondition demonstrates defer inside for with condition.
 func deferInsideForWithCondition(db *gorm.DB, items []int) {
-	q := db.Where("x = ?", 1)
+	q := db.Where("x = ?", 1).Session(&gorm.Session{})
 
 	for _, item := range items {
 		if item > 0 {
@@ -1438,7 +1438,7 @@ func deferInsideForWithCondition(db *gorm.DB, items []int) {
 
 // deferInsideNestedFor demonstrates defer inside nested for.
 func deferInsideNestedFor(db *gorm.DB) {
-	q := db.Where("x = ?", 1)
+	q := db.Where("x = ?", 1).Session(&gorm.Session{})
 
 	for i := 0; i < 2; i++ {
 		for j := 0; j < 2; j++ {
@@ -1456,7 +1456,7 @@ func deferInsideNestedFor(db *gorm.DB) {
 
 // forInsideDefer demonstrates for inside defer closure.
 func forInsideDefer(db *gorm.DB, items []string) {
-	q := db.Where("x = ?", 1)
+	q := db.Where("x = ?", 1).Session(&gorm.Session{})
 
 	defer func() {
 		for range items {
@@ -1470,7 +1470,7 @@ func forInsideDefer(db *gorm.DB, items []string) {
 
 // nestedForInsideDefer demonstrates nested for inside defer.
 func nestedForInsideDefer(db *gorm.DB) {
-	q := db.Where("x = ?", 1)
+	q := db.Where("x = ?", 1).Session(&gorm.Session{})
 
 	defer func() {
 		for i := 0; i < 2; i++ {
@@ -1552,7 +1552,7 @@ func ifForDefer(db *gorm.DB, flag bool, items []string) {
 
 // forIfDefer demonstrates for containing if containing defer.
 func forIfDefer(db *gorm.DB, items []int) {
-	q := db.Where("x = ?", 1)
+	q := db.Where("x = ?", 1).Session(&gorm.Session{})
 
 	for _, item := range items {
 		if item > 0 {
@@ -1566,7 +1566,7 @@ func forIfDefer(db *gorm.DB, items []int) {
 
 // deferIfFor demonstrates defer closure containing if containing for.
 func deferIfFor(db *gorm.DB, flag bool, items []string) {
-	q := db.Where("x = ?", 1)
+	q := db.Where("x = ?", 1).Session(&gorm.Session{})
 
 	defer func() {
 		if flag {
@@ -1582,7 +1582,7 @@ func deferIfFor(db *gorm.DB, flag bool, items []string) {
 
 // deferForIf demonstrates defer closure containing for containing if.
 func deferForIf(db *gorm.DB, items []int) {
-	q := db.Where("x = ?", 1)
+	q := db.Where("x = ?", 1).Session(&gorm.Session{})
 
 	defer func() {
 		for _, item := range items {
@@ -1632,7 +1632,7 @@ func tripleNestingForIfDefer(db *gorm.DB, items []int) {
 
 // tripleNestingDeferIfFor demonstrates 3-level nesting: defer -> if -> for.
 func tripleNestingDeferIfFor(db *gorm.DB, flag bool, items []string) {
-	q := db.Where("x = ?", 1)
+	q := db.Where("x = ?", 1).Session(&gorm.Session{})
 
 	defer func() {
 		if flag {
@@ -1648,7 +1648,7 @@ func tripleNestingDeferIfFor(db *gorm.DB, flag bool, items []string) {
 
 // tripleNestingDeferForIf demonstrates 3-level nesting: defer -> for -> if.
 func tripleNestingDeferForIf(db *gorm.DB, items []int) {
-	q := db.Where("x = ?", 1)
+	q := db.Where("x = ?", 1).Session(&gorm.Session{})
 
 	defer func() {
 		for _, item := range items {
@@ -1698,7 +1698,7 @@ func quadNestingForIfForDefer(db *gorm.DB, outer []bool, inner []int) {
 
 // quadNestingDeferIfForIf demonstrates 4-level: defer -> if -> for -> if.
 func quadNestingDeferIfForIf(db *gorm.DB, a bool, items []int) {
-	q := db.Where("x = ?", 1)
+	q := db.Where("x = ?", 1).Session(&gorm.Session{})
 
 	defer func() {
 		if a {
@@ -1716,7 +1716,7 @@ func quadNestingDeferIfForIf(db *gorm.DB, a bool, items []int) {
 
 // quadNestingDeferForIfFor demonstrates 4-level: defer -> for -> if -> for.
 func quadNestingDeferForIfFor(db *gorm.DB, outer []bool) {
-	q := db.Where("x = ?", 1)
+	q := db.Where("x = ?", 1).Session(&gorm.Session{})
 
 	defer func() {
 		for _, flag := range outer {

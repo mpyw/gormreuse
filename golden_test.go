@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 
@@ -230,6 +231,62 @@ func TestEachFixCompiles(t *testing.T) {
 	if checked == 0 {
 		t.Fatal("no diagnostic in the fixtures has a fix")
 	}
+}
+
+// TestEveryDiagnosticCarriesFix requires every diagnostic in
+// fix_every_diagnostic.go to carry the fix of its root, the same fix on each,
+// including the diagnostic after an ignored one. An editor offers a quick fix
+// only on the diagnostic that carries it (#246).
+func TestEveryDiagnosticCarriesFix(t *testing.T) {
+	t.Parallel()
+	results := analysistest.Run(goldentest.NoopT{}, analysistest.TestData(), gormreuse.Analyzer, "gormreuse")
+	if len(results) != 1 || results[0].Err != nil {
+		t.Fatalf("analysis failed: %v", results)
+	}
+	fset := results[0].Pass.Fset
+	fixes := map[string][]string{} // function name -> rendered fix of each diagnostic
+	for _, diag := range results[0].Diagnostics {
+		at := fset.Position(diag.Pos)
+		if filepath.Base(at.Filename) != "fix_every_diagnostic.go" {
+			continue
+		}
+		if len(diag.SuggestedFixes) == 0 {
+			t.Errorf("%s: the diagnostic has no fix", at)
+			continue
+		}
+		var b strings.Builder
+		for _, e := range diag.SuggestedFixes[0].TextEdits {
+			fmt.Fprintf(&b, "%d-%d %q;", e.Pos, e.End, e.NewText)
+		}
+		fn := enclosingFuncName(results[0].Pass.Files, diag.Pos)
+		fixes[fn] = append(fixes[fn], b.String())
+	}
+	want := map[string]int{"fixFirstReuseIgnored": 1, "fixEveryReuse": 2}
+	for fn, n := range want {
+		got := fixes[fn]
+		if len(got) != n {
+			t.Errorf("%s: %d diagnostics with a fix, want %d", fn, len(got), n)
+			continue
+		}
+		for _, f := range got[1:] {
+			if f != got[0] {
+				t.Errorf("%s: the diagnostics carry different fixes:\n%s\n%s", fn, got[0], f)
+			}
+		}
+	}
+}
+
+// enclosingFuncName returns the name of the function declaration in files that
+// contains pos, or "" if none does.
+func enclosingFuncName(files []*ast.File, pos token.Pos) string {
+	for _, f := range files {
+		for _, decl := range f.Decls {
+			if fd, ok := decl.(*ast.FuncDecl); ok && fd.Pos() <= pos && pos < fd.End() {
+				return fd.Name.Name
+			}
+		}
+	}
+	return ""
 }
 
 // eachFixApply returns the files of unchanged, parsed into fset, with edits
