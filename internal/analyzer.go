@@ -90,6 +90,10 @@ func RunSSA(
 	// across different violations that suggest the same edit.
 	globalSuggestedEdits := make(map[editKey]bool)
 
+	// Every per-function step runs under guard, which reports a panic at the
+	// function instead of dropping its diagnostics silently (#186).
+	guard := &panicGuard{pass: pass, reported: make(map[*ssa.Function]bool)}
+
 	// skip reports whether a function is in an excluded file or wholly ignored.
 	// When markUsed is true it also records the function-level ignore directive
 	// as used; that side effect must happen exactly once per function, so only
@@ -121,7 +125,7 @@ func RunSSA(
 	// trusted as pure at its call sites (issue #66), so this must complete for
 	// ALL functions before the analysis pass runs — a caller may be visited
 	// before its callee.
-	failedPure := validatePureFuncs(pass, ssaInfo, pureFuncs, skip)
+	failedPure := validatePureFuncs(pass, ssaInfo, pureFuncs, skip, guard)
 
 	// Collect Scopes/Preload callbacks once: their *gorm.DB parameter receives a
 	// mid-chain (clone==0) value, so reuse inside them must be detected (#60).
@@ -143,7 +147,7 @@ func RunSSA(
 		if skip(fn, false) {
 			continue
 		}
-		recoverPerFunction(fn, func() {
+		guard.run(fn, func() {
 			for _, v := range purity.ValidateImmutableInputs(fn, immutableInputSet, inputTracer) {
 				pass.Reportf(v.Pos, "%s", v.Message)
 			}
@@ -158,7 +162,7 @@ func RunSSA(
 	// Enforce the body-side immutable-return contract. Reuses inputTracer, which
 	// carries the full pass context so other immutable-return / immutable-param
 	// functions are classified correctly.
-	reportImmutableReturnViolations(pass, ssaInfo, immutableReturnFuncs, inputTracer, skip)
+	reportImmutableReturnViolations(pass, ssaInfo, immutableReturnFuncs, inputTracer, skip, guard)
 
 	// TEMPORARY (GORM bug go-gorm/gorm#7592): warn on Session/WithContext/Debug
 	// results returned from Scopes callbacks. Deletable by removing the scopeswarn
@@ -179,7 +183,7 @@ func RunSSA(
 	// contract check (stage 2b, passed into the checker below) and, by its
 	// complement, redundant-directive detection (a directive whose function does
 	// NOT reuse a param suppresses nothing).
-	needsImmutableParam := computeNeedsImmutableParam(ssaInfo, immutableParamFuncs, pureFuncs, immutableReturnFuncs, failedPure, scopesCallbacks, immutableCallbacks, skip)
+	needsImmutableParam := computeNeedsImmutableParam(ssaInfo, immutableParamFuncs, pureFuncs, immutableReturnFuncs, failedPure, scopesCallbacks, immutableCallbacks, skip, guard)
 
 	// PASS 2: run SSA reuse analysis.
 	for _, fn := range ssaInfo.SrcFuncs {
@@ -188,7 +192,7 @@ func RunSSA(
 		}
 
 		chk := newChecker(pass, ignoreMaps[pass.Fset.PositionFor(fn.Pos(), false).Filename], pureFuncs, immutableReturnFuncs, immutableParamFuncs, failedPure, scopesCallbacks, immutableCallbacks, needsImmutableParam, globalReported, globalSuggestedEdits, fixGen)
-		recoverPerFunction(fn, func() { chk.checkFunction(fn) })
+		guard.run(fn, func() { chk.checkFunction(fn) })
 	}
 
 	// Report immutable-param directives that are signature-valid but have no
@@ -220,6 +224,7 @@ func validatePureFuncs(
 	ssaInfo *buildssa.SSA,
 	pureFuncs *directive.DirectiveFuncSet,
 	skip func(*ssa.Function, bool) bool,
+	guard *panicGuard,
 ) map[*ssa.Function]bool {
 	failedPure := make(map[*ssa.Function]bool)
 	var targets []*ssa.Function
@@ -237,7 +242,7 @@ func validatePureFuncs(
 			if failedPure[fn] {
 				continue
 			}
-			recoverPerFunction(fn, func() {
+			guard.run(fn, func() {
 				// Only a definitive violation revokes pure-trust at call sites;
 				// conservative func-arg violations do not (avoids FP cascades).
 				if slices.ContainsFunc(purity.NewValidator(fn, pureFuncs, failedPure).Validate(), func(v purity.Violation) bool { return v.Definitive }) {
@@ -252,7 +257,7 @@ func validatePureFuncs(
 	// a pure function that creates it, so the same violation can come twice.
 	reported := make(map[purity.Violation]bool)
 	for _, fn := range targets {
-		recoverPerFunction(fn, func() {
+		guard.run(fn, func() {
 			for _, v := range purity.NewValidator(fn, pureFuncs, failedPure).Validate() {
 				if reported[v] {
 					continue
@@ -276,12 +281,13 @@ func reportImmutableReturnViolations(
 	immutableReturnFuncs *directive.DirectiveFuncSet,
 	rt *tracer.RootTracer,
 	skip func(*ssa.Function, bool) bool,
+	guard *panicGuard,
 ) {
 	for _, fn := range ssaInfo.SrcFuncs {
 		if skip(fn, false) {
 			continue
 		}
-		recoverPerFunction(fn, func() {
+		guard.run(fn, func() {
 			for _, v := range purity.ValidateImmutableReturn(fn, immutableReturnFuncs, rt) {
 				pass.Reportf(v.Pos, "%s", v.Message)
 			}
@@ -318,6 +324,7 @@ func computeNeedsImmutableParam(
 	immutableParamFuncs, pureFuncs, immutableReturnFuncs *directive.DirectiveFuncSet,
 	failedPure, scopesCallbacks, immutableCallbacks map[*ssa.Function]bool,
 	skip func(*ssa.Function, bool) bool,
+	guard *panicGuard,
 ) map[*ssa.Function]bool {
 	needs := make(map[*ssa.Function]bool)
 	if immutableParamFuncs == nil {
@@ -333,7 +340,7 @@ func computeNeedsImmutableParam(
 		if pureFuncs != nil && pureFuncs.Contains(fn) {
 			continue
 		}
-		recoverPerFunction(fn, func() {
+		guard.run(fn, func() {
 			// Counterfactual: analyze fn with its parameters treated as mutable.
 			cf := ssautil.NewAnalyzer(fn, pureFuncs, immutableReturnFuncs, nil, failedPure, scopesCallbacks, immutableCallbacks, nil)
 			if slices.ContainsFunc(cf.Analyze(), func(v pollution.Violation) bool {
@@ -415,19 +422,37 @@ func reportUnusedDirectiveFuncs(pass *analysis.Pass, pureFuncs, immutableReturnF
 	report(immutableParamFuncs, "unused gormreuse:immutable-param directive", pureFuncs, immutableReturnFuncs)
 }
 
-// recoverPerFunction runs work, recovering from any panic so that a single
-// pathological function (exotic SSA the tracer mishandles) cannot abort the
-// entire `go vet` run for the package. Aborting would be worse than any false
-// positive and contrary to the conservative-bias design, so the offending
-// function is simply skipped.
+// panicGuard runs per-function work and recovers from any panic, so that a
+// single pathological function (exotic SSA the tracer mishandles) cannot abort
+// the entire `go vet` run for the package. Aborting would be worse than any
+// false positive and contrary to the conservative-bias design.
+//
+// A recovered panic is reported at the function as an internal error, once per
+// function, so that the diagnostics it may have lost are not dropped silently
+// (#186). The report goes through pass.Reportf directly, so no ignore directive
+// suppresses it.
 //
 // Set GORMREUSE_DEBUG_PANIC to a non-empty value to re-panic instead, surfacing
 // the stack trace for debugging.
-func recoverPerFunction(fn *ssa.Function, work func()) {
+type panicGuard struct {
+	pass     *analysis.Pass
+	reported map[*ssa.Function]bool
+}
+
+func (g *panicGuard) run(fn *ssa.Function, work func()) {
 	defer func() {
-		if r := recover(); r != nil && os.Getenv("GORMREUSE_DEBUG_PANIC") != "" {
+		r := recover()
+		if r == nil {
+			return
+		}
+		if os.Getenv("GORMREUSE_DEBUG_PANIC") != "" {
 			panic(fmt.Sprintf("gormreuse: panic analyzing %s: %v", fn, r))
 		}
+		if g.reported[fn] {
+			return
+		}
+		g.reported[fn] = true
+		g.pass.Reportf(fn.Pos(), "gormreuse: internal error analyzing %s: %v; please report this at https://github.com/mpyw/gormreuse/issues", fn.RelString(fn.Pkg.Pkg), r)
 	}()
 	work()
 }
