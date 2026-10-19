@@ -1271,8 +1271,8 @@ func fieldBaseAddrs(root ssa.Value, seen map[ssa.Value]bool) []ssa.Value {
 	return []ssa.Value{root}
 }
 
-// FieldRoot is the mutable root of a *gorm.DB field of a struct value that a
-// call returned (#181):
+// FieldRoot is the mutable root of a *gorm.DB field of a struct that a call
+// returned, by value (#181) or through a pointer (#250):
 //
 //	s := mk(db)          // t1 = mk(db); *t0 = t1
 //	s.DB.Where("a")      // root: FieldRoot{t1, [DB]}
@@ -1281,11 +1281,21 @@ func fieldBaseAddrs(root ssa.Value, seen map[ssa.Value]bool) []ssa.Value {
 // It extends "a call returning *gorm.DB is a root" to a call returning a struct
 // that holds one. The SSA has no value for "field DB of t1", so the tracer
 // makes one per (call, field path) and returns the same pointer for each (see
-// RootTracer.internFieldRoot). Fields read through a parameter or a receiver
-// stay untracked.
+// RootTracer.internFieldRoot). Path indexes the struct the call returns, or
+// the one its pointer result points to. Fields read through a parameter or a
+// receiver stay untracked.
 type FieldRoot struct {
 	Call *ssa.Call
 	Path []int
+}
+
+// fieldRootStruct returns the struct that a FieldRoot path step selects from:
+// t itself, or what it points to.
+func fieldRootStruct(t types.Type) *types.Struct {
+	if ptr, ok := t.Underlying().(*types.Pointer); ok {
+		t = ptr.Elem()
+	}
+	return t.Underlying().(*types.Struct)
 }
 
 // Name names the field of the call: "t1.DB".
@@ -1298,7 +1308,7 @@ func (r *FieldRoot) String() string { return r.Call.String() + r.pathString() }
 func (r *FieldRoot) Type() types.Type {
 	t := r.Call.Type()
 	for _, i := range r.Path {
-		t = t.Underlying().(*types.Struct).Field(i).Type()
+		t = fieldRootStruct(t).Field(i).Type()
 	}
 	return t
 }
@@ -1312,11 +1322,38 @@ func (r *FieldRoot) Referrers() *[]ssa.Instruction { return nil }
 // Pos returns the position of the call, which the diagnostics name as the root.
 func (r *FieldRoot) Pos() token.Pos { return r.Call.Pos() }
 
+// Block returns the block of the call, which defines the field: a call inside a
+// loop returns a new struct on each iteration (#250). See RootBlock.
+func (r *FieldRoot) Block() *ssa.BasicBlock { return r.Call.Block() }
+
+// RootBlock returns the block that defines a mutable root, or nil when it has
+// none, such as a global. The loop check and the suggested fixes place a root
+// by it (#250):
+//
+//   - an instruction (a call, a Phi) is defined in its own block;
+//   - a FieldRoot is defined by its call;
+//   - a parameter is defined in its function's entry block. That block is in a
+//     loop only for the body of a range-over-func loop, whose parameters are
+//     the values of the current iteration.
+func RootBlock(v ssa.Value) *ssa.BasicBlock {
+	switch r := v.(type) {
+	case ssa.Instruction:
+		return r.Block()
+	case *FieldRoot:
+		return r.Block()
+	case *ssa.Parameter:
+		if fn := r.Parent(); fn != nil && len(fn.Blocks) > 0 {
+			return fn.Blocks[0]
+		}
+	}
+	return nil
+}
+
 func (r *FieldRoot) pathString() string {
 	var b strings.Builder
 	t := r.Call.Type()
 	for _, i := range r.Path {
-		field := t.Underlying().(*types.Struct).Field(i)
+		field := fieldRootStruct(t).Field(i)
 		b.WriteString("." + field.Name())
 		t = field.Type()
 	}
@@ -1410,8 +1447,15 @@ func fieldStoredValuesFrom(fn *ssa.Function, root ssa.Value, path []int, load ss
 	}
 	seen[ref] = true
 
+	stores, open := reachingFieldStores(fn, root, path, load)
 	var vals []ssa.Value
-	for _, store := range fieldStores(fn, root, path, load) {
+	if call, ok := root.(*ssa.Call); ok && open {
+		// A field reached through a pointer that a call returned holds what
+		// the call put there until a store replaces it (#250). That value is
+		// the call's FieldRoot, as for a struct returned by value.
+		vals = append(vals, &FieldRoot{Call: call, Path: slices.Clone(path)})
+	}
+	for _, store := range stores {
 		storePath, _ := fieldStorePath(store, root)
 		if len(storePath) == len(path) {
 			vals = append(vals, store.Val)
@@ -1471,6 +1515,17 @@ func writesFieldPath(store *ssa.Store, root ssa.Value, path []int) bool {
 // another pointer or inside a callee neither reaches the load nor replaces a
 // store, as before.
 func fieldStores(fn *ssa.Function, root ssa.Value, path []int, load ssa.Instruction) []*ssa.Store {
+	stores, _ := reachingFieldStores(fn, root, path, load)
+	return stores
+}
+
+// reachingFieldStores is fieldStores that also reports whether the field can
+// reach load unwritten: on some CFG path to load, no store writes it. A nil
+// load is open, since it stands for a read that may run before any store.
+//
+// When root is a call, which defines the address, the walk stops at the call:
+// a store above it on a loop path wrote the struct of an earlier iteration.
+func reachingFieldStores(fn *ssa.Function, root ssa.Value, path []int, load ssa.Instruction) (stores []*ssa.Store, open bool) {
 	if load == nil {
 		var all []*ssa.Store
 		for _, block := range fn.Blocks {
@@ -1480,7 +1535,7 @@ func fieldStores(fn *ssa.Function, root ssa.Value, path []int, load ssa.Instruct
 				}
 			}
 		}
-		return all
+		return all, true
 	}
 
 	// lastIn returns the last store in instrs that writes the field.
@@ -1493,9 +1548,27 @@ func fieldStores(fn *ssa.Function, root ssa.Value, path []int, load ssa.Instruct
 		return nil
 	}
 
+	// def is the call that defines root, and the walk ends there.
+	def, _ := root.(*ssa.Call)
+	// afterDef returns the instructions of block that can write root's field
+	// before control leaves it, and whether def is among them.
+	afterDef := func(instrs []ssa.Instruction) ([]ssa.Instruction, bool) {
+		if def == nil {
+			return instrs, false
+		}
+		if i := slices.Index(instrs, ssa.Instruction(def)); i >= 0 {
+			return instrs[i+1:], true
+		}
+		return instrs, false
+	}
+
 	start := load.Block()
-	if store := lastIn(start.Instrs[:slices.Index(start.Instrs, load)]); store != nil {
-		return []*ssa.Store{store}
+	prefix, defined := afterDef(start.Instrs[:slices.Index(start.Instrs, load)])
+	if store := lastIn(prefix); store != nil {
+		return []*ssa.Store{store}, false
+	}
+	if defined || len(start.Preds) == 0 {
+		return nil, true
 	}
 
 	// Walk the CFG backward. A block that writes the field ends the walk on
@@ -1512,8 +1585,13 @@ func fieldStores(fn *ssa.Function, root ssa.Value, path []int, load ssa.Instruct
 			continue
 		}
 		visitedBlocks[block] = true
-		if store := lastIn(block.Instrs); store != nil {
+		instrs, defined := afterDef(block.Instrs)
+		if store := lastIn(instrs); store != nil {
 			found = append(found, store)
+			continue
+		}
+		if defined || len(block.Preds) == 0 {
+			open = true
 			continue
 		}
 		work = append(work, block.Preds...)
@@ -1521,7 +1599,7 @@ func fieldStores(fn *ssa.Function, root ssa.Value, path []int, load ssa.Instruct
 	// Each block contributes at most one store, so block order is program
 	// order.
 	slices.SortFunc(found, func(a, b *ssa.Store) int { return a.Block().Index - b.Block().Index })
-	return found
+	return found, open
 }
 
 // globalStoredValues returns, in program order, the values stored into the

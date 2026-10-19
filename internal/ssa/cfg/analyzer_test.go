@@ -169,9 +169,13 @@ func TestIsDefinedOutsideLoop(t *testing.T) {
 	a := New()
 	info := a.DetectLoops(fn)
 
-	// A parameter is defined outside any loop.
-	if !a.IsDefinedOutsideLoop(fn.Params[0], info) {
+	// The entry block, which defines the parameters, is outside any loop. So
+	// is a value with no defining block.
+	if !a.IsDefinedOutsideLoop(fn.Blocks[0], info) {
 		t.Error("parameter should be defined outside the loop")
+	}
+	if !a.IsDefinedOutsideLoop(nil, info) {
+		t.Error("a value without a block should be outside the loop")
 	}
 
 	// An instruction inside a loop block is not defined outside the loop.
@@ -182,7 +186,7 @@ func TestIsDefinedOutsideLoop(t *testing.T) {
 		}
 		for _, instr := range b.Instrs {
 			if v, ok := instr.(ssa.Value); ok {
-				if a.IsDefinedOutsideLoop(v, info) {
+				if a.IsDefinedOutsideLoop(instr.Block(), info) {
 					t.Errorf("value %v in a loop block should be inside the loop", v)
 				}
 				insideFound = true

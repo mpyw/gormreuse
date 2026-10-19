@@ -232,7 +232,8 @@ func (a *Analyzer) markLoopBlocks(_ *ssa.Function, loopHead, loopTail *ssa.Basic
 	}
 }
 
-// IsDefinedOutsideLoop checks if a value is defined outside the loop.
+// IsDefinedOutsideLoop checks if a value whose defining block is def is
+// defined outside the loop.
 //
 // Used to detect the pattern:
 //
@@ -242,18 +243,11 @@ func (a *Analyzer) markLoopBlocks(_ *ssa.Function, loopHead, loopTail *ssa.Basic
 //	}
 //
 // When a mutable root is defined outside a loop but used inside, each
-// iteration reuses the same root, which is always a violation.
-func (a *Analyzer) IsDefinedOutsideLoop(v ssa.Value, loopInfo *LoopInfo) bool {
-	instr, ok := v.(ssa.Instruction)
-	if !ok {
-		// Non-instructions (parameters, constants) are "outside"
-		return true
-	}
-
-	block := instr.Block()
-	if block == nil {
-		return true
-	}
-
-	return !loopInfo.IsInLoop(block)
+// iteration reuses the same root, which is always a violation. The caller
+// passes the root's defining block (tracer.RootBlock), so that a root that is
+// not an instruction, such as a field of a struct a call returned, is placed
+// by the instruction that defines it (#250). A nil block (no definition in
+// this function, such as a global) is outside.
+func (a *Analyzer) IsDefinedOutsideLoop(def *ssa.BasicBlock, loopInfo *LoopInfo) bool {
+	return def == nil || !loopInfo.IsInLoop(def)
 }

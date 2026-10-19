@@ -539,14 +539,35 @@ Three struct shapes lost the root before #181, so reuse through them was missed.
 | --- | --- | --- |
 | Promoted methods of an embedded `*gorm.DB`: `e := E{q}; e.Where("a")` | `t4 = *t0; t5 = t4.DB`: a `Field` of a struct in a register, not a `FieldAddr` | `fieldValueStoredValues` turns the `Field` chain over the load into (loaded address, field path) and matches stores as for a `FieldAddr` chain. Over a Phi, each edge is resolved the same way |
 | A field of a returned struct: `s := mk(db); s.DB.Where("a")` | `*t0 = mk(db)`, or `mk(db).DB` directly | The field is a `FieldRoot{call, path}` (below) |
+| A field of a returned pointer (#250): `p := mkPtr(db); p.DB.Where("a")` | `t1 = &t0.DB; *t1`, a `FieldAddr` chain on the call | `reachingFieldStores` matches stores through `t0` as for a local. When some path from the call reaches the load with no store, the field is also the `FieldRoot{call, path}` |
 | A struct captured by a closure: `f := func() { h.q.Where("b") }` | `&h.q` on a `FreeVar`; with `h := &T{...}`, `&(*h).q` on a fresh load of the captured pointer variable | `ClosureCapturesGormDB` looks through struct fields (`holdsGormDB`), so the closure is analyzed. `fieldBaseAddrs` maps a `FreeVar` to its binding and a load of a pointer variable to each pointer stored in it, and the stores are searched in the function that defines that address |
 
 **`FieldRoot`.** A call returning `*gorm.DB` is a mutable root. A call returning a struct that holds one has no SSA value for "field `DB` of this call", and every read is a new instruction. So the tracer makes a `FieldRoot` that implements `ssa.Value` and interns one per (call, field path) in `RootTracer.fieldRoots`. Reads of the same field of the same call share it; another field or another call is a different root. Its position is the call's. A call to a builtin or a `//gormreuse:immutable-return` function yields no root.
 
+**One rule for value and pointer results (#250).** Before #250 a field of a struct returned by value was a root and the same field reached through a returned pointer was not. Both are now roots, for these reasons:
+
+- The rule then matches "a call returning `*gorm.DB` is a mutable root". A helper such as `newTestApp(t)` that returns `*gorm.DB`, a struct or a pointer to a struct is treated the same. In each case `//gormreuse:immutable-return` on the helper marks its handles as safe.
+- A returned pointer is not like a parameter. The caller usually gets a struct the callee has just built, so a mutable chain in it is as likely as in a returned value. The parameter trade-off stays because a parameter is most often the application's shared handle.
+- Making the value case match the parameter case instead would drop the #181 detection and its E2E evidence.
+
+The pointer walk stops at the call (`reachingFieldStores`): a store above it on a loop path wrote the struct of an earlier iteration. Only a `FieldAddr` chain directly on the call is followed. A pointer field inside the result (`p.inner.DB` with `inner *T`) is not.
+
+**Defining block (#250).** The loop check reports a use in a loop of a root defined outside it. It used to treat every value that is not an instruction as outside, so a `FieldRoot` from a call inside the loop was reported on every iteration. `tracer.RootBlock` now gives each root kind its defining block, and `cfg.IsDefinedOutsideLoop` takes that block. The suggested fixes use the same function.
+
+| Root kind | Defining block |
+| --- | --- |
+| A call, a Phi (instructions) | Its own block |
+| `FieldRoot` | The block of its call (`FieldRoot.Block`) |
+| `*ssa.Parameter` | The entry block of its function. That block is in a loop only for a range-over-func body, whose parameters are the values of the current iteration, so `for q := range seq { q.Find(nil) }` is no longer reported |
+| Anything else | None, so outside. The tracer returns no other kind: it follows a `FreeVar` to its binding and a global to its stores, and a constant is no root |
+
+A root defined in another function, such as an enclosing function's root used in a closure, has a block that is not in the closure's loops, so it is outside, as before.
+
 Decisions and limitations:
 
 - No fix is suggested for a `FieldRoot`. `Session()` cannot be appended to a call that returns a struct. It belongs where the function builds the struct.
-- A field read through a parameter or a receiver is still not a mutable root, whether the struct is passed by value or by pointer. That trade-off is unchanged. A closure capturing such a parameter sees only the stores in the enclosing function, as the function itself does.
+- A field read through a parameter or a receiver is still not a mutable root, whether the struct is passed by value or by pointer. That trade-off is unchanged.
+- A write to a returned struct inside another function (`p.Reset()`, `reset(&s)`) is not seen. A later read still sees the call's field, so it can be reported though the field was replaced. A closure capturing such a parameter sees only the stores in the enclosing function, as the function itself does.
 - A captured pointer variable is resolved like a captured `*gorm.DB` variable: the single-root trace takes the first pointer stored into it. After `h = &T{q: b}`, a use of `h.q` can still be matched to the first value, as `q = db.Where("b")` on a captured `q` already is.
 - A struct value that a Phi merges (`e := E{a}; if c { e = E{b} }`) yields the field of every edge. The single-root trace takes the first edge, so the suggested fix makes only that edge immutable. A struct from a channel receive, or a map or slice element, is not followed.
 - A `Field` read over a load uses the CFG-ordered store matching of #182 (`fieldStores`), so `e.DB = other` between two promoted calls is not a second branch. A read inside a closure has no CFG path to the stores in the enclosing function, so it matches all of them, and the single-root trace takes the first. This keeps reuse reported when the closure may run before a later store.

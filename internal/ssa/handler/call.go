@@ -341,7 +341,7 @@ func (h *callHandler) handle(call *ssa.Call, ctx *Context) {
 		ctx.Tracker.ProcessBranch(root, use)
 
 		// Loop with external root - immediate violation (only for non-pure methods)
-		if isInLoop && ctx.CFG.IsDefinedOutsideLoop(root, ctx.LoopInfo) {
+		if isInLoop && ctx.CFG.IsDefinedOutsideLoop(tracer.RootBlock(root), ctx.LoopInfo) {
 			ctx.Tracker.AddViolationWithRoot(pos, root)
 		}
 	}
@@ -417,7 +417,7 @@ func (h *callHandler) processBoundMethodCall(call *ssa.Call, mc *ssa.MakeClosure
 		ctx.Tracker.ProcessBranch(root, use)
 
 		// Loop with external root - immediate violation (only for non-pure methods)
-		if isInLoop && ctx.CFG.IsDefinedOutsideLoop(root, ctx.LoopInfo) {
+		if isInLoop && ctx.CFG.IsDefinedOutsideLoop(tracer.RootBlock(root), ctx.LoopInfo) {
 			ctx.Tracker.AddViolationWithRoot(pos, root)
 		}
 	}
