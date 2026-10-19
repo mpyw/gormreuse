@@ -453,7 +453,7 @@ func (h *callHandler) checkFunctionCallPollution(call *ssa.Call, ctx *Context) {
 
 	// A *gorm.DB passed to a read-only parameter of a gorm method, such as a
 	// subquery, is read, not branched (#185).
-	readOnlyArgs, readStart, hasReadOnly := pollutionsource.StaticReadOnlyArgs(&call.Call)
+	readOnlyArgs, readStart, hasReadOnly := pollutionsource.CallReadOnlyArgs(&call.Call)
 	for _, v := range readOnlyArgs {
 		recordArgumentRead(v, call, ctx)
 	}

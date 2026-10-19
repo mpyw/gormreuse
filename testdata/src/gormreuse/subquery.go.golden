@@ -204,3 +204,23 @@ func subquerySpreadArgsKeptIsBranch(db *gorm.DB) {
 }
 
 func keepSubqueryArgs([]interface{}) {}
+
+// A call through a method value is read as the method call it stands for
+// (#178).
+func subqueryThroughMethodValueReused(db *gorm.DB) {
+	db = db.Session(&gorm.Session{})
+	sub := db.Model(&User{}).Select("id")
+	where := db.Where
+	where("id IN (?)", sub).Find(&[]User{})
+	where("id NOT IN (?)", sub).Find(&[]User{})
+	where(sub).Find(&[]User{})
+}
+
+func subqueryThroughMethodValueChangedBeforeOuterQuery(db *gorm.DB) {
+	db = db.Session(&gorm.Session{})
+	sub := db.Model(&User{}).Select("id")
+	where := db.Where
+	x := where("id IN (?)", sub)
+	sub.Where("age > 1").Find(&[]User{})
+	x.Find(&[]User{}) // want `\*gorm\.DB reused: mutable root passed as a query argument`
+}

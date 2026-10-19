@@ -95,7 +95,7 @@ A `*gorm.DB` passed as an argument of a query method used to count as a branch, 
 | Group condition `Where(sub)`, `Or(sub)`, `Not(sub)` | At the call | `BuildCondition` copies the `WHERE` expressions. It also runs `sub`'s pending `Scopes`. Running them on a `clone == 0` value changes it in place, but a second run finds them already applied, so the result is the same |
 | `Joins("Company", cond)` | At the call | `joins` copies `Selects`, `Omits` and the `WHERE` clause |
 
-`pollutionsource.readOnlyArgMethods` lists the methods and the first parameter that only reads. Every later parameter reads too. `Find`/`First`/`Last`/`Take`/`Delete` take a destination or model first, which GORM writes to or parses, so that parameter is not in the list. Neither are `Model`, `Order`, `Clauses`, `Assign`, `Attrs`, `FirstOrInit` and `FirstOrCreate`, or a method value (`where := db.Where`).
+`pollutionsource.readOnlyArgMethods` lists the methods and the first parameter that only reads. Every later parameter reads too. `Find`/`First`/`Last`/`Take`/`Delete` take a destination or model first, which GORM writes to or parses, so that parameter is not in the list. Neither are `Model`, `Order`, `Clauses`, `Assign`, `Attrs`, `FirstOrInit` and `FirstOrCreate`. A call through a method value (`where := db.Where; where("id IN (?)", sub)`) is read as the method call it stands for: `collectAliasedRoots` resolves it with `calledFunc`, and `pollutionsource.CallReadOnlyArgs` does the same for the handler and `Leak` (#178).
 
 The model, as the issue proposed: an argument is a read at some point between the call and the end of the outer chain.
 
