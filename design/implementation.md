@@ -60,6 +60,16 @@ The linter detects when a mutable `*gorm.DB` branches into multiple code paths:
 ### Directives
 
 - `//gormreuse:ignore` - Suppress warnings for the same line, and for the next line when the comment is the first token on its line. A trailing comment after code covers its own line only (#189). `BuildIgnoreMap` decides this from the smallest column at which an AST node starts or ends on the comment's line.
+
+  `directive.Ignores` applies one scope rule to every diagnostic (#190). `RunSSA` sends each report through `Ignores.Ignore(pos)`, and `run` sends directive problems through it too. Lookups go from the most specific scope to the widest, and mark the first match used:
+
+  | Scope | Rule |
+  | --- | --- |
+  | Line | The diagnostic's own line, or any line of the innermost statement that holds it. Blocks and labeled statements are skipped. For `if`, `for`, `range`, `switch`, `select` and case clauses only the header (up to `{` or `:`) counts, so a header ignore does not reach the body. An ignore comment inside a closure nested in the statement belongs to the closure, not to the outer statement |
+  | Function | A `func` declaration whose doc comment holds the ignore: from the doc comment to the closing brace, closures included. A closure has no function-level ignore of its own |
+  | File | The whole file |
+
+  An ignore only suppresses reports. Before #190 a function-level ignore skipped the function in every pass. That hid contract violations while the directive stayed trusted (a leaking `pure` function was trusted at call sites), never covered closures, and marked the ignore used even when nothing was suppressed. Now every pass runs, so `failedPure` and `needsImmutableParam` see ignored functions, and an ignore is used only when it suppressed a report. Unused-ignore reports go straight to `pass.Reportf`: an ignore never silences another ignore's staleness. So do `panicGuard` internal-error reports, which can now come from an ignored function too, since it is analyzed.
 - `//gormreuse:pure` - Mark function/method/closure as not polluting its `*gorm.DB` argument
 - `//gormreuse:immutable-return` - Mark function/method/closure as returning immutable `*gorm.DB` (like Session/WithContext). **Body contract**: when the function actually returns a provably-mutable value — one whose root is a gorm chain-method call, e.g. `db.Where(...)` or `Session().Where(...)` (the trailing chain re-forks a fresh `clone==0` Statement) — the directive is reported at the declaration, since the linter would otherwise trust it and silently allow unsafe reuse of the return value at call sites. Roots the tracer treats as mutable only conservatively (a bare `*gorm.DB` parameter, or a call into an unmarked user function/closure) are given the benefit of the doubt and not reported.
 - `//gormreuse:immutable-param` - Opt a function's `*gorm.DB` parameters out of the Phase 1b mutable-by-default treatment: they are treated as immutable inside the function (the caller is responsible for passing an isolated value). **Caller-side contract**: when the function actually branches such a parameter, passing a mutable `*gorm.DB` at a call site is reported (isolate with `.Session(&gorm.Session{})` first, or make the caller `immutable-param` too so the contract propagates).
@@ -102,7 +112,7 @@ a, b := func(q *gorm.DB) { _ = q }, func(q *gorm.DB) { _ = q }
 > **Important**: User-defined functions that accept `*gorm.DB` are treated as polluting **unless** the function returns `*gorm.DB` and the result is assigned (e.g., `q = helper(q)`). In that case, it's treated like a gorm method assignment. Use `//gormreuse:pure` to mark functions that don't pollute arguments even when result is discarded, and `//gormreuse:immutable-return` to mark functions whose return value can be safely reused (like DB connection helpers).
 
 > **Note**: Unused directives are reported as warnings:
-> - Unused `//gormreuse:ignore` - line/function-level ignores that suppress no violations
+> - Unused `//gormreuse:ignore` - line/function-level ignores that suppress no diagnostic
 > - Unused `//gormreuse:pure` - directives that don't match any function
 > - Unused `//gormreuse:immutable-return` - directives that don't match any function
 > - Unused `//gormreuse:immutable-param` - directives that don't match any function (no `*gorm.DB` parameter)
@@ -123,7 +133,7 @@ gormreuse/
 │   │
 │   ├── directive/              # Comment directive handling
 │   │   ├── directive.go        # Directive parsing and problems (parse, FindDirectiveProblems, IsIgnore/IsPure)
-│   │   ├── ignore.go           # //gormreuse:ignore - IgnoreMap, unused tracking
+│   │   ├── ignore.go           # //gormreuse:ignore - Ignores scope rule, IgnoreMap, unused tracking
 │   │   └── funcset.go          # DirectiveFuncSet - directive-marked function sets
 │   │
 │   ├── scopeswarn/             # TEMPORARY Session-returned-from-Scopes warning (GORM bug #7592)
@@ -175,7 +185,7 @@ The `plugin` package registers `Analyzer` with golangci-lint's module plugin sys
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                      internal/analyzer.go                               │
 │  For each function:                                                     │
-│    1. Check ignores (directive.IgnoreMap)                              │
+│    1. Suppress reports by ignore scope (directive.Ignores)             │
 │    2. Validate pure functions (purity.Validator)                       │
 │    3. Detect violations (ssa.Analyzer)                                 │
 └─────────────────────────────────────────────────────────────────────────┘

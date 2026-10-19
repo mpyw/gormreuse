@@ -1,0 +1,146 @@
+package internal
+
+import "gorm.io/gorm"
+
+// =============================================================================
+// Ignore scope (#190): one rule for every diagnostic.
+//
+//   - A line ignore covers the statement it is on or directly above, on any of
+//     the statement's lines. For if/for/switch only the header counts.
+//   - A function ignore covers the declaration and every closure inside it.
+//   - Ignores suppress contract, redundant-directive and Scopes-warning
+//     diagnostics too, not only reuse violations.
+//   - An ignore only suppresses reports: contracts are still validated, and a
+//     function ignore that suppresses nothing is reported unused.
+// =============================================================================
+
+// -----------------------------------------------------------------------------
+// 1. Multi-line statements
+// -----------------------------------------------------------------------------
+
+// The violation is at the Where( line, two lines below the ignore.
+func ignoreScopeMultiLineAbove(db *gorm.DB) {
+	q := db.Where("x")
+	q.Find(nil)
+	//gormreuse:ignore
+	q.
+		Where("y").
+		Find(nil)
+}
+
+// A trailing ignore on the last line covers the whole statement.
+func ignoreScopeMultiLineTrailing(db *gorm.DB) {
+	q := db.Where("x")
+	q.Find(nil)
+	q.
+		Where("y").
+		Find(nil) //gormreuse:ignore
+}
+
+// A trailing ignore after the brace covers a multi-line if condition.
+func ignoreScopeMultiLineIfHeader(db *gorm.DB) {
+	q := db.Where("x")
+	q.Find(nil)
+	if q.
+		Where("y").
+		Find(nil).Error != nil { //gormreuse:ignore
+		return
+	}
+}
+
+// The ignore covers the statement only, not the next one.
+func ignoreScopeMultiLineNextStatement(db *gorm.DB) {
+	q := db.Where("x")
+	q.Find(nil)
+	//gormreuse:ignore
+	q.
+		Where("y").
+		Find(nil)
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// An ignore inside a closure belongs to the closure's statement, not to the
+// statement that holds the closure.
+func ignoreScopeClosureInsideStatement(db *gorm.DB) {
+	q := db.Where("x")
+	q.Find(nil)
+	q.Scopes(func(tx *gorm.DB) *gorm.DB { // want `\*gorm\.DB reused: second branch from mutable root`
+		return tx //gormreuse:ignore // want `unused gormreuse:ignore directive`
+	}).Find(nil)
+}
+
+// -----------------------------------------------------------------------------
+// 2. Function-level ignore covers closures
+// -----------------------------------------------------------------------------
+
+//gormreuse:ignore
+func ignoreScopeFuncCoversClosure(db *gorm.DB) {
+	run := func(d *gorm.DB) {
+		q := d.Where("x")
+		q.Find(nil)
+		q.Count(nil) // Not reported - the closure is inside an ignored function
+	}
+	run(db)
+}
+
+// -----------------------------------------------------------------------------
+// 3. Unused function-level ignore
+// -----------------------------------------------------------------------------
+
+//gormreuse:ignore // want `unused gormreuse:ignore directive`
+func ignoreScopeFuncUnused(db *gorm.DB) {
+	db.Find(nil)
+}
+
+// -----------------------------------------------------------------------------
+// 4. Contracts are still validated under an ignore
+// -----------------------------------------------------------------------------
+
+// The leak is not reported here, but the function still loses its pure trust.
+//
+//gormreuse:ignore
+//gormreuse:pure
+func ignoreScopeLeakingPure(db *gorm.DB, ch chan *gorm.DB) {
+	ch <- db
+}
+
+func ignoreScopeCallsLeakingPure(db *gorm.DB, ch chan *gorm.DB) {
+	q := db.Where("x")
+	ignoreScopeLeakingPure(q, ch)
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// -----------------------------------------------------------------------------
+// 5. Line ignores suppress contract, redundant and Scopes-warning diagnostics
+// -----------------------------------------------------------------------------
+
+//gormreuse:pure
+func ignoreScopePureLine(db *gorm.DB) {
+	//gormreuse:ignore
+	db.Where("x").Find(nil)
+}
+
+// The immutable-return violation is reported at the declaration, so the
+// trailing ignore on that line covers it.
+//
+//gormreuse:immutable-return
+func ignoreScopeImmutableReturnLine(db *gorm.DB) *gorm.DB { //gormreuse:ignore
+	return db.Where("x")
+}
+
+func ignoreScopeSessionInScopesLine(db *gorm.DB) {
+	db.Scopes(func(q *gorm.DB) *gorm.DB {
+		//gormreuse:ignore
+		return q.Session(&gorm.Session{})
+	})
+}
+
+//gormreuse:ignore
+//gormreuse:immutable-param
+func ignoreScopeRedundantImmutableParam(db *gorm.DB) {
+	db.Find(nil)
+}
+
+//gormreuse:ignore
+//gormreuse:pure
+var ignoreScopeNotAFunc = 1

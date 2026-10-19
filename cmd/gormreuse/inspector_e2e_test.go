@@ -221,7 +221,8 @@ func generatedReuse(db *gorm.DB) {
 }
 `
 
-const inspectorDiagnostics = `$DIR/app.go:35:8: *gorm.DB reused: second branch from mutable root (root at app.go:33, first branch at app.go:34); make the root immutable with .Session(&gorm.Session{})
+const inspectorDiagnostics = `$DIR/app.go:18:1: unused gormreuse:ignore directive
+$DIR/app.go:35:8: *gorm.DB reused: second branch from mutable root (root at app.go:33, first branch at app.go:34); make the root immutable with .Session(&gorm.Session{})
 $DIR/app.go:38:1: unused gormreuse:pure directive
 $DIR/app.go:55:8: *gorm.DB reused: second branch from mutable root (root at app.go:50, first branch at app.go:54); make the root immutable with .Session(&gorm.Session{})
 $DIR/app.go:59:9: unused gormreuse:pure directive

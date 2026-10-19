@@ -454,8 +454,28 @@ package mypackage
 // All violations in this file are suppressed
 ```
 
+The same scope applies to every diagnostic gormreuse reports: reuse violations, `pure` / `immutable-*` contract violations, redundant or unused directives, and the Scopes `Session()` warning.
+
+| Ignore | Covers |
+| --- | --- |
+| Line | Every line of the statement it is on or directly above. For `if`, `for`, `switch` and `select`, only the header up to `{`. An ignore inside a closure covers the closure's statement only |
+| Function | The whole declaration, its doc comment, and every closure inside it |
+| File | The whole file |
+
+A multi-line statement is covered from any of its lines:
+
+```go
+//gormreuse:ignore
+q.
+    Where("y").
+    Find(nil) // Suppressed
+```
+
+> [!NOTE]
+> An ignore only hides reports. gormreuse still checks the function. A `//gormreuse:pure` function that leaks its argument is still not trusted at its call sites, even when the leak report is ignored.
+
 > [!WARNING]
-> Unused `//gormreuse:ignore` directives are reported as warnings for line-level and function-level ignores. This helps keep the codebase clean by identifying stale ignore comments. File-level ignores do not trigger unused warnings.
+> Unused `//gormreuse:ignore` directives are reported as warnings for line-level and function-level ignores. A function-level ignore is unused when the function has nothing to suppress. This helps keep the codebase clean by identifying stale ignore comments. File-level ignores do not trigger unused warnings. No ignore suppresses an unused-ignore warning or a `gormreuse: internal error` report.
 
 ### `//gormreuse:pure`
 

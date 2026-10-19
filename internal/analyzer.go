@@ -15,10 +15,10 @@
 //	│   ┌─────────────────────────────────────────────────────────────────┐   │
 //	│   │  RunSSA()                                                       │   │
 //	│   │    │                                                            │   │
-//	│   │    ├── Skip excluded files/functions                            │   │
+//	│   │    ├── Skip excluded (generated) files                          │   │
 //	│   │    ├── Validate pure function contracts                         │   │
 //	│   │    ├── Run SSA analysis (ssa.Analyzer)                          │   │
-//	│   │    └── Apply ignore directives                                  │   │
+//	│   │    └── Apply ignore directives to every diagnostic              │   │
 //	│   └─────────────────────────────────────────────────────────────────┘   │
 //	│        │                                                                 │
 //	│        ▼                                                                 │
@@ -29,7 +29,7 @@
 // # Responsibilities
 //
 //   - Orchestrate SSA analysis for all source functions
-//   - Handle function-level and line-level ignore directives
+//   - Apply line, function and file ignore directives to every diagnostic
 //   - Report unused directives (ignore, pure, immutable-return)
 //   - Validate pure function contracts
 package internal
@@ -66,16 +66,20 @@ import (
 //
 // Processing flow for each function:
 //  1. Skip if file is excluded (generated files, etc.)
-//  2. Skip if function has //gormreuse:ignore directive
-//  3. Validate pure function contract if marked with //gormreuse:pure
-//  4. Run SSA analysis and collect violations
-//  5. Report violations (unless suppressed by line-level ignore)
-//  6. Report unused ignore directives
+//  2. Validate pure function contract if marked with //gormreuse:pure
+//  3. Run SSA analysis and collect violations
+//  4. Report violations (unless suppressed by an ignore directive)
+//  5. Report unused ignore directives
+//
+// An ignored function is still analyzed and its contracts still validated: an
+// ignore only suppresses reports (#190). A //gormreuse:pure function that leaks
+// its argument is therefore distrusted at call sites even when its own report
+// is ignored, and a function-level ignore that suppresses nothing is reported
+// unused.
 func RunSSA(
 	pass *analysis.Pass,
 	ssaInfo *buildssa.SSA,
-	ignoreMaps map[string]directive.IgnoreMap,
-	funcIgnores map[string]map[token.Pos]directive.FunctionIgnoreEntry,
+	ignores *directive.Ignores,
 	pureFuncs, immutableReturnFuncs, immutableParamFuncs *directive.DirectiveFuncSet,
 	immutableInputSet *directive.ImmutableInputSet,
 	skipFiles map[string]bool,
@@ -94,30 +98,19 @@ func RunSSA(
 	// function instead of dropping its diagnostics silently (#186).
 	guard := &panicGuard{pass: pass, reported: make(map[*ssa.Function]bool)}
 
-	// skip reports whether a function is in an excluded file or wholly ignored.
-	// When markUsed is true it also records the function-level ignore directive
-	// as used; that side effect must happen exactly once per function, so only
-	// the analysis pass passes markUsed=true.
-	skip := func(fn *ssa.Function, markUsed bool) bool {
+	// skip reports whether a function is in an excluded file. Ignore directives
+	// do not skip anything: they only suppress reports (see report).
+	skip := func(fn *ssa.Function) bool {
 		pos := fn.Pos()
-		if !pos.IsValid() {
-			return true
+		return !pos.IsValid() || skipFiles[pass.Fset.PositionFor(pos, false).Filename]
+	}
+
+	// report emits a diagnostic unless an ignore directive suppresses it. Every
+	// diagnostic except unused-ignore and internal-error reports goes through it.
+	report := func(pos token.Pos, message string) {
+		if !ignores.Ignore(pos) {
+			pass.Reportf(pos, "%s", message)
 		}
-		filename := pass.Fset.PositionFor(pos, false).Filename
-		if skipFiles[filename] {
-			return true
-		}
-		if funcIgnoreSet, ok := funcIgnores[filename]; ok {
-			if entry, ignored := funcIgnoreSet[fn.Pos()]; ignored {
-				if markUsed {
-					if ignoreMap := ignoreMaps[filename]; ignoreMap != nil {
-						ignoreMap.MarkUsed(entry.DirectiveLine)
-					}
-				}
-				return true
-			}
-		}
-		return false
 	}
 
 	// PASS 1: validate pure function contracts and collect the functions that
@@ -125,7 +118,7 @@ func RunSSA(
 	// trusted as pure at its call sites (issue #66), so this must complete for
 	// ALL functions before the analysis pass runs — a caller may be visited
 	// before its callee.
-	failedPure := validatePureFuncs(pass, ssaInfo, pureFuncs, skip, guard)
+	failedPure := validatePureFuncs(ssaInfo, pureFuncs, skip, report, guard)
 
 	// Collect Scopes/Preload callbacks once: their *gorm.DB parameter receives a
 	// mid-chain (clone==0) value, so reuse inside them must be detected (#60).
@@ -144,32 +137,32 @@ func RunSSA(
 	// full context so FindMutableRoot classifies immutable sources correctly.
 	inputTracer := tracer.New(pureFuncs, immutableReturnFuncs, immutableParamFuncs, failedPure, scopesCallbacks, immutableCallbacks)
 	for _, fn := range ssaInfo.SrcFuncs {
-		if skip(fn, false) {
+		if skip(fn) {
 			continue
 		}
 		guard.run(fn, func() {
 			for _, v := range purity.ValidateImmutableInputs(fn, immutableInputSet, inputTracer) {
-				pass.Reportf(v.Pos, "%s", v.Message)
+				report(v.Pos, v.Message)
 			}
 		})
 	}
 	if immutableInputSet != nil {
 		for _, u := range immutableInputSet.GetUnused() {
-			pass.Reportf(u.Pos, "%s", u.Reason)
+			report(u.Pos, u.Reason)
 		}
 	}
 
 	// Enforce the body-side immutable-return contract. Reuses inputTracer, which
 	// carries the full pass context so other immutable-return / immutable-param
 	// functions are classified correctly.
-	reportImmutableReturnViolations(pass, ssaInfo, immutableReturnFuncs, inputTracer, skip, guard)
+	reportImmutableReturnViolations(ssaInfo, immutableReturnFuncs, inputTracer, skip, report, guard)
 
 	// TEMPORARY (GORM bug go-gorm/gorm#7592): warn on Session/WithContext/Debug
 	// results returned from Scopes callbacks. Deletable by removing the scopeswarn
 	// package and this block once the upstream fix ships in a supported release — see that package.
 	scopesOnly := tracer.CollectScopesOnlyCallbacks(ssaInfo.SrcFuncs)
-	for _, w := range scopeswarn.Validate(scopesOnly, func(fn *ssa.Function) bool { return skip(fn, false) }) {
-		pass.Reportf(w.Pos, "%s", w.Message)
+	for _, w := range scopeswarn.Validate(scopesOnly, skip) {
+		report(w.Pos, w.Message)
 	}
 
 	// Share a single fix generator across all violations (it caches AST
@@ -187,29 +180,25 @@ func RunSSA(
 
 	// PASS 2: run SSA reuse analysis.
 	for _, fn := range ssaInfo.SrcFuncs {
-		if skip(fn, true) {
+		if skip(fn) {
 			continue
 		}
 
-		chk := newChecker(pass, ignoreMaps[pass.Fset.PositionFor(fn.Pos(), false).Filename], pureFuncs, immutableReturnFuncs, immutableParamFuncs, failedPure, scopesCallbacks, immutableCallbacks, needsImmutableParam, globalReported, globalSuggestedEdits, fixGen)
+		chk := newChecker(pass, ignores, pureFuncs, immutableReturnFuncs, immutableParamFuncs, failedPure, scopesCallbacks, immutableCallbacks, needsImmutableParam, globalReported, globalSuggestedEdits, fixGen)
 		guard.run(fn, func() { chk.checkFunction(fn) })
 	}
 
 	// Report immutable-param directives that are signature-valid but have no
 	// effect (no *gorm.DB parameter is reused).
-	reportRedundantImmutableParam(pass, ssaInfo, immutableParamFuncs, pureFuncs, needsImmutableParam, skip)
+	reportRedundantImmutableParam(ssaInfo, immutableParamFuncs, pureFuncs, needsImmutableParam, skip, report)
 
-	// Report unused ignore directives
-	for _, ignoreMap := range ignoreMaps {
-		if ignoreMap == nil {
-			continue
-		}
-		for _, pos := range ignoreMap.GetUnusedIgnores() {
-			pass.Reportf(pos, "unused gormreuse:ignore directive")
-		}
+	reportUnusedDirectiveFuncs(pureFuncs, immutableReturnFuncs, immutableParamFuncs, report)
+
+	// Report unused ignore directives last, once every other diagnostic has had
+	// the chance to use one. No ignore suppresses these.
+	for _, pos := range ignores.UnusedIgnores() {
+		pass.Reportf(pos, "unused gormreuse:ignore directive")
 	}
-
-	reportUnusedDirectiveFuncs(pass, pureFuncs, immutableReturnFuncs, immutableParamFuncs)
 }
 
 // validatePureFuncs reports every //gormreuse:pure contract violation and
@@ -220,16 +209,16 @@ func RunSSA(
 // new function fails, and violations are reported only from the final round,
 // so each is reported once and sees the complete failed set.
 func validatePureFuncs(
-	pass *analysis.Pass,
 	ssaInfo *buildssa.SSA,
 	pureFuncs *directive.DirectiveFuncSet,
-	skip func(*ssa.Function, bool) bool,
+	skip func(*ssa.Function) bool,
+	report func(token.Pos, string),
 	guard *panicGuard,
 ) map[*ssa.Function]bool {
 	failedPure := make(map[*ssa.Function]bool)
 	var targets []*ssa.Function
 	for _, fn := range ssaInfo.SrcFuncs {
-		if !skip(fn, false) && pureFuncs.Contains(fn) {
+		if !skip(fn) && pureFuncs.Contains(fn) {
 			targets = append(targets, fn)
 		}
 	}
@@ -263,7 +252,7 @@ func validatePureFuncs(
 					continue
 				}
 				reported[v] = true
-				pass.Reportf(v.Pos, "%s", v.Message)
+				report(v.Pos, v.Message)
 			}
 		})
 	}
@@ -276,20 +265,20 @@ func validatePureFuncs(
 // (returnsImmutable) and silently allows unsafe reuse of the actually-mutable
 // return value at every call site.
 func reportImmutableReturnViolations(
-	pass *analysis.Pass,
 	ssaInfo *buildssa.SSA,
 	immutableReturnFuncs *directive.DirectiveFuncSet,
 	rt *tracer.RootTracer,
-	skip func(*ssa.Function, bool) bool,
+	skip func(*ssa.Function) bool,
+	report func(token.Pos, string),
 	guard *panicGuard,
 ) {
 	for _, fn := range ssaInfo.SrcFuncs {
-		if skip(fn, false) {
+		if skip(fn) {
 			continue
 		}
 		guard.run(fn, func() {
 			for _, v := range purity.ValidateImmutableReturn(fn, immutableReturnFuncs, rt) {
-				pass.Reportf(v.Pos, "%s", v.Message)
+				report(v.Pos, v.Message)
 			}
 		})
 	}
@@ -323,7 +312,7 @@ func computeNeedsImmutableParam(
 	ssaInfo *buildssa.SSA,
 	immutableParamFuncs, pureFuncs, immutableReturnFuncs *directive.DirectiveFuncSet,
 	failedPure, scopesCallbacks, immutableCallbacks map[*ssa.Function]bool,
-	skip func(*ssa.Function, bool) bool,
+	skip func(*ssa.Function) bool,
 	guard *panicGuard,
 ) map[*ssa.Function]bool {
 	needs := make(map[*ssa.Function]bool)
@@ -331,7 +320,7 @@ func computeNeedsImmutableParam(
 		return needs
 	}
 	for _, fn := range ssaInfo.SrcFuncs {
-		if skip(fn, false) || !immutableParamFuncs.Contains(fn) {
+		if skip(fn) || !immutableParamFuncs.Contains(fn) {
 			continue
 		}
 		if fn.Signature == nil || !directive.HasGormDBParameter(fn.Signature) {
@@ -369,17 +358,17 @@ func computeNeedsImmutableParam(
 // reportUnusedDirectiveFuncs, not here; the same guards used when building
 // needsImmutableParam keep the two paths from overlapping.
 func reportRedundantImmutableParam(
-	pass *analysis.Pass,
 	ssaInfo *buildssa.SSA,
 	immutableParamFuncs, pureFuncs *directive.DirectiveFuncSet,
 	needsImmutableParam map[*ssa.Function]bool,
-	skip func(*ssa.Function, bool) bool,
+	skip func(*ssa.Function) bool,
+	report func(token.Pos, string),
 ) {
 	if immutableParamFuncs == nil {
 		return
 	}
 	for _, fn := range ssaInfo.SrcFuncs {
-		if skip(fn, false) || !immutableParamFuncs.Contains(fn) {
+		if skip(fn) || !immutableParamFuncs.Contains(fn) {
 			continue
 		}
 		if fn.Signature == nil || !directive.HasGormDBParameter(fn.Signature) {
@@ -389,7 +378,7 @@ func reportRedundantImmutableParam(
 			continue // pure ⇒ param never branched ⇒ redundant by construction (not flagged)
 		}
 		if !needsImmutableParam[fn] {
-			pass.Reportf(fn.Pos(), "redundant gormreuse:immutable-param directive: no *gorm.DB parameter is reused")
+			report(fn.Pos(), "redundant gormreuse:immutable-param directive: no *gorm.DB parameter is reused")
 		}
 	}
 }
@@ -399,13 +388,13 @@ func reportRedundantImmutableParam(
 // //gormreuse:pure,immutable-return,immutable-param) a directive at a position
 // is "used" if ANY of its combined siblings is used, so each set is suppressed
 // when another set reports that position as used.
-func reportUnusedDirectiveFuncs(pass *analysis.Pass, pureFuncs, immutableReturnFuncs, immutableParamFuncs *directive.DirectiveFuncSet) {
+func reportUnusedDirectiveFuncs(pureFuncs, immutableReturnFuncs, immutableParamFuncs *directive.DirectiveFuncSet, report func(token.Pos, string)) {
 	usedByOther := func(pos token.Pos, others ...*directive.DirectiveFuncSet) bool {
 		return slices.ContainsFunc(others, func(s *directive.DirectiveFuncSet) bool {
 			return s != nil && s.IsUsed(pos)
 		})
 	}
-	report := func(set *directive.DirectiveFuncSet, message string, others ...*directive.DirectiveFuncSet) {
+	reportSet := func(set *directive.DirectiveFuncSet, message string, others ...*directive.DirectiveFuncSet) {
 		if set == nil {
 			return
 		}
@@ -413,13 +402,13 @@ func reportUnusedDirectiveFuncs(pass *analysis.Pass, pureFuncs, immutableReturnF
 			if usedByOther(pos, others...) {
 				continue
 			}
-			pass.Reportf(pos, "%s", message)
+			report(pos, message)
 		}
 	}
 
-	report(pureFuncs, "unused gormreuse:pure directive", immutableReturnFuncs, immutableParamFuncs)
-	report(immutableReturnFuncs, "unused gormreuse:immutable-return directive", pureFuncs, immutableParamFuncs)
-	report(immutableParamFuncs, "unused gormreuse:immutable-param directive", pureFuncs, immutableReturnFuncs)
+	reportSet(pureFuncs, "unused gormreuse:pure directive", immutableReturnFuncs, immutableParamFuncs)
+	reportSet(immutableReturnFuncs, "unused gormreuse:immutable-return directive", pureFuncs, immutableParamFuncs)
+	reportSet(immutableParamFuncs, "unused gormreuse:immutable-param directive", pureFuncs, immutableReturnFuncs)
 }
 
 // panicGuard runs per-function work and recovers from any panic, so that a
@@ -465,11 +454,11 @@ func (g *panicGuard) run(fn *ssa.Function, work func()) {
 //
 // It ensures:
 //   - Violations at the same position are only reported once
-//   - Line-level ignore directives suppress violations
+//   - Ignore directives suppress violations
 //   - Violations are reported through the analysis.Pass
 type checker struct {
 	pass                 *analysis.Pass              // For reporting diagnostics
-	ignoreMap            directive.IgnoreMap         // Line-level ignore directives
+	ignores              *directive.Ignores          // Line, function and file ignore directives
 	pureFuncs            *directive.DirectiveFuncSet // Pure functions for analysis
 	immutableReturnFuncs *directive.DirectiveFuncSet // Immutable-return functions
 	immutableParamFuncs  *directive.DirectiveFuncSet // Immutable-param functions (params opt out of Phase 1b)
@@ -494,10 +483,10 @@ type editKey struct {
 // across parent functions and their closures.
 // The suggestedEdits map is shared to avoid duplicate fix edits.
 // The fixGen is shared to avoid recreating the generator for each violation.
-func newChecker(pass *analysis.Pass, ignoreMap directive.IgnoreMap, pureFuncs, immutableReturnFuncs, immutableParamFuncs *directive.DirectiveFuncSet, failedPure, scopesCallbacks, immutableCallbacks, needsImmutableParam map[*ssa.Function]bool, reported map[token.Pos]bool, suggestedEdits map[editKey]bool, fixGen *fix.Generator) *checker {
+func newChecker(pass *analysis.Pass, ignores *directive.Ignores, pureFuncs, immutableReturnFuncs, immutableParamFuncs *directive.DirectiveFuncSet, failedPure, scopesCallbacks, immutableCallbacks, needsImmutableParam map[*ssa.Function]bool, reported map[token.Pos]bool, suggestedEdits map[editKey]bool, fixGen *fix.Generator) *checker {
 	return &checker{
 		pass:                 pass,
-		ignoreMap:            ignoreMap,
+		ignores:              ignores,
 		pureFuncs:            pureFuncs,
 		immutableReturnFuncs: immutableReturnFuncs,
 		immutableParamFuncs:  immutableParamFuncs,
@@ -567,9 +556,7 @@ func (c *checker) reportViolation(v pollution.Violation, fixFor []pollution.Viol
 	}
 	c.reported[pos] = true
 
-	// Check if line is ignored
-	line := c.pass.Fset.PositionFor(pos, false).Line
-	if c.ignoreMap != nil && c.ignoreMap.ShouldIgnore(line) {
+	if c.ignores.Ignore(pos) {
 		return // Suppressed by ignore directive
 	}
 
