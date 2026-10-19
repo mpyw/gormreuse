@@ -408,6 +408,13 @@ q.Find(&users)
 q.Count(&count)  // Suppressed
 ```
 
+A comment on its own line covers that line and the next one. A comment after code on the same line covers that line only:
+
+```go
+q.Count(&count) //gormreuse:ignore // Suppressed
+q.Delete(&User{})                  // Still reported
+```
+
 Or suppress for an entire function:
 
 ```go

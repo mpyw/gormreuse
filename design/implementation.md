@@ -59,7 +59,7 @@ The linter detects when a mutable `*gorm.DB` branches into multiple code paths:
 
 ### Directives
 
-- `//gormreuse:ignore` - Suppress warnings for the next line or same line
+- `//gormreuse:ignore` - Suppress warnings for the same line, and for the next line when the comment is the first token on its line. A trailing comment after code covers its own line only (#189). `BuildIgnoreMap` decides this from the smallest column at which an AST node starts or ends on the comment's line.
 - `//gormreuse:pure` - Mark function/method/closure as not polluting its `*gorm.DB` argument
 - `//gormreuse:immutable-return` - Mark function/method/closure as returning immutable `*gorm.DB` (like Session/WithContext). **Body contract**: when the function actually returns a provably-mutable value — one whose root is a gorm chain-method call, e.g. `db.Where(...)` or `Session().Where(...)` (the trailing chain re-forks a fresh `clone==0` Statement) — the directive is reported at the declaration, since the linter would otherwise trust it and silently allow unsafe reuse of the return value at call sites. Roots the tracer treats as mutable only conservatively (a bare `*gorm.DB` parameter, or a call into an unmarked user function/closure) are given the benefit of the doubt and not reported.
 - `//gormreuse:immutable-param` - Opt a function's `*gorm.DB` parameters out of the Phase 1b mutable-by-default treatment: they are treated as immutable inside the function (the caller is responsible for passing an isolated value). **Caller-side contract**: when the function actually branches such a parameter, passing a mutable `*gorm.DB` at a call site is reported (isolate with `.Session(&gorm.Session{})` first, or make the caller `immutable-param` too so the contract propagates).

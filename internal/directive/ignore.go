@@ -29,18 +29,24 @@ type IgnoreMap map[int]*ignoreEntry
 //	//gormreuse:ignore         // Line 5 → map[5] (line-level)
 //	q.Find(nil)                // Line 6 → ignored (line 5 covers line 6)
 //
+//	q.Count(nil) //gormreuse:ignore // Line 7 → map[7], covers line 7 only
+//
 //	// File-level ignore (before package declaration):
 //	//gormreuse:ignore         // → map[-1] (special marker)
 //	package main               // All lines ignored
 //
 // The returned map uses line numbers as keys:
-//   - Positive line: ignore directive for next line
+//   - Positive line: ignore directive for that line, and for the next line
+//     when the comment is the first token on its line
 //   - Line -1: file-level ignore (all lines)
 func BuildIgnoreMap(fset *token.FileSet, file *ast.File) IgnoreMap {
 	m := make(IgnoreMap)
 
 	// Get package declaration line for file-level ignore detection
 	packageLine := fset.PositionFor(file.Package, false).Line
+
+	// Computed lazily: most files have no line-level ignore.
+	var codeStart map[int]int
 
 	// Check all comments for ignore directives
 	for _, cg := range file.Comments {
@@ -58,8 +64,17 @@ func BuildIgnoreMap(fset *token.FileSet, file *ast.File) IgnoreMap {
 					// File-level ignores are always considered "used" (no warning).
 					m[-1] = &ignoreEntry{pos: c.Pos(), used: true}
 				} else {
-					// Regular line-level ignore
-					m[pos.Line] = &ignoreEntry{pos: c.Pos(), used: false}
+					// Regular line-level ignore. A trailing comment after code
+					// covers its own line only; a comment that starts its line
+					// also covers the next line (#189).
+					if codeStart == nil {
+						codeStart = buildIgnoreCodeStartColumns(fset, file)
+					}
+					col, hasCode := codeStart[pos.Line]
+					m[pos.Line] = &ignoreEntry{
+						pos:      c.Pos(),
+						nextLine: !hasCode || col >= pos.Column,
+					}
 				}
 			}
 		}
@@ -83,7 +98,7 @@ func BuildIgnoreMap(fset *token.FileSet, file *ast.File) IgnoreMap {
 // It checks if:
 // - File-level ignore is active (marker at line -1)
 // - The same line has an ignore comment
-// - The previous line has an ignore comment
+// - The previous line has an ignore comment that starts its line
 // When an ignore is used, it marks the entry as used.
 func (m IgnoreMap) ShouldIgnore(line int) bool {
 	// File-level ignore
@@ -95,7 +110,7 @@ func (m IgnoreMap) ShouldIgnore(line int) bool {
 		entry.used = true
 		return true
 	}
-	if entry, onPrevLine := m[line-1]; onPrevLine {
+	if entry, onPrevLine := m[line-1]; onPrevLine && entry.nextLine {
 		entry.used = true
 		return true
 	}
@@ -129,8 +144,40 @@ func (m IgnoreMap) MarkUsed(line int) {
 //
 //declscope:shared // directive_test.go builds these directly
 type ignoreEntry struct {
-	pos  token.Pos // Position of the ignore comment (for reporting unused)
-	used bool      // Whether this ignore was actually used to suppress a warning
+	pos      token.Pos // Position of the ignore comment (for reporting unused)
+	used     bool      // Whether this ignore was actually used to suppress a warning
+	nextLine bool      // Whether the comment starts its line, so it also covers the next line
+}
+
+// buildIgnoreCodeStartColumns maps each line to the smallest column at which
+// a syntax node starts or ends on it. A comment whose column is greater than
+// this value has code before it on the same line.
+func buildIgnoreCodeStartColumns(fset *token.FileSet, file *ast.File) map[int]int {
+	cols := make(map[int]int)
+	record := func(p token.Pos) {
+		if !p.IsValid() {
+			return
+		}
+		pos := fset.PositionFor(p, false)
+		if col, ok := cols[pos.Line]; !ok || pos.Column < col {
+			cols[pos.Line] = pos.Column
+		}
+	}
+	ast.Inspect(file, func(n ast.Node) bool {
+		switch n.(type) {
+		case nil:
+			return false
+		case *ast.CommentGroup, *ast.Comment:
+			return false
+		}
+		record(n.Pos())
+		if end := n.End(); end.IsValid() && end > n.Pos() {
+			// End is one past the last character; record the last character.
+			record(end - 1)
+		}
+		return true
+	})
+	return cols
 }
 
 // FunctionIgnoreEntry represents a function-level ignore directive.
