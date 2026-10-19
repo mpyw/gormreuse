@@ -1,8 +1,9 @@
 // Package converge holds self-contained, fully-fixable reuse scenarios for the
 // convergence harness (#71): applying the suggested fix and re-linting the
 // result must report nothing. Every violation here is expected to be fully
-// resolved by its fix — either a Session() on a local root, or (Phase 1b stage
-// 2c) a //gormreuse:immutable-param annotation on a parameter root.
+// resolved by its fix — a Session() on a local root, or for a parameter root
+// a //gormreuse:immutable-param annotation (Phase 1b stage 2c) or a Session at
+// the top of the body (#201).
 package converge
 
 import "gorm.io/gorm"

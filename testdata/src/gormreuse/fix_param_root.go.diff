@@ -1,0 +1,202 @@
+--- fix_param_root.go	1970-01-01 00:00:00
++++ fix_param_root.go.golden	1970-01-01 00:00:00
+@@ -1,181 +1,190 @@
+ package internal
+ 
+ import (
+ 	"context"
+ 
+ 	"gorm.io/gorm"
++	gormio "gorm.io/gorm"
+ )
+ 
+ // Fixtures for issue #201: the fix for a reused *gorm.DB parameter must not
+ // hide the reuse from callers it cannot check, and a fix for a Phi edge must
+ // use the tracer's mutability rule.
+ //
+ // The Phi fixtures declare immutable-param so that only the local root q is
+ // reused.
+ 
+ // ===== IMMUTABLE-PARAM: every caller is checked =====
+ 
+ // fixParamOnlyIsolatedCallers is unexported, only called directly, and every
+ // caller passes an isolated value, so the directive is safe.
++//gormreuse:immutable-param
+ func fixParamOnlyIsolatedCallers(tx *gorm.DB) {
+ 	tx.Where("a").Find(nil)
+ 	tx.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ func fixParamCallsIsolated(db *gorm.DB) {
+ 	fixParamOnlyIsolatedCallers(db.Where("x").Session(&gorm.Session{}))
+ }
+ 
+ // fixParamGeneric is called through an instance and in parentheses. Both are
+ // direct calls.
++//gormreuse:immutable-param
+ func fixParamGeneric[T any](tx *gorm.DB) {
+ 	tx.Where("a").Find(nil)
+ 	tx.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ func fixParamCallsGeneric(db *gorm.DB) {
+ 	fixParamGeneric[int](db.Session(&gorm.Session{}))
+ 	(fixParamGeneric[string])(db.Session(&gorm.Session{}))
+ }
+ 
+ // ===== SESSION IN THE BODY =====
+ 
+ // FixParamOneLine: the Session goes on the same line as the body.
+-func FixParamOneLine(tx *gorm.DB) { tx.Where("a").Find(nil); tx.Where("b").Find(nil) } // want `\*gorm\.DB reused: second branch from mutable root`
++func FixParamOneLine(tx *gorm.DB) { tx = tx.Session(&gorm.Session{}); tx.Where("a").Find(nil); tx.Where("b").Find(nil) } // want `\*gorm\.DB reused: second branch from mutable root`
+ 
+ // FixParamExported can be called from another package, which the caller
+ // check never sees. The parameter gets a Session at the top of the body.
+ func FixParamExported(tx *gorm.DB) {
++	tx = tx.Session(&gorm.Session{})
+ 	tx.Where("a").Find(nil)
+ 	tx.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // fixParamMutableCaller has a caller in this package that passes a mid-chain
+ // value. The directive would move the report to that caller, with no fix.
+ func fixParamMutableCaller(tx *gorm.DB) {
++	tx = tx.Session(&gorm.Session{})
+ 	tx.Where("a").Find(nil)
+ 	tx.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ func fixParamCallsMutable(db *gorm.DB) {
+ 	fixParamMutableCaller(db.Where("scoped"))
+ }
+ 
+ // fixParamFuncValue is stored in a variable, so its callers are unknown.
+ func fixParamFuncValue(tx *gorm.DB) {
++	tx = tx.Session(&gorm.Session{})
+ 	tx.Where("a").Find(nil)
+ 	tx.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ var fixParamFuncValueRef = fixParamFuncValue
+ 
+ type fixParamRepo struct{}
+ 
+ // method could satisfy an interface, which hides its callers.
+ func (fixParamRepo) method(tx *gorm.DB) {
++	tx = tx.Session(&gorm.Session{})
+ 	tx.Where("a").Find(nil)
+ 	tx.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // FixParamDiscarded changes its parameter in place with a discarded
+ // statement. The statement is reassigned, so "a" still applies to the
+ // queries after it.
+ func FixParamDiscarded(tx *gorm.DB) {
+-	tx.Where("a")
++	tx = tx.Where("a").Session(&gorm.Session{})
+ 	tx.Find(nil)  // want `\*gorm\.DB reused: second branch from mutable root`
+ 	tx.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // FixParamAlias reuses its parameter through an alias. A Session at the top
+ // of the body covers the alias too.
+ func FixParamAlias(tx *gorm.DB) {
++	tx = tx.Session(&gorm.Session{})
+ 	r := tx
+ 	r.Where("a").Find(nil)
+ 	tx.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // ===== NO FIX =====
+ 
+ // fixParamScope has the shape of a Scopes callback and is stored in a slice,
+ // so it may be one. immutable-param would hide the reuse, and a Session that
+ // a Scopes callback returns leaks gorm's transaction (go-gorm/gorm#7592).
+ // The fix does not tell the results apart, so it offers none.
+ func fixParamScope(tx *gorm.DB) *gorm.DB {
+ 	tx.Where("a").Find(nil)
+ 	return tx.Where("b") // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ var fixParamScopes = []func(*gorm.DB) *gorm.DB{fixParamScope}
+ 
+ // FixParamExportedScope may be a Scopes callback in another package. No fix.
+ func FixParamExportedScope(tx *gorm.DB) *gorm.DB {
+ 	tx.Where("a").Find(nil)
+ 	return tx.Where("b") // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // fixParamClosure: a closure parameter keeps no fix.
+ func fixParamClosure() func(*gorm.DB) {
+ 	return func(tx *gorm.DB) {
+ 		tx.Where("a").Find(nil)
+ 		tx.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ 	}
+ }
+ 
+ // ===== PHI EDGES: the last call decides =====
+ 
+ // fixPhiSessionMidChain: Session before a further chain call is mutable, so
+ // that edge needs a Session too.
+ //
+ //gormreuse:immutable-param
+ func fixPhiSessionMidChain(db *gorm.DB, c bool) {
+-	q := db.Where("x")
++	q := db.Where("x").Session(&gorm.Session{})
+ 	if c {
+-		q = db.Session(&gorm.Session{}).Where("y")
++		q = db.Session(&gorm.Session{}).Where("y").Session(&gorm.Session{})
+ 	}
+ 	q.Find(nil)
+ 	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // fixPhiWithContextMidChain: the same for WithContext.
+ //
+ //gormreuse:immutable-param
+ func fixPhiWithContextMidChain(ctx context.Context, db *gorm.DB, c bool) {
+-	q := db.Where("x")
++	q := db.Where("x").Session(&gorm.Session{})
+ 	if c {
+-		q = db.WithContext(ctx).Where("y")
++		q = db.WithContext(ctx).Where("y").Session(&gorm.Session{})
+ 	}
+ 	q.Find(nil)
+ 	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // fixPhiSessionInitialized: Session{Initialized: true} returns a mutable
+ // value, so that edge needs a Session.
+ //
+ //gormreuse:immutable-param
+ func fixPhiSessionInitialized(db *gorm.DB, c bool) {
+-	q := db.Where("x")
++	q := db.Where("x").Session(&gorm.Session{})
+ 	if c {
+-		q = db.Where("y").Session(&gorm.Session{Initialized: true})
++		q = db.Where("y").Session(&gorm.Session{Initialized: true}).Session(&gorm.Session{})
+ 	}
+ 	q.Find(nil)
+ 	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // fixPhiSessionLast: an edge that ends in a Session needs none.
+ //
+ //gormreuse:immutable-param
+ func fixPhiSessionLast(db *gorm.DB, c bool) {
+-	q := db.Where("x")
++	q := db.Where("x").Session(&gorm.Session{})
+ 	if c {
+ 		q = db.Where("y").Session(&gorm.Session{})
+ 	}
+ 	q.Find(nil)
+ 	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // FixParamNamedGorm: the parameter shadows the gorm import in the body, so
+ // the Session is qualified with an added import (#200).
+ func FixParamNamedGorm(gorm *gorm.DB) {
++	gorm = gorm.Session(&gormio.Session{})
+ 	gorm.Where("a").Find(nil)
+ 	gorm.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }

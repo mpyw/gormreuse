@@ -43,6 +43,7 @@ import (
 	"maps"
 	"slices"
 	"strconv"
+	"strings"
 
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/analysis/passes/inspect"
@@ -50,6 +51,7 @@ import (
 	"golang.org/x/tools/go/ast/inspector"
 	"golang.org/x/tools/go/ssa"
 
+	"github.com/mpyw/gormreuse/internal/directive"
 	"github.com/mpyw/gormreuse/internal/ssa/cfg"
 	"github.com/mpyw/gormreuse/internal/ssa/pollution"
 	"github.com/mpyw/gormreuse/internal/ssa/tracer"
@@ -62,13 +64,18 @@ type Generator struct {
 	fset            *token.FileSet
 	files           map[*token.File]*ast.File      // token.File -> ast.File mapping
 	cursors         map[*ast.File]inspector.Cursor // file cursors in the pass inspector
-	scopesCallbacks map[*ssa.Function]bool         // Scopes/Preload callbacks (no immutable-param fix)
+	scopesCallbacks map[*ssa.Function]bool         // Scopes/Preload callbacks (no parameter-root fix)
+	tracer          *tracer.RootTracer             // the analysis' mutability rule
+	funcs           []*ssa.Function                // the pass's source functions, to find callers
 }
 
 // New creates a new fix Generator. scopesCallbacks lists Scopes/Preload callback
 // functions, whose *gorm.DB parameters cannot be made immutable-param, so the
-// parameter-root fix is withheld for them (stage 2c); it may be nil.
-func New(pass *analysis.Pass, scopesCallbacks map[*ssa.Function]bool) *Generator {
+// parameter-root fix is withheld for them (stage 2c); it may be nil. rt
+// decides which values are already immutable, and funcs are the source
+// functions whose calls are checked before a parameter is declared
+// immutable-param (#201).
+func New(pass *analysis.Pass, scopesCallbacks map[*ssa.Function]bool, rt *tracer.RootTracer, funcs []*ssa.Function) *Generator {
 	// Build token.File -> ast.File mapping
 	files := make(map[*token.File]*ast.File)
 	for _, f := range pass.Files {
@@ -90,6 +97,8 @@ func New(pass *analysis.Pass, scopesCallbacks map[*ssa.Function]bool) *Generator
 		files:           files,
 		cursors:         cursors,
 		scopesCallbacks: scopesCallbacks,
+		tracer:          rt,
+		funcs:           funcs,
 	}
 }
 
@@ -101,13 +110,19 @@ func (g *Generator) Generate(v pollution.Violation) []analysis.SuggestedFix {
 		return nil // Cannot fix without root information
 	}
 
-	// A parameter root has no definition site to Session(), so the "insert
-	// Session() at the root" model does not apply. Instead, suggest declaring the
-	// enclosing function //gormreuse:immutable-param — the parameter is then
-	// treated as immutable and the caller becomes responsible for passing an
-	// isolated value (verified caller-side, stage 2b/2c).
-	if p, ok := root.(*ssa.Parameter); ok {
-		return g.generateImmutableParamFix(p)
+	// A parameter root has no definition site to Session(). When every caller
+	// is known and passes an isolated value, the fix declares the function
+	// //gormreuse:immutable-param, which the caller-side check (stage 2b) then
+	// keeps true. Otherwise the parameter gets a Session at the top of the
+	// body, and the rest of the fix proceeds as for a local root (#201).
+	p, isParam := root.(*ssa.Parameter)
+	if isParam {
+		if !g.canFixParam(p) {
+			return nil
+		}
+		if g.callersAllIsolate(p) {
+			return g.generateImmutableParamFix(p)
+		}
 	}
 
 	// A call with a tuple result, such as q, err := helper(db), is a root whose
@@ -157,18 +172,23 @@ func (g *Generator) Generate(v pollution.Violation) []analysis.SuggestedFix {
 	// The original root is Phi-aware (Session on each incoming edge); a virtual
 	// root created by a reassignment gets Session appended at its creation site
 	// (e.g. q = q.Where("a").Session(&gorm.Session{})) — #71 defect 2.
-	var sessionPositions []token.Pos
+	var sites []sessionSite
 	for _, vr := range rootsNeedingSession {
-		if vr.isOriginal {
-			sessionPositions = append(sessionPositions, g.sessionPositionsForRoot(vr.pos, root)...)
-		} else {
-			sessionPositions = append(sessionPositions, vr.end)
+		switch {
+		case vr.isOriginal && isParam:
+			sites = append(sites, g.paramSessionSite(p))
+		case vr.isOriginal:
+			for _, pos := range g.sessionPositionsForRoot(vr.pos, root) {
+				sites = append(sites, sessionSite{pos: pos})
+			}
+		default:
+			sites = append(sites, sessionSite{pos: vr.end})
 		}
 	}
 
 	// PHASE 3: Write the Sessions, with a gorm import when they need one. Each
 	// fix carries its own import edit, so applying it alone compiles (#200).
-	edits = append(edits, g.sessionEdits(sessionPositions)...)
+	edits = append(edits, g.sessionEdits(sites)...)
 
 	if len(edits) == 0 {
 		return nil
@@ -197,26 +217,103 @@ func (g *Generator) fileCursor(file *ast.File) inspector.Cursor {
 	return g.cursors[file]
 }
 
-// generateImmutableParamFix suggests annotating the enclosing function with
-// //gormreuse:immutable-param when a *gorm.DB PARAMETER is the reused root
-// (Phase 1b). This declares the parameter immutable; the caller then owns
-// passing an isolated value (verified caller-side, stage 2b).
-//
-// No fix is offered when:
+// canFixParam reports whether a fix may rewrite the function that declares
+// p, a reused *gorm.DB parameter. It may not when:
 //   - the function is a Scopes/Preload callback — immutable-param is rejected
-//     there (the parameter genuinely receives a mid-chain value), so annotating
-//     would not converge; the user must Session() inside the callback.
+//     there (the parameter genuinely receives a mid-chain value), and a Session
+//     the callback returns leaks gorm's transaction (go-gorm/gorm#7592);
+//   - the function returns a *gorm.DB and code this pass cannot see may call
+//     it (see calledOnlyDirectly). It may be a Scopes callback, as in
+//     `var scopes = []func(*gorm.DB) *gorm.DB{scope}`;
 //   - the enclosing function is not a named declaration (a closure/func literal) —
 //     directive placement on literals is left to the user.
+func (g *Generator) canFixParam(p *ssa.Parameter) bool {
+	fn := directive.DeclaredFunc(p.Parent())
+	if g.scopesCallbacks[fn] {
+		return false
+	}
+	if _, ok := fn.Syntax().(*ast.FuncDecl); !ok {
+		return false
+	}
+	return !typeutil.HasGormDBResult(fn.Signature.Results()) || g.calledOnlyDirectly(fn)
+}
+
+// callersAllIsolate reports whether every caller of the function that
+// declares p passes an immutable value for p, so declaring the function
+// //gormreuse:immutable-param keeps the reuse checked (#201). It must also
+// see every caller, so the function must be called only directly (see
+// calledOnlyDirectly). Declaring any other function would hide the reuse from
+// the callers it cannot see, or move it to a caller that the caller-side
+// check reports with no fix, so -fix would never end clean.
+func (g *Generator) callersAllIsolate(p *ssa.Parameter) bool {
+	fn := directive.DeclaredFunc(p.Parent())
+	if !g.calledOnlyDirectly(fn) {
+		return false
+	}
+	idx := slices.Index(p.Parent().Params, p)
+	loops := cfg.New()
+	for _, caller := range g.funcs {
+		var loopInfo *cfg.LoopInfo
+		for _, block := range caller.Blocks {
+			for _, instr := range block.Instrs {
+				call, ok := instr.(ssa.CallInstruction)
+				if !ok || directive.DeclaredFunc(call.Common().StaticCallee()) != fn {
+					continue
+				}
+				if loopInfo == nil {
+					loopInfo = loops.DetectLoops(caller)
+				}
+				if g.tracer.FindMutableRoot(call.Common().Args[idx], loopInfo) != nil {
+					return false
+				}
+			}
+		}
+	}
+	return true
+}
+
+// calledOnlyDirectly reports whether every caller of fn is a call in this
+// pass that names it: fn is an unexported function, not a method, and each
+// reference to it is the function of a call. An exported function can be
+// called from another package, which the caller-side check does not see
+// (#195). A method can be called through an interface, and a function value
+// can be called anywhere.
+func (g *Generator) calledOnlyDirectly(fn *ssa.Function) bool {
+	obj := fn.Object()
+	if obj.Exported() || fn.Signature.Recv() != nil {
+		return false
+	}
+	for _, file := range g.pass.Files {
+		for c := range g.fileCursor(file).Preorder((*ast.Ident)(nil)) {
+			if g.pass.TypesInfo.Uses[c.Node().(*ast.Ident)] == obj && !isCalledFunc(c) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// isCalledFunc reports whether cur, an identifier, is the function of a call,
+// possibly instantiated or in parentheses, as in f(x), f[int](x) or (f)(x).
+func isCalledFunc(cur inspector.Cursor) bool {
+	for {
+		switch cur.ParentEdgeKind() {
+		case edge.ParenExpr_X, edge.IndexExpr_X, edge.IndexListExpr_X:
+			cur = cur.Parent()
+		case edge.CallExpr_Fun:
+			return true
+		default:
+			return false
+		}
+	}
+}
+
+// generateImmutableParamFix suggests annotating the enclosing function with
+// //gormreuse:immutable-param when a *gorm.DB PARAMETER is the reused root
+// and every caller passes an isolated value (see callersAllIsolate). The
+// caller-side check (stage 2b) then keeps the callers isolated.
 func (g *Generator) generateImmutableParamFix(p *ssa.Parameter) []analysis.SuggestedFix {
-	fn := p.Parent()
-	if fn == nil || g.scopesCallbacks[fn] {
-		return nil
-	}
-	fd, ok := fn.Syntax().(*ast.FuncDecl)
-	if !ok {
-		return nil
-	}
+	fd := p.Parent().Syntax().(*ast.FuncDecl)
 	// Insert the directive on its own line immediately before `func` (after any
 	// doc comment). FuncDecl.Pos() is the `func` keyword, so this is the
 	// recognized next-line placement and needs no indentation for top-level decls.
@@ -229,6 +326,21 @@ func (g *Generator) generateImmutableParamFix(p *ssa.Parameter) []analysis.Sugge
 			NewText: []byte("//gormreuse:immutable-param\n"),
 		}},
 	}}
+}
+
+// paramSessionSite makes p, a parameter, immutable by rebinding it at the top
+// of its function's body: `tx = tx.Session(&gorm.Session{})`. Every later use,
+// including one through an alias, then starts from the Session.
+func (g *Generator) paramSessionSite(p *ssa.Parameter) sessionSite {
+	body := p.Parent().Syntax().(*ast.FuncDecl).Body
+	// The parameter is used, so the body has a statement.
+	first := body.List[0]
+	sep := "; "
+	if line := g.fset.Position(first.Pos()); line.Line != g.fset.Position(body.Lbrace).Line {
+		sep = "\n" + strings.Repeat("\t", line.Column-1)
+	}
+	name := p.Name()
+	return sessionSite{pos: first.Pos(), prefix: name + " = " + name, suffix: sep}
 }
 
 // findReassignedChains returns the discarded chains (see discardedChain)
@@ -467,28 +579,40 @@ func (g *Generator) sessionEndAfterCall(pos token.Pos) token.Pos {
 	return call.End()
 }
 
-// sessionEdits inserts ".Session(&gorm.Session{})" at each of positions. It
-// qualifies Session with a name that refers to gorm.io/gorm at every one of
-// them, and adds an import of gorm.io/gorm to a file where no such name exists
-// (see gormNameAt).
-func (g *Generator) sessionEdits(positions []token.Pos) []analysis.TextEdit {
-	byFile := make(map[*ast.File][]token.Pos)
+// sessionSite is a place where a fix writes a Session: prefix, then
+// ".Session(&gorm.Session{})", then suffix, inserted at pos. A Session
+// appended to a call has neither; a parameter's has a whole statement around
+// it (see paramSessionSite).
+type sessionSite struct {
+	pos            token.Pos
+	prefix, suffix string
+}
+
+// sessionEdits writes a Session at each of sites. It qualifies Session with a
+// name that refers to gorm.io/gorm at every one of them, and adds an import of
+// gorm.io/gorm to a file where no such name exists (see gormNameAt).
+func (g *Generator) sessionEdits(sites []sessionSite) []analysis.TextEdit {
+	byFile := make(map[*ast.File][]sessionSite)
 	var files []*ast.File
-	for _, pos := range positions {
-		file := g.findFileContaining(pos)
+	for _, site := range sites {
+		file := g.findFileContaining(site.pos)
 		if _, seen := byFile[file]; !seen {
 			files = append(files, file)
 		}
-		byFile[file] = append(byFile[file], pos)
+		byFile[file] = append(byFile[file], site)
 	}
 	var edits []analysis.TextEdit
 	for _, file := range files {
-		qualifier, importName := g.gormNameAt(file, byFile[file])
-		for _, pos := range byFile[file] {
+		var positions []token.Pos
+		for _, site := range byFile[file] {
+			positions = append(positions, site.pos)
+		}
+		qualifier, importName := g.gormNameAt(file, positions)
+		for _, site := range byFile[file] {
 			edits = append(edits, analysis.TextEdit{
-				Pos:     pos,
-				End:     pos,
-				NewText: []byte(".Session(&" + qualifier + "Session{})"),
+				Pos:     site.pos,
+				End:     site.pos,
+				NewText: []byte(site.prefix + ".Session(&" + qualifier + "Session{})" + site.suffix),
 			})
 		}
 		if importName != "" {
@@ -592,8 +716,11 @@ func (g *Generator) phiEdgeSessionPositions(phi *ssa.Phi) []token.Pos {
 			continue
 		}
 
-		// Skip if this edge is already immutable (has Session, WithContext, etc.)
-		if g.isImmutableValue(edge) {
+		// Skip an edge that is already immutable by the tracer's rule: its own
+		// call, the last of its chain, returns an immutable value. A Session
+		// earlier in the chain, as in db.Session(s).Where("y"), does not count,
+		// and the edge would stay reported after every pass (#201).
+		if g.tracer.IsImmutableCall(edge) {
 			continue
 		}
 
@@ -705,48 +832,6 @@ func (g *Generator) findPhiUsingValue(v ssa.Value) *ssa.Phi {
 	return nil
 }
 
-// isImmutableValue checks if an SSA value is immutable (already has Session/WithContext/etc).
-// Traces through the call chain to find if there's an immutable-returning method.
-// Handles chains like: db.Where("x").Session(&gorm.Session{}).Where("y")
-func (g *Generator) isImmutableValue(v ssa.Value) bool {
-	visited := make(map[ssa.Value]bool)
-	return g.traceForImmutable(v, visited)
-}
-
-// traceForImmutable recursively traces through method chains to find immutable-returning calls.
-func (g *Generator) traceForImmutable(v ssa.Value, visited map[ssa.Value]bool) bool {
-	if v == nil || visited[v] {
-		return false
-	}
-	visited[v] = true
-
-	call, ok := v.(*ssa.Call)
-	if !ok {
-		return false
-	}
-
-	callee := call.Call.StaticCallee()
-	if callee == nil {
-		return false
-	}
-
-	// Check if this call is an immutable-returning method
-	if typeutil.IsImmutableReturningBuiltin(callee.Name()) {
-		return true
-	}
-
-	// Trace through the receiver (for method chains)
-	// If call is: receiver.Method(...), check receiver
-	if len(call.Call.Args) > 0 {
-		receiver := call.Call.Args[0]
-		if g.traceForImmutable(receiver, visited) {
-			return true
-		}
-	}
-
-	return false
-}
-
 // =============================================================================
 // AST Helper Methods
 // =============================================================================
@@ -834,12 +919,18 @@ func (g *Generator) findReassignTarget(root ssa.Value, uses []pollution.UsageInf
 	return v
 }
 
-// findRootVar returns the variable that root, a call, is assigned to by
+// findRootVar returns the variable of root when it is a parameter (#201).
+// For a call it returns the variable the call is assigned to by
 // `v := <call>`, `v = <call>` or `var v = <call>`, or nil. SSA places a call
 // at its Lparen. A root that is not a call, such as a Phi, gets nil, so the
 // fix falls back to a Session. The tracer usually resolves a Phi to its
 // edges; a loop variable swap keeps the Phi as the root.
 func (g *Generator) findRootVar(root ssa.Value) *types.Var {
+	// A parameter is held by its own variable.
+	if p, ok := root.(*ssa.Parameter); ok {
+		v, _ := p.Object().(*types.Var)
+		return v
+	}
 	// A Phi has no position, so it is in no file of the pass. Any other value
 	// matches no call's Lparen below.
 	pos := root.Pos()

@@ -648,6 +648,38 @@ An inline closure `func() { ... }()` runs in program order, so writing a capture
 
 The old resolver took the receiver of the outermost method call around the use. Inside `DB.Transaction(func(tx) { ... })` that rewrote the package-level `DB`, and in `base.Or(q)` it rebound `base`. `TestGoldenFilesCompile` now type-checks every `.golden`, and `testdata/src/gormreuse/fix_target.go` and `testdata/src/converge/fix_target.go` hold the cases.
 
+## Parameter-Root Fix (#201)
+
+A parameter root has no call to append a Session to. `Generate` used to declare the function `//gormreuse:immutable-param` for every parameter root. That moved the duty to the callers, but:
+
+- callers in other packages are never checked (#195), so an exported function's reuse disappeared;
+- a function used as a value, such as `var scopes = []func(*gorm.DB) *gorm.DB{scope}`, has callers no check sees, so a real Scopes-callback reuse disappeared;
+- a caller in the package that passes a mid-chain value got the caller-side diagnostic, which has no fix, so `-fix` never reached zero.
+
+`internal/fix/generator.go` now chooses:
+
+| Check | Fix |
+| --- | --- |
+| `canFixParam` fails: a Scopes/Preload callback, a closure, or a function with a `*gorm.DB` result that `calledOnlyDirectly` rejects | None |
+| `callersAllIsolate`: `calledOnlyDirectly`, and the tracer finds no mutable root in the argument of any call to the function in the pass's source functions | `//gormreuse:immutable-param` |
+| Otherwise | `tx = tx.Session(&gorm.Session{})` before the body's first statement (`paramSessionSite`, written by `sessionEdits` with the same gorm name resolution and import as every other Session), then the rest of the local-root fix |
+
+`calledOnlyDirectly` needs an unexported function, not a method (a method can be called through an interface), whose every reference is the function of a call (`f(x)`, `f[T](x)`, `(f)(x)`). In the Session case the parameter is the reassignment target (`findRootVar` returns its variable), so a discarded `tx.Where("a")` becomes `tx = tx.Where("a")` and keeps its effect. The Session goes at the top of the body, so it also covers uses through an alias.
+
+A function that returns a `*gorm.DB` and may be called by unknown code may be a Scopes callback. A Session result returned from one leaks gorm's transaction (go-gorm/gorm#7592), and the fix does not tell which results are Session results. It gets no fix.
+
+Limitations:
+
+- The body Session also stops the function from changing the caller's Statement in place, as `tx.Where("a").Find(nil)` does on a mid-chain value. That change is the reuse being fixed.
+- The caller scan sees only the package being analyzed. When the test variant has callers in `_test.go` files, the variant without them can still suggest `immutable-param`; the test variant then reports the mutable test caller.
+- A closure parameter still gets no fix.
+
+`TestParamSessionIsolatesBranches` in `e2e/internal/param_session_test.go` checks the body Session at runtime, and `testdata/src/converge/fix_param_root.go` checks that one pass converges.
+
+### Phi edges
+
+`phiEdgeSessionPositions` skips an edge that is already immutable. It used to call an edge immutable when a Session-family call appeared anywhere in its chain, so `db.Session(&gorm.Session{}).Where("y")` and `db.WithContext(ctx).Where("y")` got no Session, while detection still reported them: the diagnostic stayed after every pass. It now asks `RootTracer.IsImmutableCall`, the tracer's own rule: the edge's last call must be an immutable-returning builtin or an `immutable-return` function, and a Session that may set `Initialized` does not count. `TestSessionMidChainEdgeAccumulates` checks at runtime that such an edge is mutable.
+
 ## Discarded Statements Under a Session Fix (#199)
 
 A discarded non-finisher statement such as `q.Where("a")` or `q.Where("a").Limit(10)` has an effect only because `q` is mutable: it changes `q`'s Statement in place, and every later query on `q` sees it. A Session at the root makes `q` immutable, so the same statement then changes a throwaway copy. The fixed code drops `"a"` silently, and the linter is clean. The fix must therefore never leave such a statement in place. `findReassignedChains` in `internal/fix/generator.go` applies this rule:
