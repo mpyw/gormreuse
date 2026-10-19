@@ -266,6 +266,8 @@ The linter conservatively marks [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB)
 
 Note: Simple struct literal storage (`_ = &S{db: q}`) without actual field usage does NOT pollute.
 
+A field read sees only the stores that can run before it. So the builder idiom `r.db = r.db.Where(...)` in a pointer-receiver method, followed by one use of `r.db`, is not reported. A second use of `r.db` is.
+
 ### Examples
 
 #### Safe: Branching from immutable

@@ -335,6 +335,40 @@ Struct Field Tracking (field path, not base identity):
   address they were loaded from. Matching the immediate base value instead would
   miss every nested or promoted field.
 
+Field Store Order (#182):
+  r.db = r.db.Where("t")  <- SSA: t1 = *(&r.db); t2 = Where(t1); *(&r.db) = t2
+  r.db.Find(nil)          <- load sees *(&r.db) = t2 only
+
+  A load matches only the stores that reach it (fieldStores): the last store to
+  the field in its own block before it, else the last store in each predecessor
+  block found by walking the CFG backward. A store ends the walk on its path, so
+  a later store replaces an earlier one. Before #182 a load saw every store in
+  the function, so the RHS load above resolved to t2 and Where("t") counted as
+  the first branch of its own result.
+
+  for _, c := range conds {
+    r.db = r.db.Where(c)  <- the load sees this store from the previous iteration
+  }
+  r.db.Find(nil)
+
+  In a loop the call is still a root of its own receiver. isLoopFieldRebuild
+  treats it as an assignment, like the loop-header Phi of `q = q.Where(c)`. The
+  tracker also records it as a loop-carried use: a polluting use of the call's
+  result that can reach the call (`r.db.Find(nil)` later in the same body) is
+  reported at the call, whatever the positions.
+
+  Decisions and limitations:
+  - The Scopes callback resolver still reads every store to a field, since a
+    larger callback set only adds mutable roots.
+  - Only stores to the same (root address, field path) count. A write through
+    another pointer (`p := &r.db; *p = x`) or inside a callee neither reaches a
+    load nor replaces a store, as before.
+  - The loop-carried check covers fields only. The local form
+    `for { q = q.Where(c); q.Find(nil) }` is still not reported.
+  - Outside a loop the rebuild is not an assignment: `r.db = q; r.db =
+    r.db.Where("y"); q.Find(nil)` is reported. Inside a loop, as with locals,
+    the value read on the first iteration is not counted as branched.
+
 Bound Method Tracking:
   find := q.Find    <- MakeClosure with receiver q in Bindings[0]
   find(nil)         <- SSA: Call with Value=*ssa.MakeClosure, Fn.Name()="Find$bound"
