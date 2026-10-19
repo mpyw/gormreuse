@@ -385,6 +385,12 @@ func (v *Validator) checkCallPollution(call ssa.CallInstruction) []Violation {
 		}
 		return nil
 	}
+	// A wrapper such as sql.Named("s", sub) whose result is only a read-only
+	// argument hands sub to the method that reads it, as the main handler
+	// sees it (#253).
+	if c, ok := call.(*ssa.Call); ok && pollutionsource.IsReadOnlyWrapperCall(c, site) {
+		return nil
+	}
 	common, callee := call.Common(), site.Callee
 
 	// Any other call — a static function, a builtin (e.g. append, which is how

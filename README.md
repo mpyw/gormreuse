@@ -497,8 +497,19 @@ This holds for these methods and parameters. A `*gorm.DB` passed anywhere else, 
 | Methods | Read-only parameters |
 | --- | --- |
 | `Where`, `Or`, `Not`, `Having`, `Joins`, `InnerJoins`, `Table`, `Select`, `Distinct`, `Raw`, `Exec` | Every parameter, including group conditions (`db.Where(sub)`) and `Joins("Company", cond)` |
-| `Find`, `First`, `Last`, `Take`, `Delete` | The conditions after the first parameter |
+| `Find`, `First`, `Last`, `Take`, `Delete`, `FirstOrInit`, `FirstOrCreate` | The conditions after the first parameter |
 | `Update`, `UpdateColumn` | The value |
+
+A subquery inside one of these wrappers, passed to a read-only parameter, is a read too:
+
+| Wrapper | Example |
+| --- | --- |
+| `gorm.Expr` | `db.Where("id IN (?)", gorm.Expr("?", sub))` |
+| `sql.Named` | `db.Where("id IN (@s)", sql.Named("s", sub))` |
+| A map literal | `db.Where("id IN (@s)", map[string]any{"s": sub})` |
+| A `clause.Expr` literal, or a pointer to one | `db.Where(clause.Expr{SQL: "id IN (?)", Vars: []any{sub}})` |
+
+The wrapper may be kept in a variable, and wrappers may nest. But each use of the wrapper must be such an argument. A wrapper that is also used another way, such as `keep(e)`, `m["s"]` or `e.Vars`, may hand the subquery to other code, so the subquery is a branch again.
 
 GORM reads the argument when the **outer query runs**, not when you pass it. So a change to the argument before that, by a branch or by reassignment, shows up in the outer query:
 
