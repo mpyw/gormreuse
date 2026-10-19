@@ -261,6 +261,7 @@ gormreuse/
 │   │   ├── directive.go         # readDirective, FindDirectiveProblems
 │   │   ├── ignore.go            # //gormreuse:ignore scopes (Ignores), unused tracking
 │   │   ├── funcset.go           # DirectiveFuncSet: pure / immutable-return / immutable-param sets, Infer
+│   │   ├── placement.go         # placement: which function a directive comment is written on
 │   │   ├── immutable_input.go   # ImmutableInputSet: immutable-input(name) callbacks
 │   │   ├── func.go              # FuncKey: a function as a directive names it
 │   │   ├── removal.go           # Removals: fixes that delete a directive name (#248)
