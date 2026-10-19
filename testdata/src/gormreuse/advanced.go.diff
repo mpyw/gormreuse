@@ -1,6 +1,6 @@
 --- advanced.go	1970-01-01 00:00:00
 +++ advanced.go.golden	1970-01-01 00:00:00
-@@ -1,1215 +1,1217 @@
+@@ -1,1220 +1,1222 @@
  package internal
  
  import (
@@ -904,6 +904,11 @@
  
  // consecutiveHelperCallsWithFindReassign tests when Find result is used in reassignment pattern.
  // Find on chain, then reassign to q - should this be OK?
+ //
+ // immutable-param keeps the test off Phase 1b parameter branching: db is
+ // branched more than once (#175).
+ //
+ //gormreuse:immutable-param
  func consecutiveHelperCallsWithFindReassign(db *gorm.DB, a, b bool) {
 -	q := db.Where("base")
 +	q := db.Where("base").Session(&gorm.Session{})

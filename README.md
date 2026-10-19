@@ -385,11 +385,25 @@ for _, filter := range filters {
 }
 
 // Conditional reassignment
-q := db.Where("base")
+base := db.Session(&gorm.Session{}) // immutable: safe to branch more than once
+q := base.Where("base")
 if condition {
-    q = db.Where("alt")    // reassignment on this path
+    q = base.Where("alt")  // reassignment on this path
 }
 q.Find(&users)             // OK - first branch from whichever root
+```
+
+The example starts from an immutable `base`. On the `condition` path, `base` is branched twice: once by `Where("base")` and once by `Where("alt")`. If `base` were mutable, for example a `*gorm.DB` parameter, the second branch would be reported. A reassignment that extends the same variable, as in `if condition { q = q.Where("alt") }`, is not a second branch of `q`.
+
+A chain assigned to a **different** variable is a branch, even under a condition or when a closure captures it:
+
+```go
+q := db.Where("x")
+var q2 *gorm.DB
+if condition {
+    q2 = q.Where("a")      // first branch from q
+}
+q.Count(&count)            // VIOLATION: second branch from q
 ```
 
 ## Directives

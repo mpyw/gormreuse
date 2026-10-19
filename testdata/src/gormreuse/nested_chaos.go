@@ -460,6 +460,11 @@ func nestedIfChaosWithLoops(db *gorm.DB, flags []bool) {
 }
 
 // nestedIfChaosMultipleVars demonstrates multiple variables with nested ifs.
+//
+// immutable-param keeps the test off Phase 1b parameter branching: db is
+// branched more than once (#175).
+//
+//gormreuse:immutable-param
 func nestedIfChaosMultipleVars(db *gorm.DB, a, b bool) {
 	q1 := db.Where("base1")
 	q2 := db.Where("base2")
@@ -485,6 +490,11 @@ func nestedIfChaosMultipleVars(db *gorm.DB, a, b bool) {
 
 // nestedIfChaosReassignmentInBranch demonstrates reassignment in nested branches.
 // TODO: fix generator cannot handle this complex case (fresh instance in one branch, polluted in others)
+//
+// immutable-param keeps the test off Phase 1b parameter branching: db is
+// branched more than once (#175).
+//
+//gormreuse:immutable-param
 func nestedIfChaosReassignmentInBranch(db *gorm.DB, a, b, c bool) {
 	q := db.Where("base")
 
@@ -556,6 +566,11 @@ func chaosPolluteMultipleTimes(db *gorm.DB, a, b, c, d bool) {
 
 // chaosPolluteThenReassign demonstrates pollution followed by reassignment in nested branches.
 // TODO: fix generator cannot handle this complex case (multiple fresh instances in nested branches)
+//
+// immutable-param keeps the test off Phase 1b parameter branching: db is
+// branched more than once (#175).
+//
+//gormreuse:immutable-param
 func chaosPolluteThenReassign(db *gorm.DB, a, b, c bool) {
 	q := db.Where("base")
 
@@ -696,6 +711,11 @@ func chaosNestedLoopsWithPollution(db *gorm.DB, outer, inner []int) {
 }
 
 // chaosConditionalReassignmentMaze demonstrates a maze of conditional reassignments.
+//
+// immutable-param keeps the test off Phase 1b parameter branching: db is
+// branched more than once (#175).
+//
+//gormreuse:immutable-param
 func chaosConditionalReassignmentMaze(db *gorm.DB, a, b, c, d, e bool) {
 	q := db.Where("base")
 
@@ -770,6 +790,11 @@ func chaosPhiCascade(db *gorm.DB, a, b, c, d bool) {
 }
 
 // chaosInterwovenVariables demonstrates multiple variables with interwoven pollution.
+//
+// immutable-param keeps the test off Phase 1b parameter branching: db is
+// branched more than once (#175).
+//
+//gormreuse:immutable-param
 func chaosInterwovenVariables(db *gorm.DB, a, b, c bool) {
 	q1 := db.Where("base1")
 	q2 := db.Where("base2")
@@ -818,6 +843,11 @@ func chaosVariableSwap(db *gorm.DB, a, b bool) {
 }
 
 // chaosVariableSwapConditional demonstrates conditional swapping.
+//
+// immutable-param keeps the test off Phase 1b parameter branching: db is
+// branched more than once (#175).
+//
+//gormreuse:immutable-param
 func chaosVariableSwapConditional(db *gorm.DB, swap bool) {
 	q1 := db.Where("q1_base")
 	q2 := db.Where("q2_base")
@@ -857,6 +887,11 @@ func chaosVariableSwapChain(db *gorm.DB) {
 }
 
 // chaosVariableSwapLoop demonstrates swapping in loop.
+//
+// immutable-param keeps the test off Phase 1b parameter branching: db is
+// branched more than once (#175).
+//
+//gormreuse:immutable-param
 func chaosVariableSwapLoop(db *gorm.DB, items []int) {
 	q1 := db.Where("q1")
 	q2 := db.Where("q2")
@@ -876,6 +911,11 @@ func chaosVariableSwapLoop(db *gorm.DB, items []int) {
 }
 
 // chaosMultipleSwaps demonstrates multiple swaps creating complex Phi patterns.
+//
+// immutable-param keeps the test off Phase 1b parameter branching: db is
+// branched more than once (#175).
+//
+//gormreuse:immutable-param
 func chaosMultipleSwaps(db *gorm.DB, a, b, c bool) {
 	q1 := db.Where("q1")
 	q2 := db.Where("q2")
@@ -930,6 +970,11 @@ func chaosModernSwapSyntax(db *gorm.DB, a bool) {
 }
 
 // chaosModernSwapConditional demonstrates modern swap syntax with conditionals.
+//
+// immutable-param keeps the test off Phase 1b parameter branching: db is
+// branched more than once (#175).
+//
+//gormreuse:immutable-param
 func chaosModernSwapConditional(db *gorm.DB, a, b bool) {
 	q1 := db.Where("q1")
 	q2 := db.Where("q2")
@@ -952,6 +997,11 @@ func chaosModernSwapConditional(db *gorm.DB, a, b bool) {
 }
 
 // chaosModernSwapLoop demonstrates modern swap syntax in loops.
+//
+// immutable-param keeps the test off Phase 1b parameter branching: db is
+// branched more than once (#175).
+//
+//gormreuse:immutable-param
 func chaosModernSwapLoop(db *gorm.DB, flags []bool) {
 	q1 := db.Where("q1")
 	q2 := db.Where("q2")
@@ -970,6 +1020,11 @@ func chaosModernSwapLoop(db *gorm.DB, flags []bool) {
 }
 
 // chaosUltimateStressTest demonstrates the ultimate stress test with everything mixed.
+//
+// immutable-param keeps the test off Phase 1b parameter branching: db is
+// branched more than once (#175).
+//
+//gormreuse:immutable-param
 func chaosUltimateStressTest(db *gorm.DB, flags []bool) {
 	q := db.Where("base")
 	var temp *gorm.DB

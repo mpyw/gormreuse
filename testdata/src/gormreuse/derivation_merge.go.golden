@@ -1,0 +1,249 @@
+package internal
+
+import "gorm.io/gorm"
+
+// =============================================================================
+// Derivations that reach a Phi or a stored variable (#175)
+//
+// A chain result that flows into a Phi or a Store to an Alloc is a reassignment
+// only when that merge can still yield the receiver's root (q = q.Where(...)).
+// A derivation into a different variable is a branch like any other.
+// =============================================================================
+
+// ===== SHOULD REPORT =====
+
+// derivedIntoOtherVarUnderCondition: q2 = phi(nil, q.Where("a")). q2 never holds
+// q, so q.Where("a") is a branch of q and q.Count is the second one (repro A).
+func derivedIntoOtherVarUnderCondition(db *gorm.DB, c bool) {
+	q := db.Where("x").Session(&gorm.Session{})
+	var q2 *gorm.DB
+	if c {
+		q2 = q.Where("a")
+	}
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	if q2 != nil {
+		q2.Find(nil)
+	}
+}
+
+// derivedIntoCapturedVar: q2 is captured by a closure, so it lives in an Alloc
+// and q.Where("a") reaches a Store. It is still a branch of q (repro B).
+func derivedIntoCapturedVar(db *gorm.DB) {
+	q := db.Where("x").Session(&gorm.Session{})
+	q2 := q.Where("a")
+	f := func() { q2.Find(nil) }
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	f()
+}
+
+// twoDerivationsInOneBranch: a and b are both new variables derived from q on
+// the same path (repro C).
+func twoDerivationsInOneBranch(db *gorm.DB, c bool) {
+	q := db.Where("x").Session(&gorm.Session{})
+	var a, b *gorm.DB
+	if c {
+		a = q.Where("a")
+		b = q.Where("b") // want `\*gorm\.DB reused: second branch from mutable root`
+	}
+	a.Find(nil)
+	b.Find(nil)
+}
+
+// conditionalReassignmentFromMutableParam: db is a mutable parameter. On the c
+// path, db is branched by both Where calls (repro D). The phi merges two roots
+// that are branches of db, not db itself.
+//gormreuse:immutable-param
+func conditionalReassignmentFromMutableParam(db *gorm.DB, c bool) {
+	q := db.Where("base")
+	if c {
+		q = db.Where("alt") // want `\*gorm\.DB reused: second branch from mutable root`
+	}
+	q.Find(nil)
+}
+
+// conditionalReassignmentFromMutableParamStraight: the straight-line control
+// for repro D.
+//gormreuse:immutable-param
+func conditionalReassignmentFromMutableParamStraight(db *gorm.DB) {
+	q := db.Where("base")
+	q = db.Where("alt") // want `\*gorm\.DB reused: second branch from mutable root`
+	q.Find(nil)
+}
+
+// derivedIntoOtherVarInLoop: q2 is a new variable on each iteration path, and
+// q is still used after the loop.
+func derivedIntoOtherVarInLoop(db *gorm.DB, items []int) {
+	q := db.Where("x").Session(&gorm.Session{})
+	var q2 *gorm.DB
+	for range items {
+		q2 = q.Where("a") // want `\*gorm\.DB reused: second branch from mutable root`
+	}
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	_ = q2
+}
+
+// helperResultIntoOtherVar: a helper result assigned to a different variable
+// under a condition is a branch of its argument, like a gorm method.
+func helperResultIntoOtherVar(db *gorm.DB, c bool) {
+	q := db.Where("x").Session(&gorm.Session{})
+	var q2 *gorm.DB
+	if c {
+		q2 = mergeHelper(q)
+	}
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	_ = q2
+}
+
+// derivedIntoOtherVarBothBranchesThenReuse: each path branches q once into q2,
+// then q.Count is the second branch on both paths.
+func derivedIntoOtherVarBothBranchesThenReuse(db *gorm.DB, c bool) {
+	q := db.Where("x").Session(&gorm.Session{})
+	var q2 *gorm.DB
+	if c {
+		q2 = q.Where("a")
+	} else {
+		q2 = q.Where("b")
+	}
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	q2.Find(nil)
+}
+
+// ===== SHOULD NOT REPORT =====
+
+func mergeHelper(db *gorm.DB) *gorm.DB {
+	return db.Where("h")
+}
+
+// conditionalSelfReassignment: q = q.Where(...) on one path. The phi merges q
+// and its own derivation, so this is a reassignment.
+func conditionalSelfReassignment(db *gorm.DB, c bool) {
+	q := db.Where("x")
+	if c {
+		q = q.Where("a")
+	}
+	q.Find(nil)
+}
+
+// conditionalSelfReassignmentChain: q = q.Where().Where() and two reassignments
+// in a row on one path.
+func conditionalSelfReassignmentChain(db *gorm.DB, c bool) {
+	q := db.Where("x")
+	if c {
+		q = q.Where("a").Where("b")
+		q = q.Where("c")
+	}
+	q.Find(nil)
+}
+
+// nestedConditionalSelfReassignment: the derivation reaches the outer phi only
+// through the inner one.
+func nestedConditionalSelfReassignment(db *gorm.DB, c, d bool) {
+	q := db.Where("x")
+	if c {
+		if d {
+			q = q.Where("a")
+		}
+	}
+	q.Find(nil)
+}
+
+// loopSelfReassignment: q = q.Where(...) in a loop (loop-header phi).
+func loopSelfReassignment(db *gorm.DB, items []string) {
+	q := db.Where("x")
+	for _, item := range items {
+		q = q.Where(item)
+	}
+	q.Find(nil)
+}
+
+// loopConditionalSelfReassignment: q = q.Where(...) under a condition in a loop.
+func loopConditionalSelfReassignment(db *gorm.DB, items []string) {
+	q := db.Where("x")
+	for _, item := range items {
+		if item != "" {
+			q = q.Where(item)
+		}
+	}
+	q.Find(nil)
+}
+
+// helperSelfReassignment: q = helper(q) under a condition and in a loop.
+func helperSelfReassignment(db *gorm.DB, c bool, items []int) {
+	q := db.Where("x")
+	if c {
+		q = mergeHelper(q)
+	}
+	for range items {
+		q = mergeHelper(q)
+	}
+	q.Find(nil)
+}
+
+// capturedSelfReassignment: q lives in an Alloc because a closure captures it;
+// q = q.Where(...) stores back into the same variable.
+func capturedSelfReassignment(db *gorm.DB, c bool) {
+	q := db.Where("x")
+	if c {
+		q = q.Where("a")
+	}
+	f := func() { q.Find(nil) }
+	f()
+}
+
+// capturedLoopSelfReassignment: the same, in a loop.
+func capturedLoopSelfReassignment(db *gorm.DB, items []string) {
+	q := db.Where("x")
+	for _, item := range items {
+		q = q.Where(item)
+	}
+	f := func() { q.Find(nil) }
+	f()
+}
+
+// derivedIntoOtherVarExclusive: q2 takes one derivation of q per path, and q is
+// not used again.
+func derivedIntoOtherVarExclusive(db *gorm.DB, c bool) {
+	q := db.Where("x")
+	var q2 *gorm.DB
+	if c {
+		q2 = q.Where("a")
+	} else {
+		q2 = q.Where("b")
+	}
+	q2.Find(nil)
+}
+
+// derivedIntoCapturedVarOnly: q2 is captured, and q is not used again.
+func derivedIntoCapturedVarOnly(db *gorm.DB) {
+	q := db.Where("x")
+	q2 := q.Where("a")
+	f := func() { q2.Find(nil) }
+	f()
+}
+
+// conditionalReassignmentFromImmutable: the README example. Both chains start
+// from an immutable handle, so branching it twice is safe.
+func conditionalReassignmentFromImmutable(db *gorm.DB, c bool) {
+	base := db.Session(&gorm.Session{})
+	q := base.Where("base")
+	if c {
+		q = base.Where("alt")
+	}
+	q.Find(nil)
+}
+
+// derivedThenMergedBack: [LIMITATION] q2 later flows back into q, so the merge
+// can yield q's root and q.Where("a") is treated as a reassignment. On the
+// c && !d path, q is branched twice and this is missed.
+func derivedThenMergedBack(db *gorm.DB, c, d bool) {
+	q := db.Where("x")
+	var q2 *gorm.DB
+	if c {
+		q2 = q.Where("a")
+	}
+	if d {
+		q = q2
+	}
+	q.Count(nil) // [LIMITATION] FALSE NEGATIVE
+	_ = q2
+}

@@ -313,6 +313,25 @@ User-Defined Function Reassignment:
   it uses RecordAssignment (like gorm methods) instead of MarkPolluted.
 ```
 
+### Which merges are reassignments (#175)
+
+A straight-line `q = q.Where("a")` needs no special case: the new SSA value is its own root, and `q.Where("a")` is a branch of the old one. The special case is a merge. In `if c { q = q.Where("a") }; q.Find(nil)`, the use reads `Phi(q₁, q₂)`, and `FindMutableRoot` resolves that Phi to `q₁`. If `q.Where("a")` polluted `q₁`, `q.Find` would be a false second branch. So `isAssignment` records such a call with `RecordAssignment`, which does not pollute.
+
+`isAssignment(call, root)` follows the call's result forward through chained gorm calls and Phi nodes. It returns true only when it reaches a Phi, or a Store to an Alloc, whose `FindAllMutableRoots` include `root`. Only that merge can hand `root` back to a later use.
+
+| Code | Merge | Result |
+| --- | --- | --- |
+| `if c { q = q.Where("a") }` | `Phi(q₁, q₂)` holds `q₁` | assignment |
+| `for … { q = q.Where(x) }` | loop-header Phi | assignment |
+| `if a { q = q.Where("a"); if b { … }; q = q.Where("c") }` | reaches `Phi(q₁, …)` through the inner Phi and `Where("c")` | assignment |
+| `if c { q2 = q.Where("a") }` | `Phi(nil, q₂)` | branch of `q` |
+| `q2 := q.Where("a")`, `q2` captured by a closure | Store to `q2`'s Alloc | branch of `q` |
+| `q := db.Where("b"); if c { q = db.Where("a") }` | `Phi(q₁, q₂)`, both branches of `db` | branch of `db` |
+
+Before #175, any Phi or Store to an Alloc counted as an assignment. A chain derived into a different variable was then never a branch, and branching a mutable `db` parameter twice under a condition was missed.
+
+Limitation: the check asks whether the merge *can* yield `root`, not whether it does on the path that ran the call. `if c { q2 = q.Where("a") }; if d { q = q2 }` reaches `Phi(q₁, …)` and is still treated as an assignment.
+
 ## Pure Contract Validation
 
 `purity.Validator` checks the body of every `//gormreuse:pure` function. It follows "parameter-derived" values and reports when one is polluted or escapes.

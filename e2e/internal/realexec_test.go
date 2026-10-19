@@ -304,3 +304,56 @@ func TestCloneSemantics_ConnectionCallbackAccumulates(t *testing.T) {
 		t.Errorf("Connection tx is clone==0, so the second query should accumulate both 'a' and 'b': %s", second)
 	}
 }
+
+// TestDerivedIntoOtherVariableAccumulates asserts the runtime premise of #175: a
+// chain derived from a mid-chain value into a different variable under a
+// condition is a branch. It shares the Statement, so a later use of the
+// original value inherits its condition.
+func TestDerivedIntoOtherVariableAccumulates(t *testing.T) {
+	db, captured := setupDB(t)
+
+	derivedIntoOtherVariable(db.Model(&User{}).Where("base = ?", 1), true) // clone==0
+
+	if len(*captured) < 1 {
+		t.Fatalf("Expected at least 1 query, got %d", len(*captured))
+	}
+	if first := (*captured)[0]; !strings.Contains(first, "a =") {
+		t.Errorf("q.Where into q2 shares q's Statement, so q's query should contain 'a': %s", first)
+	}
+}
+
+func derivedIntoOtherVariable(q *gorm.DB, cond bool) {
+	var q2 *gorm.DB
+	if cond {
+		q2 = q.Where("a = ?", 10)
+	}
+	q.Find(&[]User{})
+	if q2 != nil {
+		q2.Find(&[]User{})
+	}
+}
+
+// TestConditionalReassignmentFromMidChainAccumulates asserts the runtime
+// premise of #175 for a conditional reassignment that starts from the same
+// mid-chain value twice: on the reassigning path, both chains share its
+// Statement, so the final query carries both conditions.
+func TestConditionalReassignmentFromMidChainAccumulates(t *testing.T) {
+	db, captured := setupDB(t)
+
+	conditionalReassign(db.Model(&User{}), true) // clone==0
+
+	if len(*captured) < 1 {
+		t.Fatalf("Expected at least 1 query, got %d", len(*captured))
+	}
+	if first := (*captured)[0]; !strings.Contains(first, "base =") || !strings.Contains(first, "alt =") {
+		t.Errorf("both chains branch the clone==0 argument, so the query should contain 'base' and 'alt': %s", first)
+	}
+}
+
+func conditionalReassign(db *gorm.DB, cond bool) {
+	q := db.Where("base = ?", 1)
+	if cond {
+		q = db.Where("alt = ?", 2)
+	}
+	q.Find(&[]User{})
+}
