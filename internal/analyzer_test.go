@@ -80,13 +80,13 @@ func TestNewAnalyzer(t *testing.T) {
 func TestNewChecker(t *testing.T) {
 	t.Parallel()
 
-	ignoreMap := make(directive.IgnoreMap)
+	ignores := directive.NewIgnores(nil)
 	pureFuncs := directive.NewPureFuncSet(nil, nil)
 	immutableReturnFuncs := directive.NewImmutableReturnFuncSet(nil, nil)
 	reported := make(map[token.Pos]bool)
 	suggestedEdits := make(map[editKey]bool)
 
-	chk := newChecker(nil, ignoreMap, pureFuncs, immutableReturnFuncs, nil, nil, nil, nil, nil, reported, suggestedEdits, nil)
+	chk := newChecker(nil, ignores, pureFuncs, immutableReturnFuncs, nil, nil, nil, nil, nil, reported, suggestedEdits, nil)
 
 	if chk == nil {
 		t.Error("Expected checker to be initialized")

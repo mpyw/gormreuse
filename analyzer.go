@@ -30,7 +30,7 @@
 //
 // Suppress false positives with:
 //
-//	//gormreuse:ignore                // Suppress for next line or same line
+//	//gormreuse:ignore                // Suppress for a statement, function or file
 //	//gormreuse:pure                  // Mark function as not polluting *gorm.DB args
 //	//gormreuse:immutable-return      // Mark function as returning immutable *gorm.DB
 //	//gormreuse:immutable-param       // Mark *gorm.DB parameters as immutable
@@ -44,7 +44,6 @@ package gormreuse
 
 import (
 	"go/ast"
-	"go/token"
 	"strings"
 
 	"golang.org/x/tools/go/analysis"
@@ -84,9 +83,8 @@ func run(pass *analysis.Pass) (any, error) {
 	// Build set of files to skip
 	skipFiles := buildSkipFiles(pass)
 
-	// Build ignore maps for each file (excluding skipped files)
-	ignoreMaps := make(map[string]directive.IgnoreMap)
-	funcIgnores := make(map[string]map[token.Pos]directive.FunctionIgnoreEntry)
+	// Collect ignore directives for each file (excluding skipped files)
+	ignores := directive.NewIgnores(pass.Fset)
 	pureFuncs := directive.NewPureFuncSet(pass.Fset, pass.TypesInfo)
 	immutableReturnFuncs := directive.NewImmutableReturnFuncSet(pass.Fset, pass.TypesInfo)
 	immutableParamFuncs := directive.NewImmutableParamFuncSet(pass.Fset, pass.TypesInfo)
@@ -100,11 +98,12 @@ func run(pass *analysis.Pass) (any, error) {
 		if skipFiles[filename] {
 			continue
 		}
+		ignores.AddFile(cur)
 		for _, p := range directive.FindDirectiveProblems(file) {
-			pass.Reportf(p.Pos, "%s", p.Message)
+			if !ignores.Ignore(p.Pos) {
+				pass.Reportf(p.Pos, "%s", p.Message)
+			}
 		}
-		ignoreMaps[filename] = directive.BuildIgnoreMap(pass.Fset, file)
-		funcIgnores[filename] = directive.BuildFunctionIgnoreSet(pass.Fset, cur)
 
 		// Add original file to sets (for position-correct directive detection)
 		pureFuncs.AddFile(cur)
@@ -128,7 +127,7 @@ func run(pass *analysis.Pass) (any, error) {
 	}
 
 	// Run SSA-based analysis
-	internal.RunSSA(pass, ssaInfo, ignoreMaps, funcIgnores, pureFuncs, immutableReturnFuncs, immutableParamFuncs, immutableInputSet, skipFiles)
+	internal.RunSSA(pass, ssaInfo, ignores, pureFuncs, immutableReturnFuncs, immutableParamFuncs, immutableInputSet, skipFiles)
 
 	return nil, nil
 }
