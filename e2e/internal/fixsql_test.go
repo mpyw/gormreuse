@@ -37,6 +37,8 @@ func TestFixPreservesQueries(t *testing.T) {
 		{"LoopOnly", before.LoopOnly, after.LoopOnly},
 		{"SessionLast", before.SessionLast, after.SessionLast},
 		{"Closure", before.Closure, after.Closure},
+		{"MethodValue", before.MethodValue, after.MethodValue},
+		{"MethodValueDiscarded", before.MethodValueDiscarded, after.MethodValueDiscarded},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -78,6 +80,13 @@ func TestFixPreservesQueriesDetectsSessionOnly(t *testing.T) {
 			q.Where("name = ?", "x").Find(&[]before.User{})
 			f()
 			q.Where("name = ?", "y").Find(&[]before.User{})
+		}},
+		{"MethodValueDiscarded", before.MethodValueDiscarded, func(db *gorm.DB) {
+			q := db.Model(&before.User{}).Where("tenant_id = ?", 7).Session(&gorm.Session{})
+			where := q.Where
+			where("age > ?", 20)
+			where("name = ?", "x").Find(&[]before.User{})
+			where("name = ?", "y").Find(&[]before.User{})
 		}},
 	}
 	for _, tc := range cases {

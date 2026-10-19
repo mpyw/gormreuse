@@ -102,6 +102,25 @@ func boundOnMutable(db *gorm.DB) {
 	w("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root \(root at [^)]+\)`
 }
 
+// boundDiscardedThroughMethodValue: w("a") changes q in place, and nothing
+// keeps its result. A Session at q's root would make it change a copy and drop
+// "a" from the later query, and a call through w names no variable to rebind,
+// so no fix is offered (#199).
+func boundDiscardedThroughMethodValue(db *gorm.DB) {
+	q := db.Where("x")
+	w := q.Where
+	w("a")
+	w("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root \(root at [^)]+\)`
+}
+
+// boundDiscardedChainThroughMethodValue: the same for a longer discarded chain.
+func boundDiscardedChainThroughMethodValue(db *gorm.DB) {
+	q := db.Where("x")
+	w := q.Where
+	w("a").Limit(1)
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root \(root at [^)]+\)`
+}
+
 // boundOnMutableInLoop: every iteration branches q, defined outside the loop.
 func boundOnMutableInLoop(db *gorm.DB, items []string) {
 	q := db.Where("x")

@@ -75,3 +75,23 @@ func Closure(db *gorm.DB) {
 	f()
 	q.Where("name = ?", "y").Find(&[]User{})
 }
+
+// MethodValue queries through a method value of q and discards nothing, so a
+// Session at the root is enough (#178).
+func MethodValue(db *gorm.DB) {
+	q := db.Model(&User{}).Where("tenant_id = ?", 7).Session(&gorm.Session{})
+	where := q.Where
+	where("name = ?", "x").Find(&[]User{})
+	where("name = ?", "y").Find(&[]User{})
+}
+
+// MethodValueDiscarded discards a call through a method value of q. It changes
+// q in place, a Session at the root would drop it, and the call names no
+// variable to reassign, so no fix is offered (#178, #199).
+func MethodValueDiscarded(db *gorm.DB) {
+	q := db.Model(&User{}).Where("tenant_id = ?", 7)
+	where := q.Where
+	where("age > ?", 20)
+	where("name = ?", "x").Find(&[]User{})
+	where("name = ?", "y").Find(&[]User{})
+}

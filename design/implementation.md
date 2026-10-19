@@ -464,7 +464,7 @@ The tracer resolves a call `w(x)` through a method value `w := r.m` as the call 
 
 An interface method value has no declared method, so `DeclaredFunc` keeps the wrapper. Its signature has no receiver, so a call through it is handled like any other call whose result holds a `*gorm.DB`: a mutable root, as for an interface call `r.Query()` (#176).
 
-Suggested fixes: a second branch made through a method value (`w := q.Where; w("a").Find(nil); w("b").Find(nil)`) gets `.Session(&gorm.Session{})` at `q`'s root. It never gets a reassignment, since a call through `w` names no variable to rebind. A root created by a call through a method value (`q := w("a")`) gets `.Session(&gorm.Session{})` appended.
+Suggested fixes: a second branch made through a method value (`w := q.Where; w("a").Find(nil); w("b").Find(nil)`) gets `.Session(&gorm.Session{})` at `q`'s root. A call through `w` names no variable to rebind, so it never gets a reassignment. When one is a discarded statement (`w("a")` or `w("a").Limit(1)`), it changes `q` in place, and a Session at the root would drop that change. `discardedChain` returns no receiver for it, so no fix is offered, as for any discarded chain that cannot be reassigned (#199). `e2e/internal/fixsql` (`MethodValue`, `MethodValueDiscarded`) checks both against real GORM. A root created by a call through a method value (`q := w("a")`) gets `.Session(&gorm.Session{})` appended.
 
 ### Which merges are reassignments (#175)
 
