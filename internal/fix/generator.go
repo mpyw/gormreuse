@@ -156,7 +156,7 @@ func (g *Generator) Generate(v pollution.Violation) []analysis.SuggestedFix {
 
 	// Phase 2: Simulate reassignments and find roots needing Session
 	virtualUses := g.simulateReassignments(root, allUses, reassigned)
-	rootsNeedingSession := g.findRootsNeedingSession(virtualUses)
+	rootsNeedingSession := g.findRootsNeedingSession(virtualUses, reassigned, usesOrdered(v))
 
 	// Generate TextEdits
 	var edits []analysis.TextEdit
@@ -181,7 +181,7 @@ func (g *Generator) Generate(v pollution.Violation) []analysis.SuggestedFix {
 			for _, pos := range g.sessionPositionsForRoot(vr.pos, root) {
 				sites = append(sites, sessionSite{pos: pos})
 			}
-		default:
+		case !g.endsImmutable(vr):
 			sites = append(sites, sessionSite{pos: vr.end})
 		}
 	}
@@ -474,11 +474,31 @@ type virtualRootKey struct {
 	isOriginal bool
 	pos        token.Pos       // For virtual roots, the position where created
 	end        token.Pos       // For virtual roots, the end of the reassigned chain
-	block      *ssa.BasicBlock // For virtual roots, the block of the reassignment
+	block      *ssa.BasicBlock // The block of the reassignment, or of the original root's definition (nil if unknown)
+}
+
+// definitionBlock returns the block that defines root, or nil when it has
+// none, such as a global.
+func definitionBlock(root ssa.Value) *ssa.BasicBlock {
+	switch r := root.(type) {
+	case ssa.Instruction:
+		return r.Block()
+	case *ssa.Parameter:
+		return r.Parent().Blocks[0]
+	}
+	return nil
 }
 
 // simulateReassignments simulates Phase 1 reassignments and returns virtual uses.
 // Returns a map from virtual root keys to their uses.
+//
+// A use is a use of every root it may see: each earlier reassignment that can
+// reach it, back to the first one whose block dominates it. When none
+// dominates it, it may also see the original root. So in
+// `if c { q.Where("a") }; q.Where("b").Find(nil); q.Where("c").Find(nil)` the
+// original root, used on the path where c is false, needs a Session as well
+// as the reassignment in the if (#202). Uses are taken in position order, so
+// a loop's next iteration is not seen here (see findRootsNeedingSession).
 func (g *Generator) simulateReassignments(root ssa.Value, uses []pollution.UsageInfo, reassigned map[token.Pos]token.Pos) map[virtualRootKey][]pollution.UsageInfo {
 	// Sort uses by position
 	sortedUses := slices.Clone(uses)
@@ -486,29 +506,85 @@ func (g *Generator) simulateReassignments(root ssa.Value, uses []pollution.Usage
 		return cmp.Compare(a.Pos, b.Pos)
 	})
 
-	// Start with the original root
-	currentRootKey := virtualRootKey{isOriginal: true, pos: root.Pos()}
+	original := virtualRootKey{isOriginal: true, pos: root.Pos(), block: definitionBlock(root)}
 	virtualUses := make(map[virtualRootKey][]pollution.UsageInfo)
+	cfgAnalyzer := cfg.New()
 
+	// The virtual roots made so far, in position order.
+	var made []virtualRootKey
 	for _, use := range sortedUses {
-		// This use is from currentRoot
-		virtualUses[currentRootKey] = append(virtualUses[currentRootKey], use)
+		dominated := false
+		for _, vr := range slices.Backward(made) {
+			reaches, dominates := reassignmentReaches(cfgAnalyzer, vr.block, use.Block)
+			if reaches {
+				virtualUses[vr] = append(virtualUses[vr], use)
+			}
+			if dominates {
+				dominated = true
+				break
+			}
+		}
+		if !dominated {
+			virtualUses[original] = append(virtualUses[original], use)
+		}
 
 		// If non-finisher, this use's result becomes the new root
 		if end, ok := reassigned[use.Pos]; ok {
 			// Create a new virtual root at this position. Its Session goes
 			// after the chain's last call: one after an earlier call would be
 			// undone by the calls that follow it.
-			currentRootKey = virtualRootKey{isOriginal: false, pos: use.Pos, end: end, block: use.Block}
+			vr := virtualRootKey{isOriginal: false, pos: use.Pos, end: end, block: use.Block}
+			made = append(made, vr)
+			// A root with no later use still needs a Session when a loop
+			// runs it again (see findRootsNeedingSession).
+			virtualUses[vr] = nil
 		}
 	}
 
 	return virtualUses
 }
 
+// endsImmutable reports whether the chain that vr, a virtual root, reassigns
+// already ends in a call whose result is immutable by the tracer's rule, as
+// q.Where("a").Session(&gorm.Session{}) does. A second Session after it
+// would be redundant (#202).
+func (g *Generator) endsImmutable(vr virtualRootKey) bool {
+	file := g.findFileContaining(vr.end)
+	lparen := token.NoPos
+	for c := range g.fileCursor(file).Preorder(callExprNodeTypes...) {
+		if call := c.Node().(*ast.CallExpr); call.End() == vr.end {
+			lparen = call.Lparen
+			break
+		}
+	}
+	for _, block := range vr.block.Parent().Blocks {
+		for _, instr := range block.Instrs {
+			// A statement in parentheses, (q.Where("a")), ends after its
+			// call, and leaves lparen invalid.
+			if call, ok := instr.(*ssa.Call); ok && lparen.IsValid() && call.Pos() == lparen {
+				return g.tracer.IsImmutableCall(call)
+			}
+		}
+	}
+	return false
+}
+
+// reassignmentReaches reports whether a use in block use, later in position,
+// can see a reassignment made in block def, and whether every path to it
+// passes the reassignment, so that it cannot see any earlier root. Blocks of
+// different functions, such as a use inside a closure called inline, are
+// taken in position order, so the reassignment both reaches and dominates
+// the use.
+func reassignmentReaches(a *cfg.Analyzer, def, use *ssa.BasicBlock) (reaches, dominates bool) {
+	if def == use || def.Parent() != use.Parent() {
+		return true, true
+	}
+	return a.CanReach(def, use), def.Dominates(use)
+}
+
 // findRootsNeedingSession finds the roots — the original AND reassignment-created
-// virtual roots — that still branch 2+ times after reassignment simulation and
-// therefore need a Session() to become immutable.
+// virtual roots — that still branch 2+ times on one path after reassignment
+// simulation and therefore need a Session() to become immutable.
 //
 // Emitting Session for virtual roots too is what makes a fix single-pass
 // complete (#71 defect 2): for `q := db.Where("base"); q.Where("a");
@@ -516,21 +592,95 @@ func (g *Generator) simulateReassignments(root ssa.Value, uses []pollution.Usage
 // the virtual root created at `q.Where("a")` still branches twice, so it needs
 // `.Session()` — without it, re-linting the "fixed" output still warns.
 //
+// Two uses of a root branch it when the earlier one can reach the later one
+// (see usesConflict). A reassignment does not branch the root it reads with
+// the uses after it: on a path through the reassignment those uses see the
+// new root, so `for ... { q = q.Where(x) }; q.Find(nil)` needs no Session on
+// the original root.
+//
 // The simulation orders uses by position, so it misses the uses that a loop's
 // next iteration makes of a virtual root created in the loop body. Such a root
 // always gets a Session (#199): in `for { q.Where("id").Find(nil); q = q.Where("age") }`
 // the next iteration's q.Where("id") would otherwise change it in place.
-func (g *Generator) findRootsNeedingSession(virtualUses map[virtualRootKey][]pollution.UsageInfo) []virtualRootKey {
+//
+// The path rules hold only when ordered is set, that is, when the uses are
+// every use of the root, in the function that defines it (see usesOrdered).
+// Otherwise a root gets a Session when it has a use other than the one
+// reassignment that reads it.
+func (g *Generator) findRootsNeedingSession(virtualUses map[virtualRootKey][]pollution.UsageInfo, reassigned map[token.Pos]token.Pos, ordered bool) []virtualRootKey {
 	var roots []virtualRootKey
 	cfgAnalyzer := cfg.New()
 	for root, uses := range virtualUses {
-		if len(uses) >= 2 || !root.isOriginal && inCycle(cfgAnalyzer, root.block) {
+		var needs bool
+		switch {
+		case !root.isOriginal && inCycle(cfgAnalyzer, root.block):
+			needs = true
+		case !ordered:
+			needs = len(uses) >= 2 || len(uses) == 1 && (!root.isOriginal || !reassigned[uses[0].Pos].IsValid())
+		case root.isOriginal && usedAgainInLoop(cfgAnalyzer, root.block, uses, reassigned):
+			needs = true
+		default:
+			needs = usesConflict(cfgAnalyzer, uses, reassigned)
+		}
+		if needs {
 			roots = append(roots, root)
 		}
 	}
 	// Deterministic order (map iteration is random) so edits/goldens are stable.
 	slices.SortFunc(roots, func(a, b virtualRootKey) int { return cmp.Compare(a.pos, b.pos) })
 	return roots
+}
+
+// usesConflict reports whether two of uses, which are sorted by position,
+// may both run on one path: the earlier one can reach the later one, and the
+// earlier one is not a reassignment. The uses are in one function.
+func usesConflict(a *cfg.Analyzer, uses []pollution.UsageInfo, reassigned map[token.Pos]token.Pos) bool {
+	for i, first := range uses {
+		if _, ok := reassigned[first.Pos]; ok {
+			continue
+		}
+		for _, later := range uses[i+1:] {
+			if a.CanReach(first.Block, later.Block) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// usedAgainInLoop reports whether one of uses, other than a reassignment,
+// runs again on the same value of a root defined in block def: the use is in
+// a loop that does not define the root again, as in
+// `q := db.Where("x"); for ... { q.Find(nil) }`. A reassignment reads the
+// root only on the first iteration; later ones read its result. The uses are
+// in def's function.
+func usedAgainInLoop(a *cfg.Analyzer, def *ssa.BasicBlock, uses []pollution.UsageInfo, reassigned map[token.Pos]token.Pos) bool {
+	return slices.ContainsFunc(uses, func(use pollution.UsageInfo) bool {
+		_, isReassignment := reassigned[use.Pos]
+		return !isReassignment && inCycle(a, use.Block) && !a.CanReach(use.Block, def)
+	})
+}
+
+// usesOrdered reports whether the fix sees every use of v's root, in the
+// function that defines the root, so that findRootsNeedingSession can follow
+// their paths. It does not when the root has uses that v.AllUses does not
+// list (see pollution.Violation.HiddenUses), when the reported use is not in
+// v.AllUses, as for a use through a Phi that the tracker files under another
+// of its edges, or when a use is in a closure, such as the body of a
+// range-over-func loop.
+func usesOrdered(v pollution.Violation) bool {
+	def := definitionBlock(v.Root)
+	if v.HiddenUses || def == nil {
+		return false
+	}
+	reported := false
+	for _, use := range v.AllUses {
+		if use.Block.Parent() != def.Parent() {
+			return false
+		}
+		reported = reported || use.Pos == v.Pos
+	}
+	return reported
 }
 
 // inCycle reports whether block can run again after itself, as a loop body
@@ -672,27 +822,31 @@ func (g *Generator) gormNameAt(file *ast.File, positions []token.Pos) (qualifier
 }
 
 // sessionPositionsForRoot returns where Sessions go to make root immutable.
-// For a Phi node, and for a root that is an edge of one, it returns a
-// position for each incoming edge that can take one. Otherwise it returns at
-// most one, after the call at pos.
+// For a Phi node it returns a position for each incoming edge that can take
+// one. Otherwise it returns the position after the call at pos and, for a
+// root that is an edge of a Phi, those of the Phi's other edges.
+//
+// The root's own Session is needed even when the Phi it flows into is used
+// once: the root has 2+ uses, and some of them may come before the merge, as
+// in `q := db.Where("x"); q.Find(nil); q.Count(nil); if c { q = db.Where("z") }`
+// (#202).
 func (g *Generator) sessionPositionsForRoot(pos token.Pos, root ssa.Value) []token.Pos {
 	// Check if root is a Phi node
 	if phi, isPhi := root.(*ssa.Phi); isPhi {
 		return g.phiEdgeSessionPositions(phi)
 	}
 
-	// Check if root is part of a Phi (root is an edge)
-	// Look for Phi nodes that use this root as an edge
-	if phi := g.findPhiUsingValue(root); phi != nil {
-		// This root is part of a Phi - fix all edges
-		return g.phiEdgeSessionPositions(phi)
+	var positions []token.Pos
+	if end := g.sessionEndAfterCall(pos); end.IsValid() {
+		positions = append(positions, end)
 	}
 
-	// Not related to Phi - a single Session
-	if end := g.sessionEndAfterCall(pos); end.IsValid() {
-		return []token.Pos{end}
+	// Check if root is part of a Phi (root is an edge). The other edges need
+	// a Session when the Phi's result branches.
+	if phi := g.findPhiUsingValue(root); phi != nil {
+		positions = append(positions, g.phiEdgeSessionPositions(phi)...)
 	}
-	return nil
+	return positions
 }
 
 // phiEdgeSessionPositions returns where Sessions go on the edges of a Phi

@@ -18,8 +18,9 @@ import (
 var wantComment = regexp.MustCompile(`(?m)[ \t]*// want .*$`)
 
 // TestFixesConverge is the convergence harness for #71: for each curated
-// fully-fixable fixture, it applies the suggested fixes, then RE-LINTS the fixed
-// output in a fresh GOPATH and asserts the analyzer reports nothing. This is the
+// fully-fixable fixture, it applies ONE pass of the suggested fixes, then
+// RE-LINTS the fixed output in a fresh GOPATH and asserts the analyzer reports
+// nothing, so a fix that needs a second -fix pass fails it (#202). This is the
 // check RunWithSuggestedFixes never does (it only diffs one pass against a
 // golden), which is why wrong/non-convergent fixes could hide in CI.
 //

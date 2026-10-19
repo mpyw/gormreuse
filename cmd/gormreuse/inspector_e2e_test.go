@@ -280,7 +280,7 @@ const inspectorDiff = `--- $DIR/app.go (old)
  func reassign(db *gorm.DB) {
  	q := db.Where("x")
 -	q.Where("a")
-+	q = q.Where("a").Session(&gorm.Session{})
++	q = q.Where("a")
  	q.Where("b").Find(nil)
  }
  

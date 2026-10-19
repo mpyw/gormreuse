@@ -466,7 +466,13 @@ func (h *callHandler) checkFunctionCallPollution(call *ssa.Call, ctx *Context) {
 	// Note: We don't skip gorm methods here because we need to pollute
 	// *gorm.DB arguments passed through interface{} (e.g., base.Model(q)),
 	// except the read-only ones recorded above.
-	// The receiver is already handled by recordMutableReceiver.
+	// The receiver of a gorm method, Args[0], is recorded by handle. Recording
+	// it here too gave every use a second copy, and the fix generator then
+	// counted a reassigning call as a use of the root it creates (#202).
+	firstArg := 0
+	if h.isGormDBMethodCall(call) {
+		firstArg = 1
+	}
 
 	// If the function returns *gorm.DB and result is assigned, treat like gorm method assignment.
 	// The assignment creates a new mutable root, so we shouldn't ADD pollution to args.
@@ -476,6 +482,9 @@ func (h *callHandler) checkFunctionCallPollution(call *ssa.Call, ctx *Context) {
 	returnsGormDB := typeutil.HasGormDBResult(call.Type())
 
 	for i, arg := range call.Call.Args {
+		if i < firstArg {
+			continue
+		}
 		if hasReadOnly && i >= readStart {
 			continue // read above
 		}

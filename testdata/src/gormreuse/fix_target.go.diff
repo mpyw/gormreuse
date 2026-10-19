@@ -26,7 +26,7 @@
  	return fixTargetDB.Transaction(func(tx *gorm.DB) error {
  		q := tx.Model(nil).Where("tenant = ?", 1)
 -		q.Where("active")
-+		q = q.Where("active").Session(&gorm.Session{})
++		q = q.Where("active")
  		q.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  		return nil
  	})
@@ -37,7 +37,7 @@
  	return db.Transaction(func(tx *gorm.DB) error {
  		q := tx.Model(nil).Where("tenant = ?", 1)
 -		q.Where("active")
-+		q = q.Where("active").Session(&gorm.Session{})
++		q = q.Where("active")
  		q.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  		return nil
  	})
@@ -48,7 +48,7 @@
  	t.Run("x", func(t *testing.T) {
  		q := db.Where("x").Session(&gorm.Session{}).Where("y")
 -		q.Where("active")
-+		q = q.Where("active").Session(&gorm.Session{})
++		q = q.Where("active")
  		q.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  	})
  }
@@ -59,7 +59,7 @@
  	wg.Go(func() {
  		q := db.Where("x").Session(&gorm.Session{}).Where("y")
 -		q.Where("active")
-+		q = q.Where("active").Session(&gorm.Session{})
++		q = q.Where("active")
  		q.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  	})
  	wg.Wait()
@@ -70,7 +70,7 @@
  	fmt.Println(func() {
  		q := db.Where("x").Session(&gorm.Session{}).Where("y")
 -		q.Where("active")
-+		q = q.Where("active").Session(&gorm.Session{})
++		q = q.Where("active")
  		q.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  	})
  }
@@ -131,7 +131,7 @@
  func fixTargetVarDecl(db *gorm.DB) {
  	var q = db.Where("x")
 -	q.Where("a")
-+	q = q.Where("a").Session(&gorm.Session{})
++	q = q.Where("a")
  	q.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  }
  
@@ -145,7 +145,7 @@
  		q = db.Where("y")
  	}
 -	q.Where("a")
-+	q = q.Where("a").Session(&gorm.Session{})
++	q = q.Where("a")
  	q.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  }
  
@@ -157,7 +157,7 @@
  		q = db.Where("x")
  	}
 -	q.Where("a")
-+	q = q.Where("a").Session(&gorm.Session{})
++	q = q.Where("a")
  	q.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  }
  
@@ -173,7 +173,7 @@
  		}
  	}
 -	q.Where("a")
-+	q = q.Where("a").Session(&gorm.Session{})
++	q = q.Where("a")
  	q.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  }
  

@@ -59,7 +59,7 @@ func LoopOnly(db *gorm.DB) {
 // and the fix reassigns the whole statement.
 func SessionLast(db *gorm.DB) {
 	q := db.Model(&User{}).Where("tenant_id = ?", 7)
-	q = q.Where("age > ?", 20).Session(&gorm.Session{}).Session(&gorm.Session{})
+	q = q.Where("age > ?", 20).Session(&gorm.Session{})
 	q.Where("name = ?", "x").Find(&[]User{})
 	q.Where("name = ?", "y").Find(&[]User{})
 }
@@ -95,3 +95,58 @@ func MethodValueDiscarded(db *gorm.DB) {
 	where("name = ?", "x").Find(&[]User{})
 	where("name = ?", "y").Find(&[]User{})
 }
+
+// Reassign is the README's reassignment example: the reassigned value is
+// used once, so it needs no Session (#202).
+func Reassign(db *gorm.DB) {
+	q := db.Model(&User{}).Where("tenant_id = ?", 7)
+	q = q.Where("age > ?", 20)
+	q.Where("name = ?", "x").Find(&[]User{})
+}
+
+// Combined is the README's combined example: only the first reassigned value
+// is used twice (#202).
+func Combined(db *gorm.DB) {
+	q := db.Model(&User{}).Where("tenant_id = ?", 7)
+	q = q.Where("age > ?", 20).Session(&gorm.Session{})
+	q.Where("name = ?", "x").Find(&[]User{})
+	q = q.Where("age < ?", 60)
+	q.Where("name = ?", "y").Find(&[]User{})
+}
+
+// ifWithoutElse discards a statement in an if without an else. On the path
+// that skips it, the original root is used twice, so it needs a Session as
+// well as the reassignment (#202).
+func ifWithoutElse(db *gorm.DB, c bool) {
+	q := db.Model(&User{}).Where("tenant_id = ?", 7).Session(&gorm.Session{})
+	if c {
+		q = q.Where("age > ?", 20).Session(&gorm.Session{})
+	}
+	q.Where("name = ?", "x").Find(&[]User{})
+	q.Where("name = ?", "y").Find(&[]User{})
+}
+
+// IfWithoutElseTaken runs ifWithoutElse through its if.
+func IfWithoutElseTaken(db *gorm.DB) { ifWithoutElse(db, true) }
+
+// IfWithoutElseSkipped runs ifWithoutElse past its if.
+func IfWithoutElseSkipped(db *gorm.DB) { ifWithoutElse(db, false) }
+
+// phiAfterUses uses the root twice, then merges it with another value that
+// is used once. The root needs a Session although the merge does not (#202).
+func phiAfterUses(db *gorm.DB, c bool) {
+	db = db.Session(&gorm.Session{})
+	q := db.Model(&User{}).Where("tenant_id = ?", 7).Session(&gorm.Session{})
+	q.Where("name = ?", "x").Find(&[]User{})
+	q.Where("name = ?", "y").Find(&[]User{})
+	if c {
+		q = db.Model(&User{}).Where("tenant_id = ?", 8)
+	}
+	q.Where("name = ?", "z").Find(&[]User{})
+}
+
+// PhiAfterUsesTaken runs phiAfterUses through its if.
+func PhiAfterUsesTaken(db *gorm.DB) { phiAfterUses(db, true) }
+
+// PhiAfterUsesSkipped runs phiAfterUses past its if.
+func PhiAfterUsesSkipped(db *gorm.DB) { phiAfterUses(db, false) }

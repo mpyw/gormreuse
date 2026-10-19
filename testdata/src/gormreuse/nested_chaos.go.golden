@@ -262,7 +262,7 @@ func nestedIfEarlyReturnBothLevels(db *gorm.DB, a, b, c bool) {
 // nestedIfMixedChainLevel1 demonstrates immediate chain at outer level.
 // TODO: fix generator cannot handle this (should add Session to base, but doesn't)
 func nestedIfMixedChainLevel1(db *gorm.DB, a, b bool) {
-	q := db.Where("base")
+	q := db.Where("base").Session(&gorm.Session{})
 	if a {
 		q.Where("immediate_a").Find(nil) // Immediate chain - pollutes q
 	}
@@ -499,7 +499,7 @@ func nestedIfChaosReassignmentInBranch(db *gorm.DB, a, b, c bool) {
 	q := db.Where("base")
 
 	if a {
-		q = q.Where("a")
+		q = q.Where("a").Session(&gorm.Session{})
 		q.Find(nil) // Pollutes q
 		if b {
 			q = db.Where("fresh") // Fresh instance
@@ -526,7 +526,7 @@ func chaosPolluteInNestedIf(db *gorm.DB, a, b, c bool) {
 	if a {
 		q = q.Where("a")
 		if b {
-			q = q.Where("b")
+			q = q.Where("b").Session(&gorm.Session{})
 			q.Find(nil) // Pollute q deep inside
 			if c {
 				q = q.Where("c") // want `\*gorm\.DB reused: second branch from mutable root`
@@ -575,7 +575,7 @@ func chaosPolluteThenReassign(db *gorm.DB, a, b, c bool) {
 	q := db.Where("base")
 
 	if a {
-		q = q.Where("a")
+		q = q.Where("a").Session(&gorm.Session{})
 		q.Find(nil) // Pollute
 
 		if b {
@@ -649,13 +649,13 @@ func chaosAsymmetricPollution(db *gorm.DB, a, b, c bool) {
 
 // chaosMixedPollutionAndChaining demonstrates pollution mixed with immediate chaining.
 func chaosMixedPollutionAndChaining(db *gorm.DB, a, b, c bool) {
-	q := db.Where("base")
+	q := db.Where("base").Session(&gorm.Session{})
 
 	if a {
 		q.Where("immediate1").Find(nil) // Immediate chain - pollutes q
 
 		if b {
-			q = q.Where("extend_polluted") // want `\*gorm\.DB reused: second branch from mutable root`
+			q = q.Where("extend_polluted").Session(&gorm.Session{}) // want `\*gorm\.DB reused: second branch from mutable root`
 			q.Where("immediate2").Count(nil)
 
 			if c {
@@ -725,7 +725,7 @@ func chaosConditionalReassignmentMaze(db *gorm.DB, a, b, c, d, e bool) {
 
 		if b {
 			q = db.Where("fresh_b") // Fresh
-			q = q.Where("b")
+			q = q.Where("b").Session(&gorm.Session{})
 
 			if c {
 				q.Count(nil) // Pollute fresh_b
@@ -800,14 +800,14 @@ func chaosInterwovenVariables(db *gorm.DB, a, b, c bool) {
 	q2 := db.Where("base2")
 
 	if a {
-		q1 = q1.Where("q1_a")
+		q1 = q1.Where("q1_a").Session(&gorm.Session{})
 		q1.Find(nil) // Pollute q1
 
-		q2 = q2.Where("q2_a")
+		q2 = q2.Where("q2_a").Session(&gorm.Session{})
 		q2.Count(nil) // Pollute q2
 
 		if b {
-			q1 = q1.Where("q1_b") // want `\*gorm\.DB reused: second branch from mutable root`
+			q1 = q1.Where("q1_b").Session(&gorm.Session{}) // want `\*gorm\.DB reused: second branch from mutable root`
 			q2 = q2.Where("q2_b") // want `\*gorm\.DB reused: second branch from mutable root`
 
 			if c {
@@ -849,7 +849,7 @@ func chaosVariableSwap(db *gorm.DB, a, b bool) {
 //
 //gormreuse:immutable-param
 func chaosVariableSwapConditional(db *gorm.DB, swap bool) {
-	q1 := db.Where("q1_base")
+	q1 := db.Where("q1_base").Session(&gorm.Session{})
 	q2 := db.Where("q2_base")
 
 	q1.Find(nil) // Pollute q1
@@ -976,8 +976,8 @@ func chaosModernSwapSyntax(db *gorm.DB, a bool) {
 //
 //gormreuse:immutable-param
 func chaosModernSwapConditional(db *gorm.DB, a, b bool) {
-	q1 := db.Where("q1")
-	q2 := db.Where("q2")
+	q1 := db.Where("q1").Session(&gorm.Session{})
+	q2 := db.Where("q2").Session(&gorm.Session{})
 	q3 := db.Where("q3")
 
 	q1.Find(nil) // Pollute q1
