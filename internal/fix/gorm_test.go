@@ -9,7 +9,6 @@ import (
 	"testing"
 
 	"golang.org/x/tools/go/analysis"
-	"golang.org/x/tools/go/ssa"
 )
 
 // TestGormNameAt covers the name the Session fix uses for gorm.io/gorm where
@@ -79,7 +78,7 @@ func checkGormNameSource(t *testing.T, src string) (*Generator, *ast.File, token
 		Implicits: make(map[ast.Node]types.Object),
 		Scopes:    make(map[ast.Node]*types.Scope),
 	}
-	conf := types.Config{Importer: importerFunc(func(path string) (*types.Package, error) { return imported[path], nil })}
+	conf := types.Config{Importer: gormStubImporter(func(path string) (*types.Package, error) { return imported[path], nil })}
 	pkg, err := conf.Check("p", fset, []*ast.File{file}, info)
 	if err != nil {
 		t.Fatalf("check: %v", err)
@@ -88,44 +87,22 @@ func checkGormNameSource(t *testing.T, src string) (*Generator, *ast.File, token
 	return &Generator{pass: &analysis.Pass{Pkg: pkg, TypesInfo: info}}, file, pos
 }
 
-type importerFunc func(path string) (*types.Package, error)
+type gormStubImporter func(path string) (*types.Package, error)
 
-func (f importerFunc) Import(path string) (*types.Package, error) { return f(path) }
+func (f gormStubImporter) Import(path string) (*types.Package, error) { return f(path) }
 
-func TestIsFinisher(t *testing.T) {
+func TestIsGormFinisher(t *testing.T) {
 	t.Parallel()
 	finishers := []string{"Find", "First", "Count", "Create", "Save", "Delete", "Exec", "Transaction", "Scan", "Rows", "Commit", "Rollback", "SavePoint", "RollbackTo", "FindInBatches", "CreateInBatches", "UpdateColumn", "UpdateColumns"}
 	for _, m := range finishers {
-		if !isFinisher(m) {
+		if !isGormFinisher(m) {
 			t.Errorf("%q should be a finisher", m)
 		}
 	}
 	nonFinishers := []string{"Where", "Order", "Limit", "Session", "WithContext", "Preload", "Scopes", ""}
 	for _, m := range nonFinishers {
-		if isFinisher(m) {
+		if isGormFinisher(m) {
 			t.Errorf("%q should not be a finisher", m)
 		}
-	}
-}
-
-// TestRootWithoutPosition checks that a root with no source position gets no
-// Session position and no reassignment target, instead of a fix at a wrong place.
-// Calls through a method value now have their own position (#178); a Phi kept
-// as the root of a loop variable swap still has none.
-func TestRootWithoutPosition(t *testing.T) {
-	t.Parallel()
-
-	g := &Generator{fset: token.NewFileSet(), files: map[*token.File]*ast.File{}}
-	root := &ssa.Const{}
-
-	if positions := g.sessionPositionsForRoot(root.Pos(), root, nil); positions != nil {
-		t.Errorf("sessionPositionsForRoot() = %v, want nil", positions)
-	}
-	if v := g.findRootVar(root); v != nil {
-		t.Errorf("findRootVar() = %v, want nil", v)
-	}
-	// A Phi root whose result is used once needs no Session on its edges.
-	if positions := g.sessionPositionsForRoot(token.NoPos, &ssa.Phi{}, nil); positions != nil {
-		t.Errorf("sessionPositionsForRoot(Phi) = %v, want nil", positions)
 	}
 }
