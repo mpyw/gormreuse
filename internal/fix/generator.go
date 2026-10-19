@@ -1142,8 +1142,11 @@ func phiUsedTwice(phi *ssa.Phi) bool {
 //   - the edges of a Phi that takes root, when the Phi's result is used twice;
 //   - for a variable that a closure captures, which SSA keeps in memory with
 //     no Phi, the other values stored to it whose store may run before two of
-//     uses. The tracer resolves each read of the variable to its first store
-//     (see tracer.AllocStoredValues), so uses holds every read of it.
+//     uses. The tracer resolves a read of the variable to the first store
+//     that reaches it, or that reaches the calls of the closure that reads
+//     it, and a read in a closure that may run anywhere to the first store
+//     (#251). A store before two of those reads may then add a Session that
+//     only another store's reads need, which is redundant but safe.
 //
 // So in `if c { q = db.Where("a") } else { q = db.Where("b") }` with q read
 // twice in a goroutine, both stores get a Session, not only the root's (#247).

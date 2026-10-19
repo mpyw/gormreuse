@@ -47,28 +47,52 @@ func FreeVarBinding(fv *ssa.FreeVar) ssa.Value {
 		return nil
 	}
 
-	// Find the MakeClosure instruction in the parent function
+	if mc := freeVarMakeClosure(fn); mc != nil && idx < len(mc.Bindings) {
+		return mc.Bindings[idx]
+	}
+	return nil
+}
+
+// freeVarMakeClosure returns the MakeClosure that creates fn's closure in its
+// enclosing function, or nil when fn is not a closure.
+//
+//declscope:shared // store.go finds the calls of the closure that reads a captured variable with it
+func freeVarMakeClosure(fn *ssa.Function) *ssa.MakeClosure {
 	parent := fn.Parent()
 	if parent == nil {
 		return nil
 	}
-
 	for _, block := range parent.Blocks {
 		for _, instr := range block.Instrs {
-			mc, ok := instr.(*ssa.MakeClosure)
-			if !ok {
-				continue
-			}
-			closureFn, ok := mc.Fn.(*ssa.Function)
-			if !ok || closureFn != fn {
-				continue
-			}
-			if idx < len(mc.Bindings) {
-				return mc.Bindings[idx]
+			if mc, ok := instr.(*ssa.MakeClosure); ok && mc.Fn == ssa.Value(fn) {
+				return mc
 			}
 		}
 	}
 	return nil
+}
+
+// traceFreeVarLoad traces load, a read through fv of a variable that the
+// closure captured by reference because it is reassigned. The read sees the
+// stores that reach the closure's calls (see allocReachingStoreValues), not
+// the first one (#251).
+//
+//declscope:shared // root.go's tracePointerLoad sends reads of captured variables here
+func (t *RootTracer) traceFreeVarLoad(fv *ssa.FreeVar, load ssa.Instruction, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) ssa.Value {
+	if alloc, ok := FreeVarBinding(fv).(*ssa.Alloc); ok {
+		return t.traceAllocStore(alloc, load, visited, loopInfo)
+	}
+	return t.traceFreeVar(fv, visited, loopInfo)
+}
+
+// traceAllFreeVarLoads is traceFreeVarLoad for every root.
+//
+//declscope:shared // root.go's traceAllPointerLoads sends reads of captured variables here
+func (t *RootTracer) traceAllFreeVarLoads(fv *ssa.FreeVar, load ssa.Instruction, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) []ssa.Value {
+	if alloc, ok := FreeVarBinding(fv).(*ssa.Alloc); ok {
+		return t.traceAllAllocStores(alloc, load, visited, loopInfo)
+	}
+	return t.traceAllFreeVar(fv, visited, loopInfo)
 }
 
 // traceAllFreeVar finds ALL possible roots from a captured closure variable.
