@@ -40,6 +40,7 @@ import (
 
 	"golang.org/x/tools/go/ssa"
 
+	"github.com/mpyw/gormreuse/internal/directive"
 	"github.com/mpyw/gormreuse/internal/ssa/cfg"
 	"github.com/mpyw/gormreuse/internal/ssa/pollution"
 	"github.com/mpyw/gormreuse/internal/ssa/pollutionsource"
@@ -365,7 +366,7 @@ func (h *callHandler) checkFunctionCallPollution(call *ssa.Call, ctx *Context) {
 		// (root != nil) *gorm.DB to a parameter of a function that relies on
 		// immutability — it branches the parameter — is unsafe: the callee's
 		// internal branching interferes because the value is not isolated.
-		if callee != nil && ctx.NeedsImmutableParam[callee] && (!recvArg || i != 0) {
+		if callee != nil && ctx.NeedsImmutableParam[directive.DeclaredFunc(callee)] && (!recvArg || i != 0) {
 			ctx.Tracker.AddMessageViolation(ctx.pos(call.Pos()), immutableParamContractMessage(callee))
 		}
 
@@ -385,7 +386,7 @@ func (h *callHandler) checkFunctionCallPollution(call *ssa.Call, ctx *Context) {
 func immutableParamContractMessage(callee *ssa.Function) string {
 	name := "immutable-param function"
 	if callee != nil {
-		name = callee.Name()
+		name = directive.DeclaredFunc(callee).Name()
 	}
 	return "mutable *gorm.DB passed to //gormreuse:immutable-param parameter of " + name +
 		"; isolate it with .Session(&gorm.Session{}) before passing"

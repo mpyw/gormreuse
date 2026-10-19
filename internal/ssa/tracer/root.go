@@ -191,8 +191,9 @@ func (t *RootTracer) IsPureFunction(fn *ssa.Function) bool {
 		return true
 	}
 	// A //gormreuse:pure function that failed its own contract validation is
-	// NOT trusted here: its callers must see the leak it hides.
-	if t.failedPure[fn] {
+	// NOT trusted here: its callers must see the leak it hides. failedPure is
+	// keyed by the declared function, and fn may be an instance of it (#180).
+	if t.failedPure[directive.DeclaredFunc(fn)] {
 		return false
 	}
 	return t.pureFuncs.Contains(fn)
@@ -1815,7 +1816,7 @@ func (r *scopesCallbackResolver) addFunc(v ssa.Value) {
 
 	switch x := v.(type) {
 	case *ssa.Function:
-		r.set[x] = true
+		r.set[directive.DeclaredFunc(x)] = true
 	case *ssa.MakeClosure:
 		fn, ok := x.Fn.(*ssa.Function)
 		if !ok {
@@ -1823,10 +1824,8 @@ func (r *scopesCallbackResolver) addFunc(v ssa.Value) {
 		}
 		r.set[fn] = true
 		// A method value is a closure over a synthetic $bound wrapper; the
-		// method itself receives the *gorm.DB, so it is a callback too.
-		if target := boundMethodTarget(fn); target != nil {
-			r.set[target] = true
-		}
+		// declared method receives the *gorm.DB, so it is a callback too (#180).
+		r.set[directive.DeclaredFunc(fn)] = true
 	case *ssa.MakeInterface:
 		r.addFunc(x.X)
 	case *ssa.ChangeType:
@@ -1883,24 +1882,6 @@ func (r *scopesCallbackResolver) globalStoredValues(g *ssa.Global) []ssa.Value {
 		})
 	}
 	return r.globalStores[g]
-}
-
-// boundMethodTarget returns the method that a synthetic $bound wrapper (built
-// for a method value such as `r.scope`) calls, or nil if fn is not one.
-func boundMethodTarget(fn *ssa.Function) *ssa.Function {
-	if fn.Synthetic == "" || len(fn.FreeVars) != 1 || fn.Object() == nil {
-		return nil
-	}
-	for _, block := range fn.Blocks {
-		for _, instr := range block.Instrs {
-			if call, ok := instr.(*ssa.Call); ok {
-				if callee := call.Call.StaticCallee(); callee != nil && callee.Object() == fn.Object() {
-					return callee
-				}
-			}
-		}
-	}
-	return nil
 }
 
 // isScopesOrPreloadMethod reports whether callee is gorm's Scopes or Preload
@@ -1961,15 +1942,16 @@ func isImmutableCallbackMethod(callee *ssa.Function) bool {
 // callbackFuncValue extracts the concrete function from a value stored into a
 // Scopes/Preload varargs slot: a MakeClosure (capturing closure), a bare
 // *ssa.Function (named function reference), or either boxed in an interface
-// (Preload's args are ...interface{}).
+// (Preload's args are ...interface{}). A generic instance or a bound method
+// wrapper is mapped to the function whose body receives the argument (#180).
 func callbackFuncValue(v ssa.Value) *ssa.Function {
 	switch x := v.(type) {
 	case *ssa.MakeClosure:
 		if fn, ok := x.Fn.(*ssa.Function); ok {
-			return fn
+			return directive.DeclaredFunc(fn)
 		}
 	case *ssa.Function:
-		return x
+		return directive.DeclaredFunc(x)
 	case *ssa.MakeInterface:
 		return callbackFuncValue(x.X)
 	}

@@ -130,21 +130,18 @@ func (s *DirectiveFuncSet) IsUsed(pos token.Pos) bool {
 }
 
 // Contains checks if the given SSA function is in the set or has the directive.
+// fn may be a generic instance or a bound method wrapper (see DeclaredFunc).
 func (s *DirectiveFuncSet) Contains(fn *ssa.Function) bool {
 	if fn == nil {
 		return false
 	}
+	// A generic instance or a bound method wrapper carries the directive of
+	// the function it stands for (#180).
+	fn = DeclaredFunc(fn)
 
 	// First, check the pre-built set (for current package)
 	if s != nil && s.known != nil {
-		key := FuncKey{FuncName: fn.Name()}
-		if fn.Pkg != nil && fn.Pkg.Pkg != nil {
-			key.PkgPath = fn.Pkg.Pkg.Path()
-		}
-		if sig := fn.Signature; sig != nil && sig.Recv() != nil {
-			key.ReceiverType = receiverTypeString(sig.Recv().Type())
-		}
-		if _, exists := s.known[key]; exists {
+		if _, exists := s.known[funcKeyOf(fn)]; exists {
 			return true
 		}
 	}

@@ -398,6 +398,8 @@ Only `//gormreuse:name[,name...]` is a directive: a line comment, lowercase name
 
 The names are `ignore`, `pure`, `immutable-return`, `immutable-param` and `immutable-input(name)`.
 
+A directive on a generic function or method applies to every instance of it (`helper[int](q)`). A directive on a method also applies when the method is called through a method value (`f := r.helper; f(q)`).
+
 > [!WARNING]
 > Any other comment that starts with `gormreuse:` has no effect, and is reported with how to write it. One unknown name in a list drops the whole comment: `//gormreuse:pure,bogus` does not mark the function pure.
 
