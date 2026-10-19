@@ -8,8 +8,10 @@ on:
         required: true
         type: string
 
+# actions: read is for tag.yml, which checks CI on the commit before tagging.
 permissions:
   contents: write
+  actions: read
 
 jobs:
   tag:

@@ -7,6 +7,13 @@ run:
 
 linters:
   default: standard
+  # Same enable list as the root config: without it the complexity thresholds
+  # below are dead settings under golangci-lint v2's default: standard (#77).
+  enable:
+    - cyclop
+    - funlen
+    - gocognit
+    - modernize
   settings:
     cyclop:
       max-complexity: 30

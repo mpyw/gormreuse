@@ -14,8 +14,12 @@ on:
         required: true
         type: string
 
+# actions: read lets the job look up the CI runs of the commit it tags. A
+# caller (tag_and_release.yml) must grant it too: a called workflow cannot get
+# more permissions than its caller has.
 permissions:
   contents: write
+  actions: read
 
 jobs:
   tag:
@@ -33,9 +37,36 @@ jobs:
           echo "Version format valid: $VERSION"
 
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+
+      # A tag publishes a release, so the commit must already be on main and
+      # must have passed CI there. Dispatching from another branch, or before
+      # CI on main has passed, fails here instead of releasing untested code.
+      - name: Check commit is on main
+        env:
+          SHA: ${{ github.sha }}
+        run: |
+          if ! git merge-base --is-ancestor "$SHA" origin/main; then
+            echo "Error: commit $SHA is not on main"
+            echo "Dispatch this workflow from main."
+            exit 1
+          fi
+          echo "Commit is on main: $SHA"
+
+      - name: Check CI succeeded on the commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+        run: |
+          count=$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${SHA}&branch=main&event=push&status=success" --jq '.total_count')
+          if [ "$count" -eq 0 ]; then
+            echo "Error: no successful CI run on main for commit $SHA"
+            echo "Wait for CI on main to pass, then dispatch again."
+            exit 1
+          fi
+          echo "CI succeeded on main for commit $SHA"
 
       - name: Check tag does not exist
         env:
@@ -50,9 +81,10 @@ jobs:
       - name: Create and push tag
         env:
           VERSION: ${{ inputs.version }}
+          SHA: ${{ github.sha }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag "$VERSION"
+          git tag "$VERSION" "$SHA"
           git push origin "$VERSION"
           echo "Tag '$VERSION' created and pushed successfully"
