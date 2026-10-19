@@ -1,6 +1,6 @@
 --- evil.go	1970-01-01 00:00:00
 +++ evil.go.golden	1970-01-01 00:00:00
-@@ -1,3238 +1,3238 @@
+@@ -1,3236 +1,3236 @@
  package internal
  
  import "gorm.io/gorm"
@@ -290,7 +290,7 @@
  	// Defer is processed in second pass, after q.Find pollutes q
  	defer q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  
- 	q.Find(nil) // LIMITATION: Not detected (defer executes after, but q.Find is first in code order)
+ 	q.Find(nil) // OK: runs before the deferred call, which is the second branch
  }
  
  // deferFunctionCallWithDB demonstrates defer with function call passing *gorm.DB.
@@ -721,7 +721,7 @@
  	defer q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  	defer q.First(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  
- 	q.Find(nil) // LIMITATION: Not detected (defers execute after, but q.Find is first in code order)
+ 	q.Find(nil) // OK: runs before the deferred calls, which are the later branches
  }
  
  // =============================================================================
@@ -1435,7 +1435,7 @@
  		defer q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  	}
  
- 	q.Find(nil) // LIMITATION: Not detected (conditional defer)
+ 	q.Find(nil) // OK: runs before the deferred calls
  }
  
  // deferInsideIfElse demonstrates defer inside if-else.
@@ -1478,7 +1478,7 @@
  		defer q.First(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  	}
  
- 	q.Find(nil) // LIMITATION: Not detected (conditional defer)
+ 	q.Find(nil) // OK: runs before the deferred calls
  }
  
  // =============================================================================
@@ -1495,7 +1495,7 @@
  		defer q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  	}
  
- 	q.Find(nil) // LIMITATION: Not detected (defer inside loop)
+ 	q.Find(nil) // OK: runs before the deferred calls
  }
  
  // deferInsideForWithCondition demonstrates defer inside for with condition.
@@ -1571,7 +1571,7 @@
  
  	defer func() {
  		if flag {
- 			q.Count(nil) // LIMITATION: Not detected (inside defer closure with condition)
+ 			q.Count(nil) // [LIMITATION] runs last, but q.Find below is reported
  		}
  	}()
  
@@ -1585,9 +1585,9 @@
  
  	defer func() {
  		if flag {
- 			q.Count(nil) // LIMITATION: Not detected (inside defer closure with condition)
+ 			q.Count(nil) // [LIMITATION] runs last, but q.Find below is reported
  		} else {
- 			q.First(nil) // LIMITATION: Not detected (inside defer closure with condition)
+ 			q.First(nil) // [LIMITATION] runs last, but q.Find below is reported
  		}
  	}()
  
@@ -1602,9 +1602,9 @@
  	defer func() {
  		if a {
  			if b {
- 				q.Count(nil) // LIMITATION: Not detected (nested if inside defer)
+ 				q.Count(nil) // [LIMITATION] runs last, but q.Find below is reported
  			} else {
- 				q.First(nil) // LIMITATION: Not detected (nested if inside defer)
+ 				q.First(nil) // [LIMITATION] runs last, but q.Find below is reported
  			}
  		}
  	}()
@@ -1973,7 +1973,7 @@
  	}
  
  	for _, f := range funcs {
- 		f() // LIMITATION: Not detected (closure invocation in loop)
+ 		f() // [LIMITATION] FALSE NEGATIVE: each call branches q again
  	}
  }
  
@@ -1985,7 +1985,7 @@
  	for _, item := range items {
  		item := item // Capture
  		defer func() {
- 			q.Where("item = ?", item).Count(nil) // LIMITATION: Not detected (defer in loop with captured var)
+ 			q.Where("item = ?", item).Count(nil) // [LIMITATION] runs last, but q.Find below is reported
  		}()
  	}
  
@@ -2003,7 +2003,7 @@
  
  	defer func() {
  		defer func() {
- 			q.Count(nil) // LIMITATION: Not detected (nested defer closure)
+ 			q.Count(nil) // [LIMITATION] runs last, but q.Find below is reported
  		}()
  	}()
  
@@ -2018,7 +2018,7 @@
  	defer func() {
  		defer func() {
  			defer func() {
- 				q.Count(nil) // LIMITATION: Not detected (triple nested defer closure)
+ 				q.Count(nil) // [LIMITATION] runs last, but q.Find below is reported
  			}()
  		}()
  	}()
@@ -2034,7 +2034,7 @@
  	defer func() {
  		for i := 0; i < 2; i++ {
  			defer func(n int) {
- 				q.Where("n = ?", n).Count(nil) // LIMITATION: Not detected (defer in loop inside defer closure)
+ 				q.Where("n = ?", n).Count(nil) // [LIMITATION] runs last, but q.Find below is reported
  			}(i)
  		}
  	}()
@@ -2111,7 +2111,7 @@
  					for _, i := range inner {
  						defer func(x int, y string) {
  							if b {
- 								q.Where("x = ? AND y = ?", x, y).Count(nil) // LIMITATION: Not detected (deeply nested defer)
+ 								q.Where("x = ? AND y = ?", x, y).Count(nil) // [LIMITATION] runs last, but q.Find below is reported
  							}
  						}(o, i)
  					}
@@ -2211,8 +2211,8 @@
  }
  
  // structFieldIIFE demonstrates struct field access with IIFE.
- // [LIMITATION] Struct field tracing: h.query.Find doesn't trace back through struct field to original q.
- // The IIFE's internal q.Where pollutes q, and q.Count is a separate use of q, so it's detected.
+ // The IIFE's q.Where is the first branch of q, and h.query continues that
+ // chain. q.Count is a second branch of q.
  func structFieldIIFE(db *gorm.DB) {
 -	q := db.Where("x = ?", 1)
 +	q := db.Where("x = ?", 1).Session(&gorm.Session{})
@@ -2224,7 +2224,7 @@
  		}(),
  	}
  
- 	h.query.Find(nil) // [LIMITATION] Does not trace through struct field
+ 	h.query.Find(nil) // OK: continues the IIFE's chain
  
  	// Second use of q - violation (q was polluted by IIFE's internal call)
  	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
@@ -2390,19 +2390,17 @@
  }
  
  // storedClosureReordered demonstrates order of calls with stored closure.
- // [LIMITATION] SSA processing order differs from runtime order.
- // At analysis time, closure body is processed first (q1.Where("from closure") is non-terminal),
- // then q1.Where("z") is first terminal use, then q2.Where("y") is second terminal use.
- // Ideally q1.Where("z") would be the violation, but current implementation reports on q2.Where("y").
+ // The closure's use of q1 is ordered at its single call site, fn() (#68), so
+ // q1.Where("z") is the second branch and q2.Where("y") continues fn's chain.
  func storedClosureReordered(db *gorm.DB) {
  	q1 := db.Where("x", 1)
  
  	fn := func() *gorm.DB {
- 		return q1.Where("from closure", 1) // Pollutes q1 (closure body processed first in SSA)
+ 		return q1.Where("from closure", 1) // First branch of q1, at fn()
  	}
  	q2 := fn()
  	q1.Where("z", 3) // want `\*gorm\.DB reused: second branch from mutable root`
- 	q2.Where("y", 2) // OK: q2 is fresh root
+ 	q2.Where("y", 2) // OK: continues fn's chain
  }
  
  // iifeStoredResult demonstrates IIFE result stored in variable.
