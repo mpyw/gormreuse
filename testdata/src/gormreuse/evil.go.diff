@@ -3183,8 +3183,9 @@
  // where both branches assign polluted values.
  //gormreuse:immutable-param
  func conditionalFieldAssignBothPolluted(db *gorm.DB, cond bool) {
- 	q1 := db.Where("a")
+-	q1 := db.Where("a")
 -	q2 := db.Where("b")
++	q1 := db.Where("a").Session(&gorm.Session{})
 +	q2 := db.Where("b").Session(&gorm.Session{})
  	q1.Find(nil) // Pollute q1
  	q2.Find(nil) // Pollute q2

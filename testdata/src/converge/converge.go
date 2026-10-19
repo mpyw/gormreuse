@@ -71,3 +71,18 @@ func paramReuse(db *gorm.DB) {
 	db.Where("a").Find(&User{})
 	db.Where("b").Find(&User{}) // want `\*gorm\.DB reused: second branch from mutable root`
 }
+
+func takeBoth(a, b *gorm.DB) {}
+
+// sharedReusePos: q and r are both reused at one call, which gets a single
+// diagnostic. It must carry the fix of both roots, or re-linting still warns
+// about r (#184). immutable-param keeps db off the root set.
+//
+//gormreuse:immutable-param
+func sharedReusePos(db *gorm.DB) {
+	q := db.Where("a")
+	r := db.Where("b")
+	q.Find(&User{})
+	r.Find(&User{})
+	takeBoth(q, r) // want `\*gorm\.DB reused: second branch from mutable root`
+}

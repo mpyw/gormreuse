@@ -228,6 +228,8 @@ q.Where("d").Find(nil)
 > [!TIP]
 > The fix generator intelligently determines which strategy to apply. Run `gormreuse -fix ./...` to automatically repair all violations in your codebase.
 
+When several roots are reused at the same place, such as `use(q, r)`, that place gets one diagnostic. Its message names the root that appears first in the source, and its fix covers every root reused there. The output is the same on every run.
+
 ## Detection Model: Mutable Branching
 
 This linter detects when a **mutable [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) branches into multiple code paths**. The core concept:
