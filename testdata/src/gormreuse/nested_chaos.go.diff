@@ -629,7 +629,8 @@
  
  		if b {
  			q = db.Where("fresh1") // Fresh start
- 			q = q.Where("b")
+-			q = q.Where("b")
++			q = q.Where("b").Session(&gorm.Session{})
  			q.Count(nil) // Pollute fresh1
  
  			if c {
@@ -923,8 +924,9 @@
  //gormreuse:immutable-param
  func chaosVariableSwapConditional(db *gorm.DB, swap bool) {
 -	q1 := db.Where("q1_base")
+-	q2 := db.Where("q2_base")
 +	q1 := db.Where("q1_base").Session(&gorm.Session{})
- 	q2 := db.Where("q2_base")
++	q2 := db.Where("q2_base").Session(&gorm.Session{})
  
  	q1.Find(nil) // Pollute q1
  
@@ -995,9 +997,10 @@
  func chaosMultipleSwaps(db *gorm.DB, a, b, c bool) {
 -	q1 := db.Where("q1")
 -	q2 := db.Where("q2")
+-	q3 := db.Where("q3")
 +	q1 := db.Where("q1").Session(&gorm.Session{})
 +	q2 := db.Where("q2").Session(&gorm.Session{})
- 	q3 := db.Where("q3")
++	q3 := db.Where("q3").Session(&gorm.Session{})
  
  	q1.Find(nil) // Pollute q1
  
@@ -1058,9 +1061,10 @@
  func chaosModernSwapConditional(db *gorm.DB, a, b bool) {
 -	q1 := db.Where("q1")
 -	q2 := db.Where("q2")
+-	q3 := db.Where("q3")
 +	q1 := db.Where("q1").Session(&gorm.Session{})
 +	q2 := db.Where("q2").Session(&gorm.Session{})
- 	q3 := db.Where("q3")
++	q3 := db.Where("q3").Session(&gorm.Session{})
  
  	q1.Find(nil) // Pollute q1
  

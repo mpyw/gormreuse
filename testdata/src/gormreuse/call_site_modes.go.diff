@@ -1,0 +1,349 @@
+--- call_site_modes.go	1970-01-01 00:00:00
++++ call_site_modes.go.golden	1970-01-01 00:00:00
+@@ -1,335 +1,335 @@
+ package internal
+ 
+ import "gorm.io/gorm"
+ 
+ // =============================================================================
+ // One handler for every call site (#254, #252)
+ //
+ // A call, a go statement and a defer statement are handled the same way,
+ // whether the function is named directly or through a method value. The mode
+ // only decides when the call runs: a plain call is ordered with the other
+ // uses, a spawned or deferred call is checked against every other use.
+ // =============================================================================
+ 
+ // --- A call through a method value can reassign the variable (#254) ---
+ 
+ func siteBoundConditionalReassign(db *gorm.DB, c bool) {
+ 	q := db.Where("x")
+ 	if c {
+ 		w := q.Where
+ 		q = w("a")
+ 	}
+ 	q.Find(nil) // OK: w("a") reassigns q
+ }
+ 
+ func siteBoundLoopReassign(db *gorm.DB, cs []string) {
+ 	q := db.Where("x")
+ 	for _, c := range cs {
+ 		w := q.Where
+ 		q = w(c)
+ 	}
+ 	q.Find(nil) // OK: w(c) reassigns q on each iteration
+ }
+ 
+ func siteBoundDerivedNotReassign(db *gorm.DB, c bool) {
+-	q := db.Where("x")
++	q := db.Where("x").Session(&gorm.Session{})
+ 	var q2 *gorm.DB
+ 	if c {
+ 		w := q.Where
+ 		q2 = w("a")
+ 	}
+ 	_ = q2
+ 	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // --- go / defer through a method value (#254) ---
+ 
+ func siteBoundDefer(db *gorm.DB) {
+-	q := db.Where("x")
++	q := db.Where("x").Session(&gorm.Session{})
+ 	f := q.Find
+ 	defer f(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ 	q.Count(nil)
+ }
+ 
+ func siteBoundDeferTwice(db *gorm.DB) {
+ 	q := db.Where("x")
+ 	f := q.Find
+ 	defer f(nil)
+ 	defer f(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ func siteBoundGo(db *gorm.DB) {
+-	q := db.Where("x")
++	q := db.Where("x").Session(&gorm.Session{})
+ 	q.Count(nil)
+ 	f := q.Find
+ 	go f(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ func siteBoundDeferOnce(db *gorm.DB) {
+ 	q := db.Where("x")
+ 	f := q.Find
+ 	defer f(nil) // OK: the only use of q
+ }
+ 
+ func siteBoundDeferSession(db *gorm.DB) {
+ 	q := db.Where("x")
+ 	s := q.Session
+ 	defer s(&gorm.Session{})
+ 	defer s(&gorm.Session{}) // OK: Session does not change q
+ }
+ 
+ func siteBoundDeferSessionAfterBranch(db *gorm.DB) {
+-	q := db.Where("x")
++	q := db.Where("x").Session(&gorm.Session{})
+ 	s := q.Session
+ 	defer s(&gorm.Session{}) // want `\*gorm\.DB reused: second branch from mutable root`
+ 	q.Find(nil)
+ }
+ 
+ // --- go / defer of a pure function (#254) ---
+ 
+ //gormreuse:pure
+ func siteReadsOnly(db *gorm.DB) {
+ 	_ = db
+ }
+ 
+ func siteDeferPure(db *gorm.DB) {
+ 	q := db.Where("x")
+ 	defer siteReadsOnly(q) // OK: a pure function does not change q
+ 	q.Find(nil)
+ }
+ 
+ func siteGoPure(db *gorm.DB) {
+ 	q := db.Where("x")
+ 	q.Find(nil)
+ 	go siteReadsOnly(q) // OK: a pure function does not change q
+ }
+ 
+ // --- go / defer of a boxed or untyped argument (#254) ---
+ 
+ func siteTakesAny(v any) {
+ 	_ = v
+ }
+ 
+ func siteDeferBoxed(db *gorm.DB) {
+-	q := db.Where("x")
++	q := db.Where("x").Session(&gorm.Session{})
+ 	q.Find(nil)
+ 	defer siteTakesAny(q) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ func siteGoBoxed(db *gorm.DB) {
+ 	q := db.Where("x")
+ 	q.Find(nil)
+ 	go siteTakesAny(q) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ func siteGoFuncValue(db *gorm.DB, fn func(*gorm.DB)) {
+ 	q := db.Where("x")
+ 	q.Find(nil)
+ 	go fn(q) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ func siteDeferModelArg(db *gorm.DB) {
+ 	db = db.Session(&gorm.Session{})
+-	q := db.Where("x")
++	q := db.Where("x").Session(&gorm.Session{})
+ 	q.Find(nil)
+ 	defer db.Model(q) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // --- go / defer of a read-only argument (#254) ---
+ 
+ func siteDeferSubqueryRead(db *gorm.DB) {
+ 	db = db.Session(&gorm.Session{})
+ 	sub := db.Model(&User{}).Select("id")
+ 	defer db.Find(&[]User{}, "id IN (?)", sub)
+ 	defer db.Find(&[]User{}, "id NOT IN (?)", sub) // OK: sub is only read
+ }
+ 
+ func siteDeferSubqueryAfterBranch(db *gorm.DB) {
+ 	db = db.Session(&gorm.Session{})
+-	sub := db.Model(&User{}).Select("id")
++	sub := db.Model(&User{}).Select("id").Session(&gorm.Session{})
+ 	defer db.Find(&[]User{}, "id IN (?)", sub) // want `\*gorm\.DB reused: second branch from mutable root`
+ 	sub.Where("age > 1").Find(&[]User{})
+ }
+ 
+ func siteGoSubqueryRead(db *gorm.DB) {
+ 	db = db.Session(&gorm.Session{})
+ 	sub := db.Model(&User{}).Select("id")
+ 	go db.Find(&[]User{}, "id IN (?)", sub)
+ 	db.Where("id IN (?)", sub).Find(&[]User{}) // OK: sub is only read
+ }
+ 
+ // --- go / defer of a Session copy ---
+ 
+ func siteDeferSessionCopyAfterBranch(db *gorm.DB) {
+ 	q := db.Session(&gorm.Session{}).Model(&User{}).Where("tenant = 1")
+ 	countQ := q.Session(&gorm.Session{})
+ 	q.Where("active = 1").Find(&[]User{})
+ 	defer countQ.Count(new(int64)) // want `\*gorm\.DB reused: Session/Debug copy shares the Statement of a mutable root`
+ }
+ 
+ func siteGoSessionCopyArgAfterBranch(db *gorm.DB, fn func(*gorm.DB)) {
+ 	q := db.Session(&gorm.Session{}).Model(&User{}).Where("tenant = 1")
+ 	countQ := q.Session(&gorm.Session{})
+ 	q.Where("active = 1").Find(&[]User{})
+ 	go fn(countQ) // want `\*gorm\.DB reused: Session/Debug copy shares the Statement of a mutable root`
+ }
+ 
+ func siteDeferOuterChainAfterSubqueryBranch(db *gorm.DB) {
+ 	db = db.Session(&gorm.Session{})
+ 	sub := db.Model(&User{}).Select("id")
+ 	x := db.Where("id IN (?)", sub)
+ 	sub.Where("age > 1").Find(&[]User{})
+ 	defer x.Find(&[]User{}) // want `\*gorm\.DB reused: mutable root passed as a query argument`
+ }
+ 
+ // [LIMITATION] siteDeferSessionCopyBranchAfterDefer: the deferred call runs
+ // after q.Where, but a use of a copy is ordered by its position.
+ func siteDeferSessionCopyBranchAfterDefer(db *gorm.DB) {
+ 	q := db.Session(&gorm.Session{}).Model(&User{}).Where("tenant = 1")
+ 	countQ := q.Session(&gorm.Session{})
+ 	defer countQ.Count(new(int64))
+ 	q.Where("active = 1").Find(&[]User{})
+ }
+ 
+ // --- go / defer in a loop ---
+ 
+ func siteGoInLoop(db *gorm.DB, items []int) {
+ 	q := db.Where("x")
+ 	for range items {
+ 		go q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ 	}
+ }
+ 
+ func siteDeferInLoop(db *gorm.DB, items []int) {
+ 	q := db.Where("x")
+ 	for range items {
+ 		defer q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ 	}
+ }
+ 
+ func siteArgInLoop(db *gorm.DB, items []int) {
+ 	q := db.Where("x")
+ 	for range items {
+ 		siteTakesAny(q) // want `\*gorm\.DB reused: second branch from mutable root`
+ 	}
+ }
+ 
+ func siteArgReassignedInLoop(db *gorm.DB, items []int) {
+ 	q := db.Where("x")
+ 	for range items {
+ 		q = siteRebuild(q) // OK: q is reassigned on each iteration
+ 	}
+ 	q.Find(nil)
+ }
+ 
+ func siteRebuild(db *gorm.DB) *gorm.DB {
+ 	return db.Where("y")
+ }
+ 
+ func siteGoInLoopFresh(db *gorm.DB, items []int) {
+ 	db = db.Session(&gorm.Session{})
+ 	for range items {
+ 		q := db.Where("x")
+ 		go q.Find(nil) // OK: q is new on each iteration
+ 	}
+ }
+ 
+ // --- A variable that may hold one of two roots (#252) ---
+ 
+ func sitePhiFirstRootReused(db *gorm.DB, c bool) {
+ 	db = db.Session(&gorm.Session{})
+ 	a := db.Where("a")
+-	b := db.Where("b")
++	b := db.Where("b").Session(&gorm.Session{})
+ 	q := b
+ 	if c {
+ 		q = a
+ 	}
+ 	q.Find(nil)
+ 	b.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ func sitePhiSecondRootReused(db *gorm.DB, c bool) {
+ 	db = db.Session(&gorm.Session{})
+-	a := db.Where("a")
++	a := db.Where("a").Session(&gorm.Session{})
+ 	b := db.Where("b")
+ 	q := b
+ 	if c {
+ 		q = a
+ 	}
+ 	q.Find(nil)
+ 	a.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ func sitePhiSecondRootReusedByArg(db *gorm.DB, c bool) {
+ 	db = db.Session(&gorm.Session{})
+-	a := db.Where("a")
++	a := db.Where("a").Session(&gorm.Session{})
+ 	b := db.Where("b")
+ 	q := b
+ 	if c {
+ 		q = a
+ 	}
+ 	siteTakesAny(q)
+ 	a.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ func sitePhiSecondRootReusedByBound(db *gorm.DB, c bool) {
+ 	db = db.Session(&gorm.Session{})
+-	a := db.Where("a")
++	a := db.Where("a").Session(&gorm.Session{})
+ 	b := db.Where("b")
+ 	q := b
+ 	if c {
+ 		q = a
+ 	}
+ 	f := q.Find
+ 	f(nil)
+ 	a.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ func sitePhiSecondRootReusedByDefer(db *gorm.DB, c bool) {
+ 	db = db.Session(&gorm.Session{})
+ 	a := db.Where("a")
+ 	b := db.Where("b")
+ 	q := b
+ 	if c {
+ 		q = a
+ 	}
+ 	defer q.Find(nil)
+ 	defer a.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ func sitePhiSecondRootReusedByGo(db *gorm.DB, c bool) {
+ 	db = db.Session(&gorm.Session{})
+ 	a := db.Where("a")
+ 	b := db.Where("b")
+ 	q := b
+ 	if c {
+ 		q = a
+ 	}
+ 	q.Find(nil)
+ 	go a.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ func sitePhiEachRootOnce(db *gorm.DB, c bool) {
+ 	db = db.Session(&gorm.Session{})
+ 	a := db.Where("a")
+ 	b := db.Where("b")
+ 	q := b
+ 	if c {
+ 		q = a
+ 	}
+ 	q.Find(nil) // OK: one use of whichever root q holds
+ }
+ 
+ func sitePhiReassigned(db *gorm.DB, c, d bool) {
+ 	db = db.Session(&gorm.Session{})
+ 	a := db.Where("a")
+ 	b := db.Where("b")
+ 	q := b
+ 	if c {
+ 		q = a
+ 	}
+ 	if d {
+ 		q = q.Where("c")
+ 	}
+ 	q.Find(nil) // OK: q.Where("c") reassigns q
+ }

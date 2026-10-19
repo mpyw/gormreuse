@@ -385,13 +385,16 @@ func isReadOnlyUse(v ssa.Value, instr ssa.Instruction) bool {
 	switch u := instr.(type) {
 	case *ssa.MakeInterface:
 		return isReadOnlyValue(u)
-	case *ssa.Call:
+	case ssa.CallInstruction:
+		// A go or defer statement reads the argument when the call runs, as
+		// a plain call does. Only a plain call has a result to wrap it in.
 		site := callsite.SiteOf(u, nil)
 		if first, ok := readOnlyArgStart(site); ok {
 			return slices.Index(site.Args, v) >= first
 		}
+		call, isCall := u.(*ssa.Call)
 		first, ok := wrapperArgStart(site)
-		return ok && slices.Index(site.Args, v) >= first && isReadOnlyValue(u)
+		return isCall && ok && slices.Index(site.Args, v) >= first && isReadOnlyValue(call)
 	case *ssa.Store:
 		// v is u.Val: a store into v is fillsLocal.
 		switch addr := u.Addr.(type) {

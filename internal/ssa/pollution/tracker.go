@@ -54,7 +54,8 @@ type Violation struct {
 
 	// HiddenUses is set when the root has uses that AllUses does not list:
 	// deferred or spawned calls, reads through a Session/Debug copy or a
-	// read-only argument, and loop-carried reads. The fix cannot order them,
+	// read-only argument, loop-carried reads, and branches through a merge
+	// that may hold the root (#252). The fix cannot order them,
 	// so it cannot prove that a Session is redundant (#202).
 	HiddenUses bool
 
@@ -96,6 +97,15 @@ type aliasUse struct {
 	UsageInfo
 	copyPos  token.Pos
 	argument bool
+}
+
+// mayUse is a branch made through a value that may hold the root, but that
+// the tracer resolves to another root first (see the mayUses field doc).
+// ordered is set for a plain call, whose position orders it with the other
+// uses; it is clear for a go or defer statement.
+type mayUse struct {
+	UsageInfo
+	ordered bool
 }
 
 // Tracker tracks pollution state of mutable *gorm.DB roots.
@@ -146,6 +156,16 @@ type Tracker struct {
 	// their positions, so DetectViolations checks these by reachability alone.
 	loopCarriedUses map[ssa.Value][]UsageInfo
 
+	// mayUses maps roots to branches made through a merge that may hold the
+	// root but resolves to another one first (#252): after
+	// `q := b; if c { q = a }`, q.Find(nil) is a branch of b, and of a when c
+	// holds. The uses of the other root are filed under b, so a later
+	// a.Find(nil) would see no earlier branch of a. A may use is checked only
+	// against the root's own uses, never against another may use: two values
+	// that may each hold the root can be exclusive, as the variables of a swap
+	// in a loop are.
+	mayUses map[ssa.Value][]mayUse
+
 	// violations tracks detected violations.
 	violations []Violation
 
@@ -179,6 +199,7 @@ func New(cfgAnalyzer CFGAnalyzer, fset *token.FileSet) *Tracker {
 		branchUses:      make(map[ssa.Value][]UsageInfo),
 		aliasUses:       make(map[ssa.Value][]aliasUse),
 		loopCarriedUses: make(map[ssa.Value][]UsageInfo),
+		mayUses:         make(map[ssa.Value][]mayUse),
 		cfgAnalyzer:     cfgAnalyzer,
 		fset:            fset,
 		invocationSites: make(map[*ssa.Function]*ssa.BasicBlock),
@@ -235,6 +256,26 @@ func (t *Tracker) RecordAliasUse(root ssa.Value, copyPos token.Pos, argument boo
 // pollute. Caller must ensure root is not nil.
 func (t *Tracker) RecordLoopCarriedUse(root ssa.Value, block *ssa.BasicBlock, pos token.Pos) {
 	t.loopCarriedUses[root] = append(t.loopCarriedUses[root], UsageInfo{Block: block, Pos: pos})
+}
+
+// RecordMayBranch records a branch, at use, of a root that the branched value
+// may hold besides the one it resolves to (see the mayUses field doc). ordered
+// is set for a plain call, and clear for a go or defer statement, whose uses
+// are not ordered by position. Caller must ensure root is not nil.
+func (t *Tracker) RecordMayBranch(root ssa.Value, use UsageInfo, ordered bool) {
+	t.mayUses[root] = append(t.mayUses[root], mayUse{UsageInfo: use, ordered: ordered})
+}
+
+// IsMayBranchedAt reports whether a branch recorded by RecordMayBranch can
+// reach the target block.
+func (t *Tracker) IsMayBranchedAt(root ssa.Value, targetBlock *ssa.BasicBlock) bool {
+	return slices.ContainsFunc(t.mayUses[root], func(use mayUse) bool { return t.isReachable(use.Block, targetBlock) })
+}
+
+// IsMayBranchedAnywhere reports whether RecordMayBranch recorded any branch
+// of root (for defer).
+func (t *Tracker) IsMayBranchedAnywhere(root ssa.Value) bool {
+	return len(t.mayUses[root]) > 0
 }
 
 // IsPollutedAt checks if a root has polluting usage that can reach the target block.
@@ -300,6 +341,22 @@ func (t *Tracker) DetectViolations() {
 			continue
 		}
 		t.checkViolationsBetween(t.assignmentUses[root], pollutingUses, root)
+	}
+
+	// Check the uses of a root against branches through a merge that may hold
+	// it (#252), both ways: a use after such a branch, and such a branch after
+	// a polluting use. Two such branches are never checked against each
+	// other. go and defer uses are left to the inline checks, as for
+	// branchUses.
+	for _, root := range sortedRoots(t, t.mayUses) {
+		var mayBranches []UsageInfo
+		for _, use := range t.mayUses[root] {
+			if use.ordered {
+				mayBranches = append(mayBranches, use.UsageInfo)
+			}
+		}
+		t.checkViolationsBetween(t.getAllUses(root), mayBranches, root)
+		t.checkViolationsBetween(mayBranches, t.pollutingUses[root], root)
 	}
 
 	// Check uses of a Session/Debug copy against changes to the root it shares
@@ -434,7 +491,7 @@ func (t *Tracker) CollectViolations() []Violation {
 	for i := range t.violations {
 		if root := t.violations[i].Root; root != nil {
 			t.violations[i].AllUses = t.getAllUses(root)
-			t.violations[i].HiddenUses = len(t.branchUses[root]) > 0 || len(t.aliasUses[root]) > 0 || len(t.loopCarriedUses[root]) > 0
+			t.violations[i].HiddenUses = len(t.branchUses[root]) > 0 || len(t.aliasUses[root]) > 0 || len(t.loopCarriedUses[root]) > 0 || len(t.mayUses[root]) > 0
 		}
 	}
 	return t.violations
@@ -529,6 +586,11 @@ func (t *Tracker) firstBranchPos(root ssa.Value) token.Pos {
 	best := token.NoPos
 	for _, u := range t.pollutingUses[root] {
 		if u.Pos.IsValid() && (!best.IsValid() || u.Pos < best) {
+			best = u.Pos
+		}
+	}
+	for _, u := range t.mayUses[root] {
+		if u.ordered && u.Pos.IsValid() && (!best.IsValid() || u.Pos < best) {
 			best = u.Pos
 		}
 	}
