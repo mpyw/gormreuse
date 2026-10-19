@@ -1,7 +1,11 @@
 version: 2
 updates:
   - package-ecosystem: gomod
-    directory: /
+    # e2e/internal is a separate module. It pins the GORM version the e2e
+    # tests run against, so it needs its own entry.
+    directories:
+      - /
+      - /e2e/internal
     schedule:
       interval: weekly
     cooldown:

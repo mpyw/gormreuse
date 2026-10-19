@@ -55,5 +55,6 @@ release:
     owner: mpyw
     name: gormreuse
   draft: false
-  prerelease: auto
+  # No prerelease setting: tag.yml and release.yml accept only vX.Y.Z, so a
+  # prerelease version never reaches goreleaser.
   name_template: "v{{.Version}}"
