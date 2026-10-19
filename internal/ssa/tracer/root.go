@@ -2203,7 +2203,7 @@ func isGormDBMethod(callee *ssa.Function) bool {
 // signature takes a *gorm.DB rather than hard-coding an index.
 func collectImmutableCallbacksFromCall(call *ssa.Call, set map[*ssa.Function]bool) {
 	callee := call.Call.StaticCallee()
-	if callee == nil || !isImmutableCallbackMethod(callee) {
+	if callee == nil || !IsImmutableCallbackMethod(callee) {
 		return
 	}
 	for _, arg := range call.Call.Args {
@@ -2214,14 +2214,14 @@ func collectImmutableCallbacksFromCall(call *ssa.Call, set map[*ssa.Function]boo
 	}
 }
 
-// isImmutableCallbackMethod reports whether callee is a gorm method that hands a
+// IsImmutableCallbackMethod reports whether callee is a gorm method that hands a
 // fresh (clone>0) *gorm.DB to a callback — Transaction or FindInBatches — gated
 // on a gorm.DB receiver so a same-named user method is excluded.
 //
 // Connection is deliberately absent: it calls fc(db.getInstance()), and
 // getInstance yields a clone==0 handle, so its callback's tx accumulates
 // conditions like any mid-chain value (#173).
-func isImmutableCallbackMethod(callee *ssa.Function) bool {
+func IsImmutableCallbackMethod(callee *ssa.Function) bool {
 	switch callee.Name() {
 	case "Transaction", "FindInBatches":
 	default:

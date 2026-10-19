@@ -1,6 +1,7 @@
 package directive
 
 import (
+	"cmp"
 	"fmt"
 	"go/ast"
 	"go/token"
@@ -8,6 +9,7 @@ import (
 	"slices"
 	"strings"
 
+	"golang.org/x/tools/go/ast/inspector"
 	"golang.org/x/tools/go/ssa"
 )
 
@@ -29,20 +31,30 @@ type ImmutableInputCallback struct {
 }
 
 // ImmutableInputUnused describes a directive whose target is not a usable
-// callback. It corresponds to the U1–U3 cases in issue #56/#62.
+// callback. It corresponds to the U1–U3 cases in issue #56/#62, plus a
+// directive attached to no function (#193).
 type ImmutableInputUnused struct {
 	Pos    token.Pos // Position of the directive comment
 	Reason string    // Human-readable reason for reporting
 }
 
 // ImmutableInputSet stores all //gormreuse:immutable-input(name) directives found
-// in the analyzed source, keyed by the enclosing function.
+// in the analyzed source, keyed by the enclosing function. A directive may sit
+// where the other function directives may (#193): in a function's doc comment,
+// after a function's or closure's opening brace on the same line, or on the
+// line before a closure.
 type ImmutableInputSet struct {
-	known  map[FuncKey][]ImmutableInputCallback
-	unused []ImmutableInputUnused
+	known    map[FuncKey][]ImmutableInputCallback
+	closures map[token.Pos][]ImmutableInputCallback // keyed by the FuncLit's position
+	unused   []ImmutableInputUnused
 
 	fset      *token.FileSet
 	typesInfo *types.Info
+	// placement decides which function a directive comment belongs to, with
+	// the rules pure and the other function directives use. It has no
+	// signature check, so its unused list holds only comments attached to no
+	// function.
+	placement *DirectiveFuncSet
 }
 
 // NewImmutableInputSet creates an empty set tied to the pass's FileSet and
@@ -50,51 +62,126 @@ type ImmutableInputSet struct {
 func NewImmutableInputSet(fset *token.FileSet, typesInfo *types.Info) *ImmutableInputSet {
 	return &ImmutableInputSet{
 		known:     make(map[FuncKey][]ImmutableInputCallback),
+		closures:  make(map[token.Pos][]ImmutableInputCallback),
 		fset:      fset,
 		typesInfo: typesInfo,
+		placement: newDirectiveFuncSet(fset, typesInfo, hasImmutableInputDirective, nil),
 	}
 }
 
 // AddFile scans an AST file for `//gormreuse:immutable-input(name)` directives,
 // validates each against the surrounding function's signature, and either
 // registers a usable callback or records an unused-directive diagnostic.
-func (s *ImmutableInputSet) AddFile(file *ast.File, pkgPath string) {
-	if s == nil || file == nil {
+// cur is the file's cursor in the pass inspector.
+func (s *ImmutableInputSet) AddFile(cur inspector.Cursor, pkgPath string) {
+	if s == nil || !cur.Valid() {
 		return
 	}
-	for _, decl := range file.Decls {
-		fd, ok := decl.(*ast.FuncDecl)
-		if !ok || fd.Doc == nil {
-			continue
+	file := cur.Node().(*ast.File)
+	s.placement.AddFile(cur)
+	comments := make(map[token.Pos]*ast.Comment)
+	for _, cg := range file.Comments {
+		for _, c := range cg.List {
+			comments[c.Pos()] = c
 		}
-		refs := s.extractParamsFromComments(fd.Doc.List)
-		if len(refs) == 0 {
-			continue
+	}
+
+	for fdCur := range cur.Preorder(funcDeclTypes...) {
+		fd := fdCur.Node().(*ast.FuncDecl)
+		var list []*ast.Comment
+		if fd.Doc != nil {
+			list = slices.Clone(fd.Doc.List)
+		}
+		if pos := s.placement.findDirectiveAfterFuncDeclBrace(fd); pos.IsValid() {
+			list = append(list, comments[pos])
 		}
 		key := s.buildFuncKey(fd, pkgPath)
-		s.processDirectiveTargets(fd, refs, key)
+		for _, ref := range s.extractParamsFromComments(list) {
+			cb, reason := s.resolveImmutableInputRef(fd.Type, ref)
+			if reason != "" {
+				s.addUnusedImmutableInput(ref, reason)
+				continue
+			}
+			s.known[key] = append(s.known[key], cb)
+		}
+	}
+
+	// One directive comment can cover several closures of one assignment
+	// (a, b := func(...) {...}, func(...) {...}). It applies to each closure
+	// whose signature fits, and is unused only when none fits.
+	litsByComment := make(map[token.Pos][]*ast.FuncLit)
+	var commentOrder []token.Pos
+	for flCur := range cur.Preorder(funcLitTypes...) {
+		fl := flCur.Node().(*ast.FuncLit)
+		pos := s.placement.findDirectiveForFuncLit(fl)
+		if !pos.IsValid() {
+			continue
+		}
+		if _, seen := litsByComment[pos]; !seen {
+			commentOrder = append(commentOrder, pos)
+		}
+		litsByComment[pos] = append(litsByComment[pos], fl)
+	}
+	for _, pos := range commentOrder {
+		for _, ref := range s.extractParamsFromComments([]*ast.Comment{comments[pos]}) {
+			applied := false
+			var firstReason string
+			for _, fl := range litsByComment[pos] {
+				cb, reason := s.resolveImmutableInputRef(fl.Type, ref)
+				if reason != "" {
+					firstReason = cmp.Or(firstReason, reason)
+					continue
+				}
+				s.closures[fl.Pos()] = append(s.closures[fl.Pos()], cb)
+				applied = true
+			}
+			if !applied {
+				s.addUnusedImmutableInput(ref, firstReason)
+			}
+		}
 	}
 }
 
 // Callbacks returns the registered immutable-input callbacks for fn, used to
 // exempt callback arguments (case 2.2) and to validate the declaring function's
-// body contract (cases 2.3/2.4). fn may be a generic instance or a bound method
-// wrapper (see DeclaredFunc); ParamIdx never counts a receiver, so it indexes
-// the arguments of a call to either.
+// body contract (cases 2.3/2.4). fn may be a closure, a generic instance or a
+// bound method wrapper (see DeclaredFunc); ParamIdx never counts a receiver,
+// so it indexes the arguments of a call to any of them.
 func (s *ImmutableInputSet) Callbacks(fn *ssa.Function) []ImmutableInputCallback {
 	if s == nil || fn == nil {
 		return nil
 	}
-	return slices.Clone(s.known[funcKeyOf(DeclaredFunc(fn))])
+	fn = DeclaredFunc(fn)
+	if fl, ok := fn.Syntax().(*ast.FuncLit); ok {
+		return slices.Clone(s.closures[fl.Pos()])
+	}
+	return slices.Clone(s.known[funcKeyOf(fn)])
 }
 
 // GetUnused returns the diagnostics for directives that don't apply to any usable
-// callback (U1–U3). U4 is the success path: nothing to report.
+// callback (U1–U3), and for directives attached to no function or closure,
+// which would otherwise have no effect at all (#193). U4 is the success path:
+// nothing to report.
 func (s *ImmutableInputSet) GetUnused() []ImmutableInputUnused {
 	if s == nil {
 		return nil
 	}
-	return slices.Clone(s.unused)
+	unused := slices.Clone(s.unused)
+	orphans := s.placement.GetUnusedDirectives()
+	slices.Sort(orphans)
+	for _, pos := range orphans {
+		unused = append(unused, ImmutableInputUnused{
+			Pos:    pos,
+			Reason: "unused gormreuse:immutable-input directive: not attached to a function or closure",
+		})
+	}
+	return unused
+}
+
+// hasImmutableInputDirective reports whether a comment carries an
+// immutable-input(name) directive.
+func hasImmutableInputDirective(text string) bool {
+	return len(extractImmutableInputParams(text)) > 0
 }
 
 // extractImmutableInputParams returns the callback parameter names declared by
@@ -132,47 +219,34 @@ func (s *ImmutableInputSet) extractParamsFromComments(list []*ast.Comment) []imm
 	return refs
 }
 
-// processDirectiveTargets validates each (commentPos, paramName) against the
-// function's signature, registering usable callbacks in s.known and pushing
-// unused-diagnostic entries into s.unused otherwise.
-func (s *ImmutableInputSet) processDirectiveTargets(fd *ast.FuncDecl, refs []immutableInputRef, key FuncKey) {
-	for _, ref := range refs {
-		idx, paramType := s.lookupParam(fd, ref.name)
-		if idx < 0 {
-			s.unused = append(s.unused, ImmutableInputUnused{
-				Pos:    ref.commentPos,
-				Reason: fmt.Sprintf("unused gormreuse:immutable-input directive: parameter %q not found", ref.name),
-			})
-			continue
-		}
-		funcSig := asFunctionSignature(paramType)
-		if funcSig == nil {
-			s.unused = append(s.unused, ImmutableInputUnused{
-				Pos:    ref.commentPos,
-				Reason: fmt.Sprintf("unused gormreuse:immutable-input directive: parameter %q is not a function type", ref.name),
-			})
-			continue
-		}
-		if !hasGormDBParameter(funcSig) {
-			s.unused = append(s.unused, ImmutableInputUnused{
-				Pos:    ref.commentPos,
-				Reason: fmt.Sprintf("unused gormreuse:immutable-input directive: callback %q has no *gorm.DB parameter", ref.name),
-			})
-			continue
-		}
-		s.known[key] = append(s.known[key], ImmutableInputCallback{ParamIdx: idx, ParamName: ref.name})
+// resolveImmutableInputRef validates ref against the parameters of ft. It
+// returns the usable callback, or the reason the directive is unused.
+func (s *ImmutableInputSet) resolveImmutableInputRef(ft *ast.FuncType, ref immutableInputRef) (ImmutableInputCallback, string) {
+	idx, paramType := s.lookupParam(ft, ref.name)
+	if idx < 0 {
+		return ImmutableInputCallback{}, fmt.Sprintf("unused gormreuse:immutable-input directive: parameter %q not found", ref.name)
 	}
+	funcSig := asFunctionSignature(paramType)
+	if funcSig == nil {
+		return ImmutableInputCallback{}, fmt.Sprintf("unused gormreuse:immutable-input directive: parameter %q is not a function type", ref.name)
+	}
+	if !hasGormDBParameter(funcSig) {
+		return ImmutableInputCallback{}, fmt.Sprintf("unused gormreuse:immutable-input directive: callback %q has no *gorm.DB parameter", ref.name)
+	}
+	return ImmutableInputCallback{ParamIdx: idx, ParamName: ref.name}, ""
 }
 
-// lookupParam finds a parameter by name in the function declaration and returns
+// addUnusedImmutableInput records an unused-directive diagnostic for ref.
+func (s *ImmutableInputSet) addUnusedImmutableInput(ref immutableInputRef, reason string) {
+	s.unused = append(s.unused, ImmutableInputUnused{Pos: ref.commentPos, Reason: reason})
+}
+
+// lookupParam finds a parameter by name in a function type and returns
 // (index counting from the first non-receiver parameter, recorded type). Returns
 // idx=-1 if not found.
-func (s *ImmutableInputSet) lookupParam(fd *ast.FuncDecl, name string) (int, types.Type) {
-	if fd.Type == nil || fd.Type.Params == nil {
-		return -1, nil
-	}
+func (s *ImmutableInputSet) lookupParam(ft *ast.FuncType, name string) (int, types.Type) {
 	idx := 0
-	for _, field := range fd.Type.Params.List {
+	for _, field := range ft.Params.List {
 		// A field with no names still occupies one parameter position but cannot
 		// match any name.
 		if len(field.Names) == 0 {

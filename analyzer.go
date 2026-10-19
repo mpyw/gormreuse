@@ -123,7 +123,7 @@ func run(pass *analysis.Pass) (any, error) {
 			immutableParamFuncs.Add(key)
 		}
 		// Build immutable-input(name) callback declarations for this file
-		immutableInputSet.AddFile(file, pkgPath)
+		immutableInputSet.AddFile(cur, pkgPath)
 	}
 
 	// Run SSA-based analysis
