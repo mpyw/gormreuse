@@ -124,7 +124,26 @@ func (a *Analyzer) Analyze() []Violation {
 	tracker.DetectViolations()
 
 	// PHASE 3: COLLECTION
-	return tracker.CollectViolations()
+	violations := tracker.CollectViolations()
+	for i := range violations {
+		violations[i].Pos = positionedViolation(violations[i], a.fn)
+	}
+	return violations
+}
+
+// positionedViolation returns the position to report v at. A violation found
+// at an instruction without a position, such as one in a synthetic wrapper,
+// falls back to its call, then to fn, so no diagnostic is reported at no
+// position, where no ignore directive can reach it and some drivers drop it
+// (#255).
+func positionedViolation(v Violation, fn *ssa.Function) token.Pos {
+	switch {
+	case v.Pos.IsValid():
+		return v.Pos
+	case v.Call != nil && v.Call.Pos().IsValid():
+		return v.Call.Pos()
+	}
+	return fn.Pos()
 }
 
 // processFunction processes all instructions in a function and its closures.
@@ -182,7 +201,7 @@ func (a *Analyzer) processFunction(fn *ssa.Function, tracker *pollution.Tracker,
 					// parameter rather than a captured variable — see #60).
 					// Skip provably-dead closures: their uses never execute, so
 					// analyzing them yields false positives (#68).
-					if (tracer.ClosureCapturesGormDB(mc) || a.rootTracer.IsScopesCallbackFunc(closureFn)) && !isDeadClosure(mc) {
+					if !isMethodValue(mc) && (tracer.ClosureCapturesGormDB(mc) || a.rootTracer.IsScopesCallbackFunc(closureFn)) && !isDeadClosure(mc) {
 						// If the closure is invoked at a single call site, order
 						// its captured uses by that call-site position (#68). When
 						// there is no single such site (IIFE, defer/go, multiple
@@ -234,6 +253,18 @@ func (a *Analyzer) processFunction(fn *ssa.Function, tracker *pollution.Tracker,
 	for _, d := range defers {
 		handler.DispatchDefer(d, ctx)
 	}
+}
+
+// isMethodValue reports whether mc is a method value (r.m), a closure over the
+// synthetic "m$bound" wrapper, not a function literal. A call through it is
+// handled as the method call it stands for (callsite.SiteBound). The wrapper
+// has no syntax, and analyzing it as a closure reported its forwarding call
+// at no position (#255). A method expression thunk is a plain function, never
+// a closure. The synthetic yield function of a range-over-func loop is the
+// loop body, so it is analyzed.
+func isMethodValue(mc *ssa.MakeClosure) bool {
+	_, bound := callsite.BoundSite(mc)
+	return bound
 }
 
 // isDeadClosure reports whether mc's closure value is provably never used: it

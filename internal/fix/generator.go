@@ -253,12 +253,18 @@ func (g *Generator) GenerateIsolation(v pollution.Violation) []analysis.Suggeste
 		call = findCallAtLparen(g.fileCursor(file), lparen)
 	}
 	// Param counts the parameters without a receiver, as the call's
-	// arguments do. Only a variadic parameter can differ, and it never
-	// holds a *gorm.DB argument of its own.
-	if call == nil || v.Param < 0 || v.Param >= len(call.Args) || !typeutil.IsGormDB(g.pass.TypesInfo.TypeOf(call.Args[v.Param])) {
+	// arguments do, except for a method expression (T.m(r, x)), whose
+	// receiver is its first argument (#258). Only a variadic parameter can
+	// differ otherwise, and it never holds a *gorm.DB argument of its own.
+	var arg ast.Expr
+	if call != nil && v.Param >= 0 {
+		if i := v.Param + receiverArgs(g.pass.TypesInfo, call, v.Call); i < len(call.Args) && typeutil.IsGormDB(g.pass.TypesInfo.TypeOf(call.Args[i])) {
+			arg = call.Args[i]
+		}
+	}
+	if arg == nil {
 		return nil
 	}
-	arg := call.Args[v.Param]
 
 	var edits []analysis.TextEdit
 	site := sessionSite{pos: arg.End()}
@@ -272,6 +278,18 @@ func (g *Generator) GenerateIsolation(v pollution.Violation) []analysis.Suggeste
 	edits = append(edits, g.sessionEdits([]sessionSite{site})...)
 	slices.SortFunc(edits, func(a, b analysis.TextEdit) int { return cmp.Compare(a.Pos, b.Pos) })
 	return []analysis.SuggestedFix{{Message: "Isolate the argument with Session", TextEdits: edits}}
+}
+
+// receiverArgs returns how many arguments of call pass the receiver of the
+// method that instr stands for: 1 for a method expression, whose function
+// takes the receiver as its first parameter, and 0 otherwise.
+func receiverArgs(info *types.Info, call *ast.CallExpr, instr ssa.CallInstruction) int {
+	declared := callsite.SiteOf(instr, nil).Declared
+	sig, ok := info.TypeOf(call.Fun).Underlying().(*types.Signature)
+	if !ok || declared == nil {
+		return 0
+	}
+	return sig.Params().Len() - declared.Signature.Params().Len()
 }
 
 // fileCursor returns the cursor for the given file in the pass inspector.

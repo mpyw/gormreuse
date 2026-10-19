@@ -636,7 +636,7 @@ Only `//gormreuse:name[,name...]` is a directive: a line comment, lowercase name
 
 The names are `ignore`, `pure`, `immutable-return`, `immutable-param` and `immutable-input(name)`.
 
-A directive on a generic function or method applies to every instance of it (`helper[int](q)`). A directive on a method also applies when the method is called through a method value (`f := r.helper; f(q)`).
+A directive on a generic function or method applies to every instance of it (`helper[int](q)`). A directive on a method also applies when the method is called through a method value (`f := r.helper; f(q)`) or a method expression (`Repo.helper(r, q)`).
 
 A directive on an exported function or method also applies in the packages that call it. The analysis of the declaring package checks the function's body. It passes the result on as an [analysis fact](https://pkg.go.dev/golang.org/x/tools/go/analysis#hdr-Modular_analysis_with_Facts), so the packages that call it do not read its source. This works with the `gormreuse` command, `go vet` and golangci-lint, which all analyze the dependencies first.
 
@@ -753,7 +753,7 @@ helper2 := func(q *gorm.DB) { //gormreuse:pure
 > ```
 >
 > Valid pure functions must:
-> - NOT call polluting methods ([`Where`](https://pkg.go.dev/gorm.io/gorm#DB.Where), [`Find`](https://pkg.go.dev/gorm.io/gorm#DB.Find), etc.) on [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) **arguments**. This includes `go db.Find(nil)`, `defer db.Find(nil)`, a method value (`f := db.Find`), and a closure the function creates (`func() { db.Find(nil) }()`). It also includes an argument reached through a pointer, slice, variadic or struct parameter (`(*pp).Find`, `dbs[0].Find`, `h.db.Find`). So does an argument returned from another pure function that returns its argument (`same(db).Find`, see the note below)
+> - NOT call polluting methods ([`Where`](https://pkg.go.dev/gorm.io/gorm#DB.Where), [`Find`](https://pkg.go.dev/gorm.io/gorm#DB.Find), etc.) on [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) **arguments**. This includes `go db.Find(nil)`, `defer db.Find(nil)`, a method value (`f := db.Find`), a method expression (`(*gorm.DB).Find(db, nil)`), and a closure the function creates (`func() { db.Find(nil) }()`). It also includes an argument reached through a pointer, slice, variadic or struct parameter (`(*pp).Find`, `dbs[0].Find`, `h.db.Find`). So does an argument returned from another pure function that returns its argument (`same(db).Find`, see the note below)
 > - NOT let an argument escape: channel send, slice/array or map store, a store to a package-level variable, or a store through a pointer (`h.db = db`)
 > - NOT pass an argument to a function that is not pure, or to a pure function that fails this contract itself
 > - MAY call polluting methods on **immutable values** (e.g., `db.Session(&gorm.Session{}).Where(...)` is OK)
@@ -833,7 +833,7 @@ func applyFilters(tx *gorm.DB) {
 > ```
 > Fix by passing an isolated value (`root.Session(&gorm.Session{})`), or make the caller `//gormreuse:immutable-param` too so the contract propagates. The suggested fix appends `.Session(&gorm.Session{})` to the argument (see [Contract and Directive Fixes](#contract-and-directive-fixes)).
 >
-> The check covers direct calls, function and method values, generic instances, and the same calls under `go` and `defer`, also when the function is in another package. It cannot cover a call through an interface or a func-typed parameter, where the callee is unknown.
+> The check covers direct calls, function and method values, method expressions, generic instances, and the same calls under `go` and `defer`, also when the function is in another package. It cannot cover a call through an interface or a func-typed parameter, where the callee is unknown.
 
 > [!TIP]
 > Combine with `//gormreuse:pure` when a helper both leaves its argument unpolluted and expects an isolated value. A **redundant** `//gormreuse:immutable-param` is reported so you can drop it. That is one whose parameter is never reused, so it suppresses nothing. Its fix deletes it.
@@ -975,6 +975,7 @@ gormreuse reports a reuse only when it can follow the value. These cases are kno
 | A package-level `*gorm.DB` that another function, a closure or the initializer assigned | Only the stores in the same function are followed. A global that the function only reads is immutable |
 | A struct field read through a parameter or a receiver (`r.db`) | The field is not a mutable root. Only the stores to it in the same function are followed |
 | `immutable-param` called through an interface or a func-typed parameter | The callee is unknown, so the caller contract is not checked |
+| A method expression of a method promoted through an embedded `*gorm.DB`: `W.Find(w, nil)` | The receiver `w` is not followed to its embedded field |
 
 **Extra reports (false positives):**
 

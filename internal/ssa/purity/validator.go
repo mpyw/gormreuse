@@ -490,7 +490,7 @@ func (v *Validator) checkFunctionCallPollution(common *ssa.CallCommon, callee *s
 			// function breaks it too (issue #187).
 			violations = append(violations, Violation{
 				Pos:        pos,
-				Message:    "pure function passes *gorm.DB argument to " + callee.Name() + ", which violates its pure contract",
+				Message:    "pure function passes *gorm.DB argument to " + v.calleeName(common, callee) + ", which violates its pure contract",
 				Definitive: true,
 			})
 			continue
@@ -543,7 +543,9 @@ func (v *Validator) isTrustedPure(callee *ssa.Function) bool {
 // calls through a func value.
 func (v *Validator) calleeName(common *ssa.CallCommon, callee *ssa.Function) string {
 	if callee != nil {
-		return callee.Name()
+		// A method value or method expression wrapper is named after the
+		// method it calls, which is what the source names (#258).
+		return directive.DeclaredFunc(callee).Name()
 	}
 	if b, ok := common.Value.(*ssa.Builtin); ok {
 		return b.Name()

@@ -244,3 +244,54 @@ func subqueryThroughImmutableReturn(db *gorm.DB) {
 	sub.Where("age > 1").Find(nil)
 	x.Find(nil) // OK: the subquery is isolated
 }
+
+// =============================================================================
+// Another package's methods through a method value or expression (#255, #258)
+// =============================================================================
+
+// The method value's receiver holds a *gorm.DB, so the synthetic Branch$bound
+// wrapper captures one. It is not analyzed as a closure of the caller, and
+// the isolated argument is not reported (#255).
+func boundImmutableParamIsolated(r purelib.Repo, db *gorm.DB) {
+	f := r.Branch
+	f(db.Session(&gorm.Session{}))
+}
+
+// A mutable argument is reported at the call through the method value.
+func boundImmutableParamMutable(r purelib.Repo, db *gorm.DB) {
+	f := r.Branch
+	f(db.Where("x = ?", 1)) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of Branch`
+}
+
+func exprImmutableParamIsolated(r purelib.Repo, db *gorm.DB) {
+	purelib.Repo.Branch(r, db.Session(&gorm.Session{}))
+}
+
+func exprImmutableParamMutable(r purelib.Repo, db *gorm.DB) {
+	purelib.Repo.Branch(r, db.Where("x = ?", 1)) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of Branch`
+}
+
+func exprPure(r purelib.Repo, db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+	purelib.Repo.Inspect(r, q)
+	q.Find(nil) // OK: Inspect is pure
+}
+
+func exprImmutableReturn(r purelib.Repo) {
+	q := purelib.Repo.Fresh(r)
+	q.Find(nil)
+	q.Find(nil) // OK: Fresh is immutable-return
+}
+
+func exprPointerImmutableReturn(o *purelib.Orm) {
+	q := (*purelib.Orm).GetDB(o)
+	q.Find(nil)
+	q.Find(nil) // OK: GetDB is immutable-return
+}
+
+func exprImmutableInput(r purelib.Repo, db *gorm.DB) {
+	purelib.Repo.With(r, db, func(q *gorm.DB) {
+		q.Find(nil)
+		q.Find(nil) // OK: With hands the callback an isolated value
+	})
+}
