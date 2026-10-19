@@ -471,7 +471,7 @@ Decisions and limitations:
 
 The reassignment fix (`q.Where("a")` → `q = q.Where("a")`) rewrites one variable: the one that holds the reused root (#198). `findReassignTarget` in `internal/fix/generator.go` finds it from the root's own definition (`q := <call>`, `q = <call>` or `var q = <call>`; a root that is not a call, such as a Phi, gets no reassignment). A statement is rewritten only when its own top-level call is the use and its receiver is an identifier that `types.Info.Uses` resolves to that variable.
 
-No statement is rewritten, and the root gets a Session instead, when:
+No statement is rewritten when one of the cases below holds. The root gets a Session instead, unless a discarded statement would lose its effect; then the diagnostic has no fix (see [Discarded Statements Under a Session Fix](#discarded-statements-under-a-session-fix-199)):
 
 | Case | Example | Why |
 | --- | --- | --- |
@@ -482,6 +482,30 @@ No statement is rewritten, and the root gets a Session instead, when:
 An inline closure `func() { ... }()` runs in program order, so writing a captured variable from it is safe. A closure passed to a call, such as `Transaction`, `t.Run` or `wg.Go`, may run later or on another goroutine, so it counts as a capture. A variable declared inside such a closure is local to it and is rewritten as usual.
 
 The old resolver took the receiver of the outermost method call around the use. Inside `DB.Transaction(func(tx) { ... })` that rewrote the package-level `DB`, and in `base.Or(q)` it rebound `base`. `TestGoldenFilesCompile` now type-checks every `.golden`, and `testdata/src/gormreuse/fix_target.go` and `testdata/src/converge/fix_target.go` hold the cases.
+
+## Discarded Statements Under a Session Fix (#199)
+
+A discarded non-finisher statement such as `q.Where("a")` or `q.Where("a").Limit(10)` has an effect only because `q` is mutable: it changes `q`'s Statement in place, and every later query on `q` sees it. A Session at the root makes `q` immutable, so the same statement then changes a throwaway copy. The fixed code drops `"a"` silently, and the linter is clean. The fix must therefore never leave such a statement in place. `findReassignedChains` in `internal/fix/generator.go` applies this rule:
+
+| Statement | Fix |
+| --- | --- |
+| A chain of non-finisher calls on the target variable, such as `q.Where("a").Limit(10)` | Reassign it as a whole: `q = q.Where("a").Limit(10)`. A Session it needs goes after its last call. One after `Where` would be undone by `Limit`, which returns a new mutable value |
+| A chain that starts with a Session-family call, such as `q.Session(s).Where("a")` | None needed. It never changes `q` |
+| A chain with a Session-family call before its last call, such as `q.Where("a").Session(s).Limit(1)` | **No fix.** Only `q.Where("a")` changes `q`. Reassigning would add `Limit(1)` to `q` |
+| A receiver that is not the target variable: an alias `r := q`, a method value `where := q.Where`, a variable captured by a closure that is not called inline, or a use that #68 orders at a closure's call site | **No fix.** The diagnostic stays without a suggested fix |
+
+Two more changes make the reassignment see every statement:
+
+- **Loop violations read their uses late.** A loop violation is added while its use is tracked (`handler/call.go`), before the uses after it in the loop body are recorded. `Violation.AllUses` used to be a snapshot taken then, so the fix never saw a discarded statement after the loop's query. `CollectViolations` now fills `AllUses` after tracking has finished.
+- **A reassignment in a loop gets a Session.** The simulation orders uses by position, so it cannot see the next iteration's use of a value reassigned in the loop body. `findRootsNeedingSession` gives such a virtual root a Session whenever its block is in a CFG cycle.
+
+`UsageInfo` carries the method name and the call's own position for this. `TestFixPreservesQueries` in `e2e/internal/fixsql_test.go` runs `e2e/internal/fixsql/before` and `fixsql/after` against real GORM and compares the SQL of each query. `TestGoldenFilesE2E` in the main module regenerates `after` from `before` with the current fixes, so the comparison always checks the fixes gormreuse suggests now. `TestFixPreservesQueriesDetectsSessionOnly` checks that the comparison fails for the old Session-only fixes.
+
+Limitations:
+
+- A discarded statement whose effect no later query sees still blocks the fix, such as a final `q.Where("after")` when a stored closure captures `q` (`whereOnlyStoredClosure` in `evil.go`). Proving that no later use exists would need alias and loop analysis.
+- A chain that ends in a Session gets a second, redundant Session (#202).
+- Other ways of keeping a chain's effect away from its root, such as `_ = q.Where("a")`, are not treated as discarded statements.
 
 ## Development Commands
 
@@ -571,7 +595,7 @@ Directives across packages are tested by `TestCrossPackageDirectives`: `testdata
 
 ### E2E Tests
 
-The `e2e/internal/` directory contains tests that verify actual GORM SQL behavior using sqlmock. This is a separate Go module (its own `go.mod`) to avoid dependency conflicts, and CI tests and lints it on every PR (`cd e2e/internal && go test ./... && golangci-lint run ./...`). Dependabot covers it, so GORM bumps arrive as PRs; re-check go-gorm/gorm#7592 on each (see the README). Every test asserts (`t.Errorf`) — the suite guards the linter's core clone-semantics premise: mid-chain (`clone==0`) reuse accumulates conditions; root / `Session()` / `Transaction`- and `FindInBatches`-callback (`clone>0`) handles fork a fresh Statement and are safe; a `Connection`-callback handle is `clone==0` and accumulates. `scopes_session_test.go` pins which Session-family calls inside a `Scopes` callback leak the transaction (go-gorm/gorm#7592): only a returned one. It also pins the exceptions in [Session and Debug copies](#session-and-debug-copies-174): a `Session()`/`Debug()` copy of a mid-chain value sees later changes to it, and `Session{Initialized: true}` returns a mid-chain value.
+The `e2e/internal/` directory contains tests that verify actual GORM SQL behavior using sqlmock. This is a separate Go module (its own `go.mod`) to avoid dependency conflicts, and CI tests and lints it on every PR (`cd e2e/internal && go test ./... && golangci-lint run ./...`). Dependabot covers it, so GORM bumps arrive as PRs; re-check go-gorm/gorm#7592 on each (see the README). Every test asserts (`t.Errorf`) — the suite guards the linter's core clone-semantics premise: mid-chain (`clone==0`) reuse accumulates conditions; root / `Session()` / `Transaction`- and `FindInBatches`-callback (`clone>0`) handles fork a fresh Statement and are safe; a `Connection`-callback handle is `clone==0` and accumulates. `scopes_session_test.go` pins which Session-family calls inside a `Scopes` callback leak the transaction (go-gorm/gorm#7592): only a returned one. It also pins the exceptions in [Session and Debug copies](#session-and-debug-copies-174): a `Session()`/`Debug()` copy of a mid-chain value sees later changes to it, and `Session{Initialized: true}` returns a mid-chain value. `fixsql_test.go` checks that suggested fixes keep every condition the code applied (see [Discarded Statements Under a Session Fix](#discarded-statements-under-a-session-fix-199)).
 
 ## Code Style
 

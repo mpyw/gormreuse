@@ -50,13 +50,22 @@ type Violation struct {
 	Pos     token.Pos
 	Message string
 	Root    ssa.Value   // mutable root that caused the violation (for fix generation)
-	AllUses []UsageInfo // all uses of this root (for fix generation)
+	AllUses []UsageInfo // all uses of this root, filled in by CollectViolations (for fix generation)
 }
 
 // UsageInfo tracks a single usage of a root (exported for fix generation).
 type UsageInfo struct {
 	Block *ssa.BasicBlock
 	Pos   token.Pos
+
+	// Method and Call describe a use as the receiver of a *gorm.DB method
+	// call, made directly or through a method value: the method's name and
+	// the call's own position. Call differs from Pos for a use inside a
+	// closure that is ordered at its single call site (#68). Both are zero
+	// for any other use, such as an argument. The fix generator reads them to
+	// find discarded statements (#199).
+	Method string
+	Call   token.Pos
 }
 
 // aliasUse is a use of a Session/Debug copy, with the position of the call
@@ -160,23 +169,23 @@ func (t *Tracker) RecordInvocationSite(fn *ssa.Function, site *ssa.BasicBlock) {
 // ProcessBranch records a POLLUTING usage of a mutable root.
 // Non-pure method calls that consume the root.
 // Caller must ensure root is not nil.
-func (t *Tracker) ProcessBranch(root ssa.Value, block *ssa.BasicBlock, pos token.Pos) {
-	t.pollutingUses[root] = append(t.pollutingUses[root], UsageInfo{Block: block, Pos: pos})
+func (t *Tracker) ProcessBranch(root ssa.Value, use UsageInfo) {
+	t.pollutingUses[root] = append(t.pollutingUses[root], use)
 }
 
 // RecordPureUse records a PURE usage (Session, Debug, etc).
 // These uses check for pollution but don't pollute.
 // Caller must ensure root is not nil.
-func (t *Tracker) RecordPureUse(root ssa.Value, block *ssa.BasicBlock, pos token.Pos) {
-	t.pureUses[root] = append(t.pureUses[root], UsageInfo{Block: block, Pos: pos})
+func (t *Tracker) RecordPureUse(root ssa.Value, use UsageInfo) {
+	t.pureUses[root] = append(t.pureUses[root], use)
 }
 
 // RecordAssignment records an ASSIGNMENT usage where a root is used to create a new root.
 // This creates a new mutable root and doesn't count as pollution.
 // Example: q = q.Where() creates new root from original q
 // Caller must ensure root is not nil.
-func (t *Tracker) RecordAssignment(root ssa.Value, block *ssa.BasicBlock, pos token.Pos) {
-	t.assignmentUses[root] = append(t.assignmentUses[root], UsageInfo{Block: block, Pos: pos})
+func (t *Tracker) RecordAssignment(root ssa.Value, use UsageInfo) {
+	t.assignmentUses[root] = append(t.assignmentUses[root], use)
 }
 
 // RecordBranchUse records a deferred/goroutine polluting usage of a root.
@@ -225,8 +234,7 @@ func (t *Tracker) AddMessageViolation(pos token.Pos, message string) {
 
 // AddViolationWithRoot adds a violation with root information for fix generation.
 func (t *Tracker) AddViolationWithRoot(pos token.Pos, root ssa.Value) {
-	allUses := t.getAllUses(root)
-	t.addViolationWithContext(pos, root, allUses)
+	t.addViolationWithContext(pos, root)
 }
 
 // DetectViolations performs violation detection after all uses are recorded.
@@ -243,8 +251,7 @@ func (t *Tracker) DetectViolations() {
 		if len(uses) <= 1 {
 			continue // Need at least 2 polluting uses for a violation
 		}
-		allUses := t.getAllUses(root)
-		t.checkViolationsBetween(uses, uses, root, allUses)
+		t.checkViolationsBetween(uses, uses, root)
 	}
 
 	// Check pure uses against polluting uses
@@ -254,8 +261,7 @@ func (t *Tracker) DetectViolations() {
 		if len(pollutingUses) == 0 {
 			continue
 		}
-		allUses := t.getAllUses(root)
-		t.checkViolationsBetween(t.pureUses[root], pollutingUses, root, allUses)
+		t.checkViolationsBetween(t.pureUses[root], pollutingUses, root)
 	}
 
 	// Check assignment uses against polluting uses
@@ -265,8 +271,7 @@ func (t *Tracker) DetectViolations() {
 		if len(pollutingUses) == 0 {
 			continue
 		}
-		allUses := t.getAllUses(root)
-		t.checkViolationsBetween(t.assignmentUses[root], pollutingUses, root, allUses)
+		t.checkViolationsBetween(t.assignmentUses[root], pollutingUses, root)
 	}
 
 	// Check uses of a Session/Debug copy against changes to the root it shares
@@ -285,10 +290,9 @@ func (t *Tracker) DetectViolations() {
 	// Positions do not order them: the polluting use may come later in the
 	// loop body and still run before the next iteration's call.
 	for _, root := range sortedRoots(t, t.loopCarriedUses) {
-		allUses := t.getAllUses(root)
 		for _, target := range t.loopCarriedUses[root] {
 			if slices.ContainsFunc(t.pollutingUses[root], func(src UsageInfo) bool { return t.isReachable(src.Block, target.Block) }) {
-				t.addViolationWithContext(target.Pos, root, allUses)
+				t.addViolationWithContext(target.Pos, root)
 			}
 		}
 	}
@@ -366,8 +370,17 @@ func funcName(v ssa.Value) string {
 	return ""
 }
 
-// CollectViolations returns all detected violations.
+// CollectViolations returns all detected violations, each with every use of
+// its root. The uses are read here, after tracking has finished, and not when
+// the violation is added: a loop violation is added while its use is tracked,
+// before the uses after it in the loop body are recorded. A fix built from
+// that snapshot never sees them (#199).
 func (t *Tracker) CollectViolations() []Violation {
+	for i := range t.violations {
+		if root := t.violations[i].Root; root != nil {
+			t.violations[i].AllUses = t.getAllUses(root)
+		}
+	}
 	return t.violations
 }
 
@@ -412,13 +425,13 @@ func (t *Tracker) invocationChain(block *ssa.BasicBlock) []*ssa.BasicBlock {
 	return chain
 }
 
-// addViolationWithContext adds a violation with root and uses information for fix generation.
-func (t *Tracker) addViolationWithContext(pos token.Pos, root ssa.Value, allUses []UsageInfo) {
+// addViolationWithContext adds a violation with root information for fix
+// generation. CollectViolations adds the root's uses.
+func (t *Tracker) addViolationWithContext(pos token.Pos, root ssa.Value) {
 	t.violations = append(t.violations, Violation{
 		Pos:     pos,
 		Message: t.reuseMessage(root),
 		Root:    root,
-		AllUses: allUses,
 	})
 }
 
@@ -480,7 +493,7 @@ func (t *Tracker) getAllUses(root ssa.Value) []UsageInfo {
 
 // checkViolationsBetween checks if any source use can reach any target use.
 // Returns positions of target uses that are reachable from a source use.
-func (t *Tracker) checkViolationsBetween(targets, sources []UsageInfo, root ssa.Value, allUses []UsageInfo) {
+func (t *Tracker) checkViolationsBetween(targets, sources []UsageInfo, root ssa.Value) {
 	for _, target := range targets {
 		for _, src := range sources {
 			// Skip self-comparison for same-list checks
@@ -495,7 +508,7 @@ func (t *Tracker) checkViolationsBetween(targets, sources []UsageInfo, root ssa.
 
 			// Check CFG reachability (across closures, at their invocation sites)
 			if t.isReachable(src.Block, target.Block) {
-				t.addViolationWithContext(target.Pos, root, allUses)
+				t.addViolationWithContext(target.Pos, root)
 				break
 			}
 		}

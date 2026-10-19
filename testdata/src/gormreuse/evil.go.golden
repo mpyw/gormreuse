@@ -939,7 +939,7 @@ func methodValue(db *gorm.DB) {
 // methodValueSameBlock demonstrates same-block pollution with method value.
 // Tests line 423: same-block pollution detection for bound methods.
 func methodValueSameBlock(db *gorm.DB) {
-	q := db.Where("x = ?", 1)
+	q := db.Where("x = ?", 1).Session(&gorm.Session{})
 	find := q.Find
 	find(nil)  // First use - pollutes q
 	find(nil)  // want `\*gorm\.DB reused: second branch from mutable root`
@@ -2266,7 +2266,7 @@ func deepNestedMixedCapture(db *gorm.DB) {
 // storedClosureChain demonstrates stored closure returning a chain.
 // The closure result flows to q2, so q2.Where() continues the same chain.
 func storedClosureChain(db *gorm.DB) {
-	q1 := db.Where("x", 1).Session(&gorm.Session{})
+	q1 := db.Where("x", 1)
 
 	// Stored closure (not IIFE) - same semantics as IIFE
 	fn := func() *gorm.DB {
@@ -2283,7 +2283,7 @@ func storedClosureChain(db *gorm.DB) {
 // then q1.Where("z") is first terminal use, then q2.Where("y") is second terminal use.
 // Ideally q1.Where("z") would be the violation, but current implementation reports on q2.Where("y").
 func storedClosureReordered(db *gorm.DB) {
-	q1 := db.Where("x", 1).Session(&gorm.Session{})
+	q1 := db.Where("x", 1)
 
 	fn := func() *gorm.DB {
 		return q1.Where("from closure", 1) // Pollutes q1 (closure body processed first in SSA)
@@ -2650,7 +2650,7 @@ func whereOnlyChain(db *gorm.DB) {
 
 	q.Find(nil) // First branch - pollutes q
 
-	q.Where("a").Where("b").Order("c") // want `\*gorm\.DB reused: second branch from mutable root`
+	q = q.Where("a").Where("b").Order("c") // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // whereOnlyClosure demonstrates closure pollution then Where-only outside.
@@ -2680,7 +2680,7 @@ func whereOnlyLoop(db *gorm.DB, items []int) {
 	q := db.Where("x = ?", 1)
 
 	for range items {
-		q = q.Where("in loop") // want `\*gorm\.DB reused: second branch from mutable root`
+		q = q.Where("in loop").Session(&gorm.Session{}) // want `\*gorm\.DB reused: second branch from mutable root`
 	}
 }
 
@@ -2709,7 +2709,7 @@ func whereOnlyDefer(db *gorm.DB) {
 // whereOnlyGoroutine demonstrates goroutine with Where-only.
 // Note: Both goroutine closure and main code pollute q - analyzer detects reuse.
 func whereOnlyGoroutine(db *gorm.DB) {
-	q := db.Where("x = ?", 1).Session(&gorm.Session{})
+	q := db.Where("x = ?", 1)
 
 	go func() {
 		q.Where("in goroutine")
@@ -2720,7 +2720,7 @@ func whereOnlyGoroutine(db *gorm.DB) {
 
 // whereOnlyStoredClosure demonstrates stored closure with Where-only violation.
 func whereOnlyStoredClosure(db *gorm.DB) {
-	q := db.Where("x = ?", 1).Session(&gorm.Session{})
+	q := db.Where("x = ?", 1)
 
 	fn := func() {
 		q.Find(nil) // Pollutes q
@@ -2732,7 +2732,7 @@ func whereOnlyStoredClosure(db *gorm.DB) {
 
 // whereOnlyStoredClosureReturn demonstrates stored closure returning chain.
 func whereOnlyStoredClosureReturn(db *gorm.DB) {
-	q := db.Where("x = ?", 1).Session(&gorm.Session{})
+	q := db.Where("x = ?", 1)
 
 	fn := func() *gorm.DB {
 		return q.Where("from closure")
@@ -2757,7 +2757,7 @@ func whereOnlyIIFEStored(db *gorm.DB) {
 
 // whereOnlyBoundMethod demonstrates bound method with Where-only.
 func whereOnlyBoundMethod(db *gorm.DB) {
-	q := db.Where("x = ?", 1).Session(&gorm.Session{})
+	q := db.Where("x = ?", 1)
 
 	where := q.Where
 	where("bound method call") // First use - pollutes q
@@ -2804,7 +2804,7 @@ func whereOnlyDoubleIIFE(db *gorm.DB) {
 
 // whereOnlyStructFieldClosure demonstrates struct field with closure and Where-only.
 func whereOnlyStructFieldClosure(db *gorm.DB) {
-	q := db.Where("x = ?", 1).Session(&gorm.Session{})
+	q := db.Where("x = ?", 1)
 
 	type holder struct {
 		fn func()

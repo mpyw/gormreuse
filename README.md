@@ -185,8 +185,12 @@ q.Where("b").Find(nil) // OK: first branch from new root
 **When applied:**
 - Non-finisher methods (chain builders like `Where`, `Order`, `Limit`)
 - Result is not assigned to a variable
-- Expression used as a statement (not part of a larger expression)
-- The receiver is the local variable that holds the reused root. Aliases (`r := q`), calls that take the root as an argument (`base.Or(q)`), package-level variables, and variables captured by a closure that is not called inline (`go func() { ... }()`, `defer func() { ... }()`) are not rewritten. The fix relies on a Session at the root instead
+- Expression used as a statement. A chain such as `q.Where("a").Limit(10)` is reassigned as a whole, and a Session it needs goes after its last call
+- The receiver is the local variable that holds the reused root. Aliases (`r := q`), calls that take the root as an argument (`base.Or(q)`), package-level variables, and variables captured by a closure that is not called inline (`go func() { ... }()`, `defer func() { ... }()`) are not rewritten. The fix relies on a Session at the root instead, unless that would drop a discarded statement (see below)
+- A reassignment inside a loop always gets a Session, since the next iteration uses it again
+
+> [!IMPORTANT]
+> A discarded statement such as `q.Where("a")` changes `q` in place, and later queries see `"a"`. A Session at the root alone would make it change a copy, so the fixed code would silently drop `"a"`. So when such a statement cannot be reassigned, the diagnostic has **no fix**: an alias receiver, a method value (`where := q.Where`), a variable captured by a closure, and a chain with a Session-family call before its last call (`q.Where("a").Session(s).Limit(1)`). Fix these by hand.
 
 ### Strategy 2: Session (Making Roots Immutable)
 
