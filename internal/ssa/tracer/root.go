@@ -363,6 +363,9 @@ func (t *RootTracer) trace(v ssa.Value, visited map[ssa.Value]bool, loopInfo *cf
 //     including dynamic and interface calls: treat as root unless the callee
 //     is known to return immutable
 //
+// A call through a method value (w := r.Where; w(x)) is handled as the method
+// call r.Where(x) it stands for, not as an IIFE of its synthetic wrapper (#178).
+//
 // Example IIFE tracing:
 //
 //	_ = func() *gorm.DB { return q.Where("y") }().Find(nil)
@@ -383,7 +386,7 @@ func (t *RootTracer) traceCall(call *ssa.Call, visited map[ssa.Value]bool, loopI
 	}
 
 	// Handle closures (IIFE)
-	if mc, ok := call.Call.Value.(*ssa.MakeClosure); ok {
+	if mc, ok := call.Call.Value.(*ssa.MakeClosure); ok && !isMethodValueCall(call) {
 		if closureFn, ok := mc.Fn.(*ssa.Function); ok {
 			if root := t.traceIIFEReturns(closureFn, visited, loopInfo); root != nil {
 				// If closure result is stored in a variable (Extract instruction),
@@ -397,7 +400,7 @@ func (t *RootTracer) traceCall(call *ssa.Call, visited map[ssa.Value]bool, loopI
 		}
 	}
 
-	callee := call.Call.StaticCallee()
+	callee, _, _ := calledFunc(call)
 	if callee != nil && isGormDBMethod(callee) {
 		// This is a gorm method call - THIS CALL is the mutable root
 		// Don't trace further - each gorm call result is its own root
@@ -1702,8 +1705,9 @@ func (t *RootTracer) traceAll(v ssa.Value, visited map[ssa.Value]bool, loopInfo 
 		if len(argRoots) > 0 {
 			return argRoots
 		}
-		// Handle closure calls (IIFE) - collect ALL roots from all returns
-		if mc, ok := val.Call.Value.(*ssa.MakeClosure); ok {
+		// Handle closure calls (IIFE) - collect ALL roots from all returns. A
+		// call through a method value is a call of its own (see traceCall).
+		if mc, ok := val.Call.Value.(*ssa.MakeClosure); ok && !isMethodValueCall(val) {
 			if closureFn, ok := mc.Fn.(*ssa.Function); ok {
 				if roots := t.traceAllIIFEReturns(closureFn, visited, loopInfo); len(roots) > 0 {
 					// If closure result is stored, treat call itself as root
@@ -1874,7 +1878,7 @@ func (t *RootTracer) isImmutableSource(v ssa.Value) bool {
 		// Builtin or //gormreuse:immutable-return call yields an immutable value,
 		// except a Session call that may set Initialized: it returns a clone==0
 		// handle, so the call is a mutable root like a chain method (#174).
-		callee := val.Call.StaticCallee()
+		callee, _, _ := calledFunc(val)
 		if t.isImmutableReturningBuiltin(callee) {
 			return !builtinCallEffect(val).ReturnsMutable
 		}
@@ -1923,7 +1927,7 @@ func (t *RootTracer) collectAliasedRoots(v ssa.Value, loopInfo *cfg.LoopInfo, se
 			continue
 		}
 		seen[call] = true
-		recv := call.Call.Args[0]
+		_, recv, _ := calledFunc(call)
 		if r := t.FindMutableRoot(recv, loopInfo); r != nil {
 			*roots = append(*roots, AliasedRoot{Root: r, Copy: call})
 		}
@@ -1934,22 +1938,56 @@ func (t *RootTracer) collectAliasedRoots(v ssa.Value, loopInfo *cfg.LoopInfo, se
 // sharesReceiverStatement reports whether call is a gorm Session or Debug
 // method call whose result may share its receiver's Statement.
 func (t *RootTracer) sharesReceiverStatement(call *ssa.Call) bool {
-	callee := call.Call.StaticCallee()
-	if !t.isImmutableReturningBuiltin(callee) || callee.Signature.Recv() == nil || len(call.Call.Args) == 0 {
+	callee, recv, _ := calledFunc(call)
+	if !t.isImmutableReturningBuiltin(callee) || recv == nil {
 		return false
 	}
 	return builtinCallEffect(call).SharesStatement
 }
 
-// builtinCallEffect returns the effect of a static call to a gorm builtin,
-// passing the *gorm.Session argument of a Session method call. The caller
-// must make sure the callee is a gorm builtin.
+// builtinCallEffect returns the effect of a call to a gorm builtin, passing
+// the *gorm.Session argument of a Session method call. The caller must make
+// sure the callee is a gorm builtin.
 func builtinCallEffect(call *ssa.Call) typeutil.BuiltinEffect {
+	callee, _, args := calledFunc(call)
 	var sessionConfig ssa.Value
-	if len(call.Call.Args) > 1 {
-		sessionConfig = call.Call.Args[1]
+	if len(args) > 0 {
+		sessionConfig = args[0]
 	}
-	return typeutil.ImmutableBuiltinEffect(call.Call.StaticCallee().Name(), sessionConfig)
+	return typeutil.ImmutableBuiltinEffect(callee.Name(), sessionConfig)
+}
+
+// calledFunc returns the function call runs, its receiver, and its other
+// arguments. For a static method call r.m(x) that is m, r and [x]; for a
+// static function call f(x) it is f, nil and [x].
+//
+// A call through a method value (f := r.m; f(x)) is resolved the same way as
+// r.m(x): SSA builds f as MakeClosure(m$bound, [r]), so the receiver is the
+// closure's binding and the method is the one the synthetic wrapper stands
+// for (directive.DeclaredFunc). Without this, the wrapper's own m call would
+// be the root of every call through f (#178). The callee is nil for a dynamic
+// call.
+func calledFunc(call *ssa.Call) (callee *ssa.Function, recv ssa.Value, args []ssa.Value) {
+	if isMethodValueCall(call) {
+		mc := call.Call.Value.(*ssa.MakeClosure)
+		return directive.DeclaredFunc(mc.Fn.(*ssa.Function)), mc.Bindings[0], call.Call.Args
+	}
+	callee = call.Call.StaticCallee()
+	if callee != nil && callee.Signature.Recv() != nil && len(call.Call.Args) > 0 {
+		return callee, call.Call.Args[0], call.Call.Args[1:]
+	}
+	return callee, nil, call.Call.Args
+}
+
+// isMethodValueCall reports whether call calls a method value directly: its
+// callee is a MakeClosure over a synthetic "m$bound" wrapper.
+func isMethodValueCall(call *ssa.Call) bool {
+	mc, ok := call.Call.Value.(*ssa.MakeClosure)
+	if !ok || len(mc.Bindings) == 0 {
+		return false
+	}
+	fn, ok := mc.Fn.(*ssa.Function)
+	return ok && fn.Synthetic != "" && strings.HasSuffix(fn.Name(), "$bound")
 }
 
 // pureReturnedArgs returns the arguments of a call to a trusted
@@ -1968,8 +2006,13 @@ func (t *RootTracer) pureReturnedArgs(call *ssa.Call) []ssa.Value {
 	if !typeutil.HasGormDBResult(call.Type()) {
 		return nil
 	}
-	callee := call.Call.StaticCallee()
-	args := t.pure.ReturnedArgs(callee, call.Call.Args)
+	// A call through a method value passes its receiver as a binding, not
+	// as an argument; put it back so a pure method returning it is followed.
+	callee, recv, args := calledFunc(call)
+	if recv != nil {
+		args = append([]ssa.Value{recv}, args...)
+	}
+	args = t.pure.ReturnedArgs(callee, args)
 	if len(args) == 0 || !t.IsPureFunction(callee) {
 		return nil
 	}

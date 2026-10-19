@@ -79,7 +79,6 @@ Alias violations carry no suggested fix. The reuse-fix strategies rewrite the ro
 
 Limitations:
 
-- A copy taken through a method value (`s := q.Session; c := s(cfg)`) is not recognized as a copy; `c` is treated as a mutable root of its own, as before.
 - `go`/`defer` uses of a copy are not alias uses.
 - A copy returned from a function, or stored in a struct field and read in another function, is not followed. A `//gormreuse:pure` function that returns a copy of its argument hides the sharing from its caller. The copy is not the argument itself, so it is not in `PureVerdicts.Returned` (see [Returned arguments](#returned-arguments-188)). Treating it as the argument would count each use of the copy as a branch, which the rejected approach above shows is wrong.
 - The fix generator's Phi-edge check treats `Session(&gorm.Session{Initialized: true})` as already immutable. The `//gormreuse:immutable-return` body check reports it (see [Immutable-return body contract](#immutable-return-body-contract-194)).
@@ -400,6 +399,10 @@ Bound Method Tracking:
   find(nil)         <- SSA: Call with Value=*ssa.MakeClosure, Fn.Name()="Find$bound"
                    <- Receiver extracted from Bindings[0] for pollution tracking
 
+  w := db.Session(&gorm.Session{}).Where
+  w("a").Find(nil)  <- w("a") is its own root, like a direct .Where("a") (#178)
+  w("b").Find(nil)  <- OK: the receiver is immutable, so each call forks
+
 Reassignment Behavior:
   q := db.Where("x")   <- SSA: q_1 = call db.Where("x")
   q.Find(nil)          <- First branch from q_1 - OK
@@ -442,6 +445,26 @@ Decisions:
 - **No suggested fix for a tuple root.** `-fix` appends `Session()` to the root's call, and `helper(db).Session(...)` does not compile when `helper` returns two values. `Generate` returns no fix when the root is not a `*gorm.DB`.
 
 Limitation: every `*gorm.DB` element of one tuple shares the call as its root. `a, b := pair(db)` followed by `a.Find(nil); b.Find(nil)` is reported as a second branch. This errs on the side of reporting. `testdata/src/gormreuse/opaque_results.go` marks it `[LIMITATION]`.
+
+### Calls through a method value (#178)
+
+The tracer resolves a call `w(x)` through a method value `w := r.m` as the call `r.m(x)`. `calledFunc` returns the declared method (`directive.DeclaredFunc` of the `m$bound` wrapper), the receiver (`MakeClosure.Bindings[0]`), and the other arguments. `traceCall`, `traceAll`, `isImmutableSource`, `pureReturnedArgs` and the Session/Debug copy checks (`sharesReceiverStatement`, `builtinCallEffect`, `collectAliasedRoots`) all read the call through it. So:
+
+| Code | Result |
+| --- | --- |
+| `w := q.Where; w("a")` | branch of `q`'s root (call handler), and a new mutable root |
+| `w := db.Session(&gorm.Session{}).Where` | each call is a fresh root; no reuse |
+| `s := q.Session; c := s(&gorm.Session{})` | `c` is a copy that shares `q`'s Statement, as with `q.Session(...)` |
+| `s(&gorm.Session{Initialized: true})` | mutable root |
+| `f := r.build; f()` | a call of the user method `build`, like `r.build()` |
+| `f := o.open; q, err := f()` | the call is a mutable root, as for a tuple result of `o.open()` (#176) |
+| `f := h.same; f(q)`, `same` pure and returning its argument | an alias of `q`'s root, as for `h.same(q)` (#188) |
+
+**Rejected: trace into the wrapper as an IIFE.** This was the old behavior. The wrapper's body is one `r.m(x)` call, so every call through `w` traced to that one call. They shared one root: two calls through a method value of an immutable receiver were a false second branch, and on a mutable receiver the chained use was reported again, with no root position, since the wrapper call has none.
+
+An interface method value has no declared method, so `DeclaredFunc` keeps the wrapper. Its signature has no receiver, so a call through it is handled like any other call whose result holds a `*gorm.DB`: a mutable root, as for an interface call `r.Query()` (#176).
+
+Limitation: a second branch made through a method value (`w := q.Where; w("a").Find(nil); w("b").Find(nil)`) gets no suggested fix. The fix generator's reassignment and Session strategies look for a `q.m(...)` selector at each use, and a call through `w` has none. A root created by a call through a method value (`q := w("a")`) does get `.Session(&gorm.Session{})` appended.
 
 ### Which merges are reassignments (#175)
 
