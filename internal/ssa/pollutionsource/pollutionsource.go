@@ -31,6 +31,9 @@
 //     its *gorm.DB arguments (db.Where("id IN (?)", sub)), when the array
 //     goes nowhere else. The main handler records such an argument as a read
 //     of its root (#185). See ReadOnlyGormArgs.
+//   - Packing into a wrapper that goes only to such a parameter: the varargs
+//     of gorm.Expr, a local map, or the Vars of a local clause.Expr literal
+//     (#253). See isReadOnlyValue.
 //   - A bare *ssa.MakeInterface with no downstream store/use. Interface
 //     conversion alone transfers no ownership; the value is only a leak once
 //     it is stored or passed somewhere, which the cases above already cover.
@@ -38,6 +41,8 @@
 package pollutionsource
 
 import (
+	"go/token"
+	"go/types"
 	"slices"
 
 	"golang.org/x/tools/go/ssa"
@@ -100,14 +105,19 @@ func Leak(instr ssa.Instruction) (ssa.Value, Kind) {
 		if !ok {
 			return nil, KindNone
 		}
-		if isReadOnlyVariadicArg(idx, i.Val) || isReadOnlyGormVarargs(idx.X) {
+		if isReadOnlyVariadicArg(idx, i.Val) || isReadOnlyArray(idx.X) {
 			return nil, KindNone
 		}
 		return v, KindSliceStore
 	case *ssa.MapUpdate:
-		if v, ok := UnwrapGormDB(i.Value); ok {
-			return v, KindMapStore
+		v, ok := UnwrapGormDB(i.Value)
+		if !ok {
+			return nil, KindNone
 		}
+		if _, local := i.Map.(*ssa.MakeMap); local && isReadOnlyValue(i.Map) {
+			return nil, KindNone
+		}
+		return v, KindMapStore
 	}
 	return nil, KindNone
 }
@@ -184,26 +194,39 @@ func isReadOnlyStdlibCallee(call *ssa.Call) bool {
 // such an argument as a subquery, a group condition or a Joins condition,
 // from a cloned Statement, so it never changes the argument (#185, checked in
 // e2e/internal/subquery_test.go). Find's dest and Delete's value are written
-// to or parsed as a model, so they are not read-only.
+// to or parsed as a model, so they are not read-only. FirstOrInit and
+// FirstOrCreate pass their conditions to Find (#253).
 var readOnlyArgMethods = map[string]int{
-	"Where":        0,
-	"Or":           0,
-	"Not":          0,
-	"Having":       0,
-	"Joins":        0,
-	"InnerJoins":   0,
-	"Table":        0,
-	"Select":       0,
-	"Distinct":     0,
-	"Raw":          0,
-	"Exec":         0,
-	"Find":         1,
-	"First":        1,
-	"Last":         1,
-	"Take":         1,
-	"Delete":       1,
-	"Update":       1,
-	"UpdateColumn": 1,
+	"Where":         0,
+	"Or":            0,
+	"Not":           0,
+	"Having":        0,
+	"Joins":         0,
+	"InnerJoins":    0,
+	"Table":         0,
+	"Select":        0,
+	"Distinct":      0,
+	"Raw":           0,
+	"Exec":          0,
+	"Find":          1,
+	"First":         1,
+	"Last":          1,
+	"Take":          1,
+	"Delete":        1,
+	"Update":        1,
+	"UpdateColumn":  1,
+	"FirstOrInit":   1,
+	"FirstOrCreate": 1,
+}
+
+// wrapperFuncs maps each package path and function name of a function that
+// wraps its arguments for a query, without reading them, to the index of its
+// first wrapped parameter. Every later parameter is wrapped too. GORM binds a
+// *gorm.DB inside the result as a subquery, as if it were passed directly
+// (#253, checked in e2e/internal/subquery_wrapper_test.go).
+var wrapperFuncs = map[[2]string]int{
+	{"gorm.io/gorm", "Expr"}:  1,
+	{"database/sql", "Named"}: 1,
 }
 
 // readOnlyArgStart returns the index in site.Args of the first argument that
@@ -218,10 +241,32 @@ func readOnlyArgStart(site callsite.Site) (int, bool) {
 	return first, ok
 }
 
+// wrapperArgStart returns the index in site.Args of the first argument that a
+// call to a wrapper function wraps (see wrapperFuncs). It returns false when
+// site is not a call to such a function.
+func wrapperArgStart(site callsite.Site) (int, bool) {
+	fn := site.Declared
+	if fn == nil || fn.Signature.Recv() != nil || fn.Object() == nil || fn.Object().Pkg() == nil {
+		return 0, false
+	}
+	first, ok := wrapperFuncs[[2]string{fn.Object().Pkg().Path(), fn.Object().Name()}]
+	return first, ok
+}
+
+// IsReadOnlyWrapperCall reports whether call, read as site, is a call to a
+// wrapper function (gorm.Expr, sql.Named) whose result goes only to read-only
+// arguments of *gorm.DB methods, directly or through other wrappers. Its
+// *gorm.DB arguments are then only read, by the method that takes the result
+// (ReadOnlyGormArgs).
+func IsReadOnlyWrapperCall(call *ssa.Call, site callsite.Site) bool {
+	_, ok := wrapperArgStart(site)
+	return ok && isReadOnlyValue(call)
+}
+
 // ReadOnlyGormArgs returns the *gorm.DB values that the call passes to a
 // read-only parameter (see readOnlyArgStart): directly, boxed in an
-// interface, or packed into a varargs array that goes nowhere else
-// (isReadOnlyGormVarargs).
+// interface, packed into a varargs array that goes nowhere else, or inside a
+// wrapper that goes nowhere else (wrappedGormDBs).
 func ReadOnlyGormArgs(site callsite.Site) []ssa.Value {
 	start, ok := readOnlyArgStart(site)
 	if !ok || start > len(site.Args) {
@@ -229,19 +274,7 @@ func ReadOnlyGormArgs(site callsite.Site) []ssa.Value {
 	}
 	var vals []ssa.Value
 	for _, arg := range site.Args[start:] {
-		if v, ok := UnwrapGormDB(arg); ok {
-			vals = append(vals, v)
-			continue
-		}
-		slice, ok := arg.(*ssa.Slice)
-		if !ok || !isReadOnlyGormVarargs(slice.X) {
-			continue
-		}
-		for _, store := range arrayElementStores(slice.X) {
-			if v, ok := UnwrapGormDB(store.Val); ok {
-				vals = append(vals, v)
-			}
-		}
+		vals = append(vals, wrappedGormDBs(arg)...)
 	}
 	return vals
 }
@@ -259,35 +292,67 @@ func CallReadOnlyArgs(site callsite.Site) (vals []ssa.Value, start int, ok bool)
 	return ReadOnlyGormArgs(site), start, true
 }
 
-// isReadOnlyGormVarargs reports whether array is a local array whose every
-// slice is passed only to read-only parameters of *gorm.DB methods: the
-// varargs of db.Where("id IN (?)", sub), or a literal spread into them. An
-// array that is used any other way may be read elsewhere, so it is not.
-func isReadOnlyGormVarargs(array ssa.Value) bool {
-	alloc, ok := array.(*ssa.Alloc)
-	if !ok {
-		return false
+// wrappedGormDBs returns the *gorm.DB values that v, passed to a read-only
+// parameter, holds: v itself, or the values inside a wrapper whose every use
+// is read-only (isReadOnlyValue). The wrappers are an interface box, a local
+// array sliced into varargs or into a []any literal, a call to a wrapper
+// function (gorm.Expr, sql.Named), a local map, and a local clause.Expr
+// literal or a pointer to one.
+func wrappedGormDBs(v ssa.Value) []ssa.Value {
+	if db, ok := UnwrapGormDB(v); ok {
+		return []ssa.Value{db}
 	}
+	var vals []ssa.Value
+	switch w := v.(type) {
+	case *ssa.MakeInterface:
+		return wrappedGormDBs(w.X)
+	case *ssa.Slice:
+		if isReadOnlyArray(w.X) {
+			for _, store := range addrStores(w.X) {
+				vals = append(vals, wrappedGormDBs(store.Val)...)
+			}
+		}
+	case *ssa.Call:
+		site := callsite.SiteOf(w, nil)
+		if start, ok := wrapperArgStart(site); ok && start <= len(site.Args) && isReadOnlyValue(w) {
+			for _, arg := range site.Args[start:] {
+				vals = append(vals, wrappedGormDBs(arg)...)
+			}
+		}
+	case *ssa.MakeMap:
+		if isReadOnlyValue(w) {
+			for _, r := range *w.Referrers() {
+				if update, ok := r.(*ssa.MapUpdate); ok {
+					vals = append(vals, wrappedGormDBs(update.Value)...)
+				}
+			}
+		}
+	case *ssa.UnOp:
+		if isClauseExprAlloc(w.X) && isReadOnlyValue(w.X) {
+			for _, store := range addrStores(w.X) {
+				vals = append(vals, wrappedGormDBs(store.Val)...)
+			}
+		}
+	case *ssa.Alloc:
+		if isClauseExprAlloc(w) && isReadOnlyValue(w) {
+			for _, store := range addrStores(w) {
+				vals = append(vals, wrappedGormDBs(store.Val)...)
+			}
+		}
+	}
+	return vals
+}
+
+// isReadOnlyValue reports whether v is used, and every use of v only hands it
+// to a read-only parameter of a *gorm.DB method (readOnlyArgStart), directly
+// or through wrappers (see wrappedGormDBs) that are used the same way. Any
+// other use may read the *gorm.DB it holds elsewhere, so it is not read-only.
+func isReadOnlyValue(v ssa.Value) bool {
 	passed := false
-	for _, r := range *alloc.Referrers() {
-		switch u := r.(type) {
-		case *ssa.IndexAddr:
-			continue
-		case *ssa.Slice:
-			if len(*u.Referrers()) == 0 {
-				return false
-			}
-			for _, sr := range *u.Referrers() {
-				call, ok := sr.(*ssa.Call)
-				if !ok {
-					return false
-				}
-				site := callsite.SiteOf(call, nil)
-				first, ok := readOnlyArgStart(site)
-				if !ok || slices.Index(site.Args, ssa.Value(u)) < first {
-					return false
-				}
-			}
+	for _, r := range *v.Referrers() {
+		switch {
+		case fillsLocal(v, r):
+		case isReadOnlyUse(v, r):
 			passed = true
 		default:
 			return false
@@ -296,16 +361,105 @@ func isReadOnlyGormVarargs(array ssa.Value) bool {
 	return passed
 }
 
-// arrayElementStores returns the stores into the elements of array.
-func arrayElementStores(array ssa.Value) []*ssa.Store {
+// fillsLocal reports whether instr, a referrer of v, only fills v, a local
+// array, map or clause.Expr: a store into it, or the address of an element or
+// field that is only stored to.
+func fillsLocal(v ssa.Value, instr ssa.Instruction) bool {
+	switch u := instr.(type) {
+	case *ssa.IndexAddr:
+		return onlyStoredTo(u)
+	case *ssa.FieldAddr:
+		return onlyStoredTo(u)
+	case *ssa.Store:
+		return u.Addr == v
+	case *ssa.MapUpdate:
+		return u.Map == v
+	}
+	return false
+}
+
+// isReadOnlyUse reports whether instr, a referrer of v, only hands v to a
+// read-only parameter or to a wrapper that isReadOnlyValue (see
+// isReadOnlyValue).
+func isReadOnlyUse(v ssa.Value, instr ssa.Instruction) bool {
+	switch u := instr.(type) {
+	case *ssa.MakeInterface:
+		return isReadOnlyValue(u)
+	case *ssa.Call:
+		site := callsite.SiteOf(u, nil)
+		if first, ok := readOnlyArgStart(site); ok {
+			return slices.Index(site.Args, v) >= first
+		}
+		first, ok := wrapperArgStart(site)
+		return ok && slices.Index(site.Args, v) >= first && isReadOnlyValue(u)
+	case *ssa.Store:
+		// v is u.Val: a store into v is fillsLocal.
+		switch addr := u.Addr.(type) {
+		case *ssa.IndexAddr:
+			return isReadOnlyArray(addr.X)
+		case *ssa.FieldAddr:
+			return isClauseExprAlloc(addr.X) && isReadOnlyValue(addr.X)
+		}
+	case *ssa.MapUpdate:
+		_, local := u.Map.(*ssa.MakeMap)
+		return u.Value == v && local && isReadOnlyValue(u.Map)
+	case *ssa.Slice:
+		// v is a local array (isReadOnlyArray checks it).
+		return isReadOnlyValue(u)
+	case *ssa.UnOp:
+		// v is a local clause.Expr: its value is used like v.
+		return u.Op == token.MUL && isClauseExprAlloc(v) && isReadOnlyValue(u)
+	}
+	return false
+}
+
+// isReadOnlyArray reports whether array is a local array that isReadOnlyValue:
+// one whose every slice is passed only to read-only parameters, such as the
+// varargs of db.Where("id IN (?)", sub) or a literal spread into them.
+func isReadOnlyArray(array ssa.Value) bool {
+	_, ok := array.(*ssa.Alloc)
+	return ok && isReadOnlyValue(array)
+}
+
+// isClauseExprAlloc reports whether v is a local clause.Expr: the address
+// that a clause.Expr literal is built in.
+func isClauseExprAlloc(v ssa.Value) bool {
+	alloc, ok := v.(*ssa.Alloc)
+	if !ok {
+		return false
+	}
+	named, ok := types.Unalias(alloc.Type().(*types.Pointer).Elem()).(*types.Named)
+	if !ok {
+		return false
+	}
+	obj := named.Obj()
+	return obj.Pkg() != nil && obj.Pkg().Path() == "gorm.io/gorm/clause" && obj.Name() == "Expr"
+}
+
+// onlyStoredTo reports whether every use of the address addr stores into it.
+func onlyStoredTo(addr ssa.Value) bool {
+	return !slices.ContainsFunc(*addr.Referrers(), func(r ssa.Instruction) bool {
+		store, ok := r.(*ssa.Store)
+		return !ok || store.Addr != addr
+	})
+}
+
+// addrStores returns the stores into the elements or fields of addr, a local
+// array or struct.
+func addrStores(addr ssa.Value) []*ssa.Store {
 	var stores []*ssa.Store
-	for _, r := range *array.Referrers() {
-		idx, ok := r.(*ssa.IndexAddr)
-		if !ok {
+	for _, r := range *addr.Referrers() {
+		var elem ssa.Value
+		switch r := r.(type) {
+		case *ssa.IndexAddr:
+			elem = r
+		case *ssa.FieldAddr:
+			elem = r
+		default:
 			continue
 		}
-		for _, ir := range *idx.Referrers() {
-			if store, ok := ir.(*ssa.Store); ok && store.Addr == idx {
+		for _, er := range *elem.Referrers() {
+			if store, ok := er.(*ssa.Store); ok && store.Addr == elem {
 				stores = append(stores, store)
 			}
 		}

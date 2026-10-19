@@ -1,0 +1,182 @@
+package internal
+
+import (
+	"database/sql"
+
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
+)
+
+// Regression fixtures for #253.
+//
+// A subquery wrapped in gorm.Expr, sql.Named, a map or a clause.Expr, and
+// passed to a read-only parameter, is only read, as a bare subquery is
+// (#185, see subquery.go). So are the conditions of FirstOrInit and
+// FirstOrCreate. A wrapper that is also used another way may hand the
+// subquery elsewhere, so it is still a branch.
+
+// =============================================================================
+// SHOULD NOT REPORT - the wrapped argument is only read
+// =============================================================================
+
+func subqueryInExprReused(db *gorm.DB) {
+	db = db.Session(&gorm.Session{})
+	sub := db.Model(&User{}).Select("id")
+	db.Where("id IN (?)", gorm.Expr("?", sub)).Find(&[]User{})
+	db.Where("id NOT IN (?)", gorm.Expr("?", sub)).Find(&[]User{})
+	sub.Find(&[]User{})
+}
+
+func subqueryInNamedArgReused(db *gorm.DB) {
+	db = db.Session(&gorm.Session{})
+	sub := db.Model(&User{}).Select("id")
+	db.Where("id IN (@s)", sql.Named("s", sub)).Find(&[]User{})
+	db.Where("id NOT IN (@s)", sql.Named("s", sub)).Find(&[]User{})
+	sub.Find(&[]User{})
+}
+
+func subqueryInMapReused(db *gorm.DB) {
+	db = db.Session(&gorm.Session{})
+	sub := db.Model(&User{}).Select("id")
+	db.Where("id IN (@s)", map[string]interface{}{"s": sub}).Find(&[]User{})
+	db.Where("id NOT IN (@s)", map[string]interface{}{"s": sub}).Find(&[]User{})
+	sub.Find(&[]User{})
+}
+
+func subqueryInClauseExprReused(db *gorm.DB) {
+	db = db.Session(&gorm.Session{})
+	sub := db.Model(&User{}).Select("id")
+	db.Where(clause.Expr{SQL: "id IN (?)", Vars: []interface{}{sub}}).Find(&[]User{})
+	db.Where(&clause.Expr{SQL: "id NOT IN (?)", Vars: []interface{}{sub}}).Find(&[]User{})
+	sub.Find(&[]User{})
+}
+
+func subqueryInFirstOrInitReused(db *gorm.DB) {
+	db = db.Session(&gorm.Session{})
+	sub := db.Model(&User{}).Select("id")
+	db.FirstOrInit(&User{}, "id IN (?)", sub)
+	db.FirstOrInit(&User{}, "id IN (?)", sub)
+	db.FirstOrCreate(&User{}, "id IN (?)", sub)
+	db.FirstOrCreate(&User{}, "id IN (?)", sub)
+}
+
+// A wrapper kept in a variable and used only as a read-only argument is read.
+func subqueryWrapperVariableReused(db *gorm.DB) {
+	db = db.Session(&gorm.Session{})
+	sub := db.Model(&User{}).Select("id")
+	e := gorm.Expr("?", sub)
+	db.Where("id IN (?)", e).Find(&[]User{})
+	db.Where("id NOT IN (?)", e).Find(&[]User{})
+}
+
+// Wrappers nest.
+func subqueryNestedWrappersReused(db *gorm.DB) {
+	db = db.Session(&gorm.Session{})
+	sub := db.Model(&User{}).Select("id")
+	db.Where("id IN (@s)", sql.Named("s", gorm.Expr("?", sub))).Find(&[]User{})
+	db.Where("id IN (@s)", map[string]interface{}{"s": sql.Named("s", sub)}).Find(&[]User{})
+}
+
+// =============================================================================
+// SHOULD REPORT - the argument changed before it was read
+// =============================================================================
+
+func subqueryInExprChangedBeforeOuterQuery(db *gorm.DB) {
+	db = db.Session(&gorm.Session{})
+	sub := db.Model(&User{}).Select("id")
+	x := db.Where("id IN (?)", gorm.Expr("?", sub))
+	sub.Where("age > 1").Find(&[]User{})
+	x.Find(&[]User{}) // want `\*gorm\.DB reused: mutable root passed as a query argument`
+}
+
+func subqueryInNamedArgReadAfterBranch(db *gorm.DB) {
+	db = db.Session(&gorm.Session{})
+	sub := db.Model(&User{}).Select("id")
+	sub.Where("age > 1").Find(&[]User{})
+	db.Where("id IN (@s)", sql.Named("s", sub)).Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+func subqueryInFirstOrInitChangedBeforeIt(db *gorm.DB) {
+	db = db.Session(&gorm.Session{})
+	sub := db.Model(&User{}).Select("id")
+	sub.Where("age > 1").Find(&[]User{})
+	db.FirstOrInit(&User{}, "id IN (?)", sub) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// =============================================================================
+// SHOULD REPORT - the wrapper is used another way
+// =============================================================================
+
+func subqueryExprKeptIsBranch(db *gorm.DB) {
+	db = db.Session(&gorm.Session{})
+	sub := db.Model(&User{}).Select("id")
+	e := gorm.Expr("?", sub)
+	db.Where("id IN (?)", e).Find(&[]User{})
+	keepSubqueryExpr(e)
+	sub.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+func keepSubqueryExpr(clause.Expr) {}
+
+func subqueryNamedArgKeptIsBranch(db *gorm.DB) {
+	db = db.Session(&gorm.Session{})
+	sub := db.Model(&User{}).Select("id")
+	n := sql.Named("s", sub)
+	db.Where("id IN (@s)", n).Find(&[]User{})
+	keepSubqueryNamedArg(n)
+	sub.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+func keepSubqueryNamedArg(sql.NamedArg) {}
+
+func subqueryMapReadBackIsBranch(db *gorm.DB) {
+	db = db.Session(&gorm.Session{})
+	sub := db.Model(&User{}).Select("id")
+	m := map[string]interface{}{"s": sub}
+	db.Where("id IN (@s)", m).Find(&[]User{})
+	_ = m["s"]
+	sub.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+func subqueryClauseExprFieldReadIsBranch(db *gorm.DB) {
+	db = db.Session(&gorm.Session{})
+	sub := db.Model(&User{}).Select("id")
+	e := &clause.Expr{SQL: "id IN (?)", Vars: []interface{}{sub}}
+	db.Where(e).Find(&[]User{})
+	_ = e.Vars
+	sub.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// A wrapper passed to a method that is not known to only read it is a branch.
+func subqueryExprInOrderIsBranch(db *gorm.DB) {
+	db = db.Session(&gorm.Session{})
+	sub := db.Model(&User{}).Select("id")
+	db.Order(gorm.Expr("FIELD(id, ?)", sub)).Find(&[]User{})
+	sub.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// =============================================================================
+// //gormreuse:pure - a wrapped argument is read there too
+// =============================================================================
+
+//gormreuse:pure
+func pureSubqueryInNamedArg(db, sub *gorm.DB) *gorm.DB {
+	return db.Session(&gorm.Session{}).Where("id IN (@s)", sql.Named("s", sub))
+}
+
+//gormreuse:pure
+func pureSubqueryInExpr(db, sub *gorm.DB) *gorm.DB {
+	return db.Session(&gorm.Session{}).Where("id IN (?)", gorm.Expr("?", sub))
+}
+
+//gormreuse:pure
+func pureSubqueryInMap(db, sub *gorm.DB) *gorm.DB {
+	return db.Session(&gorm.Session{}).Where("id IN (@s)", map[string]interface{}{"s": sub})
+}
+
+//gormreuse:pure
+func pureSubqueryNamedArgKept(db, sub *gorm.DB) *gorm.DB {
+	n := sql.Named("s", sub) // want `pure function passes \*gorm\.DB argument to non-pure function Named`
+	keepSubqueryNamedArg(n)
+	return db.Session(&gorm.Session{}).Where("id IN (@s)", n)
+}

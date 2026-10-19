@@ -435,8 +435,10 @@ func (h *callHandler) checkFunctionCallPollution(call *ssa.Call, site callsite.S
 		recordArgumentRead(v, call, ctx)
 	}
 
-	// Check if this is a pure function - pure functions don't pollute args
-	if callee != nil && ctx.RootTracer.IsPureFunction(callee) {
+	// Check if this is a pure function - pure functions don't pollute args.
+	// Neither does a wrapper such as sql.Named("s", sub) whose result is only
+	// a read-only argument: the method that takes it reads sub (#253).
+	if callee != nil && ctx.RootTracer.IsPureFunction(callee) || pollutionsource.IsReadOnlyWrapperCall(call, site) {
 		return
 	}
 
