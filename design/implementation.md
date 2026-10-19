@@ -313,6 +313,29 @@ User-Defined Function Reassignment:
   it uses RecordAssignment (like gorm methods) instead of MarkPolluted.
 ```
 
+## Pure Contract Validation
+
+`purity.Validator` checks the body of every `//gormreuse:pure` function. It follows "parameter-derived" values and reports when one is polluted or escapes.
+
+| Step | What it does |
+| --- | --- |
+| Seed | Every parameter whose type holds a `*gorm.DB` without going through an interface: `*gorm.DB`, `**gorm.DB`, `[]*gorm.DB` (variadic too), maps, channels, arrays, and structs with such a field. A method's receiver is not seeded. |
+| Propagate | Through Phi, Extract, call results, loads (`*p`), channel receives, `FieldAddr`/`Field`/`IndexAddr`/`Index`/`Lookup`/`Slice`, conversions, range iteration, and stores into a local `Alloc` (`p := &db`, `h := holder{db: db}`). It repeats until nothing changes, so loop Phis and later stores are seen. |
+| Closures | A `MakeClosure` whose bindings are derived seeds the closure's free variables and validates the closure body as part of the pure function (IIFE, `go func(){...}()`, stored closures). |
+| Check | `Call`, `Go` and `Defer` share one check. `*gorm.DB` method values (`Find$bound`) are checked where they are created. Stores outside local variables and `pollutionsource.Leak` cover escapes. |
+
+A violation is **definitive** (`Violation.Definitive`) when the argument is polluted by a gorm chain method, escapes, or is passed to a pure function that already failed. Only definitive violations put the function in `failedPure`, which makes the tracer stop trusting it at call sites. Passing the argument to a function that is not marked pure stays conservative and does not revoke trust (`nestedClosureOuterPureViolation`, PV117).
+
+Failure is transitive (#187). `validatePureFuncs` in `internal/analyzer.go` validates all pure functions repeatedly until `failedPure` stops growing, then reports from a final round. The set only grows, and a larger set only adds violations, so this ends within one round per pure function.
+
+Decisions and limitations:
+
+- **The receiver is not seeded.** It usually holds the application's root handle, and the directive's signature check also ignores receivers (`OrmWrapper.GetDB` is reported unused). Seeding it would report every `r.db.Where(...)` in a pure method.
+- **Interfaces are not followed.** A `*gorm.DB` boxed in an `interface{}` is caught only when it is passed or stored directly (`pollutionsource.UnwrapGormDB`). Types that hold one only through an interface are not seeded.
+- **Builtins.** `len(dbs)` and `cap(dbs)` cannot pollute and are not reported. `append` and `copy` count every derived argument. Other builtins count only a `*gorm.DB` argument itself.
+- **Captured variables.** A closure that assigns a derived value to a variable captured from the pure function (`func() { x = db }()`) is reported as a store through a pointer. The free variable is not traced back to the enclosing `Alloc`.
+- **Returning the argument.** A pure function that returns its argument is still trusted as returning a fresh value, so `pureReturnsArg(db).Find(nil)` in another pure function is not reported. That is #188.
+
 ## Development Commands
 
 Develop on Go 1.27 or later: the fixtures use generic methods and promoted
