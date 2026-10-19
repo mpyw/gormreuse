@@ -395,6 +395,28 @@ User-Defined Function Reassignment:
   it uses RecordAssignment (like gorm methods) instead of MarkPolluted.
 ```
 
+### Results the tracer cannot see through (#176)
+
+`traceCall` makes a call its own mutable root when its result holds a `*gorm.DB` and the callee is not known to return an immutable value. Before #176 it returned `nil` (immutable) in two cases, against the conservative principle:
+
+| Call | Root | Immutable when |
+| --- | --- | --- |
+| `q := helper(db)`, unmarked user function | the call | never |
+| `q, err := helper(db)`, tuple result | the call, reached through the `Extract`; for a trusted pure callee, the returned argument's root (#188) | the callee is `immutable-return`, or is pure and returns only immutable arguments |
+| `q := f(db)`, `f` a func-typed parameter, field or merged func value | the call | never |
+| `q := r.Query()`, interface method | the call | never |
+
+Decisions:
+
+- **A trusted pure function's tuple result is an alias of its argument** when its body may return that argument, as for a single result ([Returned arguments](#returned-arguments-188)).
+- **`immutable-return` applies to a tuple result.** The signature check already accepted any result list with a `*gorm.DB`, and `ValidateImmutableReturn` already checks every `*gorm.DB` operand of each `return`. So `//gormreuse:immutable-return` on `func open() (*gorm.DB, error)` makes its `*gorm.DB` immutable at call sites, and returning `db.Where(...)` from it is reported at the declaration.
+- **The tuple call is the root**, not the `Extract`. An `Extract` has no source position, so the message could not say `root at file:line`. This matches what `traceCall` already did for a closure with a stored tuple result.
+- **A dynamic or interface callee is mutable.** Nothing says what it returns. A repository interface whose method returns a fresh handle, such as `r.DB()`, is now reported when its result is branched twice. Write `r.DB().Session(&gorm.Session{})`, or `//gormreuse:ignore`. No directive applies to an interface method, so `immutable-return` on the implementation does not help a call through the interface.
+- **`q, err = helper(q)` is a reassignment**, like `q = helper(q)`. `checkFunctionCallPollution` accepts a tuple result, and `isAssignment` follows the `*gorm.DB` `Extract` to the merge.
+- **No suggested fix for a tuple root.** `-fix` appends `Session()` to the root's call, and `helper(db).Session(...)` does not compile when `helper` returns two values. `Generate` returns no fix when the root is not a `*gorm.DB`.
+
+Limitation: every `*gorm.DB` element of one tuple shares the call as its root. `a, b := pair(db)` followed by `a.Find(nil); b.Find(nil)` is reported as a second branch. This errs on the side of reporting. `testdata/src/gormreuse/opaque_results.go` marks it `[LIMITATION]`.
+
 ### Which merges are reassignments (#175)
 
 A straight-line `q = q.Where("a")` needs no special case: the new SSA value is its own root, and `q.Where("a")` is a branch of the old one. The special case is a merge. In `if c { q = q.Where("a") }; q.Find(nil)`, the use reads `Phi(q₁, q₂)`, and `FindMutableRoot` resolves that Phi to `q₁`. If `q.Where("a")` polluted `q₁`, `q.Find` would be a false second branch. So `isAssignment` records such a call with `RecordAssignment`, which does not pollute.
@@ -463,7 +485,7 @@ Decisions and limitations:
 
 - **The argument wins when the result may be either.** A result that may be the argument or a fresh chain is treated as the argument. A branch from it is then counted against the argument, which can report a reuse on the fresh path. Treating it as fresh would miss the reuse on the other path.
 - **A Session-isolated result is not an alias.** `db.Session(&gorm.Session{}).Where(...)` gets its own Statement copy at the `Where` (`TestPureSessionResultIsolated` in `e2e/internal`), so the documented `withTenant` pattern keeps a fresh root, as the README says.
-- **Only a `*gorm.DB` result is traced.** A tuple result (`(*gorm.DB, error)`) is still not followed by the tracer (#176), although the validator follows it.
+- **A tuple result follows the same rule (#176).** `Validator.ReturnedParams` already looks at every operand of each `Return`, so `return db, nil` records `db`. `pureReturnedArgs` accepts a tuple result, and `returnsOnlyParams` checks every `*gorm.DB` operand, in any position. The `*gorm.DB` elements of one tuple share the call as their root (see [Results the tracer cannot see through](#results-the-tracer-cannot-see-through-176)), so they are all traced to the returned arguments.
 - **Across packages.** `ReturnedParams` needs the callee's body, so a pure function in another package is still trusted to return a fresh value (#195, `pureReturnedArgUnknown` in `testdata/src/externalpure/use.go`).
 - **The receiver.** The receiver is not seeded, so a pure method that returns `r.db` is not an alias of anything.
 
