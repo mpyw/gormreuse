@@ -884,21 +884,21 @@ func (t *RootTracer) tracePhi(phi *ssa.Phi, visited map[ssa.Value]bool, loopInfo
 func (t *RootTracer) traceUnOp(unop *ssa.UnOp, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) ssa.Value {
 	if unop.Op == token.MUL {
 		// Pointer dereference - trace through the pointer
-		return t.tracePointerLoad(unop.X, visited, loopInfo)
+		return t.tracePointerLoad(unop, visited, loopInfo)
 	}
 	return t.trace(unop.X, visited, loopInfo)
 }
 
-func (t *RootTracer) tracePointerLoad(ptr ssa.Value, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) ssa.Value {
-	switch p := ptr.(type) {
+func (t *RootTracer) tracePointerLoad(load *ssa.UnOp, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) ssa.Value {
+	switch p := load.X.(type) {
 	case *ssa.FreeVar:
 		return t.traceFreeVar(p, visited, loopInfo)
 	case *ssa.Alloc:
 		return t.traceAlloc(p, visited, loopInfo)
 	case *ssa.FieldAddr:
-		return t.traceFieldStore(p, visited, loopInfo)
+		return t.traceFieldStore(p, load, visited, loopInfo)
 	default:
-		return t.trace(ptr, visited, loopInfo)
+		return t.trace(p, visited, loopInfo)
 	}
 }
 
@@ -1012,21 +1012,25 @@ func AllocStoredValues(alloc *ssa.Alloc) []ssa.Value {
 //	t2 = UnOp * t1             // Dereference to get value
 //	                           // (traced here to find the Store)
 //
-// This function finds the Store that wrote to the same field.
-func (t *RootTracer) traceFieldStore(fa *ssa.FieldAddr, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) ssa.Value {
+// This function finds the Store that wrote to the same field and can reach the
+// load.
+func (t *RootTracer) traceFieldStore(fa *ssa.FieldAddr, load *ssa.UnOp, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) ssa.Value {
 	// Single-root: trace the first value stored into the same field.
-	if vals := fieldStoredValues(fa); len(vals) > 0 {
+	if vals := fieldStoredValues(fa, load); len(vals) > 0 {
 		return t.trace(vals[0], visited, loopInfo)
 	}
 	return nil
 }
 
 // fieldStoredValues returns, in program order, the values stored into the same
-// struct field as fa. Shared by traceFieldStore (first) and
-// traceAllFieldStores (all).
-func fieldStoredValues(fa *ssa.FieldAddr) []ssa.Value {
+// struct field as fa. Shared by traceFieldStore (first), traceAllFieldStores
+// (all), and the Scopes callback resolver.
+//
+// With a load, only the stores that can reach it are returned (see
+// fieldStores). With a nil load, every store in the function is returned.
+func fieldStoredValues(fa *ssa.FieldAddr, load ssa.Instruction) []ssa.Value {
 	root, path := fieldAddrPath(fa)
-	return fieldStoredValuesFrom(fa.Parent(), root, path, make(map[fieldRef]bool))
+	return fieldStoredValuesFrom(fa.Parent(), root, path, load, make(map[fieldRef]bool))
 }
 
 // fieldAddrPath resolves fa to the address it ultimately selects from together
@@ -1053,12 +1057,22 @@ func fieldAddrPath(fa *ssa.FieldAddr) (root ssa.Value, path []int) {
 	}
 }
 
-// fieldRef identifies one (aggregate, field path) pair being searched. Every
-// path visited during a single fieldStoredValues query is a suffix of the
-// original path, so its length identifies it uniquely.
+// SameField reports whether a and b select the same field path from the same
+// address. Two accesses to one field are separate FieldAddr chains, so this
+// compares them as fieldStoredValues does.
+func SameField(a, b *ssa.FieldAddr) bool {
+	rootA, pathA := fieldAddrPath(a)
+	rootB, pathB := fieldAddrPath(b)
+	return rootA == rootB && slices.Equal(pathA, pathB)
+}
+
+// fieldRef identifies one (aggregate, field path, load) search. Every path
+// visited during a single fieldStoredValues query is a suffix of the original
+// path, so its length identifies it uniquely.
 type fieldRef struct {
 	root  ssa.Value
 	depth int
+	load  ssa.Instruction
 }
 
 // fieldStoredValuesFrom returns, in program order, the values stored into the
@@ -1077,43 +1091,121 @@ type fieldRef struct {
 //	*t2 = t5             // copy it into h
 //
 // A FieldAddr on t2 has no matching field store of its own; following
-// `*t2 = *t3` back to t3 recovers the store of q. seen guards against
-// aggregates that copy into each other.
-func fieldStoredValuesFrom(fn *ssa.Function, root ssa.Value, path []int, seen map[fieldRef]bool) []ssa.Value {
-	ref := fieldRef{root: root, depth: len(path)}
+// `*t2 = *t3` back to t3 recovers the store of q, as it was when t3 was
+// loaded. seen guards against aggregates that copy into each other.
+func fieldStoredValuesFrom(fn *ssa.Function, root ssa.Value, path []int, load ssa.Instruction, seen map[fieldRef]bool) []ssa.Value {
+	ref := fieldRef{root: root, depth: len(path), load: load}
 	if fn == nil || root == nil || len(path) == 0 || seen[ref] {
 		return nil
 	}
 	seen[ref] = true
 
 	var vals []ssa.Value
-	for _, block := range fn.Blocks {
-		for _, instr := range block.Instrs {
-			store, ok := instr.(*ssa.Store)
-			if !ok {
-				continue
-			}
-			storeRoot, storePath := store.Addr, []int(nil)
-			if storeFA, ok := store.Addr.(*ssa.FieldAddr); ok {
-				storeRoot, storePath = fieldAddrPath(storeFA)
-			}
-			if storeRoot != root {
-				continue
-			}
-			switch {
-			case slices.Equal(storePath, path):
-				vals = append(vals, store.Val)
-			case len(storePath) < len(path) && slices.Equal(storePath, path[:len(storePath)]):
-				// A whole sub-aggregate was copied over a prefix of the path
-				// being read; resume the search at the address it was loaded
-				// from, for the remainder of the path.
-				if load, ok := store.Val.(*ssa.UnOp); ok && load.Op == token.MUL {
-					vals = append(vals, fieldStoredValuesFrom(fn, load.X, path[len(storePath):], seen)...)
-				}
-			}
+	for _, store := range fieldStores(fn, root, path, load) {
+		storePath, _ := fieldStorePath(store, root)
+		if len(storePath) == len(path) {
+			vals = append(vals, store.Val)
+			continue
+		}
+		// A whole sub-aggregate was copied over a prefix of the path being
+		// read; resume the search at the address it was loaded from, for the
+		// remainder of the path.
+		if agg, ok := store.Val.(*ssa.UnOp); ok && agg.Op == token.MUL {
+			vals = append(vals, fieldStoredValuesFrom(fn, agg.X, path[len(storePath):], agg, seen)...)
 		}
 	}
 	return vals
+}
+
+// fieldStorePath returns the field path that store writes below root. ok is
+// false when it writes somewhere else. A store to root itself has an empty
+// path.
+func fieldStorePath(store *ssa.Store, root ssa.Value) (path []int, ok bool) {
+	storeRoot := store.Addr
+	if storeFA, isFA := store.Addr.(*ssa.FieldAddr); isFA {
+		storeRoot, path = fieldAddrPath(storeFA)
+	}
+	return path, storeRoot == root
+}
+
+// writesFieldPath reports whether store writes the field that path selects
+// from root: either that field itself, or a whole aggregate over a prefix of
+// path.
+func writesFieldPath(store *ssa.Store, root ssa.Value, path []int) bool {
+	storePath, ok := fieldStorePath(store, root)
+	return ok && len(storePath) <= len(path) && slices.Equal(storePath, path[:len(storePath)])
+}
+
+// fieldStores returns, in program order, the stores that write the field that
+// path selects from root. With a nil load it returns all of them. Otherwise it
+// returns only the stores that reach load (#182): on some CFG path from the
+// store to load, no other store writes the field.
+//
+//	t0 = &r.db
+//	t1 = *t0                 // load: the store below does not reach it
+//	t2 = Where(t1, "tenant")
+//	t3 = &r.db
+//	*t3 = t2
+//	t4 = &r.db
+//	t5 = *t4                 // load: reached by *t3 = t2 only
+//
+// Without this, the load on the right of `r.db = r.db.Where(...)` resolved to
+// the value being stored, so the builder call counted as a branch of its own
+// result. Only stores to the same (root, field path) are seen. A write through
+// another pointer or inside a callee neither reaches the load nor replaces a
+// store, as before.
+func fieldStores(fn *ssa.Function, root ssa.Value, path []int, load ssa.Instruction) []*ssa.Store {
+	if load == nil {
+		var all []*ssa.Store
+		for _, block := range fn.Blocks {
+			for _, instr := range block.Instrs {
+				if store, ok := instr.(*ssa.Store); ok && writesFieldPath(store, root, path) {
+					all = append(all, store)
+				}
+			}
+		}
+		return all
+	}
+
+	// lastIn returns the last store in instrs that writes the field.
+	lastIn := func(instrs []ssa.Instruction) *ssa.Store {
+		for _, instr := range slices.Backward(instrs) {
+			if store, ok := instr.(*ssa.Store); ok && writesFieldPath(store, root, path) {
+				return store
+			}
+		}
+		return nil
+	}
+
+	start := load.Block()
+	if store := lastIn(start.Instrs[:slices.Index(start.Instrs, load)]); store != nil {
+		return []*ssa.Store{store}
+	}
+
+	// Walk the CFG backward. A block that writes the field ends the walk on
+	// that path with its last such store. The load's own block is scanned in
+	// full when a loop leads back to it, since its later stores then run
+	// before the load on the next iteration.
+	var found []*ssa.Store
+	visitedBlocks := make(map[*ssa.BasicBlock]bool)
+	work := slices.Clone(start.Preds)
+	for len(work) > 0 {
+		block := work[len(work)-1]
+		work = work[:len(work)-1]
+		if visitedBlocks[block] {
+			continue
+		}
+		visitedBlocks[block] = true
+		if store := lastIn(block.Instrs); store != nil {
+			found = append(found, store)
+			continue
+		}
+		work = append(work, block.Preds...)
+	}
+	// Each block contributes at most one store, so block order is program
+	// order.
+	slices.SortFunc(found, func(a, b *ssa.Store) int { return a.Block().Index - b.Block().Index })
+	return found
 }
 
 // traceIIFEReturns traces through an immediately invoked function expression.
@@ -1309,7 +1401,7 @@ func (t *RootTracer) traceAll(v ssa.Value, visited map[ssa.Value]bool, loopInfo 
 
 	case *ssa.UnOp:
 		if val.Op == token.MUL {
-			return t.traceAllPointerLoads(val.X, visited, loopInfo)
+			return t.traceAllPointerLoads(val, visited, loopInfo)
 		}
 		return t.traceAll(val.X, visited, loopInfo)
 
@@ -1351,12 +1443,12 @@ func (t *RootTracer) traceAll(v ssa.Value, visited map[ssa.Value]bool, loopInfo 
 	}
 }
 
-func (t *RootTracer) traceAllPointerLoads(ptr ssa.Value, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) []ssa.Value {
-	switch p := ptr.(type) {
+func (t *RootTracer) traceAllPointerLoads(load *ssa.UnOp, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) []ssa.Value {
+	switch p := load.X.(type) {
 	case *ssa.Alloc:
 		return t.traceAllAllocStores(p, visited, loopInfo)
 	case *ssa.FieldAddr:
-		return t.traceAllFieldStores(p, visited, loopInfo)
+		return t.traceAllFieldStores(p, load, visited, loopInfo)
 	case *ssa.Phi:
 		// Check for loop variable swap pattern
 		if loopHeaderPhis := isLoopVariableSwap(p, loopInfo); loopHeaderPhis != nil {
@@ -1366,7 +1458,7 @@ func (t *RootTracer) traceAllPointerLoads(ptr ssa.Value, visited map[ssa.Value]b
 		// Regular Phi - traverse all edges
 		return t.traceAllPhiEdges(p, visited, loopInfo)
 	default:
-		return t.traceAll(ptr, visited, loopInfo)
+		return t.traceAll(p, visited, loopInfo)
 	}
 }
 
@@ -1395,8 +1487,9 @@ func (t *RootTracer) traceAllAllocStores(alloc *ssa.Alloc, visited map[ssa.Value
 // traceAllFieldStores finds ALL possible roots from stores to a struct field.
 //
 // Unlike traceFieldStore which returns the first Store found, this collects
-// all roots from ALL Store instructions writing to the same field. This is
-// needed for conditional code where different branches may store different values:
+// all roots from ALL Store instructions that write the same field and reach the
+// load. This is needed for conditional code where different branches may store
+// different values:
 //
 //	if cond {
 //	    h.db = q1  // Store #1
@@ -1404,9 +1497,9 @@ func (t *RootTracer) traceAllAllocStores(alloc *ssa.Alloc, visited map[ssa.Value
 //	    h.db = q2  // Store #2
 //	}
 //	h.db.Find(nil)  // Need to check BOTH q1 and q2
-func (t *RootTracer) traceAllFieldStores(fa *ssa.FieldAddr, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) []ssa.Value {
+func (t *RootTracer) traceAllFieldStores(fa *ssa.FieldAddr, load *ssa.UnOp, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) []ssa.Value {
 	var roots []ssa.Value
-	for _, v := range fieldStoredValues(fa) {
+	for _, v := range fieldStoredValues(fa, load) {
 		roots = append(roots, t.traceAll(v, visited, loopInfo)...)
 	}
 	return roots
@@ -1926,7 +2019,10 @@ func (r *scopesCallbackResolver) storedValues(addr ssa.Value) []ssa.Value {
 	case *ssa.Alloc:
 		return AllocStoredValues(a)
 	case *ssa.FieldAddr:
-		return fieldStoredValues(a)
+		// Every store, not only the ones that reach the load: a larger
+		// callback set only makes more parameters mutable roots, so the
+		// over-approximation stays on the reporting side.
+		return fieldStoredValues(a, nil)
 	case *ssa.FreeVar:
 		return r.storedValues(FreeVarBinding(a))
 	case *ssa.Global:

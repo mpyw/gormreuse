@@ -1,0 +1,180 @@
+package internal
+
+import "gorm.io/gorm"
+
+// =============================================================================
+// FIELD STORE ORDER (#182)
+//
+// A load of a struct field is matched only to the stores that can reach it on
+// the CFG. In the builder idiom `r.db = r.db.Where(...)`, the load on the right
+// runs before the store, so it must not see the value being stored. A later
+// store to the same field also replaces an earlier one on every path through
+// it.
+// =============================================================================
+
+type fsoRepo struct{ db *gorm.DB }
+
+// =============================================================================
+// SHOULD REPORT
+// =============================================================================
+
+// fsoReceiverTwice: builder method followed by two uses of the result.
+func (r *fsoRepo) fsoReceiverTwice() {
+	r.db = r.db.Where("tenant")
+	r.db.Find(nil)
+	r.db.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fsoReceiverTwiceChained: same, with chains on both uses.
+func (r *fsoRepo) fsoReceiverTwiceChained() {
+	r.db = r.db.Where("tenant")
+	r.db.Where("a").Find(nil)
+	r.db.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fsoParamTwice: the same through a pointer parameter.
+func fsoParamTwice(p *fsoRepo) {
+	p.db = p.db.Where("tenant")
+	p.db.Find(nil)
+	p.db.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fsoConditionalStoreTwice: a store in one branch still reaches both uses.
+func (r *fsoRepo) fsoConditionalStoreTwice(cond bool) {
+	if cond {
+		r.db = r.db.Where("tenant")
+	}
+	r.db.Find(nil)
+	r.db.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fsoLoopUseOfOuterStore: a value stored before a loop is reused on every
+// iteration.
+func (r *fsoRepo) fsoLoopUseOfOuterStore(n int) {
+	r.db = r.db.Where("tenant")
+	for i := 0; i < n; i++ {
+		r.db.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	}
+}
+
+// fsoLoopCarriedStore: the store at the end of an iteration reaches the loads
+// at the start of the next one.
+func (r *fsoRepo) fsoLoopCarriedStore(n int) {
+	for i := 0; i < n; i++ {
+		r.db.Find(nil)
+		r.db.Count(nil)           // want `\*gorm\.DB reused: second branch from mutable root`
+		r.db = r.db.Where("next") // want `\*gorm\.DB reused: second branch from mutable root`
+	}
+}
+
+// fsoLoopRebuildThenUse: the value rebuilt in one iteration is used, then
+// rebuilt again in the next.
+func (r *fsoRepo) fsoLoopRebuildThenUse(conds []string) {
+	for _, c := range conds {
+		r.db = r.db.Where(c) // want `\*gorm\.DB reused: second branch from mutable root`
+		r.db.Find(nil)
+	}
+}
+
+// fsoRebuildOfAliasedValue: rebuilding the field branches the value it holds,
+// which the local still refers to.
+func fsoRebuildOfAliasedValue(p *fsoRepo, db *gorm.DB) {
+	q := db.Where("x")
+	p.db = q
+	p.db = p.db.Where("y")
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fsoStoreThenLocalReuse: the stored value is reused through the field and
+// through the local it came from.
+func fsoStoreThenLocalReuse(p *fsoRepo, db *gorm.DB) {
+	q := db.Where("x")
+	p.db = q
+	p.db.Find(nil)
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// =============================================================================
+// SHOULD NOT REPORT
+// =============================================================================
+
+// fsoReceiverOnce: the case from #182. One use after the builder store.
+func (r *fsoRepo) fsoReceiverOnce() {
+	r.db = r.db.Where("tenant")
+	r.db.Where("a").Find(nil)
+}
+
+// fsoParamOnce: the same through a pointer parameter.
+func fsoParamOnce(p *fsoRepo) {
+	p.db = p.db.Where("tenant")
+	p.db.Where("a").Find(nil)
+}
+
+// fsoReceiverRebuilt: each load reads the value the previous store left.
+func (r *fsoRepo) fsoReceiverRebuilt() {
+	r.db = r.db.Where("a")
+	r.db = r.db.Where("b")
+	r.db.Find(nil)
+}
+
+// fsoConditionalStoreOnce: one use after a store in one branch.
+func (r *fsoRepo) fsoConditionalStoreOnce(cond bool) {
+	if cond {
+		r.db = r.db.Where("tenant")
+	}
+	r.db.Find(nil)
+}
+
+// fsoConditionalStoreBothBranches: each branch stores, then one use.
+func (r *fsoRepo) fsoConditionalStoreBothBranches(cond bool) {
+	if cond {
+		r.db = r.db.Where("a")
+	} else {
+		r.db = r.db.Where("b")
+	}
+	r.db.Find(nil)
+}
+
+// fsoLoopBuilder: the builder idiom repeated in a loop, then one use.
+func (r *fsoRepo) fsoLoopBuilder(conds []string) {
+	for _, c := range conds {
+		r.db = r.db.Where(c)
+	}
+	r.db.Find(nil)
+}
+
+// fsoLoopBuilderFromStore: the builder loop starts from a value stored before
+// it.
+func (r *fsoRepo) fsoLoopBuilderFromStore(db *gorm.DB, conds []string) {
+	r.db = db.Session(&gorm.Session{}).Where("tenant")
+	for _, c := range conds {
+		r.db = r.db.Where(c).Where("chained")
+	}
+	r.db.Find(nil)
+}
+
+// fsoOverwrittenStore: a value replaced before the field is read is not what
+// the read sees.
+//
+//gormreuse:immutable-param
+func fsoOverwrittenStore(p *fsoRepo, db *gorm.DB) {
+	q := db.Where("x")
+	p.db = q
+	p.db = db.Where("y")
+	p.db.Find(nil)
+	q.Count(nil)
+}
+
+// fsoLoopRebuildOfAliasedValue: the first iteration branches q, which is used
+// again after the loop.
+// [LIMITATION] Not reported. In a loop the rebuild is an assignment, as
+// `x = x.Where(c)` on a local is, so the value read on the first iteration is
+// not counted as branched.
+func fsoLoopRebuildOfAliasedValue(p *fsoRepo, db *gorm.DB, conds []string) {
+	q := db.Where("x")
+	p.db = q
+	for _, c := range conds {
+		p.db = p.db.Where(c)
+	}
+	q.Find(nil)
+}

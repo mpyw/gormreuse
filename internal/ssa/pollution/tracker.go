@@ -105,6 +105,13 @@ type Tracker struct {
 	// second branch. Copies never change the root, so these uses do not pollute.
 	aliasUses map[ssa.Value][]aliasUse
 
+	// loopCarriedUses maps roots to the calls in a loop that read the root's
+	// value from the previous iteration: the call is its own root, as in
+	// `for { r.db = r.db.Where(c) }` (#182). A polluting use of the root that
+	// can reach such a call runs before it on the next iteration, whatever
+	// their positions, so DetectViolations checks these by reachability alone.
+	loopCarriedUses map[ssa.Value][]UsageInfo
+
 	// violations tracks detected violations.
 	violations []Violation
 
@@ -125,13 +132,14 @@ type CFGAnalyzer interface {
 // diagnostics and may be nil (positions are then omitted).
 func New(cfgAnalyzer CFGAnalyzer, fset *token.FileSet) *Tracker {
 	return &Tracker{
-		pollutingUses:  make(map[ssa.Value][]UsageInfo),
-		pureUses:       make(map[ssa.Value][]UsageInfo),
-		assignmentUses: make(map[ssa.Value][]UsageInfo),
-		branchUses:     make(map[ssa.Value][]UsageInfo),
-		aliasUses:      make(map[ssa.Value][]aliasUse),
-		cfgAnalyzer:    cfgAnalyzer,
-		fset:           fset,
+		pollutingUses:   make(map[ssa.Value][]UsageInfo),
+		pureUses:        make(map[ssa.Value][]UsageInfo),
+		assignmentUses:  make(map[ssa.Value][]UsageInfo),
+		branchUses:      make(map[ssa.Value][]UsageInfo),
+		aliasUses:       make(map[ssa.Value][]aliasUse),
+		loopCarriedUses: make(map[ssa.Value][]UsageInfo),
+		cfgAnalyzer:     cfgAnalyzer,
+		fset:            fset,
 	}
 }
 
@@ -170,6 +178,13 @@ func (t *Tracker) RecordBranchUse(root ssa.Value, block *ssa.BasicBlock, pos tok
 // Session/Debug call that took the copy. Caller must ensure root is not nil.
 func (t *Tracker) RecordAliasUse(root ssa.Value, copyPos token.Pos, block *ssa.BasicBlock, pos token.Pos) {
 	t.aliasUses[root] = append(t.aliasUses[root], aliasUse{Block: block, Pos: pos, copyPos: copyPos})
+}
+
+// RecordLoopCarriedUse records a call in a loop that reads root's value from
+// the previous iteration (see the loopCarriedUses field doc). It does not
+// pollute. Caller must ensure root is not nil.
+func (t *Tracker) RecordLoopCarriedUse(root ssa.Value, block *ssa.BasicBlock, pos token.Pos) {
+	t.loopCarriedUses[root] = append(t.loopCarriedUses[root], UsageInfo{Block: block, Pos: pos})
 }
 
 // IsPollutedAt checks if a root has polluting usage that can reach the target block.
@@ -248,6 +263,18 @@ func (t *Tracker) DetectViolations() {
 		for _, use := range t.aliasUses[root] {
 			if change, ok := t.earlierReaching(changes, use.UsageInfo, use.copyPos); ok {
 				t.violations = append(t.violations, Violation{Pos: use.Pos, Message: t.aliasMessage(root, change.Pos)})
+			}
+		}
+	}
+
+	// Check loop-carried uses against polluting uses that can reach them.
+	// Positions do not order them: the polluting use may come later in the
+	// loop body and still run before the next iteration's call.
+	for _, root := range sortedRoots(t, t.loopCarriedUses) {
+		allUses := t.getAllUses(root)
+		for _, target := range t.loopCarriedUses[root] {
+			if slices.ContainsFunc(t.pollutingUses[root], func(src UsageInfo) bool { return t.isReachable(src.Block, target.Block) }) {
+				t.addViolationWithContext(target.Pos, root, allUses)
 			}
 		}
 	}

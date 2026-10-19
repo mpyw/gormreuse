@@ -113,6 +113,8 @@ type callHandler struct{}
 //   - if a { q = q.Where("a"); if b { q = q.Where("b") }; q = q.Where("c") }
 //     → q.Where("a") reaches Phi(q, …) through the inner Phi and q.Where("c")
 //   - q = helper(q)             → same, for a function returning *gorm.DB
+//   - for { r.db = r.db.Where() } → the field form of the loop rebuild
+//     (see isLoopFieldRebuild)
 //
 // Non-assignment patterns (pollute root):
 //   - q.Find(nil) → direct use (finisher)
@@ -127,6 +129,9 @@ type callHandler struct{}
 // use as a false second branch. Any other merge is a different variable, and
 // the call is a branch of root like any other.
 func isAssignment(call *ssa.Call, root ssa.Value, ctx *Context) bool {
+	if isLoopFieldRebuild(call, ctx) {
+		return true
+	}
 	visited := map[ssa.Value]bool{call: true}
 	work := []ssa.Value{call}
 	for len(work) > 0 {
@@ -167,6 +172,54 @@ func isAssignment(call *ssa.Call, root ssa.Value, ctx *Context) bool {
 		}
 	}
 
+	return false
+}
+
+// isLoopFieldRebuild reports whether call, inside a loop, rebuilds a struct
+// field from its own value: its first argument is loaded from the field, and
+// its result, directly or at the end of a gorm chain, is stored back into the
+// same field.
+//
+//	for _, c := range conds {
+//		r.db = r.db.Where(c)
+//	}
+//	r.db.Find(nil)
+//
+// This is the field form of `q = q.Where(c)` in a loop, where the loop-header
+// Phi makes the call an assignment. Without it, the load sees the store of the
+// previous iteration, so the call is a branch of its own result and the use
+// after the loop is reported (#182). Outside a loop the store cannot reach the
+// load, so the call stays a branch of the value it read.
+func isLoopFieldRebuild(call *ssa.Call, ctx *Context) bool {
+	if ctx.LoopInfo == nil || !ctx.LoopInfo.IsInLoop(call.Block()) || len(call.Call.Args) == 0 {
+		return false
+	}
+	load, ok := call.Call.Args[0].(*ssa.UnOp)
+	if !ok || load.Op != token.MUL {
+		return false
+	}
+	loadFA, ok := load.X.(*ssa.FieldAddr)
+	if !ok {
+		return false
+	}
+	return storesIntoField(call, loadFA)
+}
+
+// storesIntoField reports whether the result of call, directly or at the end of
+// a gorm chain, is stored into the same field as fa.
+func storesIntoField(call *ssa.Call, fa *ssa.FieldAddr) bool {
+	for _, user := range *call.Referrers() {
+		switch u := user.(type) {
+		case *ssa.Store:
+			if storeFA, ok := u.Addr.(*ssa.FieldAddr); ok && u.Val == call && tracer.SameField(storeFA, fa) {
+				return true
+			}
+		case *ssa.Call:
+			if isChainedGormMethodCall(call, u) && storesIntoField(u, fa) {
+				return true
+			}
+		}
+	}
 	return false
 }
 
@@ -270,6 +323,12 @@ func (h *callHandler) handle(call *ssa.Call, ctx *Context) {
 	// Check ALL possible roots for phi nodes
 	allRoots := ctx.RootTracer.FindAllMutableRoots(recv, ctx.LoopInfo)
 	for _, r := range allRoots {
+		if r == call && isLoopFieldRebuild(call, ctx) {
+			// The call reads its own result from the previous iteration
+			// through the field (#182). A use of that result later in the
+			// loop body runs before this call on the next iteration.
+			ctx.Tracker.RecordLoopCarriedUse(call, call.Block(), pos)
+		}
 		if r == root {
 			continue
 		}

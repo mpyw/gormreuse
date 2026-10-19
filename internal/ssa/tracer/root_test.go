@@ -349,3 +349,51 @@ func TestFindMutableRootThroughStructField(t *testing.T) {
 		}
 	}
 }
+
+// TestFieldStoredValuesReachingLoad pins #182: a field load sees only the stores
+// that reach it. In `p.db = p.db.Where("tenant")` the load on the right runs
+// before the store, so it sees nothing, while the next load sees that store.
+// Without a load, as the Scopes callback resolver asks, every store is seen.
+func TestFieldStoredValuesReachingLoad(t *testing.T) {
+	t.Parallel()
+	fixtures, _ := loadProgram(t)
+	fn := fixtures["fsoParamOnce"]
+	if fn == nil {
+		t.Fatal("fsoParamOnce fixture missing")
+	}
+
+	var loads []*ssa.UnOp
+	var tenant ssa.Value
+	for _, b := range fn.Blocks {
+		for _, instr := range b.Instrs {
+			call, ok := instr.(*ssa.Call)
+			if !ok || len(call.Call.Args) == 0 {
+				continue
+			}
+			callee := call.Common().StaticCallee()
+			if callee == nil || callee.Name() != "Where" {
+				continue
+			}
+			if load, ok := call.Call.Args[0].(*ssa.UnOp); ok {
+				loads = append(loads, load)
+				if tenant == nil {
+					tenant = call
+				}
+			}
+		}
+	}
+	if len(loads) != 2 {
+		t.Fatalf("expected two Where calls on a field load, got %d", len(loads))
+	}
+
+	fa := loads[0].X.(*ssa.FieldAddr)
+	if got := fieldStoredValues(fa, loads[0]); len(got) != 0 {
+		t.Errorf("the load before the store should see no store, got %v", got)
+	}
+	if got := fieldStoredValues(loads[1].X.(*ssa.FieldAddr), loads[1]); len(got) != 1 || got[0] != tenant {
+		t.Errorf("the load after the store should see the Where(\"tenant\") result, got %v", got)
+	}
+	if got := fieldStoredValues(fa, nil); len(got) != 1 || got[0] != tenant {
+		t.Errorf("without a load every store should be seen, got %v", got)
+	}
+}
