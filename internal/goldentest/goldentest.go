@@ -73,30 +73,54 @@ func Fixtures(srcDir string) ([]string, error) {
 	return out, nil
 }
 
-// ApplyFixes runs analyzer a over pkg (loaded from testdata) and returns
-// srcPath's original bytes together with the content produced by applying every
-// suggested-fix text edit targeting srcPath. Edits are matched to the file by
-// their own position and applied from the highest offset down so earlier offsets
-// stay valid. Each diagnostic's fix is complete on its own (#200), so two fixes
-// may carry the same edit, such as one gorm import. That edit is applied once,
-// as the -fix driver does.
-func ApplyFixes(testdata, pkg, srcPath string, a *analysis.Analyzer) (original, fixed []byte, err error) {
-	original, err = os.ReadFile(srcPath)
-	if err != nil {
-		return nil, nil, err
-	}
+// Analysis is one run of an analyzer over a package. The fixes for each of the
+// package's files come from the same run, so a test that checks every file
+// analyzes the package once (#195: with analysis facts, each run also
+// analyzes every dependency).
+type Analysis struct {
+	results []*analysistest.Result
+}
 
+// Analyze runs analyzer a over pkg, loaded from testdata.
+func Analyze(testdata, pkg string, a *analysis.Analyzer) (*Analysis, error) {
 	// NoopT also swallows load failures, which would leave no fixes and so an
 	// unchanged file. Report them instead (#203).
 	results := analysistest.Run(NoopT{}, testdata, a, pkg)
 	if len(results) == 0 {
-		return nil, nil, fmt.Errorf("analysistest loaded no package for %q from %s", pkg, testdata)
+		return nil, fmt.Errorf("analysistest loaded no package for %q from %s", pkg, testdata)
 	}
 	for _, result := range results {
 		if result.Err != nil {
-			return nil, nil, fmt.Errorf("analyzing %s: %w", pkg, result.Err)
+			return nil, fmt.Errorf("analyzing %s: %w", pkg, result.Err)
 		}
 	}
+	return &Analysis{results: results}, nil
+}
+
+// ApplyFixes runs analyzer a over pkg (loaded from testdata) and returns
+// srcPath's original bytes together with the content produced by applying every
+// suggested-fix text edit targeting srcPath (see Analysis.ApplyFixes).
+func ApplyFixes(testdata, pkg, srcPath string, a *analysis.Analyzer) (original, fixed []byte, err error) {
+	run, err := Analyze(testdata, pkg, a)
+	if err != nil {
+		return nil, nil, err
+	}
+	return run.ApplyFixes(srcPath)
+}
+
+// ApplyFixes returns srcPath's original bytes together with the content
+// produced by applying every suggested-fix text edit of the run that targets
+// srcPath. Edits are matched to the file by their own position and applied
+// from the highest offset down so earlier offsets stay valid. Each
+// diagnostic's fix is complete on its own (#200), so two fixes may carry the
+// same edit, such as one gorm import. That edit is applied once, as the -fix
+// driver does.
+func (r *Analysis) ApplyFixes(srcPath string) (original, fixed []byte, err error) {
+	original, err = os.ReadFile(srcPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	results := r.results
 
 	type offsetEdit struct {
 		start, end int
@@ -136,7 +160,16 @@ func ApplyFixes(testdata, pkg, srcPath string, a *analysis.Analyzer) (original, 
 // produces now, and returns the paths of those that are missing or stale. With
 // update set, it rewrites both files instead and returns nothing stale.
 func SyncFixture(testdata, pkg, srcPath string, a *analysis.Analyzer, update bool) (stale []string, err error) {
-	original, fixed, err := ApplyFixes(testdata, pkg, srcPath, a)
+	run, err := Analyze(testdata, pkg, a)
+	if err != nil {
+		return nil, err
+	}
+	return run.SyncFixture(srcPath, update)
+}
+
+// SyncFixture is the package-level SyncFixture for a run that is already done.
+func (r *Analysis) SyncFixture(srcPath string, update bool) (stale []string, err error) {
+	original, fixed, err := r.ApplyFixes(srcPath)
 	if err != nil {
 		return nil, err
 	}

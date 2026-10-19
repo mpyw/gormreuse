@@ -49,22 +49,27 @@ import (
 
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/analysis/passes/buildssa"
+	"golang.org/x/tools/go/analysis/passes/ctrlflow"
 	"golang.org/x/tools/go/analysis/passes/inspect"
 	"golang.org/x/tools/go/ast/inspector"
 
 	"github.com/mpyw/gormreuse/internal"
 	"github.com/mpyw/gormreuse/internal/directive"
 	"github.com/mpyw/gormreuse/internal/facts"
+	"github.com/mpyw/gormreuse/internal/typeutil"
 )
 
 // Analyzer is the main analyzer for gormreuse.
 //
-// It requires the buildssa analyzer to build SSA form of the code,
-// then performs reuse detection via pollution tracking. It exports what it
-// finds about the directive functions of a package as facts, so drivers run
-// it on every dependency first. It also requires the
-// inspect analyzer, which buildssa already depends on, so the directive scans
-// share one AST traversal instead of walking each file again.
+// It builds SSA form of the code with the buildssa analyzer, then performs
+// reuse detection via pollution tracking. It exports what it finds about the
+// directive functions of a package as facts, so drivers run it on every
+// dependency first, the standard library included. buildssa is therefore not
+// required but run from run, only for a package that reaches gorm.io/gorm: in
+// any other package no value holds a *gorm.DB (#195). gormreuse requires
+// ctrlflow, which buildssa needs and which already runs on every dependency
+// for its own facts, and the inspect analyzer, so the directive scans share
+// one AST traversal instead of walking each file again.
 //
 // Usage with go vet:
 //
@@ -76,7 +81,7 @@ import (
 var Analyzer = &analysis.Analyzer{
 	Name:     "gormreuse",
 	Doc:      "detects unsafe *gorm.DB instance reuse after chain methods",
-	Requires: []*analysis.Analyzer{buildssa.Analyzer, inspect.Analyzer},
+	Requires: []*analysis.Analyzer{ctrlflow.Analyzer, inspect.Analyzer},
 	// What a package's analysis finds about its directive functions is
 	// exported to the packages that call them (#195).
 	FactTypes: []analysis.Fact{new(facts.Func)},
@@ -84,8 +89,18 @@ var Analyzer = &analysis.Analyzer{
 }
 
 func run(pass *analysis.Pass) (any, error) {
-	ssaInfo := pass.ResultOf[buildssa.Analyzer].(*buildssa.SSA)
 	insp := pass.ResultOf[inspect.Analyzer].(*inspector.Inspector)
+
+	// SSA is built only where it can find something (see Analyzer). It needs
+	// the ctrlflow result, which this pass requires.
+	var ssaInfo *buildssa.SSA
+	if typeutil.ReachesGorm(pass.Pkg) {
+		result, err := buildssa.Analyzer.Run(pass)
+		if err != nil {
+			return nil, err
+		}
+		ssaInfo = result.(*buildssa.SSA)
+	}
 
 	// Build set of files to skip
 	skipFiles := buildSkipFiles(pass)

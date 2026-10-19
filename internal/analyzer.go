@@ -57,7 +57,6 @@ import (
 	"github.com/mpyw/gormreuse/internal/ssa/pollution"
 	"github.com/mpyw/gormreuse/internal/ssa/purity"
 	"github.com/mpyw/gormreuse/internal/ssa/tracer"
-	"github.com/mpyw/gormreuse/internal/typeutil"
 )
 
 // =============================================================================
@@ -99,11 +98,6 @@ func RunSSA(
 	// function instead of dropping its diagnostics silently (#186).
 	guard := &panicGuard{pass: pass, reported: make(map[*ssa.Function]bool)}
 
-	// Analyze the closures of package-level `var f = func(...)` initializers
-	// too, and resolve calls through such variables (#183).
-	funcs := analyzedFuncs(ssaInfo)
-	funcVars := tracer.CollectFuncVars(append(slices.Clone(funcs), ssaInfo.Pkg.Func("init")))
-
 	// skip reports whether a function is in an excluded file. Ignore directives
 	// do not skip anything: they only suppress reports (see report).
 	skip := func(fn *ssa.Function) bool {
@@ -119,16 +113,20 @@ func RunSSA(
 		}
 	}
 
-	// A package that does not reach gorm.io/gorm holds no *gorm.DB, so the
-	// passes below would find nothing. The drivers run the analyzer on every
-	// dependency for its facts, the standard library included, so skipping
-	// them keeps that cheap (#195). The reports that need no SSA remain.
-	if !typeutil.ReachesGorm(pass.Pkg) {
+	// ssaInfo is nil for a package that does not reach gorm.io/gorm: it holds
+	// no *gorm.DB, so the passes below would find nothing, and the analyzer
+	// does not build its SSA (#195). The reports that need no SSA remain.
+	if ssaInfo == nil {
 		reportUnusedImmutableInputs(immutableInputSet, report)
 		reportUnusedDirectiveFuncs(pureFuncs, immutableReturnFuncs, immutableParamFuncs, report)
 		reportUnusedIgnores(pass, ignores)
 		return
 	}
+
+	// Analyze the closures of package-level `var f = func(...)` initializers
+	// too, and resolve calls through such variables (#183).
+	funcs := analyzedFuncs(ssaInfo)
+	funcVars := tracer.CollectFuncVars(append(slices.Clone(funcs), ssaInfo.Pkg.Func("init")))
 
 	// Callees in other packages are decided by the facts their packages
 	// exported (#195). A package without facts leaves its functions unmarked.
