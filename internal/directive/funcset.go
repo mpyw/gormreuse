@@ -58,6 +58,8 @@ func NewImmutableParamFuncSet(fset *token.FileSet, typesInfo *types.Info) *Direc
 }
 
 // newDirectiveFuncSet creates a new DirectiveFuncSet with the given directive checker and signature validator.
+//
+//declscope:shared // immutable_input.go builds its placement-only set with it
 func newDirectiveFuncSet(fset *token.FileSet, typesInfo *types.Info, isDirective directiveChecker, validateSignature signatureValidator) *DirectiveFuncSet {
 	return &DirectiveFuncSet{
 		known:                  make(map[FuncKey]struct{}),
@@ -375,6 +377,8 @@ func (s *DirectiveFuncSet) findMatchingDirective(node ast.Node, predicate func(f
 //
 // findDirectiveAfterFuncDeclBrace finds a directive comment after the opening brace.
 // Returns the position of the directive, or token.NoPos if not found.
+//
+//declscope:shared // immutable_input.go places its directives with the same rules
 func (s *DirectiveFuncSet) findDirectiveAfterFuncDeclBrace(funcDecl *ast.FuncDecl) token.Pos {
 	if s == nil || s.fset == nil || funcDecl.Body == nil {
 		return token.NoPos
@@ -442,6 +446,8 @@ func (s *DirectiveFuncSet) isCommentAfterBrace(cg *ast.CommentGroup, bracePos to
 //
 // findDirectiveForFuncLit finds a directive comment for a FuncLit and returns its position.
 // Returns token.NoPos if no directive is found.
+//
+//declscope:shared // immutable_input.go places its directives with the same rules
 func (s *DirectiveFuncSet) findDirectiveForFuncLit(funcLit *ast.FuncLit) token.Pos {
 	if s == nil || s.fset == nil {
 		return token.NoPos

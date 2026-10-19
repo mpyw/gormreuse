@@ -684,7 +684,29 @@ func useIt(db *gorm.DB) {
 >     return cb(q) // VIOLATION: immutable-input(cb) declared but mutable *gorm.DB passed to callback
 > }
 > ```
-> The directive is reported **unused** when `name` isn't a parameter, isn't a function type, or the callback has no [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) parameter.
+>
+> The check follows the callback wherever the function keeps it: `go cb(...)`, `defer cb(...)`, a closure that captures it, a local variable or its address, a struct field, a slice, an array, a map, `append`, and an interface it is boxed in. A `func(**gorm.DB)` callback called with `&q` is checked against every value stored in `q`.
+>
+> Handing `cb` to another `immutable-input` function at its declared callback, or to gorm's `Transaction`/`FindInBatches`, keeps the promise. Any other flow cannot be checked, so it is reported:
+>
+> | Flow | Message |
+> | --- | --- |
+> | Passed to a function, method or function value | `callback cb escapes (passed to forward); cannot verify the *gorm.DB it receives` |
+> | Returned, sent on a channel, stored in a package-level variable or through a pointer | `callback cb escapes (returned)` and so on |
+> | Called with a value that holds a `*gorm.DB` the checker cannot trace (a `**gorm.DB` parameter, a struct) | `cannot verify the *gorm.DB passed to callback` |
+>
+> The directive is reported **unused** when `name` isn't a parameter, isn't a function type, or the callback has no [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) parameter. It is also reported when it is attached to no function or closure.
+
+Write it where `pure` goes: in the function's doc comment, after its opening brace on the same line, or on the line before a closure:
+
+```go
+func withFresh(cb func(*gorm.DB) error, db *gorm.DB) error { //gormreuse:immutable-input(cb)
+    return cb(db.Session(&gorm.Session{}))
+}
+
+//gormreuse:immutable-input(cb)
+withTx := func(cb func(*gorm.DB) error) error { return cb(fresh) }
+```
 
 > [!NOTE]
 > gorm's built-in [`Transaction`](https://pkg.go.dev/gorm.io/gorm#DB.Transaction) and [`FindInBatches`](https://pkg.go.dev/gorm.io/gorm#DB.FindInBatches) already pass a fresh handle to their callbacks, so reuse inside those callbacks needs no directive. [`Connection`](https://pkg.go.dev/gorm.io/gorm#DB.Connection) does not: its callback gets a `clone == 0` handle, so reuse inside it is reported. Do not put `//gormreuse:immutable-input` on a wrapper that forwards a Connection `tx` unchanged — its body contract would be false.

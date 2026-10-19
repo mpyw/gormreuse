@@ -9,6 +9,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"golang.org/x/tools/go/ast/inspector"
 )
 
 // parseImmutableInputSrc parses src as a single Go file in package "demo" and
@@ -33,13 +35,20 @@ func parseImmutableInputSrc(t *testing.T, src string) (*token.FileSet, *ast.File
 	return fset, file, info
 }
 
+// immutableInputFileCursor returns file's cursor in an inspector of its own,
+// standing in for the pass inspector.
+func immutableInputFileCursor(file *ast.File) inspector.Cursor {
+	cur, _ := inspector.New([]*ast.File{file}).Root().FirstChild()
+	return cur
+}
+
 func TestImmutableInputSet_NilSafety(t *testing.T) {
 	t.Parallel()
 
 	var nilSet *ImmutableInputSet
 	// Every accessor must tolerate a nil receiver — the analyzer passes a nil set
 	// when directive bookkeeping isn't applicable.
-	nilSet.AddFile(nil, "demo")
+	nilSet.AddFile(inspector.Cursor{}, "demo")
 	if got := nilSet.Callbacks(nil); got != nil {
 		t.Errorf("Callbacks(nil) = %v, want nil", got)
 	}
@@ -54,7 +63,7 @@ func TestImmutableInputSet_AddFile_NoDirectives(t *testing.T) {
 	const src = "package demo\n\nfunc plain(cb func()) {}\n"
 	fset, file, info := parseImmutableInputSrc(t, src)
 	s := NewImmutableInputSet(fset, info)
-	s.AddFile(file, "demo")
+	s.AddFile(immutableInputFileCursor(file), "demo")
 	if got := len(s.GetUnused()); got != 0 {
 		t.Errorf("GetUnused() with no directives = %d, want 0", got)
 	}
@@ -66,7 +75,7 @@ func TestImmutableInputSet_AddFile_ParamNotFound(t *testing.T) {
 	const src = "package demo\n\n//gormreuse:immutable-input(missing)\nfunc noSuchParam(cb func()) {}\n"
 	fset, file, info := parseImmutableInputSrc(t, src)
 	s := NewImmutableInputSet(fset, info)
-	s.AddFile(file, "demo")
+	s.AddFile(immutableInputFileCursor(file), "demo")
 	assertOneImmutableInputUnused(t, s, `parameter "missing" not found`)
 }
 
@@ -76,7 +85,7 @@ func TestImmutableInputSet_AddFile_ParamNotFunctionType(t *testing.T) {
 	const src = "package demo\n\n//gormreuse:immutable-input(x)\nfunc notFn(x int) {}\n"
 	fset, file, info := parseImmutableInputSrc(t, src)
 	s := NewImmutableInputSet(fset, info)
-	s.AddFile(file, "demo")
+	s.AddFile(immutableInputFileCursor(file), "demo")
 	assertOneImmutableInputUnused(t, s, `parameter "x" is not a function type`)
 }
 
@@ -88,7 +97,7 @@ func TestImmutableInputSet_AddFile_CallbackHasNoGormDB(t *testing.T) {
 	const src = "package demo\n\n//gormreuse:immutable-input(cb)\nfunc cbNoGormDB(cb func(int) int) {}\n"
 	fset, file, info := parseImmutableInputSrc(t, src)
 	s := NewImmutableInputSet(fset, info)
-	s.AddFile(file, "demo")
+	s.AddFile(immutableInputFileCursor(file), "demo")
 	assertOneImmutableInputUnused(t, s, "no *gorm.DB parameter")
 }
 
@@ -101,7 +110,7 @@ func TestImmutableInputSet_AddFile_AnonymousParam(t *testing.T) {
 	const src = "package demo\n\n//gormreuse:immutable-input(missing)\nfunc anon(int, cb func()) {}\n"
 	fset, file, info := parseImmutableInputSrc(t, src)
 	s := NewImmutableInputSet(fset, info)
-	s.AddFile(file, "demo")
+	s.AddFile(immutableInputFileCursor(file), "demo")
 	assertOneImmutableInputUnused(t, s, `parameter "missing" not found`)
 }
 
@@ -114,8 +123,40 @@ func TestImmutableInputSet_AddFile_NilTypesInfo(t *testing.T) {
 	const src = "package demo\n\n//gormreuse:immutable-input(cb)\nfunc noTypeInfo(cb func()) {}\n"
 	fset, file, _ := parseImmutableInputSrc(t, src)
 	s := NewImmutableInputSet(fset, nil) // no TypesInfo
-	s.AddFile(file, "demo")
+	s.AddFile(immutableInputFileCursor(file), "demo")
 	assertOneImmutableInputUnused(t, s, `parameter "cb" is not a function type`)
+}
+
+// A directive shared by the closures of one assignment applies when one of
+// them has the parameter, and is reported only when none has it.
+func TestImmutableInputSet_AddFile_MultiAssignClosures(t *testing.T) {
+	t.Parallel()
+
+	const src = `package demo
+
+func f() {
+	//gormreuse:immutable-input(cb)
+	a, b := func(cb func(int)) {}, func(x int) {}
+	//gormreuse:immutable-input(cb)
+	c, d := func(x int) {}, func(y func()) {}
+	_, _, _, _ = a, b, c, d
+}
+`
+	fset, file, info := parseImmutableInputSrc(t, src)
+	s := NewImmutableInputSet(fset, info)
+	s.AddFile(immutableInputFileCursor(file), "demo")
+	// The first comment matches a's name but cb has no *gorm.DB parameter, so
+	// both comments are reported, each once, with the first closure's reason.
+	unused := s.GetUnused()
+	if len(unused) != 2 {
+		t.Fatalf("len(GetUnused()) = %d, want 2; entries=%+v", len(unused), unused)
+	}
+	if !strings.Contains(unused[0].Reason, `callback "cb" has no *gorm.DB parameter`) {
+		t.Errorf("unused[0].Reason = %q", unused[0].Reason)
+	}
+	if !strings.Contains(unused[1].Reason, `parameter "cb" not found`) {
+		t.Errorf("unused[1].Reason = %q", unused[1].Reason)
+	}
 }
 
 func assertOneImmutableInputUnused(t *testing.T, s *ImmutableInputSet, want string) {

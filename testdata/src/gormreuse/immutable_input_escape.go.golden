@@ -1,0 +1,326 @@
+package internal
+
+import "gorm.io/gorm"
+
+// =============================================================================
+// //gormreuse:immutable-input(name): every flow of the callback is checked (#193)
+// =============================================================================
+//
+// A call that does not name the parameter directly still reaches the callback.
+// The checker follows the callback through local variables, struct fields,
+// slices, maps and closures, and checks the arguments wherever it is called.
+// A flow it cannot follow is reported as an escape.
+
+type immutableInputCB func(*gorm.DB) error
+
+// forwardImmutableInput hands the callback to code the checker cannot see.
+func forwardImmutableInput(cb func(*gorm.DB) error, db *gorm.DB) error {
+	return cb(db)
+}
+
+//gormreuse:immutable-input(cb)
+func goCallbackImmutableInput(cb func(*gorm.DB) error, db *gorm.DB) {
+	go cb(db.Where("x")) // want `immutable-input\(cb\) declared but mutable \*gorm\.DB passed to callback`
+}
+
+//gormreuse:immutable-input(cb)
+func deferCallbackImmutableInput(cb func(*gorm.DB) error, db *gorm.DB) {
+	defer cb(db.Where("x")) // want `immutable-input\(cb\) declared but mutable \*gorm\.DB passed to callback`
+}
+
+//gormreuse:immutable-input(cb)
+func iifeCallbackImmutableInput(cb func(*gorm.DB) error, db *gorm.DB) error {
+	return func() error {
+		return cb(db.Where("x")) // want `immutable-input\(cb\) declared but mutable \*gorm\.DB passed to callback`
+	}()
+}
+
+//gormreuse:immutable-input(cb)
+func iifeCallbackImmutableInputOK(cb func(*gorm.DB) error, db *gorm.DB) error {
+	fresh := db.Session(&gorm.Session{})
+	return func() error {
+		return cb(fresh) // OK: the captured value is immutable
+	}()
+}
+
+//gormreuse:immutable-input(cb)
+func storedClosureImmutableInput(cb func(*gorm.DB) error, db *gorm.DB) error {
+	run := func(q *gorm.DB) error {
+		return cb(q.Where("x")) // want `immutable-input\(cb\) declared but mutable \*gorm\.DB passed to callback`
+	}
+	return run(db.Session(&gorm.Session{}))
+}
+
+//gormreuse:immutable-input(cb)
+func forwardCallbackImmutableInput(cb func(*gorm.DB) error, db *gorm.DB) error {
+	return forwardImmutableInput(cb, db.Where("x")) // want `immutable-input\(cb\) declared but callback cb escapes \(passed to forwardImmutableInput\); cannot verify the \*gorm\.DB it receives`
+}
+
+// forwardToImmutableInput passes cb to a function that declares
+// immutable-input for that parameter, so the promise carries over.
+//
+//gormreuse:immutable-input(cb)
+func forwardToImmutableInput(cb func(*gorm.DB) error, db *gorm.DB) error {
+	return withFreshDB(cb, db) // OK: withFreshDB promises an immutable value too
+}
+
+// forwardToTransaction passes cb to gorm's Transaction, which hands it a fresh
+// handle.
+//
+//gormreuse:immutable-input(cb)
+func forwardToTransaction(cb func(*gorm.DB) error, db *gorm.DB) error {
+	return db.Transaction(cb) // OK: Transaction passes a fresh handle
+}
+
+//gormreuse:immutable-input(cb)
+func derefCallbackImmutableInput(cb func(*gorm.DB) error, db *gorm.DB) error {
+	return (*(&cb))(db.Where("x")) // want `immutable-input\(cb\) declared but mutable \*gorm\.DB passed to callback`
+}
+
+//gormreuse:immutable-input(cb)
+func structFieldCallbackImmutableInput(cb immutableInputCB, db *gorm.DB) error {
+	s := struct{ f immutableInputCB }{cb}
+	return s.f(db.Where("x")) // want `immutable-input\(cb\) declared but mutable \*gorm\.DB passed to callback`
+}
+
+//gormreuse:immutable-input(cb)
+func sliceCallbackImmutableInput(cb func(*gorm.DB) error, db *gorm.DB) error {
+	cbs := []func(*gorm.DB) error{cb}
+	return cbs[0](db.Where("x")) // want `immutable-input\(cb\) declared but mutable \*gorm\.DB passed to callback`
+}
+
+//gormreuse:immutable-input(cb)
+func appendCallbackImmutableInput(cb func(*gorm.DB) error, db *gorm.DB) error {
+	var cbs []func(*gorm.DB) error
+	cbs = append(cbs, cb)
+	return cbs[len(cbs)-1](db.Where("x")) // want `immutable-input\(cb\) declared but mutable \*gorm\.DB passed to callback`
+}
+
+//gormreuse:immutable-input(cb)
+func rangeCallbackImmutableInput(cb func(*gorm.DB) error, db *gorm.DB) error {
+	q := db.Where("x")
+	for _, f := range map[string]func(*gorm.DB) error{"a": cb} {
+		return f(q) // want `immutable-input\(cb\) declared but mutable \*gorm\.DB passed to callback`
+	}
+	return nil
+}
+
+//gormreuse:immutable-input(cb)
+func mapCallbackImmutableInput(cb func(*gorm.DB) error, db *gorm.DB) error {
+	m := map[string]func(*gorm.DB) error{"a": cb}
+	return m["a"](db.Where("x")) // want `immutable-input\(cb\) declared but mutable \*gorm\.DB passed to callback`
+}
+
+//gormreuse:immutable-input(cb)
+func sliceCallbackImmutableInputOK(cb func(*gorm.DB) error, db *gorm.DB) error {
+	if cb == nil {
+		return nil
+	}
+	cbs := []func(*gorm.DB) error{cb}
+	return cbs[0](db.Session(&gorm.Session{})) // OK
+}
+
+var immutableInputSaved func(*gorm.DB) error
+
+//gormreuse:immutable-input(cb)
+func globalCallbackImmutableInput(cb func(*gorm.DB) error) {
+	immutableInputSaved = cb // want `immutable-input\(cb\) declared but callback cb escapes \(stored outside the function\); cannot verify the \*gorm\.DB it receives`
+}
+
+//gormreuse:immutable-input(cb)
+func returnCallbackImmutableInput(cb func(*gorm.DB) error) func(*gorm.DB) error {
+	return cb // want `immutable-input\(cb\) declared but callback cb escapes \(returned\); cannot verify the \*gorm\.DB it receives`
+}
+
+//gormreuse:immutable-input(cb)
+func chanCallbackImmutableInput(cb func(*gorm.DB) error, ch chan func(*gorm.DB) error) {
+	ch <- cb // want `immutable-input\(cb\) declared but callback cb escapes \(sent on a channel\); cannot verify the \*gorm\.DB it receives`
+}
+
+//gormreuse:immutable-input(cb)
+func boxedCallbackImmutableInput(cb func(*gorm.DB) error) any {
+	return any(cb) // want `immutable-input\(cb\) declared but callback cb escapes \(returned\); cannot verify the \*gorm\.DB it receives`
+}
+
+func immutableInputSink(v any) { _ = v }
+
+//gormreuse:immutable-input(cb)
+func implicitBoxCallbackImmutableInput(cb func(*gorm.DB) error) {
+	immutableInputSink(cb) // want `immutable-input\(cb\) declared but callback cb escapes \(passed to immutableInputSink\); cannot verify the \*gorm\.DB it receives`
+}
+
+//gormreuse:immutable-input(cb)
+func unboxedCallbackImmutableInput(cb func(*gorm.DB) error, db *gorm.DB) error {
+	var boxed any = cb
+	return boxed.(func(*gorm.DB) error)(db.Where("x")) // want `immutable-input\(cb\) declared but mutable \*gorm\.DB passed to callback`
+}
+
+//gormreuse:immutable-input(cb)
+func pointerCallbackImmutableInput(cb func(**gorm.DB), db *gorm.DB) {
+	q := db.Where("x")
+	cb(&q) // want `immutable-input\(cb\) declared but mutable \*gorm\.DB passed to callback`
+}
+
+//gormreuse:immutable-input(cb)
+func pointerCallbackImmutableInputOK(cb func(**gorm.DB), db *gorm.DB) {
+	q := db.Session(&gorm.Session{})
+	cb(&q) // OK
+}
+
+//gormreuse:immutable-input(cb)
+func pointerParamCallbackImmutableInput(cb func(**gorm.DB), pq **gorm.DB) {
+	cb(pq) // want `immutable-input\(cb\) declared but cannot verify the \*gorm\.DB passed to callback`
+}
+
+type immutableInputRunner interface {
+	Run(cb func(*gorm.DB) error)
+}
+
+//gormreuse:immutable-input(cb)
+func interfaceCallbackImmutableInput(cb func(*gorm.DB) error, r immutableInputRunner) {
+	r.Run(cb) // want `immutable-input\(cb\) declared but callback cb escapes \(passed to Run\); cannot verify the \*gorm\.DB it receives`
+}
+
+//gormreuse:immutable-input(cb)
+func funcValueCallbackImmutableInput(cb func(*gorm.DB) error, run func(func(*gorm.DB) error)) {
+	run(cb) // want `immutable-input\(cb\) declared but callback cb escapes \(passed to a function value\); cannot verify the \*gorm\.DB it receives`
+}
+
+//gormreuse:immutable-input(cb)
+func selectCallbackImmutableInput(cb func(*gorm.DB) error, ch chan func(*gorm.DB) error) {
+	select { // want `immutable-input\(cb\) declared but callback cb escapes \(used in a way the checker does not follow\); cannot verify the \*gorm\.DB it receives`
+	case ch <- cb:
+	default:
+	}
+}
+
+// A closure that captures the callback is checked where it calls it, so the
+// closure itself may go anywhere.
+//
+//gormreuse:immutable-input(cb)
+func transactionClosureImmutableInput(cb func(*gorm.DB) error, db *gorm.DB) error {
+	return db.Transaction(func(tx *gorm.DB) error {
+		return cb(tx) // OK: Transaction's tx is fresh
+	})
+}
+
+//gormreuse:immutable-input(cb)
+func transactionClosureImmutableInputBad(cb func(*gorm.DB) error, db *gorm.DB) error {
+	return db.Transaction(func(tx *gorm.DB) error {
+		return cb(tx.Where("x")) // want `immutable-input\(cb\) declared but mutable \*gorm\.DB passed to callback`
+	})
+}
+
+//gormreuse:immutable-input(cb)
+func reassignedCallbackImmutableInput(cb func(*gorm.DB) error, other func(*gorm.DB) error, db *gorm.DB, swap bool) error {
+	f := other
+	if swap {
+		f = cb
+	}
+	return f(db.Where("x")) // want `immutable-input\(cb\) declared but mutable \*gorm\.DB passed to callback`
+}
+
+//gormreuse:immutable-input(cb)
+func structPointerCallbackImmutableInput(cb func(*struct{ db *gorm.DB }), db *gorm.DB) {
+	s := struct{ db *gorm.DB }{db.Session(&gorm.Session{})}
+	cb(&s) // want `immutable-input\(cb\) declared but cannot verify the \*gorm\.DB passed to callback`
+}
+
+//gormreuse:immutable-input(cb)
+func mapParamCallbackImmutableInput(cb func(*gorm.DB) error, m map[string]func(*gorm.DB) error) {
+	m["a"] = cb // want `immutable-input\(cb\) declared but callback cb escapes \(stored outside the function\); cannot verify the \*gorm\.DB it receives`
+}
+
+//gormreuse:immutable-input(cb)
+func arraySliceCallbackImmutableInput(cb func(*gorm.DB) error, db *gorm.DB) error {
+	var arr [1]func(*gorm.DB) error
+	s := arr[:]
+	s[0] = cb
+	return arr[0](db.Where("x")) // want `immutable-input\(cb\) declared but mutable \*gorm\.DB passed to callback`
+}
+
+//gormreuse:immutable-input(cb)
+func extraArgCallbackImmutableInput(cb func(*gorm.DB, int) error, db *gorm.DB) error {
+	return cb(db.Session(&gorm.Session{}), 1) // OK: the int holds no *gorm.DB
+}
+
+// A method that declares immutable-input keeps the promise as well.
+type immutableInputRunnerImpl struct{}
+
+//gormreuse:immutable-input(cb)
+func (immutableInputRunnerImpl) withFresh(cb func(*gorm.DB) error, db *gorm.DB) error {
+	return cb(db.Session(&gorm.Session{}))
+}
+
+//gormreuse:immutable-input(cb)
+func forwardToMethodImmutableInput(r immutableInputRunnerImpl, cb func(*gorm.DB) error, db *gorm.DB) error {
+	return r.withFresh(cb, db) // OK: withFresh promises an immutable value too
+}
+
+func forwardImmutableInputTwice(a, b func(*gorm.DB) error) { _, _ = a, b }
+
+//gormreuse:immutable-input(cb)
+func twiceCallbackImmutableInput(cb func(*gorm.DB) error) {
+	forwardImmutableInputTwice(cb, cb) // want `immutable-input\(cb\) declared but callback cb escapes \(passed to forwardImmutableInputTwice\); cannot verify the \*gorm\.DB it receives`
+}
+
+// =============================================================================
+// Same-line and closure placements (#193)
+// =============================================================================
+
+func sameLineImmutableInput(cb func(*gorm.DB) error, db *gorm.DB) error { //gormreuse:immutable-input(cb)
+	return cb(db.Where("x")) // want `immutable-input\(cb\) declared but mutable \*gorm\.DB passed to callback`
+}
+
+func useSameLineImmutableInput(db *gorm.DB) {
+	_ = sameLineImmutableInput(func(q *gorm.DB) error {
+		q.Find(nil)
+		q.Count(nil) // OK — q is declared immutable input
+		return nil
+	}, db)
+}
+
+func closureImmutableInput(db *gorm.DB) {
+	//gormreuse:immutable-input(cb)
+	withTx := func(cb func(*gorm.DB) error) error {
+		return cb(db.Where("x")) // want `immutable-input\(cb\) declared but mutable \*gorm\.DB passed to callback`
+	}
+	_ = withTx(func(q *gorm.DB) error {
+		q.Find(nil)
+		q.Count(nil) // OK — q is declared immutable input
+		return nil
+	})
+}
+
+func closureSameLineImmutableInput(db *gorm.DB) {
+	fresh := db.Session(&gorm.Session{})
+	withTx := func(cb func(*gorm.DB) error) error { //gormreuse:immutable-input(cb)
+		return cb(fresh) // OK
+	}
+	_ = withTx(func(q *gorm.DB) error {
+		q.Find(nil)
+		q.Count(nil) // OK — q is declared immutable input
+		return nil
+	})
+}
+
+// A directive above a multi-assignment applies to every closure that has the
+// parameter.
+func multiAssignClosureImmutableInput(db *gorm.DB) {
+	//gormreuse:immutable-input(cb)
+	bad, plain := func(cb func(*gorm.DB) error) error {
+		return cb(db.Where("x")) // want `immutable-input\(cb\) declared but mutable \*gorm\.DB passed to callback`
+	}, func(n int) int { return n }
+	_, _ = bad, plain
+}
+
+func closureUnusedImmutableInput() {
+	//gormreuse:immutable-input(missing) // want `unused gormreuse:immutable-input directive: parameter "missing" not found`
+	f := func(cb func(*gorm.DB) error) error { return cb(nil) }
+	_ = f
+}
+
+func misplacedImmutableInput(cb func(*gorm.DB) error, db *gorm.DB) error {
+	//gormreuse:immutable-input(cb) // want `unused gormreuse:immutable-input directive: not attached to a function or closure`
+	return cb(db)
+}

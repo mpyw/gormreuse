@@ -550,6 +550,8 @@ func (v *Validator) calleeName(common *ssa.CallCommon, callee *ssa.Function) str
 // holdsGormDB reports whether a value of type t can reach a *gorm.DB without
 // going through an interface: *gorm.DB itself, a pointer to one, or a
 // struct, slice, array, map, channel or tuple containing one.
+//
+//declscope:shared // immutable_input.go classifies callback arguments with it
 func (v *Validator) holdsGormDB(t types.Type) bool {
 	if result, ok := v.holdsCache[t]; ok {
 		return result
