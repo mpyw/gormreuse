@@ -183,8 +183,15 @@ func (a *Analyzer) processFunction(fn *ssa.Function, tracker *pollution.Tracker,
 						// there is no single such site (IIFE, defer/go, multiple
 						// or no invocations), inherit the enclosing override.
 						childOverride := posOverride
-						if p := closureInvocationPos(mc, a.fset()); p.IsValid() {
+						call := closureInvocation(mc)
+						if p := closureInvocationPos(call, closureFn, a.fset()); p.IsValid() {
 							childOverride = p
+						}
+						// A single call site, IIFE included, also places the
+						// closure's uses at the call's block for reachability
+						// (#179).
+						if call != nil {
+							tracker.RecordInvocationSite(closureFn, call.Block())
 						}
 						a.processFunction(closureFn, tracker, visited, childOverride)
 					}
@@ -236,52 +243,47 @@ func isDeadClosure(mc *ssa.MakeClosure) bool {
 	return refs == nil || len(*refs) == 0
 }
 
-// closureInvocationPos returns the source position at which the closure value
-// mc is invoked, but ONLY for the define-early/call-late case that #68 targets:
-// a closure invoked by exactly one plain call whose call site is on a LATER line
-// than the closure literal's end (i.e. `f := func(){...}; …; f()`). It returns
-// token.NoPos otherwise — an IIFE (invoked on its own closing-brace line), a
-// deferred/spawned closure, a closure passed as an argument or stored, or one
-// invoked more than once — so those keep their body positions unchanged.
-func closureInvocationPos(mc *ssa.MakeClosure, fset *token.FileSet) token.Pos {
-	if fset == nil {
-		return token.NoPos
-	}
-	refs := mc.Referrers()
-	if refs == nil {
-		return token.NoPos
-	}
-	found := token.NoPos
-	for _, r := range *refs {
+// closureInvocation returns the one plain call that invokes the closure value
+// mc, or nil when there is no such single call: it is invoked more than once,
+// or used in any other way (deferred, spawned, passed as an argument, stored).
+func closureInvocation(mc *ssa.MakeClosure) *ssa.Call {
+	var found *ssa.Call
+	for _, r := range *mc.Referrers() {
 		call, ok := r.(*ssa.Call)
 		if !ok || call.Call.Value != ssa.Value(mc) {
 			// A non-call referrer (store, defer, go, arg) makes the invocation
-			// site ambiguous; bail out to the safe (no-override) behavior.
-			return token.NoPos
+			// site ambiguous; bail out to the safe (no-site) behavior.
+			return nil
 		}
-		if found.IsValid() {
-			return token.NoPos // more than one call site
+		if found != nil {
+			return nil // more than one call site
 		}
-		found = call.Pos()
+		found = call
 	}
-	if !found.IsValid() {
+	return found
+}
+
+// closureInvocationPos returns the position of call, the single invocation of
+// closureFn (see closureInvocation), but ONLY for the define-early/call-late
+// case that #68 targets: a call on a LATER line than the closure literal's end
+// (i.e. `f := func(){...}; …; f()`). It returns token.NoPos otherwise — no
+// single call, or an IIFE (invoked on its own closing-brace line) — so those
+// keep their body positions unchanged.
+func closureInvocationPos(call *ssa.Call, closureFn *ssa.Function, fset *token.FileSet) token.Pos {
+	if call == nil || fset == nil {
 		return token.NoPos
 	}
 
 	// Distinguish define-early/call-late from an inline IIFE: the former's call
 	// is on a later line than the closure literal's closing brace.
-	closureFn, ok := mc.Fn.(*ssa.Function)
-	if !ok {
-		return token.NoPos
-	}
 	lit, ok := closureFn.Syntax().(*ast.FuncLit)
 	if !ok {
 		return token.NoPos
 	}
-	if fset.PositionFor(found, false).Line <= fset.PositionFor(lit.End(), false).Line {
+	if fset.PositionFor(call.Pos(), false).Line <= fset.PositionFor(lit.End(), false).Line {
 		return token.NoPos // IIFE / same-line invocation: keep body positions
 	}
-	return found
+	return call.Pos()
 }
 
 // fset returns the program's FileSet (nil if unavailable).

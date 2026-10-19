@@ -121,6 +121,13 @@ type Tracker struct {
 	// fset renders root/first-branch positions in diagnostic messages. May be
 	// nil (positions are then omitted).
 	fset *token.FileSet
+
+	// invocationSites maps a closure to the block of its one known invocation
+	// in the enclosing function (a single plain call, IIFE included). A use in
+	// such a closure is compared with uses elsewhere at that block, so the CFG
+	// decides whether the two can both run (#179). Closures that are missing
+	// here (several call sites, defer, go, passed or stored) stay conservative.
+	invocationSites map[*ssa.Function]*ssa.BasicBlock
 }
 
 // CFGAnalyzer interface for control flow analysis.
@@ -140,7 +147,14 @@ func New(cfgAnalyzer CFGAnalyzer, fset *token.FileSet) *Tracker {
 		loopCarriedUses: make(map[ssa.Value][]UsageInfo),
 		cfgAnalyzer:     cfgAnalyzer,
 		fset:            fset,
+		invocationSites: make(map[*ssa.Function]*ssa.BasicBlock),
 	}
+}
+
+// RecordInvocationSite records site as the block of the one known invocation
+// of the closure fn (see the invocationSites field doc).
+func (t *Tracker) RecordInvocationSite(fn *ssa.Function, site *ssa.BasicBlock) {
+	t.invocationSites[fn] = site
 }
 
 // ProcessBranch records a POLLUTING usage of a mutable root.
@@ -288,9 +302,6 @@ func (t *Tracker) earlierReaching(sources []UsageInfo, target UsageInfo, after t
 		if src.Pos >= target.Pos || src.Pos <= after {
 			continue
 		}
-		if src.Block != nil && target.Block != nil && src.Block.Parent() != target.Block.Parent() {
-			return src, true
-		}
 		if t.isReachable(src.Block, target.Block) {
 			return src, true
 		}
@@ -371,13 +382,34 @@ func (t *Tracker) isReachable(pollutedBlock, targetBlock *ssa.BasicBlock) bool {
 		return false
 	}
 
-	// Cross-function (closure): conservative approach
-	if pollutedBlock.Parent() != targetBlock.Parent() {
-		return true
+	// Same function: use CFG reachability
+	if pollutedBlock.Parent() == targetBlock.Parent() {
+		return t.cfgAnalyzer.CanReach(pollutedBlock, targetBlock)
 	}
 
-	// Same function: use CFG reachability
-	return t.cfgAnalyzer.CanReach(pollutedBlock, targetBlock)
+	// Cross-function (closure): compare the two at the blocks where their
+	// closures are invoked in the innermost function holding both (#179). Two
+	// sites in the same block, or no such function (a closure with no known
+	// invocation site on the way), leave the order to the positions.
+	for _, src := range t.invocationChain(pollutedBlock) {
+		for _, dst := range t.invocationChain(targetBlock) {
+			if src.Parent() == dst.Parent() {
+				return t.cfgAnalyzer.CanReach(src, dst)
+			}
+		}
+	}
+	return true
+}
+
+// invocationChain returns block, then the invocation site of its function,
+// then that site's invocation site, and so on while each closure has a known
+// one. Each block lies in a function enclosing the previous one.
+func (t *Tracker) invocationChain(block *ssa.BasicBlock) []*ssa.BasicBlock {
+	chain := []*ssa.BasicBlock{block}
+	for site, ok := t.invocationSites[block.Parent()]; ok; site, ok = t.invocationSites[site.Parent()] {
+		chain = append(chain, site)
+	}
+	return chain
 }
 
 // addViolationWithContext adds a violation with root and uses information for fix generation.
@@ -461,14 +493,7 @@ func (t *Tracker) checkViolationsBetween(targets, sources []UsageInfo, root ssa.
 				continue
 			}
 
-			// Different functions (closure): position order is sufficient
-			if src.Block != nil && target.Block != nil &&
-				src.Block.Parent() != target.Block.Parent() {
-				t.addViolationWithContext(target.Pos, root, allUses)
-				break
-			}
-
-			// Same function: check CFG reachability
+			// Check CFG reachability (across closures, at their invocation sites)
 			if t.isReachable(src.Block, target.Block) {
 				t.addViolationWithContext(target.Pos, root, allUses)
 				break

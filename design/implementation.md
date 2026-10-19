@@ -586,6 +586,8 @@ These are documented in `testdata/src/gormreuse/evil.go` and `testdata/src/exter
 
 **Closure use ordering (#68)**: uses inside a closure that is invoked at a *single* later call site (`f := func() { q.Find(nil) }; …; f()`) are ordered by that **call-site position**, not the closure body's source position — so define-early/call-late reuse is reported at the call site and the earlier direct use is correctly treated as the first branch. This applies only to the unambiguous single-invocation case; IIFEs (invoked inline), deferred/spawned closures, and closures invoked from multiple sites keep their body positions.
 
+**Closure use reachability (#179)**: the same single invocation, and also an IIFE, gives the closure an invocation site: the block of its one plain call (`Tracker.RecordInvocationSite`). When two uses are in different functions, `isReachable` lifts each use through these sites to the innermost function that holds both, and asks the CFG whether the first site reaches the second. So `if c { f() } else { q.Count(nil) }`, `if c { f(); return }; q.Count(nil)` and one IIFE per branch are not reported. Positions still decide the order. If the two sites are the same block, or no common function is reached, the pair counts as reachable, as before #179. A closure with no single plain call (more than one call, `defer`, `go`, passed as an argument, stored) has no site, so its uses stay conservative. A nested closure without its own site does not inherit its parent's site either: it can escape the parent and run after it.
+
 ### IIFE/Closure Stored Result Limitation
 
 When a closure result is stored (in a variable or struct field) rather than directly chained to a gorm method, branch tracking may differ from runtime behavior:

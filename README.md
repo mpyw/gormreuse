@@ -386,6 +386,22 @@ To opt a helper out — declaring that the caller is responsible for passing an 
 
 Reuse safety is determined by GORM's internal `clone` field: a handle with `clone > 0` forks a **fresh** `Statement` on the next chain call (safe to reuse), while a mid-chain handle (`clone == 0`) shares its `Statement`. A parameter's `clone` value is statically unknowable, so it is treated conservatively as mutable.
 
+#### Closures
+
+A use inside a closure counts where the closure is called. When the closure has one plain call site, or is called in place (`func() { ... }()`), uses on paths that cannot both run are not reported:
+
+```go
+q := db.Where("x")
+f := func() { q.Find(&users) }
+if condition {
+    f()               // first branch from q - OK
+} else {
+    q.Count(&count)   // OK - f() never runs on this path
+}
+```
+
+A closure called from more than one place, deferred, run with `go`, passed to a function, or stored, may run at any time. A use inside it conflicts with every other use of the same root.
+
 | Source | `clone` | Reusable? |
 | --- | --- | --- |
 | [`gorm.Open`](https://pkg.go.dev/gorm.io/gorm#Open), [`Session`](https://pkg.go.dev/gorm.io/gorm#DB.Session), [`WithContext`](https://pkg.go.dev/gorm.io/gorm#DB.WithContext), [`Debug`](https://pkg.go.dev/gorm.io/gorm#DB.Debug) | `> 0` | ✅ forks a fresh Statement (but see [Session and Debug copies](#session-and-debug-copies)) |
