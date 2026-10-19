@@ -514,7 +514,7 @@ func (u siteUse) handleArgs() {
 		// branching interferes because the value is not isolated. It holds
 		// for a deferred or spawned call as for a plain one (#192).
 		if checksImmutableParamArg(site, i, ctx) {
-			ctx.Tracker.AddContractViolation(u.pos, immutableParamContractMessage(site.Callee), site.Instr, p)
+			ctx.Tracker.AddContractViolation(u.pos, immutableParamContractMessage(ctx.RootTracer.FuncName(site.Callee)), site.Instr, p)
 		}
 
 		// The function may change the argument in place, so even an
@@ -560,12 +560,9 @@ func BreaksImmutableParam(site callsite.Site, i int, rt *tracer.RootTracer, loop
 }
 
 // immutableParamContractMessage builds the diagnostic for passing a mutable
-// *gorm.DB to a //gormreuse:immutable-param parameter.
-func immutableParamContractMessage(callee *ssa.Function) string {
-	name := "immutable-param function"
-	if callee != nil {
-		name = directive.DeclaredFunc(callee).Name()
-	}
+// *gorm.DB to a //gormreuse:immutable-param parameter of the function named
+// name.
+func immutableParamContractMessage(name string) string {
 	return "mutable *gorm.DB passed to //gormreuse:immutable-param parameter of " + name +
 		"; isolate it with .Session(&gorm.Session{}) before passing"
 }

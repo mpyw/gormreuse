@@ -230,6 +230,11 @@ func (t *RootTracer) Site(instr ssa.CallInstruction) callsite.Site {
 	return callsite.SiteOf(instr, t.funcVars)
 }
 
+// FuncName names fn in a diagnostic (see callsite.FuncVars.FuncName).
+func (t *RootTracer) FuncName(fn *ssa.Function) string {
+	return t.funcVars.FuncName(fn)
+}
+
 // IsScopesCallbackFunc reports whether fn is a Scopes/Preload callback. The
 // analyzer uses this to recurse into such callbacks even when they capture no
 // *gorm.DB (they operate on their parameter, not a captured variable), so reuse

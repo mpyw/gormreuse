@@ -126,9 +126,9 @@ func TestImmutableInputSet_AddFile_CallbackHasNoGormDB(t *testing.T) {
 	assertOneImmutableInputUnused(t, s, "no *gorm.DB parameter")
 }
 
-// Covers the lookupParam branch where a field has no Names slice — it still
-// consumes a position but cannot match any name — and confirms the index is
-// advanced so a later parameter still resolves.
+// Covers the lookupImmutableInputParam branch where a field has no Names
+// slice — it still consumes a position but cannot match any name — and
+// confirms the index is advanced so a later parameter still resolves.
 func TestImmutableInputSet_AddFile_AnonymousParam(t *testing.T) {
 	t.Parallel()
 
@@ -139,7 +139,7 @@ func TestImmutableInputSet_AddFile_AnonymousParam(t *testing.T) {
 	assertOneImmutableInputUnused(t, s, `parameter "missing" not found`)
 }
 
-// With no type info, lookupParam returns a nil type, so asFunctionSignature(nil)
+// With no type info, the parameter has a nil type, so asFunctionSignature(nil)
 // takes its nil branch and the directive is honestly reported as U2 rather than
 // synthesising a misleading U3.
 func TestImmutableInputSet_AddFile_NilTypesInfo(t *testing.T) {
@@ -150,6 +150,18 @@ func TestImmutableInputSet_AddFile_NilTypesInfo(t *testing.T) {
 	s := NewImmutableInputSet(fset, nil) // no TypesInfo
 	s.AddFile(immutableInputFileCursor(file), "demo")
 	assertOneImmutableInputUnused(t, s, `parameter "cb" is not a function type`)
+}
+
+// A variadic callback parameter is reported as unsupported, not as a
+// parameter that is not a function type (#259).
+func TestImmutableInputSet_AddFile_Variadic(t *testing.T) {
+	t.Parallel()
+
+	const src = "package demo\n\n//gormreuse:immutable-input(cbs)\nfunc many(cbs ...func()) {}\n"
+	fset, file, info := parseImmutableInputSrc(t, src)
+	s := NewImmutableInputSet(fset, info)
+	s.AddFile(immutableInputFileCursor(file), "demo")
+	assertOneImmutableInputUnused(t, s, `parameter "cbs" is variadic; variadic callbacks are not supported`)
 }
 
 // A directive shared by the closures of one assignment applies when one of

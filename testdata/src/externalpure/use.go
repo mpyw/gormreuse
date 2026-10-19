@@ -295,3 +295,22 @@ func exprImmutableInput(r purelib.Repo, db *gorm.DB) {
 		q.Find(nil) // OK: With hands the callback an isolated value
 	})
 }
+
+// =============================================================================
+// Directives in generated files are not validated, so not exported (#259)
+// =============================================================================
+
+// GeneratedImmutableReturn returns a mutable chain, and nothing checked its
+// directive, so its result is mutable.
+func generatedImmutableReturnNotTrusted() {
+	q := purelib.GeneratedImmutableReturn()
+	q.Find(nil)
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// GeneratedPure is not trusted either, though its body keeps the contract.
+func generatedPureNotTrusted(db *gorm.DB) {
+	q := db.Where("x")
+	purelib.GeneratedPure(q)
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}

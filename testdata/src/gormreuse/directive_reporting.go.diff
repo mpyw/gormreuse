@@ -1,0 +1,95 @@
+--- directive_reporting.go	1970-01-01 00:00:00
++++ directive_reporting.go.golden	1970-01-01 00:00:00
+@@ -1,90 +1,90 @@
+ package internal
+ 
+ import "gorm.io/gorm"
+ 
+ // =============================================================================
+ // DIRECTIVE REPORTING (#259)
+ //
+ // A diagnostic names a called function as the source spells it: a
+ // package-level closure by its variable, not "init$1", and a method value or
+ // method expression by its method, not "m$bound" or "m$thunk".
+ // =============================================================================
+ 
+ // drLeakyPure breaks its pure contract.
+ //
+ //gormreuse:pure
+ var drLeakyPure = func(q *gorm.DB) {
+ 	q.Where("x") // want `pure function pollutes \*gorm\.DB argument by calling Where`
+ }
+ 
+ // drCallLeakyPure: the failed callee is named by its variable.
+ //
+ //gormreuse:pure
+ func drCallLeakyPure(q *gorm.DB) {
+ 	drLeakyPure(q) // want `pure function passes \*gorm\.DB argument to drLeakyPure, which violates its pure contract`
+ }
+ 
+ // drPlainClosure has no directive.
+ var drPlainClosure = func(q *gorm.DB) { q.Find(nil) }
+ 
+ // drCallPlainClosure: the non-pure callee is named by its variable.
+ //
+ //gormreuse:pure
+ func drCallPlainClosure(q *gorm.DB) {
+ 	drPlainClosure(q) // want `pure function passes \*gorm\.DB argument to non-pure function drPlainClosure$`
+ }
+ 
+ // drBranches branches its parameter.
+ //
+ //gormreuse:immutable-param
+ var drBranches = func(q *gorm.DB) {
+ 	q.Where("a").Find(nil)
+ 	q.Where("b").Find(nil)
+ }
+ 
+ // drCallBranches: the immutable-param callee is named by its variable.
+ func drCallBranches(db *gorm.DB) {
+-	drBranches(db.Where("x")) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of drBranches;`
++	drBranches(db.Where("x").Session(&gorm.Session{})) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of drBranches;`
+ }
+ 
+ // drSink takes a callback it may call with anything.
+ var drSink = func(cb func(*gorm.DB)) { _ = cb }
+ 
+ // drEscapeToClosure: the function the callback escapes to is named by its
+ // variable.
+ //
+ //gormreuse:immutable-input(cb)
+ func drEscapeToClosure(db *gorm.DB, cb func(*gorm.DB)) {
+ 	drSink(cb) // want `immutable-input\(cb\) declared but callback cb escapes \(passed to drSink\)`
+ 	_ = db
+ }
+ 
+ type drRepo struct{}
+ 
+ func (drRepo) run(q *gorm.DB) { q.Find(nil) }
+ 
+ // drCallMethodValue: a method value call is named by its method.
+ //
+ //gormreuse:pure
+ func drCallMethodValue(q *gorm.DB) {
+ 	f := drRepo{}.run
+ 	f(q) // want `pure function passes \*gorm\.DB argument to non-pure function run$`
+ }
+ 
+ // drCallMethodExpr: a method expression call is named by its method.
+ //
+ //gormreuse:pure
+ func drCallMethodExpr(q *gorm.DB) {
+ 	drRepo.run(drRepo{}, q) // want `pure function passes \*gorm\.DB argument to non-pure function run$`
+ }
+ 
+ // drVariadicCallbacks: each element of a variadic parameter would be a
+ // callback, which immutable-input does not support. The directive is reported
+ // unused with that reason, and the callbacks keep a mutable parameter.
+ //
+-//gormreuse:immutable-input(cbs) // want `unused gormreuse:immutable-input directive: parameter "cbs" is variadic; variadic callbacks are not supported`
++// want `unused gormreuse:immutable-input directive: parameter "cbs" is variadic; variadic callbacks are not supported`
+ func drVariadicCallbacks(db *gorm.DB, cbs ...func(*gorm.DB)) {
+ 	for _, cb := range cbs {
+ 		cb(db.Session(&gorm.Session{}))
+ 	}
+ }

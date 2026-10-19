@@ -252,7 +252,7 @@ func RunSSA(
 		failedInput:          failedInput,
 		needsImmutableParam:  needsImmutableParam,
 		tracer:               inputTracer,
-	}, guard)
+	}, skip, guard)
 
 	// Report unused ignore directives last, once every other diagnostic has had
 	// the chance to use one. A function whose analysis panicked lost its
@@ -577,10 +577,16 @@ type factSources struct {
 // still trusted in this package so that the report is not repeated at every
 // call. Another package does not trust it: its author may never see this
 // package's reports.
-func exportFacts(pass *analysis.Pass, ssaInfo *buildssa.SSA, src factSources, guard *panicGuard) {
+//
+// A function in a skipped file, such as a generated one, exports nothing: its
+// contracts are not validated, so another package must not trust them (#259).
+func exportFacts(pass *analysis.Pass, ssaInfo *buildssa.SSA, src factSources, skip func(*ssa.Function) bool, guard *panicGuard) {
 	for _, fn := range ssaInfo.SrcFuncs {
 		if obj, ok := fn.Object().(*types.Func); !ok || !obj.Exported() {
 			continue // another package cannot name it
+		}
+		if skip(fn) {
+			continue
 		}
 		guard.run(fn, func() {
 			var f facts.Func
