@@ -53,7 +53,8 @@
 -	q := db.Where("active = ?", true)
 +	q := db.Where("active = ?", true).Session(&gorm.Session{})
  	q.Find(nil)
- 	if q != nil { //gormreuse:ignore // want `unused gormreuse:ignore directive`
+-	if q != nil { //gormreuse:ignore // want `unused gormreuse:ignore directive`
++	if q != nil { // want `unused gormreuse:ignore directive`
  		q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  	}
  }
@@ -77,12 +78,14 @@
  func unusedIgnoreOnSafeCode(db *gorm.DB) {
  	q := db.Where("x = ?", 1).Session(&gorm.Session{})
  	q.Find(nil)
- 	//gormreuse:ignore // want `unused gormreuse:ignore directive`
+-	//gormreuse:ignore // want `unused gormreuse:ignore directive`
++	// want `unused gormreuse:ignore directive`
  	q.Count(nil)
  }
  
  func unusedIgnoreNoViolation(db *gorm.DB) {
  	q := db.Where("x = ?", 1)
- 	//gormreuse:ignore // want `unused gormreuse:ignore directive`
+-	//gormreuse:ignore // want `unused gormreuse:ignore directive`
++	// want `unused gormreuse:ignore directive`
  	q.Find(nil)
  }

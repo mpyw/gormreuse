@@ -315,12 +315,12 @@ func multiAssignClosureImmutableInput(db *gorm.DB) {
 }
 
 func closureUnusedImmutableInput() {
-	//gormreuse:immutable-input(missing) // want `unused gormreuse:immutable-input directive: parameter "missing" not found`
+	// want `unused gormreuse:immutable-input directive: parameter "missing" not found`
 	f := func(cb func(*gorm.DB) error) error { return cb(nil) }
 	_ = f
 }
 
 func misplacedImmutableInput(cb func(*gorm.DB) error, db *gorm.DB) error {
-	//gormreuse:immutable-input(cb) // want `unused gormreuse:immutable-input directive: not attached to a function or closure`
+	// want `unused gormreuse:immutable-input directive: not attached to a function or closure`
 	return cb(db)
 }

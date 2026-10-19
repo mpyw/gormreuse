@@ -75,6 +75,8 @@ import (
 )
 
 // directiveTool is the tool part of every gormreuse directive.
+//
+//declscope:shared // removal.go finds the list of a directive comment after it
 const directiveTool = "gormreuse"
 
 // directiveChecker is a function that checks if a comment is a specific directive.
@@ -150,6 +152,8 @@ func checkDirectivePart(part string) string {
 // directiveAddressed reports whether a comment's body, after "//" or "/*" and any
 // whitespace, starts with "gormreuse:". Prose that only mentions gormreuse:
 // later in a sentence is not addressed to gormreuse.
+//
+//declscope:shared // removal.go withholds a fix that would turn a reason into a directive
 func directiveAddressed(text string) bool {
 	body := text
 	if after, ok := strings.CutPrefix(body, "/*"); ok {

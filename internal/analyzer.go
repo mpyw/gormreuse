@@ -42,6 +42,7 @@ import (
 	"go/token"
 	"go/types"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 
@@ -115,13 +116,23 @@ func RunSSA(
 		}
 	}
 
+	// reportRemoval is report for a diagnostic whose fix deletes targets, the
+	// parts of directive comments that have no effect (#248).
+	removals := directive.NewRemovals(pass)
+	reportRemoval := func(pos token.Pos, message string, targets ...directive.RemovalTarget) {
+		if !ignores.Ignore(pos) {
+			removals.Report(pos, message, targets...)
+		}
+	}
+
 	// ssaInfo is nil for a package that does not reach gorm.io/gorm: it holds
 	// no *gorm.DB, so the passes below would find nothing, and the analyzer
 	// does not build its SSA (#195). The reports that need no SSA remain.
 	if ssaInfo == nil {
-		reportUnusedImmutableInputs(immutableInputSet, report)
-		reportUnusedDirectiveFuncs(pureFuncs, immutableReturnFuncs, immutableParamFuncs, report)
-		reportUnusedIgnores(pass, ignores)
+		reportUnusedImmutableInputs(immutableInputSet, reportRemoval)
+		reportUnusedDirectiveFuncs(pureFuncs, immutableReturnFuncs, immutableParamFuncs, reportRemoval)
+		reportUnusedIgnores(removals, ignores, ignoreRemovable(pass, false))
+		removals.Flush()
 		return
 	}
 
@@ -177,7 +188,7 @@ func RunSSA(
 			}
 		})
 	}
-	reportUnusedImmutableInputs(immutableInputSet, report)
+	reportUnusedImmutableInputs(immutableInputSet, reportRemoval)
 
 	// Enforce the body-side immutable-return contract. Reuses inputTracer, which
 	// carries the full pass context so other immutable-return / immutable-param
@@ -225,9 +236,9 @@ func RunSSA(
 
 	// Report immutable-param directives that are signature-valid but have no
 	// effect (no *gorm.DB parameter is reused).
-	reportRedundantImmutableParam(funcs, immutableParamFuncs, pureFuncs, needsImmutableParam, skip, report)
+	reportRedundantImmutableParam(funcs, immutableParamFuncs, pureFuncs, needsImmutableParam, skip, reportRemoval)
 
-	reportUnusedDirectiveFuncs(pureFuncs, immutableReturnFuncs, immutableParamFuncs, report)
+	reportUnusedDirectiveFuncs(pureFuncs, immutableReturnFuncs, immutableParamFuncs, reportRemoval)
 
 	exportFacts(pass, ssaInfo, factSources{
 		pureFuncs:            pureFuncs,
@@ -241,8 +252,11 @@ func RunSSA(
 	}, guard)
 
 	// Report unused ignore directives last, once every other diagnostic has had
-	// the chance to use one.
-	reportUnusedIgnores(pass, ignores)
+	// the chance to use one. A function whose analysis panicked lost its
+	// diagnostics, so an ignore that looks unused may cover one of them: no
+	// fix deletes an ignore then.
+	reportUnusedIgnores(removals, ignores, ignoreRemovable(pass, len(guard.reported) > 0))
+	removals.Flush()
 }
 
 // ReportInOrder holds back every diagnostic pass reports until flush, which
@@ -269,20 +283,76 @@ func ReportInOrder(pass *analysis.Pass) (flush func()) {
 	}
 }
 
+// reportRemovalFunc reports a diagnostic whose fix deletes targets.
+type reportRemovalFunc func(pos token.Pos, message string, targets ...directive.RemovalTarget)
+
 // reportUnusedImmutableInputs reports the immutable-input directives that name
-// no usable callback or are attached to no function.
-func reportUnusedImmutableInputs(set *directive.ImmutableInputSet, report func(token.Pos, string)) {
+// no usable callback or are attached to no function. The fix deletes the
+// unused parts.
+func reportUnusedImmutableInputs(set *directive.ImmutableInputSet, report reportRemovalFunc) {
 	for _, u := range set.GetUnused() {
-		report(u.Pos, u.Reason)
+		var targets []directive.RemovalTarget
+		for _, part := range u.Parts {
+			targets = append(targets, directive.RemovalTarget{Comment: u.Pos, Part: part})
+		}
+		report(u.Pos, u.Reason, targets...)
 	}
 }
 
 // reportUnusedIgnores reports the ignore directives that suppressed nothing.
-// No ignore suppresses these.
-func reportUnusedIgnores(pass *analysis.Pass, ignores *directive.Ignores) {
+// No ignore suppresses these. The fix deletes an ignore when removable
+// reports that it may.
+func reportUnusedIgnores(removals *directive.Removals, ignores *directive.Ignores, removable func(token.Pos) bool) {
 	for _, pos := range ignores.UnusedIgnores() {
-		pass.Reportf(pos, "unused gormreuse:ignore directive")
+		if removable(pos) {
+			removals.Report(pos, "unused gormreuse:ignore directive", directive.RemovalTarget{Comment: pos, Part: "ignore"})
+		} else {
+			removals.Report(pos, "unused gormreuse:ignore directive")
+		}
 	}
+}
+
+// ignoreRemovable returns whether a fix may delete the unused ignore at a
+// position (#248). It may not after an internal error, which may have dropped
+// the diagnostic the ignore covers. Nor may it in a file other than a test
+// file when the package has test files: the test variant of the package also
+// analyzes the file, with the test files' calls, and may need the ignore. A
+// pass sees one variant only, so the pass without the test files cannot tell.
+// A test file is in the test variant alone, which sees the whole package.
+func ignoreRemovable(pass *analysis.Pass, internalError bool) func(token.Pos) bool {
+	hasTests := make(map[string]bool) // By directory
+	return func(pos token.Pos) bool {
+		if internalError {
+			return false
+		}
+		filename := pass.Fset.PositionFor(pos, false).Filename
+		if strings.HasSuffix(filename, "_test.go") {
+			return true
+		}
+		dir := filepath.Dir(filename)
+		has, seen := hasTests[dir]
+		if !seen {
+			has = dirHasTestFiles(pass, dir)
+			hasTests[dir] = has
+		}
+		return !has
+	}
+}
+
+// dirHasTestFiles reports whether dir holds a _test.go file, the test files
+// of the package of pass among them. A directory that cannot be read counts
+// as holding one.
+func dirHasTestFiles(pass *analysis.Pass, dir string) bool {
+	for _, f := range pass.Files {
+		if strings.HasSuffix(pass.Fset.PositionFor(f.Pos(), false).Filename, "_test.go") {
+			return true
+		}
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return true
+	}
+	return slices.ContainsFunc(entries, func(e os.DirEntry) bool { return strings.HasSuffix(e.Name(), "_test.go") })
 }
 
 // analyzedFuncs returns the functions the analysis runs on: the source
@@ -593,16 +663,23 @@ func computeNeedsImmutableParam(
 // Signature-invalid directives (no *gorm.DB parameter) are reported as unused by
 // reportUnusedDirectiveFuncs, not here; the same guards used when building
 // needsImmutableParam keep the two paths from overlapping.
+//
+// The fix deletes immutable-param from the function's directive comments
+// (#248). A comment before an assignment of several closures applies to each
+// of them, so it is edited only when no other closure it covers keeps the
+// directive.
 func reportRedundantImmutableParam(
 	funcs []*ssa.Function,
 	immutableParamFuncs, pureFuncs *directive.DirectiveFuncSet,
 	needsImmutableParam map[*ssa.Function]bool,
 	skip func(*ssa.Function) bool,
-	report func(token.Pos, string),
+	report reportRemovalFunc,
 ) {
 	if immutableParamFuncs == nil {
 		return
 	}
+	var redundant []*ssa.Function
+	kept := make(map[token.Pos]bool) // Comments that a function not reported keeps
 	for _, fn := range funcs {
 		if skip(fn) || !immutableParamFuncs.Contains(fn) {
 			continue
@@ -610,12 +687,25 @@ func reportRedundantImmutableParam(
 		if fn.Signature == nil || !directive.HasGormDBParameter(fn.Signature) {
 			continue // signature-invalid: handled by reportUnusedDirectiveFuncs
 		}
-		if pureFuncs != nil && pureFuncs.Contains(fn) {
-			continue // pure ⇒ param never branched ⇒ redundant by construction (not flagged)
+		// pure ⇒ param never branched ⇒ redundant by construction (not flagged)
+		if pureFuncs != nil && pureFuncs.Contains(fn) || needsImmutableParam[fn] {
+			for _, pos := range immutableParamFuncs.CommentsOf(fn) {
+				kept[pos] = true
+			}
+			continue
 		}
-		if !needsImmutableParam[fn] {
-			report(fn.Pos(), "redundant gormreuse:immutable-param directive: no *gorm.DB parameter is reused")
+		redundant = append(redundant, fn)
+	}
+	for _, fn := range redundant {
+		var targets []directive.RemovalTarget
+		for _, pos := range immutableParamFuncs.CommentsOf(fn) {
+			if kept[pos] {
+				targets = nil
+				break
+			}
+			targets = append(targets, directive.RemovalTarget{Comment: pos, Part: "immutable-param"})
 		}
+		report(fn.Pos(), "redundant gormreuse:immutable-param directive: no *gorm.DB parameter is reused", targets...)
 	}
 }
 
@@ -623,14 +713,15 @@ func reportRedundantImmutableParam(
 // directives that matched no valid function. For combined directives (e.g.
 // //gormreuse:pure,immutable-return,immutable-param) a directive at a position
 // is "used" if ANY of its combined siblings is used, so each set is suppressed
-// when another set reports that position as used.
-func reportUnusedDirectiveFuncs(pureFuncs, immutableReturnFuncs, immutableParamFuncs *directive.DirectiveFuncSet, report func(token.Pos, string)) {
+// when another set reports that position as used. The fix deletes the unused
+// part of the comment (#248).
+func reportUnusedDirectiveFuncs(pureFuncs, immutableReturnFuncs, immutableParamFuncs *directive.DirectiveFuncSet, report reportRemovalFunc) {
 	usedByOther := func(pos token.Pos, others ...*directive.DirectiveFuncSet) bool {
 		return slices.ContainsFunc(others, func(s *directive.DirectiveFuncSet) bool {
 			return s != nil && s.IsUsed(pos)
 		})
 	}
-	reportSet := func(set *directive.DirectiveFuncSet, message string, others ...*directive.DirectiveFuncSet) {
+	reportSet := func(set *directive.DirectiveFuncSet, name string, others ...*directive.DirectiveFuncSet) {
 		if set == nil {
 			return
 		}
@@ -638,13 +729,13 @@ func reportUnusedDirectiveFuncs(pureFuncs, immutableReturnFuncs, immutableParamF
 			if usedByOther(pos, others...) {
 				continue
 			}
-			report(pos, message)
+			report(pos, "unused gormreuse:"+name+" directive", directive.RemovalTarget{Comment: pos, Part: name})
 		}
 	}
 
-	reportSet(pureFuncs, "unused gormreuse:pure directive", immutableReturnFuncs, immutableParamFuncs)
-	reportSet(immutableReturnFuncs, "unused gormreuse:immutable-return directive", pureFuncs, immutableParamFuncs)
-	reportSet(immutableParamFuncs, "unused gormreuse:immutable-param directive", pureFuncs, immutableReturnFuncs)
+	reportSet(pureFuncs, "pure", immutableReturnFuncs, immutableParamFuncs)
+	reportSet(immutableReturnFuncs, "immutable-return", pureFuncs, immutableParamFuncs)
+	reportSet(immutableParamFuncs, "immutable-param", pureFuncs, immutableReturnFuncs)
 }
 
 // panicGuard runs per-function work and recovers from any panic, so that a
@@ -755,12 +846,22 @@ func (c *checker) checkFunction(fn *ssa.Function) {
 	// fix of every root in the group. Otherwise only the first root would get a
 	// fix (#184). A violation with no root, such as a read-only argument that
 	// sees a change, is another bug, and is reported on its own (see
-	// reportKey).
+	// reportKey). One such diagnostic stands for every violation in the group
+	// with its message, such as each mutable argument of f(q, r) passed to an
+	// immutable-param function, so it carries all their fixes (#248).
 	for _, group := range groupByPos(violations) {
 		var reuse, fixFor []pollution.Violation
 		for _, v := range group {
 			if v.Root == nil {
-				c.reportViolation(v, nil, fixOf)
+				c.reportViolation(v, func() []analysis.SuggestedFix {
+					var fixes []analysis.SuggestedFix
+					for _, same := range group {
+						if same.Root == nil && same.Message == v.Message {
+							fixes = append(fixes, c.fixGen.GenerateIsolation(same)...)
+						}
+					}
+					return fixes
+				})
 				continue
 			}
 			reuse = append(reuse, v)
@@ -769,7 +870,13 @@ func (c *checker) checkFunction(fn *ssa.Function) {
 			}
 		}
 		if len(reuse) > 0 {
-			c.reportViolation(reuse[0], fixFor, fixOf)
+			c.reportViolation(reuse[0], func() []analysis.SuggestedFix {
+				var fixes []analysis.SuggestedFix
+				for _, fv := range fixFor {
+					fixes = append(fixes, fixOf(fv)...)
+				}
+				return fixes
+			})
 		}
 	}
 }
@@ -810,10 +917,10 @@ func groupByPos(violations []pollution.Violation) [][]pollution.Violation {
 	return groups
 }
 
-// reportViolation reports v with the suggested fixes, given by fixOf, for the
-// roots of fixFor. The fixes are merged into one, because drivers apply only
-// the first suggested fix of a diagnostic.
-func (c *checker) reportViolation(v pollution.Violation, fixFor []pollution.Violation, fixOf func(pollution.Violation) []analysis.SuggestedFix) {
+// reportViolation reports v with the suggested fixes that fixes returns. The
+// fixes are merged into one, because drivers apply only the first suggested
+// fix of a diagnostic. fixes is called only when v is reported.
+func (c *checker) reportViolation(v pollution.Violation, fixes func() []analysis.SuggestedFix) {
 	pos := v.Pos
 
 	// Deduplicate: same position may be reached multiple times
@@ -826,16 +933,11 @@ func (c *checker) reportViolation(v pollution.Violation, fixFor []pollution.Viol
 		return // Suppressed by ignore directive
 	}
 
-	var suggestedFixes []analysis.SuggestedFix
-	for _, fv := range fixFor {
-		suggestedFixes = append(suggestedFixes, fixOf(fv)...)
-	}
-
 	// Each diagnostic carries every edit its roots need, even one that another
 	// diagnostic carries too, such as a shared Phi edge's Session or the gorm
 	// import. Applying one diagnostic's fix alone must compile (#200). Drivers
 	// that apply several fixes, such as -fix, merge identical edits.
-	suggestedFixes = mergeFixes(suggestedFixes)
+	suggestedFixes := mergeFixes(fixes())
 
 	// Report with diagnostic
 	c.pass.Report(analysis.Diagnostic{

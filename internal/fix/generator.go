@@ -231,6 +231,43 @@ func (g *Generator) Generate(v pollution.Violation) []analysis.SuggestedFix {
 	}
 }
 
+// GenerateIsolation returns the fix for a violation of the caller-side
+// immutable-param contract: .Session(&gorm.Session{}) after the mutable
+// argument, as the diagnostic says (#248). The Session result is immutable,
+// so the call no longer breaks the contract. It returns nil for any other
+// violation, or when the argument is not a *gorm.DB expression of the call.
+func (g *Generator) GenerateIsolation(v pollution.Violation) []analysis.SuggestedFix {
+	if v.Call == nil {
+		return nil
+	}
+	// The call's Lparen, for a go or defer statement too.
+	lparen := v.Call.Common().Pos()
+	var call *ast.CallExpr
+	if file := g.findFileContaining(lparen); file != nil {
+		call = findCallAtLparen(g.fileCursor(file), lparen)
+	}
+	// Param counts the parameters without a receiver, as the call's
+	// arguments do. Only a variadic parameter can differ, and it never
+	// holds a *gorm.DB argument of its own.
+	if call == nil || v.Param < 0 || v.Param >= len(call.Args) || !typeutil.IsGormDB(g.pass.TypesInfo.TypeOf(call.Args[v.Param])) {
+		return nil
+	}
+	arg := call.Args[v.Param]
+
+	var edits []analysis.TextEdit
+	site := sessionSite{pos: arg.End()}
+	switch arg.(type) {
+	case *ast.Ident, *ast.ParenExpr, *ast.SelectorExpr, *ast.CallExpr, *ast.IndexExpr, *ast.IndexListExpr, *ast.TypeAssertExpr:
+	default:
+		// Session binds tighter than *p or a conversion's operand.
+		edits = append(edits, analysis.TextEdit{Pos: arg.Pos(), End: arg.Pos(), NewText: []byte("(")})
+		site.prefix = ")"
+	}
+	edits = append(edits, g.sessionEdits([]sessionSite{site})...)
+	slices.SortFunc(edits, func(a, b analysis.TextEdit) int { return cmp.Compare(a.Pos, b.Pos) })
+	return []analysis.SuggestedFix{{Message: "Isolate the argument with Session", TextEdits: edits}}
+}
+
 // fileCursor returns the cursor for the given file in the pass inspector.
 func (g *Generator) fileCursor(file *ast.File) inspector.Cursor {
 	return g.cursors[file]

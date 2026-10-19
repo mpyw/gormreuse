@@ -36,6 +36,7 @@ type ImmutableInputCallback struct {
 type ImmutableInputUnused struct {
 	Pos    token.Pos // Position of the directive comment
 	Reason string    // Human-readable reason for reporting
+	Parts  []string  // The immutable-input(name) parts of the comment that are unused
 }
 
 // ImmutableInputSet stores all //gormreuse:immutable-input(name) directives found
@@ -47,6 +48,7 @@ type ImmutableInputSet struct {
 	known    map[FuncKey][]ImmutableInputCallback
 	closures map[token.Pos][]ImmutableInputCallback // keyed by the FuncLit's position
 	unused   []ImmutableInputUnused
+	texts    map[token.Pos]string // text of each immutable-input comment, by position
 	// imported returns the callbacks of a function of another package, from
 	// the fact its package exported (#195). It may be nil.
 	imported func(fn *ssa.Function) []ImmutableInputCallback
@@ -66,6 +68,7 @@ func NewImmutableInputSet(fset *token.FileSet, typesInfo *types.Info) *Immutable
 	return &ImmutableInputSet{
 		known:     make(map[FuncKey][]ImmutableInputCallback),
 		closures:  make(map[token.Pos][]ImmutableInputCallback),
+		texts:     make(map[token.Pos]string),
 		fset:      fset,
 		typesInfo: typesInfo,
 		placement: newDirectiveFuncSet(fset, typesInfo, hasImmutableInputDirective, nil),
@@ -86,6 +89,9 @@ func (s *ImmutableInputSet) AddFile(cur inspector.Cursor, pkgPath string) {
 	for _, cg := range file.Comments {
 		for _, c := range cg.List {
 			comments[c.Pos()] = c
+			if hasImmutableInputDirective(c.Text) {
+				s.texts[c.Pos()] = c.Text
+			}
 		}
 	}
 
@@ -187,9 +193,14 @@ func (s *ImmutableInputSet) GetUnused() []ImmutableInputUnused {
 	orphans := s.placement.GetUnusedDirectives()
 	slices.Sort(orphans)
 	for _, pos := range orphans {
+		var parts []string
+		for _, name := range extractImmutableInputParams(s.texts[pos]) {
+			parts = append(parts, immutableInputPart(name))
+		}
 		unused = append(unused, ImmutableInputUnused{
 			Pos:    pos,
 			Reason: "unused gormreuse:immutable-input directive: not attached to a function or closure",
+			Parts:  parts,
 		})
 	}
 	return unused
@@ -255,7 +266,13 @@ func (s *ImmutableInputSet) resolveImmutableInputRef(ft *ast.FuncType, ref immut
 
 // addUnusedImmutableInput records an unused-directive diagnostic for ref.
 func (s *ImmutableInputSet) addUnusedImmutableInput(ref immutableInputRef, reason string) {
-	s.unused = append(s.unused, ImmutableInputUnused{Pos: ref.commentPos, Reason: reason})
+	s.unused = append(s.unused, ImmutableInputUnused{Pos: ref.commentPos, Reason: reason, Parts: []string{immutableInputPart(ref.name)}})
+}
+
+// immutableInputPart returns the directive part that declares the callback
+// name: immutable-input(name).
+func immutableInputPart(name string) string {
+	return "immutable-input(" + name + ")"
 }
 
 // lookupParam finds a parameter by name in a function type and returns

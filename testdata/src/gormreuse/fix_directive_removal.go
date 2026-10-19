@@ -1,0 +1,64 @@
+package internal
+
+import "gorm.io/gorm"
+
+// Fixtures for issue #248: the fix of an unused or redundant directive, or of
+// an unused ignore, deletes only that part of the comment. The other parts
+// and the reason after "//" stay. A comment left with no part and no reason
+// goes, with its line when nothing else is on it.
+
+// removalRedundantInList: immutable-param goes, immutable-return and the
+// reason stay.
+//
+//gormreuse:immutable-return,immutable-param // the note stays
+func removalRedundantInList(db *gorm.DB) *gorm.DB { // want `redundant gormreuse:immutable-param directive: no \*gorm\.DB parameter is reused`
+	return db.Session(&gorm.Session{})
+}
+
+// removalRedundantAfterBrace: the comment after the brace goes, the brace
+// stays.
+func removalRedundantAfterBrace( // want `redundant gormreuse:immutable-param directive: no \*gorm\.DB parameter is reused`
+	db *gorm.DB,
+) { //gormreuse:immutable-param
+	db.Find(nil)
+}
+
+// removalSharedComment: the comment covers both closures and the first one
+// relies on it, so the second one's diagnostic has no fix.
+func removalSharedComment() {
+	//gormreuse:immutable-param
+	removalNeeds, removalRedundant := func(db *gorm.DB) {
+		db.Where("a").Find(nil)
+		db.Where("b").Find(nil)
+	}, func(db *gorm.DB) { db.Find(nil) } // want `redundant gormreuse:immutable-param directive: no \*gorm\.DB parameter is reused`
+	_, _ = removalNeeds, removalRedundant
+}
+
+// removalInputInList: the unused immutable-input part goes, the used one
+// stays.
+//
+//gormreuse:immutable-input(cb),immutable-input(missing) // want `unused gormreuse:immutable-input directive: parameter "missing" not found`
+func removalInputInList(db *gorm.DB, cb func(*gorm.DB)) {
+	cb(db.Session(&gorm.Session{}))
+}
+
+// removalIgnoreInList: the function has nothing to ignore, so ignore goes and
+// pure stays.
+//
+//gormreuse:ignore,pure // want `unused gormreuse:ignore directive`
+func removalIgnoreInList(db *gorm.DB) {
+	_ = db
+}
+
+// removalBothUnused: pure and immutable-return are both unused. Both fixes
+// are the same edit, so -fix applies it once.
+//
+//gormreuse:pure,immutable-return // want `unused gormreuse:pure directive` `unused gormreuse:immutable-return directive`
+func removalBothUnused(x int) int { return x }
+
+func removalIgnoreReasons() {
+	// Another tool's directive in the reason stays.
+	_ = 1 //gormreuse:ignore //nolint:gocritic // want `unused gormreuse:ignore directive`
+	// A reason that would become a gormreuse directive gets no fix.
+	_ = 2 //gormreuse:ignore //gormreuse:pure // want `unused gormreuse:ignore directive`
+}

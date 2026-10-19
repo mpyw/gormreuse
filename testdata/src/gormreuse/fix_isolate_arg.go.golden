@@ -1,0 +1,47 @@
+package internal
+
+import "gorm.io/gorm"
+import gormio "gorm.io/gorm"
+
+// Fixtures for issue #248: a mutable *gorm.DB passed to an immutable-param
+// parameter gets .Session(&gorm.Session{}) after the argument.
+
+//gormreuse:immutable-param
+func isolateBranchBoth(a, b *gorm.DB) {
+	a.Where("x").Find(nil)
+	a.Where("y").Find(nil)
+	b.Where("x").Find(nil)
+	b.Where("y").Find(nil)
+}
+
+// isolateTwoArgs: one diagnostic stands for both arguments, so its fix
+// isolates both.
+func isolateTwoArgs(a, b *gorm.DB) {
+	isolateBranchBoth(a.Where("a").Session(&gorm.Session{}), b.Where("b").Session(&gorm.Session{})) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of isolateBranchBoth`
+}
+
+// isolateDeref: Session binds tighter than *, so the argument is wrapped.
+func isolateDeref(db *gorm.DB) {
+	p := &db
+	isolateBranchBoth((*p).Session(&gorm.Session{}), nil) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of isolateBranchBoth`
+}
+
+// isolateShadowed: the local gorm shadows the import at the argument, so the
+// fix imports gorm.io/gorm under another name (#237).
+func isolateShadowed(db *gorm.DB) {
+	gorm := db.Where("x")
+	isolateBranchBoth(gorm.Session(&gormio.Session{}), nil) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of isolateBranchBoth`
+}
+
+type isolateRepo struct{}
+
+//gormreuse:immutable-param
+func (isolateRepo) apply(db *gorm.DB) {
+	db.Where("x").Find(nil)
+	db.Where("y").Find(nil)
+}
+
+// isolateMethod: the receiver is not an argument of the call expression.
+func isolateMethod(db *gorm.DB) {
+	isolateRepo{}.apply(db.Session(&gorm.Session{})) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of apply`
+}

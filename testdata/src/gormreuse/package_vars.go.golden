@@ -282,5 +282,5 @@ var pvImmutableParamClosure = func(q *gorm.DB) {
 // pvCallImmutableParamClosure: the caller-side contract is checked through the
 // variable.
 func pvCallImmutableParamClosure(db *gorm.DB) {
-	pvImmutableParamClosure(db.Where("x")) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter`
+	pvImmutableParamClosure(db.Where("x").Session(&gorm.Session{})) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter`
 }
