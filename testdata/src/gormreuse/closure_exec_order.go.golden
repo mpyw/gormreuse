@@ -39,3 +39,121 @@ func execOrderMismatch(db *gorm.DB) {
 	q.Count(nil)                    // first branch (executes first) - OK
 	later()                         // want `\*gorm\.DB reused: second branch from mutable root`
 }
+
+// =============================================================================
+// Closure uses on mutually exclusive paths (#179)
+// =============================================================================
+
+// ===== SHOULD NOT REPORT =====
+
+// closureCallElseBranch: f's only call site is in the then branch, so its use
+// of q never runs on the path through q.Count.
+func closureCallElseBranch(db *gorm.DB, c bool) {
+	q := db.Where("x")
+	f := func() { q.Find(nil) }
+	if c {
+		f()
+	} else {
+		q.Count(nil)
+	}
+}
+
+// closureCallEarlyReturn: the path that calls f returns before q.Count.
+func closureCallEarlyReturn(db *gorm.DB, c bool) {
+	q := db.Where("x")
+	f := func() { q.Find(nil) }
+	if c {
+		f()
+		return
+	}
+	q.Count(nil)
+}
+
+// iifeEachBranch: one IIFE runs per path.
+func iifeEachBranch(db *gorm.DB, c bool) {
+	q := db.Where("x")
+	if c {
+		func() { q.Find(nil) }()
+	} else {
+		func() { q.Count(nil) }()
+	}
+}
+
+// iifeElseDirect: an IIFE in one branch and a direct use in the other.
+func iifeElseDirect(db *gorm.DB, c bool) {
+	q := db.Where("x")
+	if c {
+		func() { q.Find(nil) }()
+	} else {
+		q.Count(nil)
+	}
+}
+
+// nestedIIFEEachBranch: the IIFEs are nested in a closure with a single call
+// site; each inner IIFE is lifted through both call sites.
+func nestedIIFEEachBranch(db *gorm.DB, c bool) {
+	q := db.Where("x")
+	run := func() {
+		if c {
+			func() { q.Find(nil) }()
+		} else {
+			func() { q.Count(nil) }()
+		}
+	}
+	run()
+}
+
+// ===== SHOULD REPORT =====
+
+// closureCallThenDirect: the path through f() also reaches q.Count.
+func closureCallThenDirect(db *gorm.DB, c bool) {
+	q := db.Where("x").Session(&gorm.Session{})
+	f := func() { q.Find(nil) }
+	if c {
+		f()
+	}
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// iifeThenDirect: the IIFE runs before q.Count on the same path.
+func iifeThenDirect(db *gorm.DB) {
+	q := db.Where("x").Session(&gorm.Session{})
+	func() { q.Find(nil) }()
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// closureCalledTwice: two call sites, so the invocation site is unknown and
+// the analysis stays conservative even though no call reaches q.Count.
+func closureCalledTwice(db *gorm.DB, n int) {
+	q := db.Where("x").Session(&gorm.Session{})
+	f := func() { q.Find(nil) }
+	switch n {
+	case 0:
+		f()
+	case 1:
+		f()
+	default:
+		q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	}
+}
+
+// closurePassedAway: a closure passed to another function may run anywhere.
+func closurePassedAway(db *gorm.DB, c bool, run func(func())) {
+	q := db.Where("x").Session(&gorm.Session{})
+	f := func() { q.Find(nil) }
+	if c {
+		run(f)
+	} else {
+		q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	}
+}
+
+// goroutineClosureExclusive: a goroutine runs concurrently, so its block in the
+// parent says nothing about ordering; it stays conservative.
+func goroutineClosureExclusive(db *gorm.DB, c bool) {
+	q := db.Where("x").Session(&gorm.Session{})
+	if c {
+		go func() { q.Find(nil) }()
+	}
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
