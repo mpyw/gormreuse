@@ -137,6 +137,27 @@ func scopesPackageClosureSessionWarns(db *gorm.DB) {
 	db.Scopes(packageSessionScope)
 }
 
+// A returned variable that may hold the Debug() result.
+func scopesMergedSessionWarns(db *gorm.DB, debug bool) {
+	db.Scopes(func(q *gorm.DB) *gorm.DB {
+		s := q
+		if debug {
+			s = q.Debug() // want `Debug\(\) result returned from Scopes callback causes transaction leak`
+		}
+		return s
+	})
+}
+
+// #293: a method expression held in a package-level variable is named as
+// the method it stands for.
+var packageSessionExpr = (*gorm.DB).Session
+
+func scopesPackageMethodExprSessionWarns(db *gorm.DB) {
+	db.Scopes(func(q *gorm.DB) *gorm.DB {
+		return packageSessionExpr(q, &gorm.Session{}) // want `Session\(\) result returned from Scopes callback causes transaction leak`
+	})
+}
+
 // ===== SHOULD NOT REPORT =====
 
 // A chain method after Session returns a clone==0 value, so nothing leaks.
