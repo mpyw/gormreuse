@@ -315,7 +315,7 @@ A struct field is followed in these forms:
 
 - A field of a struct literal or variable, including nested fields and fields reached through embedding.
 - Methods promoted from an embedded `*gorm.DB`: `e := E{db.Where("x")}; e.Where("a")`.
-- A field of a struct value that a function returned: `s := mk(db); s.DB.Where("a")`. Each field of each call is its own mutable root, like a function that returns `*gorm.DB`. No fix is suggested for it, because the `Session` belongs inside the function.
+- A field of a struct that a function returned, by value or by pointer: `s := mk(db); s.DB.Where("a")`. Each field of each call is its own mutable root, like a function that returns `*gorm.DB`. A call inside a loop makes a new root on each iteration. A store to the field through the returned pointer replaces it, as for a local struct. No fix is suggested for it, because the `Session` belongs inside the function. Mark a helper that returns a struct of safe handles, such as a test setup function, with `//gormreuse:immutable-return`.
 - A struct captured by a closure, also through a pointer.
 
 A field read through a parameter or a receiver, by value or by pointer, is not a mutable root. Only the stores to it in the same function are followed.

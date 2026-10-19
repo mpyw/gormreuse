@@ -453,4 +453,53 @@ func TestFieldRoot(t *testing.T) {
 	if distinct[0] == nil || distinct[1] == nil || distinct[0] == distinct[1] {
 		t.Errorf("two fields should have different roots: %v, %v", distinct[0], distinct[1])
 	}
+
+	// A field reached through a pointer the call returned (#250).
+	ptr := whereRoots("pointerStructNested")
+	ptrRoot, ok := ptr[0].(*FieldRoot)
+	if !ok || ptr[1] != ptr[0] {
+		t.Fatalf("expected one shared *FieldRoot, got %v (%T), %v", ptr[0], ptr[0], ptr[1])
+	}
+	if got := ptrRoot.Name(); got != ptrRoot.Call.Name()+".inner.DB" {
+		t.Errorf("Name() = %q", got)
+	}
+	if !typeutil.IsGormDB(ptrRoot.Type()) {
+		t.Errorf("Type() = %v, want *gorm.DB", ptrRoot.Type())
+	}
+}
+
+// TestRootBlock checks the defining block of each root kind (#250).
+func TestRootBlock(t *testing.T) {
+	t.Parallel()
+	fixtures, _ := loadProgram(t)
+	fn := fixtures["valueStructCalledInLoop"]
+	if fn == nil {
+		t.Fatal("valueStructCalledInLoop fixture missing")
+	}
+	var call *ssa.Call
+	for _, block := range fn.Blocks {
+		for _, instr := range block.Instrs {
+			if c, ok := instr.(*ssa.Call); ok && call == nil {
+				call = c
+			}
+		}
+	}
+	if call == nil {
+		t.Fatal("no call in valueStructCalledInLoop")
+	}
+	if got := RootBlock(call); got != call.Block() {
+		t.Errorf("RootBlock(call) = %v, want %v", got, call.Block())
+	}
+	if got := RootBlock(&FieldRoot{Call: call}); got != call.Block() {
+		t.Errorf("RootBlock(FieldRoot) = %v, want %v", got, call.Block())
+	}
+	if got := RootBlock(fn.Params[0]); got != fn.Blocks[0] {
+		t.Errorf("RootBlock(param) = %v, want the entry block", got)
+	}
+	if got := RootBlock(ssa.NewConst(nil, call.Type())); got != nil {
+		t.Errorf("RootBlock(const) = %v, want nil", got)
+	}
+	if got := RootBlock(&ssa.Parameter{}); got != nil {
+		t.Errorf("RootBlock(param without a function) = %v, want nil", got)
+	}
 }

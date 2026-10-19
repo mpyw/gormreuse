@@ -477,18 +477,6 @@ type virtualRootKey struct {
 	block      *ssa.BasicBlock // The block of the reassignment, or of the original root's definition (nil if unknown)
 }
 
-// definitionBlock returns the block that defines root, or nil when it has
-// none, such as a global.
-func definitionBlock(root ssa.Value) *ssa.BasicBlock {
-	switch r := root.(type) {
-	case ssa.Instruction:
-		return r.Block()
-	case *ssa.Parameter:
-		return r.Parent().Blocks[0]
-	}
-	return nil
-}
-
 // simulateReassignments simulates Phase 1 reassignments and returns virtual uses.
 // Returns a map from virtual root keys to their uses.
 //
@@ -506,7 +494,7 @@ func (g *Generator) simulateReassignments(root ssa.Value, uses []pollution.Usage
 		return cmp.Compare(a.Pos, b.Pos)
 	})
 
-	original := virtualRootKey{isOriginal: true, pos: root.Pos(), block: definitionBlock(root)}
+	original := virtualRootKey{isOriginal: true, pos: root.Pos(), block: tracer.RootBlock(root)}
 	virtualUses := make(map[virtualRootKey][]pollution.UsageInfo)
 	cfgAnalyzer := cfg.New()
 
@@ -669,7 +657,7 @@ func usedAgainInLoop(a *cfg.Analyzer, def *ssa.BasicBlock, uses []pollution.Usag
 // of its edges, or when a use is in a closure, such as the body of a
 // range-over-func loop.
 func usesOrdered(v pollution.Violation) bool {
-	def := definitionBlock(v.Root)
+	def := tracer.RootBlock(v.Root)
 	if v.HiddenUses || def == nil {
 		return false
 	}
