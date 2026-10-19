@@ -33,10 +33,11 @@ func fixTargetTestingRun(t *testing.T, db *gorm.DB) {
 }
 
 // fixTargetAliasReceiver: the fix makes q's root immutable, not r = r.Where.
+// A discarded r.Where("a") would get no fix at all (#199).
 func fixTargetAliasReceiver(db *gorm.DB) {
 	q := db.Where("x")
 	r := q
-	r.Where("a")
+	r.Where("a").Find(nil)
 	q.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
@@ -48,11 +49,12 @@ func fixTargetArgument(db, base *gorm.DB) {
 }
 
 // fixTargetGoroutine: the fix makes q's root immutable and writes nothing
-// inside the goroutine.
+// inside the goroutine. A discarded q.Where("a") there would get no fix at
+// all (#199).
 func fixTargetGoroutine(db *gorm.DB) {
 	q := db.Where("x")
 	go func() {
-		q.Where("a")
+		q.Where("a").Find(nil)
 		q.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 	}()
 	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`

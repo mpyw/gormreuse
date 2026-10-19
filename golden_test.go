@@ -1,6 +1,7 @@
 package gormreuse_test
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
@@ -99,4 +100,56 @@ func TestGoldenFilesCompile(t *testing.T) {
 			t.Errorf("golden output does not compile: %v", e)
 		}
 	})
+}
+
+// TestGoldenFilesE2E applies the suggested fixes to the E2E fixture package
+// e2e/internal/fixsql/before and checks that e2e/internal/fixsql/after/after.go
+// holds the result. The E2E tests run both packages against real GORM and
+// compare the SQL they emit, so they check the fixes gormreuse suggests now
+// (#199). Its name matches goldentest.UpdateCommand, which rewrites the file
+// like the other fixtures.
+func TestGoldenFilesE2E(t *testing.T) {
+	t.Parallel()
+	const header = "// Code generated from ../before/before.go by TestGoldenFilesE2E in the main module. DO NOT EDIT.\n\n"
+	srcPath := filepath.Join("e2e", "internal", "fixsql", "before", "before.go")
+	afterPath := filepath.Join("e2e", "internal", "fixsql", "after", "after.go")
+
+	src, err := os.ReadFile(srcPath)
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	// The fixture imports gorm.io/gorm, which the analysis loads from the stub
+	// in testdata.
+	gopath := t.TempDir()
+	if err := os.CopyFS(filepath.Join(gopath, "src", "gorm.io", "gorm"),
+		os.DirFS(filepath.Join(analysistest.TestData(), "src", "gorm.io", "gorm"))); err != nil {
+		t.Fatalf("copy gorm stub: %v", err)
+	}
+	pkgPath := filepath.Join(gopath, "src", "before", "before.go")
+	if err := os.MkdirAll(filepath.Dir(pkgPath), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(pkgPath, src, 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	_, fixed, err := goldentest.ApplyFixes(gopath, "before", pkgPath, gormreuse.Analyzer)
+	if err != nil {
+		t.Fatalf("apply fixes: %v", err)
+	}
+	if bytes.Equal(src, fixed) {
+		t.Fatalf("the suggested fixes did not change %s", srcPath)
+	}
+	want := append([]byte(header), bytes.Replace(fixed, []byte("package before"), []byte("package after"), 1)...)
+
+	if goldentest.Updating() {
+		if err := os.WriteFile(afterPath, want, 0o644); err != nil {
+			t.Fatalf("write %s: %v", afterPath, err)
+		}
+		return
+	}
+	got, err := os.ReadFile(afterPath)
+	if err != nil || !bytes.Equal(got, want) {
+		t.Errorf("%s is missing or out of date.\nRun: %s\nThen review and commit the changes.", afterPath, goldentest.UpdateCommand)
+	}
 }

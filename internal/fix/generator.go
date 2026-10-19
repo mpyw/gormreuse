@@ -40,6 +40,7 @@ import (
 	"go/ast"
 	"go/token"
 	"go/types"
+	"maps"
 	"slices"
 	"strconv"
 
@@ -50,6 +51,7 @@ import (
 	"golang.org/x/tools/go/ast/inspector"
 	"golang.org/x/tools/go/ssa"
 
+	"github.com/mpyw/gormreuse/internal/ssa/cfg"
 	"github.com/mpyw/gormreuse/internal/ssa/pollution"
 	"github.com/mpyw/gormreuse/internal/typeutil"
 )
@@ -125,10 +127,13 @@ func (g *Generator) Generate(v pollution.Violation) []analysis.SuggestedFix {
 	target := g.findReassignTarget(root, allUses)
 
 	// Phase 1: Identify non-finisher uses that need reassignment
-	nonFinisherUses := g.findNonFinisherUses(allUses, target)
+	reassigned, ok := g.findReassignedChains(allUses, target)
+	if !ok {
+		return nil
+	}
 
 	// Phase 2: Simulate reassignments and find roots needing Session
-	virtualUses := g.simulateReassignments(root, allUses, target)
+	virtualUses := g.simulateReassignments(root, allUses, reassigned)
 	rootsNeedingSession := g.findRootsNeedingSession(virtualUses)
 
 	// Generate TextEdits
@@ -138,8 +143,8 @@ func (g *Generator) Generate(v pollution.Violation) []analysis.SuggestedFix {
 	filesNeedingImport := make(map[*ast.File]bool)
 
 	// PHASE 1: Add reassignments for non-finisher uses (Rule 1)
-	for _, use := range nonFinisherUses {
-		if edit := g.generateReassignmentEdit(use.Pos, target); edit != nil {
+	for _, pos := range slices.Sorted(maps.Keys(reassigned)) {
+		if edit := g.generateReassignmentEdit(pos, target); edit != nil {
 			edits = append(edits, *edit)
 		}
 	}
@@ -152,8 +157,8 @@ func (g *Generator) Generate(v pollution.Violation) []analysis.SuggestedFix {
 		var sessionEdits []analysis.TextEdit
 		if vr.isOriginal {
 			sessionEdits = g.generateSessionEditsForRoot(vr.pos, root)
-		} else if edit := g.generateSessionEdit(vr.pos); edit != nil {
-			sessionEdits = []analysis.TextEdit{*edit}
+		} else {
+			sessionEdits = []analysis.TextEdit{g.sessionEditAt(vr.end)}
 		}
 		if len(sessionEdits) > 0 {
 			edits = append(edits, sessionEdits...)
@@ -231,103 +236,94 @@ func (g *Generator) generateImmutableParamFix(p *ssa.Parameter) []analysis.Sugge
 	}}
 }
 
-// findNonFinisherUses finds uses that are non-finisher expression statements
-// on target.
-func (g *Generator) findNonFinisherUses(uses []pollution.UsageInfo, target *types.Var) []pollution.UsageInfo {
-	var nonFinishers []pollution.UsageInfo
+// findReassignedChains returns the discarded chains (see discardedChain)
+// among uses, which the fix reassigns to target, as a map from the position of
+// the use to the end of its chain. Several uses can share a position, such as
+// a method call's receiver that is also recorded as an argument; the map
+// classifies them all.
+//
+// A discarded chain such as `q.Where("a").Limit(1)` changes the root in
+// place, and nothing else keeps that change. Once the root gets a Session,
+// the chain changes a copy instead, and the fixed code silently drops its
+// conditions. So when a chain cannot be reassigned, ok is false and no fix is
+// offered (#199).
+func (g *Generator) findReassignedChains(uses []pollution.UsageInfo, target *types.Var) (chains map[token.Pos]token.Pos, ok bool) {
+	chains = make(map[token.Pos]token.Pos)
 	for _, use := range uses {
-		if g.isNonFinisherExprStmt(use.Pos, target) {
-			nonFinishers = append(nonFinishers, use)
+		stmt, recv, isChain := g.discardedChain(use)
+		if !isChain {
+			continue
 		}
+		if !g.isReassignable(use, recv, target) {
+			return nil, false
+		}
+		chains[use.Pos] = stmt.X.End()
 	}
-	return nonFinishers
+	return chains, true
 }
 
-// isNonFinisherExprStmt checks if a position is a non-finisher expression
-// statement on target. Non-finisher means the result is not used (e.g.,
-// q.Where("a") without assignment).
-//
-// Returns true only when ALL of the following conditions are met:
-//  1. The statement is an ExprStmt (expression used as statement)
-//  2. The use is the statement's own top-level call, not a call nested in it
-//  3. The top-level expression is a *gorm.DB method call (checked via receiver type)
-//  4. The method is a non-finisher (chainable method like Where, Limit, etc.)
-//  5. The receiver is an identifier that resolves to target
-//
-// This prevents inappropriate fixes for non-GORM expressions like:
-//
-//	require.NoError(t, tx.Create(...).Error)
-func (g *Generator) isNonFinisherExprStmt(pos token.Pos, target *types.Var) bool {
-	if target == nil {
-		return false
-	}
+// isReassignable reports whether `target = <statement>` keeps the effect of
+// the discarded chain that starts at use, whose first call has receiver recv.
+// The receiver must be the variable that holds the root. In `r.Where("a")` r
+// is an alias of q, and a method value `where("a")` has no receiver to
+// rebind (issue #198). The use must also be at its own call: a use moved to
+// the call site of a closure (#68) is in a statement that runs elsewhere.
+func (g *Generator) isReassignable(use pollution.UsageInfo, recv ast.Expr, target *types.Var) bool {
+	return target != nil && use.Call == use.Pos && recv != nil && g.refersTo(recv, target)
+}
 
-	// Find the AST node at this position
-	file := g.findFileContaining(pos)
+// discardedChain reports whether use is the first call of a chain of *gorm.DB
+// non-finisher calls whose result an expression statement discards, such as
+// q.Where("a") or q.Where("a").Limit(1). Such a statement has an effect only
+// by changing the receiver's Statement in place. It returns the statement and
+// the receiver of the use's call. The receiver is nil when the statement
+// cannot be reassigned as a whole: for a call through a method value, and for
+// a chain with a Session-family call before its last call, such as
+// q.Where("a").Session(s).Limit(1). Only q.Where("a") changes q there, so
+// reassigning the statement would add Limit(1) to q.
+//
+// A statement that ends in a finisher runs its own query, and one whose
+// top-level call is not a gorm method, such as
+// require.NoError(t, tx.Create(...).Error), is not a chain. Nor is one whose
+// first call is a Session-family call: it never changes the receiver.
+func (g *Generator) discardedChain(use pollution.UsageInfo) (*ast.ExprStmt, ast.Expr, bool) {
+	if use.Method == "" || isFinisher(use.Method) || typeutil.IsImmutableReturningBuiltin(use.Method) {
+		return nil, nil, false
+	}
+	file := g.findFileContaining(use.Call)
 	if file == nil {
-		return false
+		return nil, nil, false
 	}
-
-	// Find the statement containing this position
-	stmt := g.findStmtAtPos(file, pos)
-	if stmt == nil {
-		return false
-	}
-
-	// Check if it's an ExprStmt (expression used as statement)
-	exprStmt, ok := stmt.(*ast.ExprStmt)
+	stmt, ok := g.findStmtAtPos(file, use.Call).(*ast.ExprStmt)
 	if !ok {
-		return false
+		return nil, nil, false
 	}
-
-	// Check if pos is within the ExprStmt's expression
-	if exprStmt.X.Pos() > pos || pos > exprStmt.X.End() {
-		return false
-	}
-
-	// Check if it's a call expression
-	callExpr, ok := exprStmt.X.(*ast.CallExpr)
-	if !ok {
-		return false
-	}
-
-	// A use is recorded at its call's Lparen. A use anywhere else in the
-	// statement is nested: inside an argument (the reused q in
-	// `base.Or(q.Where("y"))`, issue #71 defect 1) or in a call on the
-	// receiver spine. Reassigning the whole statement would rebind the wrong
-	// variable and never address the violation root. Such a use is not a
-	// reassignable non-finisher; the root instead gets a Session at its own
-	// definition (Phase 2).
-	if callExpr.Lparen != pos {
-		return false
-	}
-
-	// Check if it's a method call (selector expression)
-	sel, ok := callExpr.Fun.(*ast.SelectorExpr)
-	if !ok {
-		return false
-	}
-
-	// Check if the receiver's type is *gorm.DB
-	// This prevents false positives for non-GORM methods like require.NoError
-	if g.pass.TypesInfo != nil {
-		receiverType := g.pass.TypesInfo.TypeOf(sel.X)
-		if receiverType == nil || !typeutil.IsGormDB(receiverType) {
-			return false
+	// Walk down the receiver spine from the statement's top-level call to the
+	// use's call. A use anywhere else, such as inside an argument, is not on
+	// the spine and ends the walk at a non-call.
+	copied := false
+	for e := stmt.X; ; {
+		call, ok := ast.Unparen(e).(*ast.CallExpr)
+		if !ok || !typeutil.IsGormDB(g.pass.TypesInfo.TypeOf(call)) {
+			return nil, nil, false
 		}
+		sel, isMethod := call.Fun.(*ast.SelectorExpr)
+		if call.Lparen == use.Call {
+			if !isMethod || copied {
+				return stmt, nil, true
+			}
+			return stmt, sel.X, true
+		}
+		if !isMethod || isFinisher(sel.Sel.Name) || !typeutil.IsGormDB(g.pass.TypesInfo.TypeOf(sel.X)) {
+			return nil, nil, false
+		}
+		// A Session-family call below the top-level call stops the calls above
+		// it from changing the receiver.
+		if e != stmt.X && typeutil.IsImmutableReturningBuiltin(sel.Sel.Name) {
+			copied = true
+		}
+		e = sel.X
 	}
-
-	// The receiver must be the variable that holds the root. In `base.Or(q)`
-	// the root q is an argument, and in `r.Where("a")` r is an alias of q;
-	// rebinding base or r would not address q (issue #198).
-	if !g.refersTo(sel.X, target) {
-		return false
-	}
-
-	// Check if the method is a finisher
-	// Finishers are methods that typically end a chain: Find, Count, First, etc.
-	methodName := sel.Sel.Name
-	return !isFinisher(methodName)
 }
 
 // isFinisher checks if a method name is a GORM finisher method.
@@ -359,12 +355,14 @@ func isFinisher(methodName string) bool {
 // virtualRootKey represents a virtual root (either original or created by reassignment).
 type virtualRootKey struct {
 	isOriginal bool
-	pos        token.Pos // For virtual roots, the position where created
+	pos        token.Pos       // For virtual roots, the position where created
+	end        token.Pos       // For virtual roots, the end of the reassigned chain
+	block      *ssa.BasicBlock // For virtual roots, the block of the reassignment
 }
 
 // simulateReassignments simulates Phase 1 reassignments and returns virtual uses.
 // Returns a map from virtual root keys to their uses.
-func (g *Generator) simulateReassignments(root ssa.Value, uses []pollution.UsageInfo, target *types.Var) map[virtualRootKey][]pollution.UsageInfo {
+func (g *Generator) simulateReassignments(root ssa.Value, uses []pollution.UsageInfo, reassigned map[token.Pos]token.Pos) map[virtualRootKey][]pollution.UsageInfo {
 	// Sort uses by position
 	sortedUses := slices.Clone(uses)
 	slices.SortFunc(sortedUses, func(a, b pollution.UsageInfo) int {
@@ -380,9 +378,11 @@ func (g *Generator) simulateReassignments(root ssa.Value, uses []pollution.Usage
 		virtualUses[currentRootKey] = append(virtualUses[currentRootKey], use)
 
 		// If non-finisher, this use's result becomes the new root
-		if g.isNonFinisherExprStmt(use.Pos, target) {
-			// Create a new virtual root at this position
-			currentRootKey = virtualRootKey{isOriginal: false, pos: use.Pos}
+		if end, ok := reassigned[use.Pos]; ok {
+			// Create a new virtual root at this position. Its Session goes
+			// after the chain's last call: one after an earlier call would be
+			// undone by the calls that follow it.
+			currentRootKey = virtualRootKey{isOriginal: false, pos: use.Pos, end: end, block: use.Block}
 		}
 	}
 
@@ -398,16 +398,28 @@ func (g *Generator) simulateReassignments(root ssa.Value, uses []pollution.Usage
 // q.Where("b").Find(); q.Where("c"); q.Where("d").Find()` the reassignment of
 // the virtual root created at `q.Where("a")` still branches twice, so it needs
 // `.Session()` — without it, re-linting the "fixed" output still warns.
+//
+// The simulation orders uses by position, so it misses the uses that a loop's
+// next iteration makes of a virtual root created in the loop body. Such a root
+// always gets a Session (#199): in `for { q.Where("id").Find(nil); q = q.Where("age") }`
+// the next iteration's q.Where("id") would otherwise change it in place.
 func (g *Generator) findRootsNeedingSession(virtualUses map[virtualRootKey][]pollution.UsageInfo) []virtualRootKey {
 	var roots []virtualRootKey
+	cfgAnalyzer := cfg.New()
 	for root, uses := range virtualUses {
-		if len(uses) >= 2 {
+		if len(uses) >= 2 || !root.isOriginal && inCycle(cfgAnalyzer, root.block) {
 			roots = append(roots, root)
 		}
 	}
 	// Deterministic order (map iteration is random) so edits/goldens are stable.
 	slices.SortFunc(roots, func(a, b virtualRootKey) int { return cmp.Compare(a.pos, b.pos) })
 	return roots
+}
+
+// inCycle reports whether block can run again after itself, as a loop body
+// does.
+func inCycle(a *cfg.Analyzer, block *ssa.BasicBlock) bool {
+	return slices.ContainsFunc(block.Succs, func(succ *ssa.BasicBlock) bool { return a.CanReach(succ, block) })
 }
 
 // generateReassignmentEdit generates a TextEdit for reassignment.
@@ -439,17 +451,19 @@ func (g *Generator) generateSessionEdit(pos token.Pos) *analysis.TextEdit {
 	if endPos == token.NoPos {
 		return nil
 	}
+	edit := g.sessionEditAt(endPos)
+	return &edit
+}
 
+// sessionEditAt inserts ".Session(&gorm.Session{})" at pos, which is in a
+// file of the pass.
+func (g *Generator) sessionEditAt(pos token.Pos) analysis.TextEdit {
 	// Qualify Session with the file's actual local name for gorm.io/gorm so the
 	// fix compiles under an aliased or dot import (issue #71, defect 3).
-	qualifier := "gorm."
-	if file := g.findFileContaining(pos); file != nil {
-		qualifier = gormQualifier(file)
-	}
-
-	return &analysis.TextEdit{
-		Pos:     endPos,
-		End:     endPos,
+	qualifier := gormQualifier(g.findFileContaining(pos))
+	return analysis.TextEdit{
+		Pos:     pos,
+		End:     pos,
 		NewText: []byte(".Session(&" + qualifier + "Session{})"),
 	}
 }

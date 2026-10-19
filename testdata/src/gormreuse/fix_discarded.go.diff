@@ -1,0 +1,113 @@
+--- fix_discarded.go	1970-01-01 00:00:00
++++ fix_discarded.go.golden	1970-01-01 00:00:00
+@@ -1,103 +1,103 @@
+ package internal
+ 
+ import "gorm.io/gorm"
+ 
+ // Fixtures for issue #199: a suggested fix must never make the effect of a
+ // discarded non-finisher statement disappear. Such a statement changes the
+ // root's Statement in place; once the root gets a Session, the statement
+ // changes a throwaway copy instead. So it is either reassigned, or the
+ // diagnostic carries no fix.
+ 
+ // ===== REASSIGNED =====
+ 
+ // fixDiscardedMultiCall: a discarded statement with several calls is
+ // reassigned as a whole, and the Session goes after its last call.
+ func fixDiscardedMultiCall(db *gorm.DB) {
+ 	q := db.Model(nil).Where("tenant_id = ?", 7)
+-	q.Where("deleted_at IS NULL").Limit(10)
++	q = q.Where("deleted_at IS NULL").Limit(10).Session(&gorm.Session{})
+ 	q.Where("x").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ 	q.Where("y").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // fixDiscardedMultiCallParen: parentheses around the receiver do not stop the
+ // reassignment.
+ func fixDiscardedMultiCallParen(db *gorm.DB) {
+ 	q := db.Model(nil).Where("tenant_id = ?", 7)
+-	(q).Where("deleted_at IS NULL").Order("id")
++	q = (q).Where("deleted_at IS NULL").Order("id").Session(&gorm.Session{})
+ 	q.Where("x").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ 	q.Where("y").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // fixDiscardedLoop: the loop violation is reported at the first use, but the
+ // fix still sees the later discarded statement and reassigns it.
+ func fixDiscardedLoop(db *gorm.DB, xs []int) {
+-	q := db.Model(nil).Where("tenant_id = ?", 7)
++	q := db.Model(nil).Where("tenant_id = ?", 7).Session(&gorm.Session{})
+ 	for _, x := range xs {
+ 		q.Where("id > ?", x).Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+-		q.Where("age > ?", x)          // want `\*gorm\.DB reused: second branch from mutable root`
++		q = q.Where("age > ?", x).Session(&gorm.Session{})          // want `\*gorm\.DB reused: second branch from mutable root`
+ 	}
+ }
+ 
+ // fixDiscardedLoopOnly: the only use is a discarded statement in a loop. Its
+ // reassignment gets a Session, since the next iteration uses it again.
+ func fixDiscardedLoopOnly(db *gorm.DB, xs []int) {
+ 	q := db.Model(nil).Where("tenant_id = ?", 7)
+ 	for _, x := range xs {
+-		q.Where("age > ?", x) // want `\*gorm\.DB reused: second branch from mutable root`
++		q = q.Where("age > ?", x).Session(&gorm.Session{}) // want `\*gorm\.DB reused: second branch from mutable root`
+ 	}
+ 	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // fixDiscardedSessionLast: a chain that ends in a Session changes q through
+ // q.Where("a"), so it is reassigned as a whole. The fix also appends a second,
+ // redundant Session.
+ func fixDiscardedSessionLast(db *gorm.DB) {
+ 	q := db.Model(nil).Where("tenant_id = ?", 7)
+-	q.Where("a").Session(&gorm.Session{})
++	q = q.Where("a").Session(&gorm.Session{}).Session(&gorm.Session{})
+ 	q.Where("x").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ 	q.Where("y").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // ===== SESSION ONLY =====
+ 
+ // fixDiscardedSessionFirst: q.Session(...).Where("a") changes a copy and never
+ // q, so it is not a discarded chain, and a Session at the root is enough.
+ func fixDiscardedSessionFirst(db *gorm.DB) {
+-	q := db.Model(nil).Where("tenant_id = ?", 7)
++	q := db.Model(nil).Where("tenant_id = ?", 7).Session(&gorm.Session{})
+ 	q.Session(&gorm.Session{}).Where("a")
+ 	q.Where("x").Find(nil)
+ 	q.Where("y").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // ===== NO FIX =====
+ 
+ // fixDiscardedSessionMid: only q.Where("a") changes q, and the Limit(1) after
+ // the Session changes a copy. Reassigning the statement would add Limit(1) to
+ // q, and a Session at the root would drop "a". No fix.
+ func fixDiscardedSessionMid(db *gorm.DB) {
+ 	q := db.Model(nil).Where("tenant_id = ?", 7)
+ 	q.Where("a").Session(&gorm.Session{}).Limit(1)
+ 	q.Where("x").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ 	q.Where("y").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // fixDiscardedClosure: the discarded statement is in a closure called at one
+ // later site. A stored closure captures q, so q is not rewritten, and a
+ // Session at the root would make q.Where("a") change a copy. No fix.
+ func fixDiscardedClosure(db *gorm.DB) {
+ 	q := db.Model(nil).Where("tenant_id = ?", 7)
+ 	f := func() {
+ 		q.Where("a")
+ 	}
+ 	q.Where("b").Find(nil)
+ 	f()                    // want `\*gorm\.DB reused: second branch from mutable root`
+ 	q.Where("c").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // fixDiscardedAlias: r aliases q, so r.Where("a") cannot be reassigned. No fix.
+ func fixDiscardedAlias(db *gorm.DB) {
+ 	q := db.Model(nil).Where("tenant_id = ?", 7)
+ 	r := q
+ 	r.Where("a").Limit(1)
+ 	q.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }

@@ -315,15 +315,16 @@ func (h *callHandler) handle(call *ssa.Call, ctx *Context) {
 
 	// KEY CHANGE: Process ALL calls uniformly (no isTerminal skip)
 	// Record usage (violations detected later in DetectViolations).
+	use := pollution.UsageInfo{Block: call.Block(), Pos: pos, Method: methodName, Call: call.Pos()}
 	if isImmutableReturning {
 		// Pure methods check for pollution but don't pollute
-		ctx.Tracker.RecordPureUse(root, call.Block(), pos)
+		ctx.Tracker.RecordPureUse(root, use)
 	} else if isAssignment(call, root, ctx) {
 		// Assignment creates new root - record but doesn't pollute
-		ctx.Tracker.RecordAssignment(root, call.Block(), pos)
+		ctx.Tracker.RecordAssignment(root, use)
 	} else {
 		// Actual use - pollutes the root
-		ctx.Tracker.ProcessBranch(root, call.Block(), pos)
+		ctx.Tracker.ProcessBranch(root, use)
 
 		// Loop with external root - immediate violation (only for non-pure methods)
 		if isInLoop && ctx.CFG.IsDefinedOutsideLoop(root, ctx.LoopInfo) {
@@ -393,12 +394,13 @@ func (h *callHandler) processBoundMethodCall(call *ssa.Call, mc *ssa.MakeClosure
 	}
 
 	// Record usage (violations detected later)
+	use := pollution.UsageInfo{Block: call.Block(), Pos: pos, Method: methodName, Call: call.Pos()}
 	if isImmutableReturning {
 		// Pure methods check for pollution but don't pollute
-		ctx.Tracker.RecordPureUse(root, call.Block(), pos)
+		ctx.Tracker.RecordPureUse(root, use)
 	} else {
 		// Non-pure methods pollute the root
-		ctx.Tracker.ProcessBranch(root, call.Block(), pos)
+		ctx.Tracker.ProcessBranch(root, use)
 
 		// Loop with external root - immediate violation (only for non-pure methods)
 		if isInLoop && ctx.CFG.IsDefinedOutsideLoop(root, ctx.LoopInfo) {
@@ -476,7 +478,7 @@ func (h *callHandler) checkFunctionCallPollution(call *ssa.Call, ctx *Context) {
 		if returnsGormDB && isAssignment(call, root, ctx) {
 			// For reassignment pattern: check if already polluted, but don't add pollution.
 			// This is similar to how gorm methods handle RecordAssignment.
-			ctx.Tracker.RecordAssignment(root, call.Block(), ctx.pos(call.Pos()))
+			ctx.Tracker.RecordAssignment(root, pollution.UsageInfo{Block: call.Block(), Pos: ctx.pos(call.Pos())})
 		} else {
 			// Mark polluted (function may use the value)
 			ctx.Tracker.MarkPolluted(root, call.Block(), ctx.pos(call.Pos()))
