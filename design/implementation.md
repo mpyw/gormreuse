@@ -259,7 +259,19 @@ gormreuse/
 │   │   ├── gorm_db.go           # Does a type hold a *gorm.DB?
 │   │   └── typestr.go           # Type and receiver strings for matching
 │   ├── facts/facts.go           # facts.Func: directives exported to importing packages (#195)
-│   ├── fix/generator.go         # Suggested fixes: reassignment, Session, immutable-param
+│   ├── fix/                     # Suggested fixes
+│   │   ├── generator.go         # Generator, NewGenerator, Generate, GenerateIsolation: fix dispatch
+│   │   ├── param.go             # Parameter roots: immutable-param or a Session at the top of the body (#201)
+│   │   ├── reassign.go          # Reassignment target and discarded chains to reassign (#198, #199)
+│   │   ├── virtual.go           # Virtual roots: the reassignment simulation (#202)
+│   │   ├── use.go               # Order of a root's uses, and whether one runs again
+│   │   ├── session.go           # Where Sessions go, and their edits
+│   │   ├── merge.go             # Values that merge with a root: Phi edges, other stores (#247)
+│   │   ├── change.go            # In-place changes outside the variable (#243)
+│   │   ├── closure.go           # Closures: captured variables, reassignments in a closure
+│   │   ├── gorm.go              # gorm.io/gorm name and import, finishers, state fields
+│   │   ├── call.go              # Calls in the syntax: the call at an Lparen, direct and inline calls
+│   │   └── stmt.go              # The innermost statement at a position
 │   ├── goldentest/goldentest.go # Shared golden machinery (ApplyFixes, UpdateCommand)
 │   ├── scopeswarn/scopeswarn.go # TEMPORARY Session-returned-from-Scopes warning (GORM bug #7592)
 │   ├── typeutil/gorm.go         # IsGormDB, IsImmutableReturningBuiltin
@@ -553,7 +565,7 @@ An interface method value has no declared method, so `DeclaredFunc` keeps the wr
 
 A method value's wrapper is never analyzed as a closure of its caller, even when its receiver holds a `*gorm.DB` and so the `MakeClosure` captures one (`processFunction`, `isMethodValue`). Analyzing it read the wrapper's parameter as a mutable parameter and reported its forwarding call to an `immutable-param` method at no position (#255). As a last guard, `Analyzer.Analyze` moves a violation without a position to its call, then to the analyzed function (`positionedViolation`). A diagnostic at no position cannot be suppressed, and golangci-lint drops it.
 
-Suggested fixes: a second branch made through a method value (`w := q.Where; w("a").Find(nil); w("b").Find(nil)`) gets `.Session(&gorm.Session{})` at `q`'s root. A call through `w` names no variable to rebind, so it never gets a reassignment. When one is a discarded statement (`w("a")` or `w("a").Limit(1)`), it changes `q` in place, and a Session at the root would drop that change. `discardedChain` returns no receiver for it, so no fix is offered, as for any discarded chain that cannot be reassigned (#199). `e2e/internal/fixsql` (`MethodValue`, `MethodValueDiscarded`) checks both against real GORM. A root created by a call through a method value (`q := w("a")`) gets `.Session(&gorm.Session{})` appended.
+Suggested fixes: a second branch made through a method value (`w := q.Where; w("a").Find(nil); w("b").Find(nil)`) gets `.Session(&gorm.Session{})` at `q`'s root. A call through `w` names no variable to rebind, so it never gets a reassignment. When one is a discarded statement (`w("a")` or `w("a").Limit(1)`), it changes `q` in place, and a Session at the root would drop that change. `discardedChainToReassign` returns no receiver for it, so no fix is offered, as for any discarded chain that cannot be reassigned (#199). `e2e/internal/fixsql` (`MethodValue`, `MethodValueDiscarded`) checks both against real GORM. A root created by a call through a method value (`q := w("a")`) gets `.Session(&gorm.Session{})` appended.
 
 ### Calls through a method expression (#258)
 
@@ -606,7 +618,7 @@ Limitation: the check asks whether the merge *can* yield `root`, not whether it 
 
 ### Uses that run more than once (#249, #252)
 
-A use that may run more than once for one run of its root's definition reuses the root, even with one use in the source. `cfg.Repeats.RepeatsAfter(use, def)` is the one query for it. The handler asks it for the first root of every branch, of a call, a `go` or a `defer`. The suggested fixes ask it too (`usedAgainInLoop`, `escapeSeen`, the Session of a reassignment in a loop), so a fix and the diagnostic agree. `RunsAgain(block)` asks only whether a block can run after itself, for a loop-carried read (`storeReadTwice`).
+A use that may run more than once for one run of its root's definition reuses the root, even with one use in the source. `cfg.Repeats.RepeatsAfter(use, def)` is the one query for it. The handler asks it for the first root of every branch, of a call, a `go` or a `defer`. The suggested fixes ask it too (`usedAgainInLoop`, `changeSeenAfterEscape`, the Session of a reassignment in a loop), so a fix and the diagnostic agree. `RunsAgain(block)` asks only whether a block can run after itself, for a loop-carried read (`mergedStoreReadTwice`).
 
 `RepeatsAfter` is true when:
 
@@ -859,7 +871,7 @@ Each removed report branched a `clone > 0` handle, so none was a real reuse. No 
 
 ## Reassignment Fix Target
 
-The reassignment fix (`q.Where("a")` → `q = q.Where("a")`) rewrites one variable: the one that holds the reused root (#198). `findReassignTarget` in `internal/fix/generator.go` finds it from the root's own definition (`q := <call>`, `q = <call>` or `var q = <call>`; a root that is not a call, such as a Phi, gets no reassignment). A statement is rewritten only when its own top-level call is the use and its receiver is an identifier that `types.Info.Uses` resolves to that variable.
+The reassignment fix (`q.Where("a")` → `q = q.Where("a")`) rewrites one variable: the one that holds the reused root (#198). `findReassignTarget` in `internal/fix/reassign.go` finds it from the root's own definition (`q := <call>`, `q = <call>` or `var q = <call>`; a root that is not a call, such as a Phi, gets no reassignment). A statement is rewritten only when its own top-level call is the use and its receiver is an identifier that `types.Info.Uses` resolves to that variable.
 
 No statement is rewritten when one of the cases below holds. The root gets a Session instead, unless a discarded statement would lose its effect; then the diagnostic has no fix (see [Discarded Statements Under a Session Fix](#discarded-statements-under-a-session-fix-199)):
 
@@ -881,19 +893,19 @@ A parameter root has no call to append a Session to. `Generate` used to declare 
 - a function used as a value, such as `var scopes = []func(*gorm.DB) *gorm.DB{scope}`, has callers no check sees, so a real Scopes-callback reuse disappeared;
 - a caller in the package that passes a mid-chain value got the caller-side diagnostic, which had no fix, so `-fix` never reached zero. Since #248 that diagnostic has a fix of its own, which isolates the argument (see [Contract and Directive Fixes](#contract-and-directive-fixes-248)). The parameter-root fix still uses the body Session for such a function, which fixes every caller at once.
 
-`internal/fix/generator.go` now chooses:
+`Generate` in `internal/fix/generator.go` now chooses (the checks are in `internal/fix/param.go`):
 
 | Check | Fix |
 | --- | --- |
 | `canFixParam` fails: a Scopes/Preload callback, a closure, or a function with a `*gorm.DB` result that `calledOnlyDirectly` rejects | None |
-| `callersAllIsolate`: the pass sees every file of the package (`seesWholePackage`), `calledOnlyDirectly`, and `handler.BreaksImmutableParam` holds for no argument of any call to the function in the analysed functions | `//gormreuse:immutable-param` |
+| `paramCallersIsolate`: the pass sees every file of the package (`seesWholePackage`), `calledOnlyDirectly`, and `handler.BreaksImmutableParam` holds for no argument of any call to the function in the analysed functions | `//gormreuse:immutable-param` |
 | Otherwise | `tx = tx.Session(&gorm.Session{})` before the body's first statement (`paramSessionSite`, written by `sessionEdits` with the same gorm name resolution and import as every other Session), then the rest of the local-root fix |
 
-`callersAllIsolate` checks every argument of each call with the caller-side check's own predicate, not only the argument of the reused parameter: declaring the function covers all its `*gorm.DB` parameters. It scans the analysed functions (`analyzedFuncs`), so a caller in a package-level closure counts (#183, #245).
+`paramCallersIsolate` checks every argument of each call with the caller-side check's own predicate, not only the argument of the reused parameter: declaring the function covers all its `*gorm.DB` parameters. It scans the analysed functions (`analyzedFuncs`), so a caller in a package-level closure counts (#183, #245).
 
 A package with test files is analyzed as two variants, one without its `_test.go` files and the test variant, and `-fix` applies the fixes of both. The variant without the test files cannot see their callers. If each variant decided from the callers it sees, one could add `immutable-param` and the other the body Session, and the result reports the directive redundant. So a function outside the test files of a package with test files always gets the body Session, in both variants (`seesWholePackage`, the rule `ignoreRemovable` uses for #248). A function in a test file is analyzed only by the test variant, which sees every caller, so it may get the directive. The cost is a body Session where the directive would also have worked. `TestParamFixWithTestFiles` and `testdata/src/paramtests` check it.
 
-`calledOnlyDirectly` needs an unexported function, not a method (a method can be called through an interface), whose every reference is the function of a call (`f(x)`, `f[T](x)`, `(f)(x)`). In the Session case the parameter is the reassignment target (`findRootVar` returns its variable), so a discarded `tx.Where("a")` becomes `tx = tx.Where("a")` and keeps its effect inside the function. The Session goes at the top of the body, so it also covers uses through an alias.
+`calledOnlyDirectly` needs an unexported function, not a method (a method can be called through an interface), whose every reference is the function of a call (`f(x)`, `f[T](x)`, `(f)(x)`). In the Session case the parameter is the reassignment target (`varToReassign` returns its variable), so a discarded `tx.Where("a")` becomes `tx = tx.Where("a")` and keeps its effect inside the function. The Session goes at the top of the body, so it also covers uses through an alias.
 
 A discarded statement on a parameter also changes the caller's value, and a helper such as `func applyTenant(tx *gorm.DB) { tx.Where("tenant_id = ?", t) }` exists for exactly that. Reassigning it keeps the change inside the function only, and makes the helper lint-clean, so nothing reports the change a caller's Session then drops (#243). `Generate` therefore offers no Session-case fix for a parameter with a discarded statement, unless the function has a `*gorm.DB` result that can carry the change back to the caller.
 
@@ -912,7 +924,7 @@ Limitations:
 
 ## Discarded Statements Under a Session Fix (#199)
 
-A discarded non-finisher statement such as `q.Where("a")` or `q.Where("a").Limit(10)` has an effect only because `q` is mutable: it changes `q`'s Statement in place, and every later query on `q` sees it. A Session at the root makes `q` immutable, so the same statement then changes a throwaway copy. The fixed code drops `"a"` silently, and the linter is clean. The fix must therefore never leave such a statement in place. `findReassignedChains` in `internal/fix/generator.go` applies this rule:
+A discarded non-finisher statement such as `q.Where("a")` or `q.Where("a").Limit(10)` has an effect only because `q` is mutable: it changes `q`'s Statement in place, and every later query on `q` sees it. A Session at the root makes `q` immutable, so the same statement then changes a throwaway copy. The fixed code drops `"a"` silently, and the linter is clean. The fix must therefore never leave such a statement in place. `findReassignedChains` in `internal/fix/reassign.go` applies this rule:
 
 | Statement | Fix |
 | --- | --- |
@@ -935,15 +947,15 @@ Limitations:
 
 ## In-Place Changes Outside the Variable (#243)
 
-The #199 rule covers a discarded statement written on the root's variable. Other code can change the root's Statement in place too, and a Session at the root makes it change a copy. The tenant filter of `applyTenant(q, 7); q.Find(&users)` then disappears, and the re-lint is clean. `changedElsewhere` in `internal/fix/generator.go` withholds the whole fix when:
+The #199 rule covers a discarded statement written on the root's variable. Other code can change the root's Statement in place too, and a Session at the root makes it change a copy. The tenant filter of `applyTenant(q, 7); q.Find(&users)` then disappears, and the re-lint is clean. `changedElsewhere` in `internal/fix/change.go` withholds the whole fix when:
 
 | Case | Example | How it is found |
 | --- | --- | --- |
-| The root is handed to other code, and a later use may see the change | `applyTenant(q)`, `apply(q)` for a closure, `_ = withTenant(q)`, `qs := []*gorm.DB{q}`, `m["q"] = q`, `ch <- q` | `UsageInfo.Escapes`, set by `Tracker.MarkPolluted` (a call argument, slice or map store, send) and by `q = helper(q)`. `escapeSeen` decides whether a later use exists |
-| The `Error`, `RowsAffected` or `Statement` field is read from the root, or from a chain on it that runs no query | `return q.Error`, `if err := q.Where("a").Error; ...`, `q.Where("a").Limit(1).Statement` | A `FieldAddr` in the root's function or its closures, whose operand `readsRootState` walks down a chain of non-finisher, non-Session-family `*gorm.DB` methods to the root |
+| The root is handed to other code, and a later use may see the change | `applyTenant(q)`, `apply(q)` for a closure, `_ = withTenant(q)`, `qs := []*gorm.DB{q}`, `m["q"] = q`, `ch <- q` | `UsageInfo.Escapes`, set by `Tracker.MarkPolluted` (a call argument, slice or map store, send) and by `q = helper(q)`. `changeSeenAfterEscape` decides whether a later use exists |
+| The `Error`, `RowsAffected` or `Statement` field is read from the root, or from a chain on it that runs no query | `return q.Error`, `if err := q.Where("a").Error; ...`, `q.Where("a").Limit(1).Statement` | A `FieldAddr` in the root's function or its closures, whose operand `carriesRootChanges` walks down a chain of non-finisher, non-Session-family `*gorm.DB` methods to the root |
 | A go statement hands the root to a call | `go applyTenant(q)` | An `*ssa.Go` whose argument traces to the root. The goroutine may change it while the uses after the statement run |
 
-`escapeSeen` keeps the fix of an escape that nothing can observe: the last use of the root, in no loop, when every use is in order (`usesOrdered`). `q.Find(&a); render(q)` keeps its Session. An argument of a call that returns a `*gorm.DB`, other than a `*gorm.DB` method, always counts: `q = withTenant(q)` may return `q` itself, so the uses of its result see the change. A `*gorm.DB` method such as `base.Model(q)` returns a chain on its receiver. Read-only uses do not escape: a subquery (`RecordPureUse`), a `//gormreuse:pure` function, and the `fmt`/`log`/`testing` variadics.
+`changeSeenAfterEscape` keeps the fix of an escape that nothing can observe: the last use of the root, in no loop, when every use is in order (`usesOrdered`). `q.Find(&a); render(q)` keeps its Session. An argument of a call that returns a `*gorm.DB`, other than a `*gorm.DB` method, always counts: `q = withTenant(q)` may return `q` itself, so the uses of its result see the change. A `*gorm.DB` method such as `base.Model(q)` returns a chain on its receiver. Read-only uses do not escape: a subquery (`RecordPureUse`), a `//gormreuse:pure` function, and the `fmt`/`log`/`testing` variadics.
 
 The field read on a finisher's result, as in `q.Where("a").Find(&x).Error`, is that query's own outcome, and keeps the fix. A read of the root's own field counts wherever it is, even before the first use: telling the two apart needs ordering against the closures that may read it.
 
@@ -959,15 +971,15 @@ Limitations:
 
 ## Where Sessions Go (#202)
 
-After the reassignments, `simulateReassignments` decides which root each use reads, and `findRootsNeedingSession` gives a Session to each root, original or created by a reassignment, that is still used twice. Three defects made `-fix` add Sessions it did not need, miss ones it did, or need a second pass:
+After the reassignments, `simulateVirtualRoots` decides which root each use reads, and `findRootsNeedingSession` gives a Session to each root, original or created by a reassignment, that is still used twice. Three defects made `-fix` add Sessions it did not need, miss ones it did, or need a second pass:
 
 | Defect | Example | Change |
 | --- | --- | --- |
 | Every receiver use was recorded twice: by the gorm method handler and by `checkFunctionCallPollution`, which did not skip `Args[0]`. A reassigning call then counted as a use of the value it creates | `q.Where("a"); q.Where("b").Find(nil)` became `q = q.Where("a").Session(...)` | `checkFunctionCallPollution` skips the receiver of a gorm method. Detection is unchanged: the copies had the same block and position |
-| The simulation took uses in position order, so a use after an `if` without an `else` read only the reassignment in the `if` | `if c { q.Where("a") }; q.Where("b").Find(nil); q.Where("c").Find(nil)` left the root mutable on the path where `c` is false | A use reads each earlier reassignment that can reach it, back to the first whose block dominates it, and the original root when none does (`reassignmentReaches`) |
+| The simulation took uses in position order, so a use after an `if` without an `else` read only the reassignment in the `if` | `if c { q.Where("a") }; q.Where("b").Find(nil); q.Where("c").Find(nil)` left the root mutable on the path where `c` is false | A use reads each earlier reassignment that can reach it, back to the first whose block dominates it, and the original root when none does (`virtualRootReaches`) |
 | A root that flows into a Phi got Sessions only on the Phi's edges, and none when the Phi is used once | `q := db.Where("x"); q.Find(nil); q.Count(nil); if c { q = db.Where("z") }; q.Find(nil)` had no fix. With `q` captured by a closure, the synthetic Phi from its stores had the same result | `sessionPositionsForRoot` always puts a Session on the root itself, and adds the other edges when the Phi is used twice |
 
-`findRootsNeedingSession` counts two uses of one root as a reuse when the earlier one can reach the later one (`usesConflict`). A reassignment does not conflict with the uses after it: on any path through it, they read the new value. A root used again in a loop, other than by a reassignment, gets a Session (`usedAgainInLoop`). So does a reassignment in a loop that does not define the root again: the next iteration reads it. Both ask `cfg.Repeats`, as the checker does, and so does `escapeSeen`. The simulation takes the uses of one block in the order the block runs them (`runOrderedUses`), not by position: go/ssa puts a `for` statement's post statement at the end of the body's block, so `for i := 0; i < 2; q.Where("a") { q.Find(nil); i++ }` reads the root in `q.Find` before the post statement reassigns it (#247). A reassignment whose chain already ends in an immutable call, by the tracer's `IsImmutableCall`, gets no second Session (`endsImmutable`).
+`findRootsNeedingSession` counts two uses of one root as a reuse when the earlier one can reach the later one (`usesConflict`). A reassignment does not conflict with the uses after it: on any path through it, they read the new value. A root used again in a loop, other than by a reassignment, gets a Session (`usedAgainInLoop`). So does a reassignment in a loop that does not define the root again: the next iteration reads it. Both ask `cfg.Repeats`, as the checker does, and so does `changeSeenAfterEscape`. The simulation takes the uses of one block in the order the block runs them (`runOrderedUses`), not by position: go/ssa puts a `for` statement's post statement at the end of the body's block, so `for i := 0; i < 2; q.Where("a") { q.Find(nil); i++ }` reads the root in `q.Find` before the post statement reassigns it (#247). A reassignment whose chain already ends in an immutable call, by the tracer's `IsImmutableCall`, gets no second Session (`virtualRootEndsImmutable`).
 
 These rules need every use of the root, in the function that defines it. `usesOrdered` checks that:
 
@@ -995,11 +1007,11 @@ Limitations:
 
 ## Fixes That Compile (#200)
 
-Every suggested fix must compile, applied with all the others (`-fix`) or alone (an editor's quick fix). `internal/fix/generator.go` checks types before it writes an edit:
+Every suggested fix must compile, applied with all the others (`-fix`) or alone (an editor's quick fix). `internal/fix` checks types before it writes an edit:
 
 | Edit | Rule | What went wrong before |
 | --- | --- | --- |
-| Reassignment `q = <statement>` | Each call in the chain must return `*gorm.DB` (`discardedChain`), and none may be a finisher (`isFinisher`) | `q = q.AddError(err)` assigned an `error`. `FindInBatches`, `CreateInBatches`, `UpdateColumn(s)`, `Commit`, `Rollback`, `SavePoint` and `RollbackTo` return `*gorm.DB` but run SQL or end a transaction, and were reassigned |
+| Reassignment `q = <statement>` | Each call in the chain must return `*gorm.DB` (`discardedChainToReassign`), and none may be a finisher (`isGormFinisher`) | `q = q.AddError(err)` assigned an `error`. `FindInBatches`, `CreateInBatches`, `UpdateColumn(s)`, `Commit`, `Rollback`, `SavePoint` and `RollbackTo` return `*gorm.DB` but run SQL or end a transaction, and were reassigned |
 | `.Session(...)` after a root or a Phi edge | Only after the call whose `Lparen` is the value's position, and only when it returns `*gorm.DB` (`sessionEndAfterCall`) | The innermost call that contained the position got it. For a closure parameter edge that was the call the closure is passed to: `run(db, func(tx *gorm.DB) { ... }).Session(...)` |
 | The `gorm` qualifier | `gormNameAt` resolves the name with `types.Scope.LookupParent` at each insertion point. It uses an import whose name resolves to `gorm.io/gorm` at all of them (a dot import if `Session` does). Otherwise it adds an import under the first free name of `gorm`, `gormio`, `gormio2`, ... | A blank import counted as an import (`undefined: gorm`). A parameter named `gorm` gave `gorm.Session is not a type`. A file importing another package as `gorm` got a second `gorm` (`gorm redeclared`) |
 | The import edit | Each diagnostic's fix carries every edit it needs. `internal/analyzer.go` no longer drops an edit that an earlier diagnostic already suggested | With two roots in a file without the import, only the first fix had it. Applying the second alone failed with `undefined: gorm` |

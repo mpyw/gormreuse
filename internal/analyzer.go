@@ -218,7 +218,7 @@ func RunSSA(
 	// inputTracer gives it the analysis' own mutability rule, and the analysed
 	// functions let it check every caller, in package-level closures too,
 	// before it suggests immutable-param (#201, #245).
-	fixGen := fix.New(pass, scopesCallbacks, inputTracer, funcs, seesWholePackage(pass))
+	fixGen := fix.NewGenerator(pass, scopesCallbacks, inputTracer, funcs, seesWholePackage(pass))
 
 	// Determine which //gormreuse:immutable-param functions actually rely on
 	// immutability — they would reuse a *gorm.DB parameter if it were treated as
