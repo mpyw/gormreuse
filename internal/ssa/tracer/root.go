@@ -118,6 +118,8 @@ type RootTracer struct {
 	scopesCallbacks      map[*ssa.Function]bool      // Scopes/Preload callbacks (params are mutable roots)
 	immutableCallbacks   map[*ssa.Function]bool      // Transaction/FindInBatches callbacks (fresh tx)
 	fieldRoots           map[fieldRootKey]*FieldRoot // Interned FieldRoots (one per call and field path)
+	allRoots             map[allRootsKey][]ssa.Value // Memo of FindAllMutableRoots
+	aliases              map[aliasKey]bool           // Memo of mayAlias
 	funcVars             callsite.FuncVars           // Package-level variables that hold one function (#183)
 }
 
@@ -214,7 +216,15 @@ func New(pureFuncs, immutableReturnFuncs, immutableParamFuncs *directive.Directi
 		funcVars:             funcVars,
 		onlyParams:           make(map[*ssa.Function]bool),
 		fieldRoots:           make(map[fieldRootKey]*FieldRoot),
+		allRoots:             make(map[allRootsKey][]ssa.Value),
+		aliases:              make(map[aliasKey]bool),
 	}
+}
+
+// allRootsKey is a FindAllMutableRoots query.
+type allRootsKey struct {
+	v        ssa.Value
+	loopInfo *cfg.LoopInfo
 }
 
 // FindMutableRoot finds the mutable root for a receiver value.
@@ -252,8 +262,19 @@ func (t *RootTracer) FindMutableRoot(recv ssa.Value, loopInfo *cfg.LoopInfo) ssa
 //	    q = db.Where("b")     // root #2
 //	}
 //	q.Find(nil)               // Phi node: needs to check BOTH roots
+//
+// The result depends only on v and loopInfo, so it is computed once per pair
+// (#260): every gorm call asks for the roots of its receiver, and
+// collectAliasedRoots asks again at each step down the chain. The caller must
+// not modify the returned slice.
 func (t *RootTracer) FindAllMutableRoots(v ssa.Value, loopInfo *cfg.LoopInfo) []ssa.Value {
-	return t.traceAll(v, make(map[ssa.Value]bool), loopInfo)
+	key := allRootsKey{v, loopInfo}
+	if roots, ok := t.allRoots[key]; ok {
+		return roots
+	}
+	roots := slices.Clip(t.traceAll(v, make(map[ssa.Value]bool), loopInfo))
+	t.allRoots[key] = roots
+	return roots
 }
 
 // IsPureFunction checks if a function is marked as pure (doesn't pollute arguments).
@@ -2093,16 +2114,19 @@ type aliasVisit struct {
 // collectAliasedRoots adds to roots the mutable roots that v reaches through
 // Statement-sharing builtin calls, while copies is set, and through read-only
 // arguments of the gorm calls in its chain. seen stops cycles through loops.
+//
+// A search that mayAlias says adds nothing is skipped. Without that, a chain
+// of n conditional reassignments takes time cubic in n (#260): each of the n
+// calls searches n steps down the chain, and each step goes through the n
+// roots of its receiver. Skipping such a search does not change what is added
+// or in what order: everything it would reach adds nothing either.
 func (t *RootTracer) collectAliasedRoots(v ssa.Value, loopInfo *cfg.LoopInfo, copies bool, seen map[aliasVisit]bool, roots *[]AliasedRoot) {
+	if !t.mayAlias(v, loopInfo, copies) {
+		return
+	}
 	for _, candidate := range t.FindAllMutableRoots(v, loopInfo) {
-		call, ok := candidate.(*ssa.Call)
+		call, site, ok := t.aliasStep(candidate)
 		if !ok || seen[aliasVisit{call, copies}] {
-			continue
-		}
-		// A call through a method value (w := q.Where; w(x, sub)) is read as
-		// the method call it stands for (#178).
-		site := t.Site(call)
-		if !site.IsGormMethod() || site.Recv == nil {
 			continue
 		}
 		seen[aliasVisit{call, copies}] = true
@@ -2120,6 +2144,58 @@ func (t *RootTracer) collectAliasedRoots(v ssa.Value, loopInfo *cfg.LoopInfo, co
 		}
 		t.collectAliasedRoots(site.Recv, loopInfo, isCopy, seen, roots)
 	}
+}
+
+// aliasKey is a collectAliasedRoots search that mayAlias answers.
+type aliasKey struct {
+	v        ssa.Value
+	loopInfo *cfg.LoopInfo
+	copies   bool
+}
+
+// mayAlias reports whether collectAliasedRoots(v, loopInfo, copies, ...) may
+// add a root. The answer is computed once per search. A search that reaches
+// itself again through a loop is assumed to add one.
+func (t *RootTracer) mayAlias(v ssa.Value, loopInfo *cfg.LoopInfo, copies bool) bool {
+	key := aliasKey{v, loopInfo, copies}
+	if may, ok := t.aliases[key]; ok {
+		return may
+	}
+	t.aliases[key] = true
+	may := slices.ContainsFunc(t.FindAllMutableRoots(v, loopInfo), func(candidate ssa.Value) bool {
+		_, site, ok := t.aliasStep(candidate)
+		if !ok {
+			return false
+		}
+		isCopy := copies && t.sharesReceiverStatement(site)
+		if isCopy && t.FindMutableRoot(site.Recv, loopInfo) != nil {
+			return true
+		}
+		for _, arg := range pollutionsource.ReadOnlyGormArgs(site.Declared, site.Args) {
+			if t.FindMutableRoot(arg, loopInfo) != nil || t.mayAlias(arg, loopInfo, true) {
+				return true
+			}
+		}
+		return t.mayAlias(site.Recv, loopInfo, isCopy)
+	})
+	t.aliases[key] = may
+	return may
+}
+
+// aliasStep returns the gorm method call that collectAliasedRoots goes
+// through at candidate, and its Site, or false when it does not go through
+// candidate. A call through a method value (w := q.Where; w(x, sub)) is read
+// as the method call it stands for (#178).
+func (t *RootTracer) aliasStep(candidate ssa.Value) (*ssa.Call, callsite.Site, bool) {
+	call, ok := candidate.(*ssa.Call)
+	if !ok {
+		return nil, callsite.Site{}, false
+	}
+	site := t.Site(call)
+	if !site.IsGormMethod() || site.Recv == nil {
+		return nil, callsite.Site{}, false
+	}
+	return call, site, true
 }
 
 // sharesReceiverStatement reports whether site is a gorm Session or Debug
