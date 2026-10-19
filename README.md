@@ -600,18 +600,32 @@ func useIt(db *gorm.DB) {
 > [!WARNING]
 > Unused `//gormreuse:pure`, `//gormreuse:immutable-return`, and `//gormreuse:immutable-param` directives are reported as warnings (a directive whose signature doesn't fit — e.g. `immutable-param` on a function with no [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) parameter). A **redundant** `//gormreuse:immutable-param` (signature-valid but its parameter is never reused) is reported too. For combined directives like `//gormreuse:pure,immutable-return`, if either part is used, no unused warning is reported.
 
-## Temporary rule: `Session`/`WithContext`/`Debug` inside `Scopes` callbacks
+## Temporary rule: `Session`/`WithContext`/`Debug` returned from `Scopes` callbacks
 
 > [!WARNING]
 > This is a **temporary** rule working around an upstream GORM bug.
 
-Calling [`Session`](https://pkg.go.dev/gorm.io/gorm#DB.Session), [`WithContext`](https://pkg.go.dev/gorm.io/gorm#DB.WithContext), or [`Debug`](https://pkg.go.dev/gorm.io/gorm#DB.Debug) inside a [`Scopes`](https://pkg.go.dev/gorm.io/gorm#DB.Scopes) callback corrupts GORM's `InstanceSet`/`InstanceGet` bookkeeping and leaks transactions ([go-gorm/gorm#7592](https://github.com/go-gorm/gorm/issues/7592), fix attempt [#7593](https://github.com/go-gorm/gorm/pull/7593)):
+A [`Scopes`](https://pkg.go.dev/gorm.io/gorm#DB.Scopes) callback that **returns** the result of [`Session`](https://pkg.go.dev/gorm.io/gorm#DB.Session), [`WithContext`](https://pkg.go.dev/gorm.io/gorm#DB.WithContext), or [`Debug`](https://pkg.go.dev/gorm.io/gorm#DB.Debug) leaks the transaction of a create, update or delete: GORM begins it and never commits or rolls it back ([go-gorm/gorm#7592](https://github.com/go-gorm/gorm/issues/7592); the fix attempt [#7593](https://github.com/go-gorm/gorm/pull/7593) was closed without merging).
 
 ```go
 db.Scopes(func(q *gorm.DB) *gorm.DB {
-    return q.Session(&gorm.Session{}).Where("x") // WARNING: Session() in Scopes callback causes transaction leak
+    return q.Session(&gorm.Session{}) // WARNING: Session() result returned from Scopes callback causes transaction leak
 })
 ```
+
+GORM runs the query on the value the callback returns. These three methods return a value that makes GORM store its "transaction started" flag on a copy of the statement, so the commit step never finds it. Every other chain method returns a value without this problem. So only the returned value matters:
+
+| Inside a `Scopes` callback | Leaks | Reported |
+| --- | --- | --- |
+| `return q.Session(&gorm.Session{})` | Yes | Yes |
+| `return other.Session(&gorm.Session{})` (any `*gorm.DB`) | Yes | Yes |
+| `s := q.Session(...); s.Where("a").Find(&x); return s` | Yes | Yes |
+| `return q.Session(&gorm.Session{}).Where("x")` | No | No |
+| `other.Session(&gorm.Session{}).Find(&x); return q` | No | No |
+
+`e2e/internal/scopes_session_test.go` checks each row against real GORM.
+
+The rule finds the callback the same way reuse detection does: a function literal, a named function, a method value, a closure in a variable or a package-level variable, and a slice built with `append`. It follows the returned value through variables, branches, and the returns of helpers and closures the callback calls, and reports the `Session`/`WithContext`/`Debug` call itself.
 
 [`Preload`](https://pkg.go.dev/gorm.io/gorm#DB.Preload) callbacks are **unaffected** (Preload builds a fresh DB), so the same code inside a Preload callback is not flagged.
 

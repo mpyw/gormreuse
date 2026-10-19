@@ -126,7 +126,7 @@ gormreuse/
 │   │   ├── ignore.go           # //gormreuse:ignore - IgnoreMap, unused tracking
 │   │   └── funcset.go          # DirectiveFuncSet - directive-marked function sets
 │   │
-│   ├── scopeswarn/             # TEMPORARY Session-in-Scopes warning (GORM bug #7592)
+│   ├── scopeswarn/             # TEMPORARY Session-returned-from-Scopes warning (GORM bug #7592)
 │   │
 │   ├── ssa/                    # SSA-based analysis (modular subpackages)
 │   │   ├── analyzer.go         # Analyzer - orchestrates analysis phases
@@ -423,7 +423,7 @@ Directives across packages are tested by `TestCrossPackageDirectives`: `testdata
 
 ### E2E Tests
 
-The `e2e/internal/` directory contains tests that verify actual GORM SQL behavior using sqlmock. This is a separate Go module (its own `go.mod`) to avoid dependency conflicts, and CI tests and lints it on every PR (`cd e2e/internal && go test ./... && golangci-lint run ./...`). Dependabot covers it, so GORM bumps arrive as PRs; re-check go-gorm/gorm#7592 on each (see the README). Every test asserts (`t.Errorf`) — the suite guards the linter's core clone-semantics premise: mid-chain (`clone==0`) reuse accumulates conditions; root / `Session()` / `Transaction`- and `FindInBatches`-callback (`clone>0`) handles fork a fresh Statement and are safe; a `Connection`-callback handle is `clone==0` and accumulates.
+The `e2e/internal/` directory contains tests that verify actual GORM SQL behavior using sqlmock. This is a separate Go module (its own `go.mod`) to avoid dependency conflicts, and CI tests and lints it on every PR (`cd e2e/internal && go test ./... && golangci-lint run ./...`). Dependabot covers it, so GORM bumps arrive as PRs; re-check go-gorm/gorm#7592 on each (see the README). Every test asserts (`t.Errorf`) — the suite guards the linter's core clone-semantics premise: mid-chain (`clone==0`) reuse accumulates conditions; root / `Session()` / `Transaction`- and `FindInBatches`-callback (`clone>0`) handles fork a fresh Statement and are safe; a `Connection`-callback handle is `clone==0` and accumulates. `scopes_session_test.go` pins which Session-family calls inside a `Scopes` callback leak the transaction (go-gorm/gorm#7592): only a returned one.
 
 ## Code Style
 
@@ -479,6 +479,30 @@ q2.Find(nil)  // Expected: OK. Actual: may report as violation
 ```
 
 **Root Cause**: SSA analysis processes closure bodies before closure call sites. The branch tracking order differs from runtime execution order.
+
+### Scopes Session-family warning (temporary, #196)
+
+`internal/scopeswarn` works around go-gorm/gorm#7592. It reports a `Session`/`WithContext`/`Debug` call only when its result is what a `Scopes` callback returns.
+
+Why only the returned value (checked in `e2e/internal/scopes_session_test.go`):
+
+- gorm runs the create/update/delete callbacks on the value the last scope returned (`db = scope(db)` in `executeScopes`).
+- `BeginTransaction` stores its flag with `InstanceSet`, which calls `getInstance`. On a `clone>0` value that clones the Statement, so `CommitOrRollbackTransaction` never finds the flag and the transaction stays open.
+- `Session`/`WithContext`/`Debug` return `clone>0`. Every other chain method returns a `clone==0` value from `getInstance`.
+
+So `return q.Session(...).Where("x")` is safe, and `return other.Session(...)` leaks even though `other` is not the callback parameter. The issue's suggestion to restrict the warning to values derived from the parameter was wrong; the rule keys off the return value instead.
+
+How the rule finds its input:
+
+- **Callbacks**: `tracer.CollectScopesOnlyCallbacks`, the Scopes half of the resolver that reuse detection uses (`scopesCallbackResolver`). It follows the varargs array, slice literals, `append`, Phi edges, local, captured and package-level variables, struct fields, and method values (both the `$bound` wrapper and the method). Package-level initializers live in the synthetic `init`, which is not in `SrcFuncs`, so the resolver scans it for stores to globals.
+- **Returned value**: followed through Phi edges, local and captured variables, `Extract`, and the returns of static callees (helpers, invoked closures). A callee's parameter maps back to the caller's argument, so `return passThrough(q.Debug())` is reported. Calls are followed to depth 16 and never into a function already on the stack.
+
+Limitations:
+
+- A dynamic callee (a func-typed parameter, an interface method) ends the trace, so a Session result returned through one is not reported.
+- A callback that returns a root `*gorm.DB` (also `clone>0`, for example a package-level `DB`) leaks the same way. It is not reported, since the warning is about the three Session-family methods.
+- The rule does not model the order of several scopes; each callback that returns a Session-family result is reported, even when a later scope returns a `clone==0` value.
+- A package-level closure is now a known Scopes callback, but reuse detection still does not analyze its body, because it is not in `SrcFuncs` (#183).
 
 ## Related Projects
 
