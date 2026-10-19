@@ -65,7 +65,7 @@ func ignoreScopeClosureInsideStatement(db *gorm.DB) {
 	q := db.Where("x").Session(&gorm.Session{})
 	q.Find(nil)
 	q.Scopes(func(tx *gorm.DB) *gorm.DB { // want `\*gorm\.DB reused: second branch from mutable root`
-		return tx //gormreuse:ignore // want `unused gormreuse:ignore directive`
+		return tx // want `unused gormreuse:ignore directive`
 	}).Find(nil)
 }
 
@@ -87,7 +87,7 @@ func ignoreScopeFuncCoversClosure(db *gorm.DB) {
 // 3. Unused function-level ignore
 // -----------------------------------------------------------------------------
 
-//gormreuse:ignore // want `unused gormreuse:ignore directive`
+// want `unused gormreuse:ignore directive`
 func ignoreScopeFuncUnused(db *gorm.DB) {
 	db.Find(nil)
 }

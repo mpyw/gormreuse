@@ -281,6 +281,32 @@ q.Where("d").Find(nil)
 
 When several roots are reused at the same place, such as `use(q, r)`, that place gets one diagnostic. Its message names the root that appears first in the source, and its fix covers every root reused there. A different problem at the same place, such as a [condition argument](#subqueries-and-condition-arguments) read after it changed, gets its own diagnostic. The output is the same on every run.
 
+### Contract and Directive Fixes
+
+Some other diagnostics have a fix too:
+
+| Diagnostic | Fix |
+| --- | --- |
+| Mutable `*gorm.DB` passed to an [`immutable-param`](#gormreuseimmutable-param) parameter | Append `.Session(&gorm.Session{})` to the argument: `apply(q)` becomes `apply(q.Session(&gorm.Session{}))`. An argument such as `*p` is wrapped first: `(*p).Session(...)`. When a call passes several mutable arguments, the fix isolates all of them. `Session` is named and imported as above |
+| Unused `pure`, `immutable-return`, `immutable-param` or `immutable-input(name)` | Delete that name from the comment |
+| Redundant `immutable-param` | Delete `immutable-param` from the function's comment. A comment before `a, b := func..., func...` covers both closures, so it gets no fix while another closure still needs it |
+| Unused `ignore` | Delete `ignore` from the comment |
+
+A fix deletes only the name it is about. The comment keeps its other names and its reason:
+
+| Before | After |
+| --- | --- |
+| `//gormreuse:ignore,pure // why` | `//gormreuse:pure // why` |
+| `//gormreuse:ignore // why` | `// why` |
+| `q.Find(nil) //gormreuse:ignore //nolint:errcheck` | `q.Find(nil) //nolint:errcheck` |
+| `//gormreuse:ignore` on its own line | The line is deleted |
+| `q.Find(nil) //gormreuse:ignore` | `q.Find(nil)` |
+
+There is no fix when the reason would become a directive itself, as in `//gormreuse:ignore //gormreuse:pure`. An unused ignore gets no fix after a `gormreuse: internal error` report, because the analysis may have lost the diagnostic it covers.
+
+> [!CAUTION]
+> An ignore can be needed only when the package's `_test.go` files are analyzed, for example when a test calls a Transaction callback directly. The package without its tests then reports the ignore unused, and `-fix` deletes it. Review the deletions with `-diff` before you apply them.
+
 ## Detection Model: Mutable Branching
 
 This linter detects when a **mutable [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) branches into multiple code paths**. The core concept:
@@ -684,7 +710,7 @@ q.
 > An ignore only hides reports. gormreuse still checks the function. A `//gormreuse:pure` function that leaks its argument is still not trusted at its call sites, even when the leak report is ignored.
 
 > [!WARNING]
-> Unused `//gormreuse:ignore` directives are reported as warnings for line-level and function-level ignores. A function-level ignore is unused when the function has nothing to suppress. This helps keep the codebase clean by identifying stale ignore comments. File-level ignores do not trigger unused warnings. No ignore suppresses an unused-ignore warning or a `gormreuse: internal error` report.
+> Unused `//gormreuse:ignore` directives are reported as warnings for line-level and function-level ignores. A function-level ignore is unused when the function has nothing to suppress. This helps keep the codebase clean by identifying stale ignore comments. File-level ignores do not trigger unused warnings. No ignore suppresses an unused-ignore warning or a `gormreuse: internal error` report. The fix deletes the ignore (see [Contract and Directive Fixes](#contract-and-directive-fixes)).
 
 ### `//gormreuse:pure`
 
@@ -805,12 +831,12 @@ func applyFilters(tx *gorm.DB) {
 >     applyFilters(q) // VIOLATION: mutable *gorm.DB passed to immutable-param parameter
 > }
 > ```
-> Fix by passing an isolated value (`root.Session(&gorm.Session{})`), or make the caller `//gormreuse:immutable-param` too so the contract propagates.
+> Fix by passing an isolated value (`root.Session(&gorm.Session{})`), or make the caller `//gormreuse:immutable-param` too so the contract propagates. The suggested fix appends `.Session(&gorm.Session{})` to the argument (see [Contract and Directive Fixes](#contract-and-directive-fixes)).
 >
 > The check covers direct calls, function and method values, generic instances, and the same calls under `go` and `defer`, also when the function is in another package. It cannot cover a call through an interface or a func-typed parameter, where the callee is unknown.
 
 > [!TIP]
-> Combine with `//gormreuse:pure` when a helper both leaves its argument unpolluted and expects an isolated value. A **redundant** `//gormreuse:immutable-param` is reported so you can drop it. That is one whose parameter is never reused, so it suppresses nothing.
+> Combine with `//gormreuse:pure` when a helper both leaves its argument unpolluted and expects an isolated value. A **redundant** `//gormreuse:immutable-param` is reported so you can drop it. That is one whose parameter is never reused, so it suppresses nothing. Its fix deletes it.
 
 ### `//gormreuse:immutable-input(name)`
 
@@ -898,7 +924,7 @@ func useIt(db *gorm.DB) {
 ```
 
 > [!WARNING]
-> Unused `//gormreuse:pure`, `//gormreuse:immutable-return`, and `//gormreuse:immutable-param` directives are reported as warnings. A directive is unused when the signature doesn't fit, e.g. `immutable-param` on a function with no [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) parameter. A **redundant** `//gormreuse:immutable-param` (signature-valid but its parameter is never reused) is reported too. For combined directives like `//gormreuse:pure,immutable-return`, if either part is used, no unused warning is reported.
+> Unused `//gormreuse:pure`, `//gormreuse:immutable-return`, and `//gormreuse:immutable-param` directives are reported as warnings. A directive is unused when the signature doesn't fit, e.g. `immutable-param` on a function with no [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) parameter. A **redundant** `//gormreuse:immutable-param` (signature-valid but its parameter is never reused) is reported too. For combined directives like `//gormreuse:pure,immutable-return`, if either part is used, no unused warning is reported. The fix of each warning deletes the unused name (see [Contract and Directive Fixes](#contract-and-directive-fixes)).
 
 ## Temporary rule: `Session`/`WithContext`/`Debug` returned from `Scopes` callbacks
 

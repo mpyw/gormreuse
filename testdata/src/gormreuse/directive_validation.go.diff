@@ -1,6 +1,6 @@
 --- directive_validation.go	1970-01-01 00:00:00
 +++ directive_validation.go.golden	1970-01-01 00:00:00
-@@ -1,1264 +1,1264 @@
+@@ -1,1264 +1,1262 @@
  package internal
  
  import (
@@ -229,7 +229,8 @@
  
  // PV109: Pure function without *gorm.DB argument
  //
- //gormreuse:pure // want `unused gormreuse:pure directive`
+-//gormreuse:pure // want `unused gormreuse:pure directive`
++// want `unused gormreuse:pure directive`
  func pureNoGormArg(x int) int {
  	return x * 2 // OK: no *gorm.DB involved
  }
@@ -429,7 +430,8 @@
  // gap4 (#72) requires a concrete *gorm.DB in the signature, so this is reported
  // as unused.
  //
- //gormreuse:pure // want `unused gormreuse:pure directive`
+-//gormreuse:pure // want `unused gormreuse:pure directive`
++// want `unused gormreuse:pure directive`
  func pureWithTypeAssert(v interface{}) *gorm.DB {
  	if db, ok := v.(*gorm.DB); ok {
  		return db.Session(&gorm.Session{})
@@ -485,7 +487,8 @@
  // As with PV213, the parameter is interface{} (no concrete *gorm.DB), so the
  // pure directive governs nothing and is reported as unused (gap4, #72).
  //
- //gormreuse:pure // want `unused gormreuse:pure directive`
+-//gormreuse:pure // want `unused gormreuse:pure directive`
++// want `unused gormreuse:pure directive`
  func pureReturnsTypeAssertDirect(v interface{}) *gorm.DB {
  	return v.(*gorm.DB) // traces to v (interface{}, not *gorm.DB)
  }
@@ -592,7 +595,8 @@
  // PV230: Tests inferPureUserFuncCall with no gorm.DB args
  // The pure helper is called but returns Clean (no deps)
  //
- //gormreuse:pure // want `unused gormreuse:pure directive`
+-//gormreuse:pure // want `unused gormreuse:pure directive`
++// want `unused gormreuse:pure directive`
  func pureCallsNoGormArgs() int {
  	return pureNoGormArgHelper(42) // Pure function with no *gorm.DB args
  }
@@ -609,7 +613,8 @@
  // PV232: Tests inferCall path where function has no *gorm.DB args
  // This should return Clean in the "no *gorm.DB args" branch
  //
- //gormreuse:pure // want `unused gormreuse:pure directive`
+-//gormreuse:pure // want `unused gormreuse:pure directive`
++// want `unused gormreuse:pure directive`
  func pureCallsRegularFunc() int {
  	return regularHelper(42) // Non-pure function but no *gorm.DB args
  }
@@ -663,7 +668,8 @@
  
  // pureNoGormArgHelper is a pure function with no *gorm.DB args
  //
- //gormreuse:pure // want `unused gormreuse:pure directive`
+-//gormreuse:pure // want `unused gormreuse:pure directive`
++// want `unused gormreuse:pure directive`
  func pureNoGormArgHelper(x int) int {
  	return x * 2
  }
@@ -813,7 +819,8 @@
  // (no concrete *gorm.DB anywhere in the signature) is vacuous — the directive
  // governs nothing, so it is reported as unused (gap4, #72).
  //
- //gormreuse:immutable-return // want `unused gormreuse:immutable-return directive`
+-//gormreuse:immutable-return // want `unused gormreuse:immutable-return directive`
++// want `unused gormreuse:immutable-return directive`
  func immutableReturnInterface() interface{} {
  	return globalDB.Session(&gorm.Session{})
  }
@@ -1238,7 +1245,8 @@
  
  // IPARAM002: immutable-param on a function without a *gorm.DB parameter is unused.
  //
- //gormreuse:immutable-param // want `unused gormreuse:immutable-param directive`
+-//gormreuse:immutable-param // want `unused gormreuse:immutable-param directive`
++// want `unused gormreuse:immutable-param directive`
  func immutableParamNoGormArg(x int) int { return x }
  
  // IPARAM003: combined pure,immutable-param — both recognized, neither reported
@@ -1254,7 +1262,7 @@
  // the directive suppresses nothing. Reported (distinct from the signature-invalid
  // "unused" case).
  //
- //gormreuse:immutable-param
+-//gormreuse:immutable-param
  func immutableParamRedundant(db *gorm.DB) { // want `redundant gormreuse:immutable-param directive: no \*gorm\.DB parameter is reused`
  	db.Where("only-one-branch").Find(nil)
  }
@@ -1262,7 +1270,7 @@
  // IPARAM005: signature-valid immutable-param on a parameter used but not branched
  // (single chain via a local) is also redundant.
  //
- //gormreuse:immutable-param
+-//gormreuse:immutable-param
  func immutableParamRedundantLocal(db *gorm.DB) { // want `redundant gormreuse:immutable-param directive: no \*gorm\.DB parameter is reused`
  	q := db.Where("x")
  	q.Find(nil)

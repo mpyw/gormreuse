@@ -57,6 +57,14 @@ type Violation struct {
 	// read-only argument, and loop-carried reads. The fix cannot order them,
 	// so it cannot prove that a Session is redundant (#202).
 	HiddenUses bool
+
+	// Call and Param locate the argument of a violation of the caller-side
+	// immutable-param contract: the call, and the index of the parameter
+	// the mutable value is passed to (callsite.Site.ArgParam). The fix
+	// isolates that argument with a Session (#248). Call is nil for any
+	// other violation.
+	Call  ssa.CallInstruction
+	Param int
 }
 
 // UsageInfo tracks a single usage of a root (exported for fix generation).
@@ -243,13 +251,13 @@ func (t *Tracker) MarkPolluted(root ssa.Value, block *ssa.BasicBlock, pos token.
 	t.pollutingUses[root] = append(t.pollutingUses[root], UsageInfo{Block: block, Pos: pos, Escapes: true})
 }
 
-// AddMessageViolation records a violation with a fixed message and no root, so it
-// carries no suggested fix. Used for contract violations that are not root-reuse
-// violations — e.g. passing a mutable *gorm.DB to a //gormreuse:immutable-param
-// parameter (Phase 1b stage 2b). It still flows through the normal reporting path,
-// so //gormreuse:ignore and position dedup apply.
-func (t *Tracker) AddMessageViolation(pos token.Pos, message string) {
-	t.violations = append(t.violations, Violation{Pos: pos, Message: message})
+// AddContractViolation records a violation of the caller-side immutable-param
+// contract (Phase 1b stage 2b): call passes a mutable *gorm.DB to parameter
+// param of a //gormreuse:immutable-param function. It has a fixed message and
+// no root. It still flows through the normal reporting path, so
+// //gormreuse:ignore and position dedup apply.
+func (t *Tracker) AddContractViolation(pos token.Pos, message string, call ssa.CallInstruction, param int) {
+	t.violations = append(t.violations, Violation{Pos: pos, Message: message, Call: call, Param: param})
 }
 
 // AddViolationWithRoot adds a violation with root information for fix generation.

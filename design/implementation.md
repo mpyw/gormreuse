@@ -739,7 +739,7 @@ A parameter root has no call to append a Session to. `Generate` used to declare 
 
 - callers in other packages are never checked (#195), so an exported function's reuse disappeared;
 - a function used as a value, such as `var scopes = []func(*gorm.DB) *gorm.DB{scope}`, has callers no check sees, so a real Scopes-callback reuse disappeared;
-- a caller in the package that passes a mid-chain value got the caller-side diagnostic, which has no fix, so `-fix` never reached zero.
+- a caller in the package that passes a mid-chain value got the caller-side diagnostic, which had no fix, so `-fix` never reached zero. Since #248 that diagnostic has a fix of its own, which isolates the argument (see [Contract and Directive Fixes](#contract-and-directive-fixes-248)). The parameter-root fix still uses the body Session for such a function, which fixes every caller at once.
 
 `internal/fix/generator.go` now chooses:
 
@@ -865,6 +865,42 @@ A Phi edge with no call is left without a Session, as an edge without a position
 
 The `-fix` driver and `analysistest.RunWithSuggestedFixes` merge identical edits from several fixes. `goldentest.ApplyFixes` does the same. `TestGoldenFilesCompile` type-checks the fixtures with all fixes applied, and `TestEachFixCompiles` type-checks each diagnostic's fix applied alone, in every file it edits. `TestEveryDiagnosticCarriesFix` requires each diagnostic in `fix_every_diagnostic.go` to carry its root's fix (#246). The cases are in `testdata/src/gormreuse/fix_result_type.go`, `fix_session_target.go` and `fix_import_*.go`, and in `testdata/src/converge/fix_compile.go`.
 
+## Contract and Directive Fixes (#248)
+
+Four diagnostics used to have no fix, although the fix is mechanical:
+
+| Diagnostic | Fix | Where |
+| --- | --- | --- |
+| Mutable value passed to an `immutable-param` parameter | `.Session(&gorm.Session{})` after the argument | `Generator.GenerateIsolation` |
+| Unused `pure`, `immutable-return`, `immutable-param` | Delete the name from the comment | `reportUnusedDirectiveFuncs` |
+| Unused `immutable-input(name)` | Delete each unused `immutable-input(...)` part. An orphan comment loses all of them | `reportUnusedImmutableInputs`, from `ImmutableInputUnused.Parts` |
+| Redundant `immutable-param` | Delete `immutable-param` from every comment `DirectiveFuncSet.CommentsOf` finds for the function | `reportRedundantImmutableParam` |
+| Unused `ignore` | Delete `ignore` from the comment | `reportUnusedIgnores` |
+
+**Isolating an argument.** The tracker records the call and the parameter index (`callsite.Site.ArgParam`) on the violation (`AddContractViolation`). The index counts no receiver, and neither does `ast.CallExpr.Args` for `r.m(x)`, a method value or a method expression, so it indexes the AST arguments. Only a variadic parameter differs, and a `*gorm.DB` passed to one is packed into a slice that the check never sees. The fix checks that the argument is a `*gorm.DB` expression, wraps an operand that is not a primary expression (`*p` becomes `(*p).Session(...)`), and writes the Session through `sessionEdits`, so it takes its gorm name and import from `gormNameAt` as every other Session does (#200). Several mutable arguments of one call give one diagnostic, because the reports share the position and the message (see `reportKey`). `checkFunction` therefore gives that diagnostic the fixes of every violation in its group with the same message. The Session result is immutable, so one pass resolves the diagnostic. The caller's own reuse of the value is a separate diagnostic with its own fix.
+
+**Deleting a directive.** `directive.Removals` holds every diagnostic whose fix deletes a directive part and reports them in `Flush`, at the end of `RunSSA`. A diagnostic suppressed by an ignore is never recorded. The rewrite of a comment takes out the parts of every diagnostic recorded for it, not only its own. `//gormreuse:pure,immutable-return` on a function with no `*gorm.DB` has two diagnostics, and two different rewrites of the one comment would conflict under `-fix`. Their fixes are now the same edit, which the drivers apply once. A fix is still complete alone, as #200 requires.
+
+`removalEdit` rewrites a comment as follows:
+
+| Comment after the deletion | Edit |
+| --- | --- |
+| Other names remain | Only the name list changes: `//gormreuse:ignore,pure // why` becomes `//gormreuse:pure // why` |
+| No name, and a reason after `//` | The reason stays, from its `//`: `// why`. It may be a note or another tool's directive, such as `//nolint:errcheck` |
+| No name, and a reason that starts with `gormreuse:` | **No fix.** `//gormreuse:ignore //gormreuse:pure` would become a pure directive |
+| No name and no reason | The comment is deleted. A comment alone on its line goes with the line. A comment after code goes with the blanks before it |
+
+The line test reads the file with `pass.ReadFile`. When it cannot read it, or the file's size differs from the parsed one, there is no fix.
+
+**Which ignores are deleted.** An unused ignore covers no diagnostic of the pass by definition: `Ignores.Ignore` marks an entry used whenever it suppresses one, and a line entry and the function span of a doc-comment ignore share one entry. Two cases remain:
+
+- A function whose analysis panicked lost its diagnostics, so its ignores can look unused. After any `gormreuse: internal error` report, unused ignores keep their report but get no fix.
+- An ignore can be used in one variant of a package and unused in the other. The test variant sees calls in `_test.go` files: for example, a direct call of a named Transaction callback makes its parameter mutable (#191) in that variant only. The non-test variant then reports the ignore unused, as it did before #248, and `-fix` applies that variant's fix too. A pass sees only its own variant, so it cannot tell. The README tells users to review the deletions with `-diff`.
+
+**Redundant immutable-param.** One comment before `a, b := func..., func...` applies to both closures. The comment is edited only when no closure it covers keeps the directive: one that needs it (`needsImmutableParam`) or is also `pure`. Otherwise the redundant closure's diagnostic has no fix. A function that forwards its parameter once to another immutable-param function is reported redundant (see `computeNeedsImmutableParam`). Deleting its directive then exposes the caller-side diagnostic at the forwarding call, which a second pass fixes.
+
+`testdata/src/gormreuse/fix_directive_removal.go` and `fix_isolate_arg.go` pin the output. `testdata/src/converge/fix_directives.go` and `fix_isolate_arg.go` check that one pass converges. `internal/directive/removal_test.go` covers each comment shape.
+
 ## Development Commands
 
 Develop on Go 1.27 or later: the fixtures use generic methods and promoted
@@ -935,7 +971,7 @@ This rewrites every `.golden` and `.diff` file and deletes the ones whose source
 
 `TestFixesConverge` applies the fixes to each fixture in `testdata/src/converge`, then lints the fixed output again. It fails when the directory has no fixture, when a fixture's fixes change nothing, when the fixed output does not type-check, or when any diagnostic remains. So every fixture there must need a fix, and one pass of fixes must resolve all of it. It analyzes the package once and re-lints all the fixed files as one package.
 
-A fixture of `testdata/src/gormreuse` whose fixes must also converge is listed in `convergeGormreuseFixtures` (today `fix_paths.go`) instead of being copied into `converge`. `TestFixesConverge` re-lints its committed `.golden`, which `TestGoldenFiles` keeps equal to the current fixes.
+A fixture of `testdata/src/gormreuse` whose fixes must also converge is listed in `convergeGormreuseFixtures` (today `fix_paths.go` and `fix_isolate_arg.go`) instead of being copied into `converge`. `TestFixesConverge` re-lints its committed `.golden`, which `TestGoldenFiles` keeps equal to the current fixes.
 
 > **Trap: never name a fixture `*_test.go` unless you mean to.** `analysistest`
 > loads a package's `*_test.go` files as part of both the normal package and the

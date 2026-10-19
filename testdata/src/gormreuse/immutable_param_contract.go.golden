@@ -24,13 +24,13 @@ func applyTwoFilters(db *gorm.DB) {
 // contractPassMutable passes a mutable (mid-chain) value — a contract violation.
 func contractPassMutable(root *gorm.DB) {
 	q := root.Session(&gorm.Session{}).Where("x") // mutable: chain after Session (clone==0)
-	applyTwoFilters(q)                             // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of applyTwoFilters`
+	applyTwoFilters(q.Session(&gorm.Session{}))                             // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of applyTwoFilters`
 }
 
 // contractPassParamDirectly passes an ordinary parameter, which is mutable under
 // Phase 1b (the caller cannot know its clone state).
 func contractPassParamDirectly(db *gorm.DB) {
-	applyTwoFilters(db) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of applyTwoFilters`
+	applyTwoFilters(db.Session(&gorm.Session{})) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of applyTwoFilters`
 }
 
 // ===== SHOULD NOT REPORT =====
@@ -60,7 +60,6 @@ func contractRedundantCalleeNoContract(root *gorm.DB) {
 // applyOneFilter is annotated immutable-param but only uses its parameter once,
 // so the directive is redundant and imposes no caller-side contract.
 //
-//gormreuse:immutable-param
 func applyOneFilter(db *gorm.DB) { // want `redundant gormreuse:immutable-param directive: no \*gorm\.DB parameter is reused`
 	db.Where("a").Find(nil)
 }
@@ -88,33 +87,33 @@ type contractApplier interface {
 
 func contractFuncValue(root *gorm.DB) {
 	f := applyTwoFilters
-	f(root.Where("x")) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of applyTwoFilters`
+	f(root.Where("x").Session(&gorm.Session{})) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of applyTwoFilters`
 }
 
 func contractGo(root *gorm.DB) {
-	go applyTwoFilters(root.Where("x")) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of applyTwoFilters`
+	go applyTwoFilters(root.Where("x").Session(&gorm.Session{})) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of applyTwoFilters`
 }
 
 func contractDefer(root *gorm.DB) {
-	defer applyTwoFilters(root.Where("x")) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of applyTwoFilters`
+	defer applyTwoFilters(root.Where("x").Session(&gorm.Session{})) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of applyTwoFilters`
 }
 
 func contractMethod(root *gorm.DB) {
-	contractRepo{}.apply(root.Where("x")) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of apply`
+	contractRepo{}.apply(root.Where("x").Session(&gorm.Session{})) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of apply`
 }
 
 func contractMethodValue(root *gorm.DB) {
 	f := contractRepo{}.apply
-	f(root.Where("x")) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of apply`
+	f(root.Where("x").Session(&gorm.Session{})) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of apply`
 }
 
 func contractGoMethod(root *gorm.DB) {
-	go contractRepo{}.apply(root.Where("x")) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of apply`
+	go contractRepo{}.apply(root.Where("x").Session(&gorm.Session{})) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of apply`
 }
 
 func contractDeferMethodValue(root *gorm.DB) {
 	f := contractRepo{}.apply
-	defer f(root.Where("x")) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of apply`
+	defer f(root.Where("x").Session(&gorm.Session{})) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of apply`
 }
 
 func contractGoIsolated(root *gorm.DB) {

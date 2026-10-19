@@ -483,7 +483,7 @@ func (h *callHandler) checkFunctionCallPollution(call *ssa.Call, site callsite.S
 		// immutability — it branches the parameter — is unsafe: the callee's
 		// internal branching interferes because the value is not isolated.
 		if checksImmutableParamArg(site, i, ctx) {
-			ctx.Tracker.AddMessageViolation(ctx.pos(call.Pos()), immutableParamContractMessage(callee))
+			ctx.Tracker.AddContractViolation(ctx.pos(call.Pos()), immutableParamContractMessage(callee), call, site.ArgParam(i))
 		}
 
 		if returnsGormDB && isAssignment(call, root, ctx) {
@@ -745,7 +745,7 @@ func processGormDBCallCommonWith(instr ssa.CallInstruction, block *ssa.BasicBloc
 		// The caller-side immutable-param contract holds for a deferred or
 		// spawned call as for a plain one (#192).
 		if checksImmutableParamArg(site, i, ctx) && ctx.RootTracer.FindMutableRoot(arg, ctx.LoopInfo) != nil {
-			ctx.Tracker.AddMessageViolation(ctx.pos(pos), immutableParamContractMessage(site.Callee))
+			ctx.Tracker.AddContractViolation(ctx.pos(pos), immutableParamContractMessage(site.Callee), instr, site.ArgParam(i))
 		}
 		handleBranchUse(arg, pos, block, ctx, isPolluted)
 	}

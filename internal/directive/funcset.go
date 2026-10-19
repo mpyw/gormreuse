@@ -161,6 +161,32 @@ func (s *DirectiveFuncSet) Contains(fn *ssa.Function) bool {
 	return s.hasDirective(fn)
 }
 
+// CommentsOf returns the positions of the directive comments written on fn,
+// a function of the package: each one in a declaration's doc comment, the
+// one after its opening brace, or the one a closure takes. A fix that deletes
+// the directive edits these comments.
+func (s *DirectiveFuncSet) CommentsOf(fn *ssa.Function) []token.Pos {
+	var positions []token.Pos
+	switch syntax := DeclaredFunc(fn).Syntax().(type) {
+	case *ast.FuncDecl:
+		if syntax.Doc != nil {
+			for _, c := range syntax.Doc.List {
+				if s.isDirective(c.Text) {
+					positions = append(positions, c.Pos())
+				}
+			}
+		}
+		if pos := s.findDirectiveAfterFuncDeclBrace(syntax); pos.IsValid() {
+			positions = append(positions, pos)
+		}
+	case *ast.FuncLit:
+		if pos := s.findDirectiveForFuncLit(syntax); pos.IsValid() {
+			positions = append(positions, pos)
+		}
+	}
+	return positions
+}
+
 // fileCursor returns the cursor in the pass inspector of a file added with
 // AddFile. Directives are only looked for in those files.
 func (s *DirectiveFuncSet) fileCursor(file *ast.File) inspector.Cursor {

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"golang.org/x/tools/go/analysis"
+	"golang.org/x/tools/go/ast/inspector"
 	"golang.org/x/tools/go/ssa"
 	xssautil "golang.org/x/tools/go/ssa/ssautil"
 
@@ -58,6 +59,40 @@ func TestPanicGuard(t *testing.T) {
 		}()
 		guard.run(fn, func() { panic("boom") })
 	}()
+}
+
+// TestReportUnusedIgnoresFix verifies that an unused ignore gets a fix that
+// deletes it, except after an internal error, which may have dropped the
+// diagnostic the ignore covers (#248).
+func TestReportUnusedIgnoresFix(t *testing.T) {
+	const src = "package p\n\nfunc F() {\n\t_ = 1 //gormreuse:ignore\n}\n"
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "p.go", src, parser.ParseComments)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fix := range []bool{true, false} {
+		ignores := directive.NewIgnores(fset)
+		for cur := range inspector.New([]*ast.File{file}).Root().Children() {
+			ignores.AddFile(cur)
+		}
+		var got []analysis.Diagnostic
+		pass := &analysis.Pass{
+			Fset:     fset,
+			Files:    []*ast.File{file},
+			Report:   func(d analysis.Diagnostic) { got = append(got, d) },
+			ReadFile: func(string) ([]byte, error) { return []byte(src), nil },
+		}
+		removals := directive.NewRemovals(pass)
+		reportUnusedIgnores(removals, ignores, fix)
+		removals.Flush()
+		if len(got) != 1 || got[0].Message != "unused gormreuse:ignore directive" {
+			t.Fatalf("fix=%v: got %+v, want one unused-ignore diagnostic", fix, got)
+		}
+		if hasFix := len(got[0].SuggestedFixes) > 0; hasFix != fix {
+			t.Errorf("fix=%v: diagnostic has a fix: %v", fix, hasFix)
+		}
+	}
 }
 
 // =============================================================================

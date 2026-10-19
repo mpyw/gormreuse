@@ -550,7 +550,7 @@ func multiAssign08(db *gorm.DB) {
 func multiAssign09(db *gorm.DB) {
 	a, b, c := func(q *gorm.DB) { //gormreuse:pure
 		_ = q
-	}, //gormreuse:pure // want `unused gormreuse:pure directive`
+	}, // want `unused gormreuse:pure directive`
 		func(q *gorm.DB) {
 			_ = q
 		}, func(q *gorm.DB) { //gormreuse:pure
