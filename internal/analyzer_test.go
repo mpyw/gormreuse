@@ -107,7 +107,7 @@ func TestReportUnusedIgnoresFix(t *testing.T) {
 				ReadFile: func(string) ([]byte, error) { return []byte(src), nil },
 			}
 			removals := directive.NewRemovals(pass)
-			reportUnusedIgnores(removals, ignores, ignoreRemovable(pass, tc.internalError))
+			reportUnusedIgnores(removals, ignores, reportIgnoreRemovable(pass, tc.internalError))
 			removals.Flush()
 			if len(got) != 1 || got[0].Message != "unused gormreuse:ignore directive" {
 				t.Fatalf("got %+v, want one unused-ignore diagnostic", got)
