@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -13,6 +14,7 @@ import (
 
 	"github.com/mpyw/gormreuse/internal/directive"
 	"github.com/mpyw/gormreuse/internal/ssa/purity"
+	"github.com/mpyw/gormreuse/internal/ssa/tracer"
 )
 
 // loadFixtureFuncs builds SSA for the testdata/gormreuse fixture package (which
@@ -106,7 +108,7 @@ func TestValidatorValidate(t *testing.T) {
 			if !ok {
 				t.Fatalf("fixture function %q not found", tc.fn)
 			}
-			violations := purity.NewValidator(fn, pureFuncs, nil).Validate()
+			violations := purity.NewValidator(fn, pureFuncs, nil, nil).Validate()
 
 			if tc.clean {
 				if len(violations) != 0 {
@@ -150,24 +152,60 @@ func TestValidatorValidateTransitive(t *testing.T) {
 	pureFuncs := directive.NewPureFuncSet(nil, nil)
 	wrapper := funcs["pcWrapper"]
 
-	if v := purity.NewValidator(wrapper, pureFuncs, nil).Validate(); len(v) != 0 {
+	if v := purity.NewValidator(wrapper, pureFuncs, nil, nil).Validate(); len(v) != 0 {
 		t.Fatalf("pcWrapper with trusted pcBroken: expected no violations, got %+v", v)
 	}
 
-	failed := map[*ssa.Function]bool{funcs["pcBroken"]: true}
-	v := purity.NewValidator(wrapper, pureFuncs, failed).Validate()
+	failed := &tracer.PureVerdicts{Failed: map[*ssa.Function]bool{funcs["pcBroken"]: true}}
+	v := purity.NewValidator(wrapper, pureFuncs, nil, failed).Validate()
 	if len(v) != 1 || !v[0].Definitive || !strings.Contains(v[0].Message, "pcBroken, which violates its pure contract") {
 		t.Fatalf("pcWrapper with failed pcBroken: expected one definitive violation, got %+v", v)
+	}
+}
+
+// TestValidatorReturnedParams checks which parameters a pure function's
+// result may be (issue #188).
+func TestValidatorReturnedParams(t *testing.T) {
+	t.Parallel()
+	funcs := loadFixtureFuncs(t)
+	pureFuncs := directive.NewPureFuncSet(nil, nil)
+
+	tests := []struct {
+		fn       string
+		verdicts *tracer.PureVerdicts
+		want     []int
+	}{
+		{fn: "paReturn", want: []int{0}},
+		{fn: "paMaybe", want: []int{0}},
+		{fn: "paThroughHolder", want: []int{0}},
+		{fn: "paThroughIIFE", want: []int{0}},
+		{fn: "paDeref", want: []int{0}},
+		{fn: "paFirst", want: []int{0}},
+		{fn: "paTenant", want: nil},
+		{fn: "paIIFEFresh", want: nil},
+		// A wrapper returns its argument only once the callee is known to.
+		{fn: "paWrapper", want: nil},
+		{fn: "paWrapper", verdicts: &tracer.PureVerdicts{Returned: map[*ssa.Function][]int{funcs["paReturn"]: {0}}}, want: []int{0}},
+	}
+	for _, tc := range tests {
+		got := purity.NewValidator(funcs[tc.fn], pureFuncs, nil, tc.verdicts).ReturnedParams()
+		if !slices.Equal(got, tc.want) {
+			t.Errorf("%s: ReturnedParams() = %v, want %v", tc.fn, got, tc.want)
+		}
+	}
+
+	if got := purity.NewValidator(nil, pureFuncs, nil, nil).ReturnedParams(); got != nil {
+		t.Errorf("nil function: expected nil, got %v", got)
 	}
 }
 
 // TestValidatorValidateNil covers the nil/blockless guards.
 func TestValidatorValidateNil(t *testing.T) {
 	t.Parallel()
-	if v := purity.NewValidator(nil, directive.NewPureFuncSet(nil, nil), nil).Validate(); v != nil {
+	if v := purity.NewValidator(nil, directive.NewPureFuncSet(nil, nil), nil, nil).Validate(); v != nil {
 		t.Errorf("nil function: expected nil, got %+v", v)
 	}
-	if v := purity.NewValidator(&ssa.Function{}, directive.NewPureFuncSet(nil, nil), nil).Validate(); v != nil {
+	if v := purity.NewValidator(&ssa.Function{}, directive.NewPureFuncSet(nil, nil), nil, nil).Validate(); v != nil {
 		t.Errorf("blockless function: expected nil, got %+v", v)
 	}
 }

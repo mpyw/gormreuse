@@ -55,7 +55,9 @@
 //	│  *ssa.Const (nil)       │  STOP - nil is ignored                     │
 //	│  Builtin pure call      │  STOP - returns immutable (nil root)       │
 //	│  immutable-return call  │  STOP - returns immutable (nil root)       │
-//	│  User-defined pure call │  Returns call as root (may be mutable)     │
+//	│  User-defined pure call │  Returns call as root (may be mutable),    │
+//	│                         │  or the argument's root when the result    │
+//	│                         │  may be that argument (#188)               │
 //	└───────────────────────────────────────────────────────────────────────┘
 package tracer
 
@@ -102,17 +104,63 @@ type RootTracer struct {
 	pureFuncs            *directive.DirectiveFuncSet // User-defined pure functions
 	immutableReturnFuncs *directive.DirectiveFuncSet // Functions returning immutable *gorm.DB
 	immutableParamFuncs  *directive.DirectiveFuncSet // Functions whose *gorm.DB params are immutable (opt out of Phase 1b)
-	failedPure           map[*ssa.Function]bool      // Pure functions that FAILED contract validation
+	pure                 *PureVerdicts               // What validating the pure functions found
+	onlyParams           map[*ssa.Function]bool      // Memo of returnsOnlyParams
 	scopesCallbacks      map[*ssa.Function]bool      // Scopes/Preload callbacks (params are mutable roots)
 	immutableCallbacks   map[*ssa.Function]bool      // Transaction/FindInBatches callbacks (fresh tx)
 }
 
+// PureVerdicts is what validating the //gormreuse:pure functions found. The
+// purity package fills it before the reuse analysis runs.
+type PureVerdicts struct {
+	// Failed lists the pure functions whose bodies definitively break the
+	// contract (pollute or leak an argument). They must NOT be trusted as pure
+	// at call sites, since that would hide reuse of the value they leak (#66).
+	Failed map[*ssa.Function]bool
+
+	// Returned lists, for each pure function that keeps the contract, the
+	// indexes into fn.Params of the parameters its result may be (#188). A
+	// pure function does not pollute its argument, but `return db` hands the
+	// same *gorm.DB back, so a branch from the result is a branch from the
+	// argument.
+	Returned map[*ssa.Function][]int
+}
+
+// HasFailed reports whether fn is a pure function that broke its contract. The
+// verdicts are keyed by the declared function, and fn may be a generic instance
+// or a bound method wrapper of it (#180).
+func (p *PureVerdicts) HasFailed(fn *ssa.Function) bool {
+	return p != nil && p.Failed[directive.DeclaredFunc(fn)]
+}
+
+// ReturnedArgs returns the arguments of a call to fn (args, as in
+// CallCommon.Args) that its result may be. A bound method wrapper (f := x.M;
+// f(a)) takes no receiver argument, so the indexes are shifted by the
+// parameters it lacks; the receiver itself is never in Returned.
+func (p *PureVerdicts) ReturnedArgs(fn *ssa.Function, args []ssa.Value) []ssa.Value {
+	if p == nil {
+		return nil
+	}
+	declared := directive.DeclaredFunc(fn)
+	indexes := p.Returned[declared]
+	if len(indexes) == 0 {
+		return nil
+	}
+	shift := len(declared.Params) - len(args)
+	var returned []ssa.Value
+	for _, i := range indexes {
+		if j := i - shift; j >= 0 && j < len(args) {
+			returned = append(returned, args[j])
+		}
+	}
+	return returned
+}
+
 // New creates a new RootTracer.
 //
-// failedPure lists functions marked //gormreuse:pure whose bodies definitively
-// leaked their *gorm.DB argument (channel send, slice/array store, map store;
-// validated earlier this pass). They must NOT be trusted as pure at call sites
-// — doing so would hide reuse of the value they leak (issue #66). It may be nil.
+// pure holds the verdicts of validating the //gormreuse:pure functions earlier
+// this pass: the ones that failed are not trusted as pure, and the result of a
+// trusted one is traced to the arguments it may return. It may be nil.
 //
 // scopesCallbacks lists function literals passed to gorm's Scopes/Preload, whose
 // *gorm.DB parameter receives a mid-chain (clone==0) value at runtime and is
@@ -124,14 +172,15 @@ type RootTracer struct {
 // (issue #61). immutableCallbacks lists function literals passed to gorm's
 // Transaction/FindInBatches, whose tx parameter is a fresh forkable (clone>0)
 // handle and is therefore immutable. Both may be nil.
-func New(pureFuncs, immutableReturnFuncs, immutableParamFuncs *directive.DirectiveFuncSet, failedPure, scopesCallbacks, immutableCallbacks map[*ssa.Function]bool) *RootTracer {
+func New(pureFuncs, immutableReturnFuncs, immutableParamFuncs *directive.DirectiveFuncSet, pure *PureVerdicts, scopesCallbacks, immutableCallbacks map[*ssa.Function]bool) *RootTracer {
 	return &RootTracer{
 		pureFuncs:            pureFuncs,
 		immutableReturnFuncs: immutableReturnFuncs,
 		immutableParamFuncs:  immutableParamFuncs,
-		failedPure:           failedPure,
+		pure:                 pure,
 		scopesCallbacks:      scopesCallbacks,
 		immutableCallbacks:   immutableCallbacks,
+		onlyParams:           make(map[*ssa.Function]bool),
 	}
 }
 
@@ -191,9 +240,8 @@ func (t *RootTracer) IsPureFunction(fn *ssa.Function) bool {
 		return true
 	}
 	// A //gormreuse:pure function that failed its own contract validation is
-	// NOT trusted here: its callers must see the leak it hides. failedPure is
-	// keyed by the declared function, and fn may be an instance of it (#180).
-	if t.failedPure[directive.DeclaredFunc(fn)] {
+	// NOT trusted here: its callers must see the leak it hides.
+	if t.pure.HasFailed(fn) {
 		return false
 	}
 	return t.pureFuncs.Contains(fn)
@@ -300,10 +348,11 @@ func (t *RootTracer) trace(v ssa.Value, visited map[ssa.Value]bool, loopInfo *cf
 
 // traceCall handles *ssa.Call values during tracing.
 //
-// Three cases:
-//  1. IIFE (Immediately Invoked Function Expression): trace through returns
-//  2. Gorm method call: STOP - this call is the mutable root
-//  3. Non-gorm function returning *gorm.DB: treat as root if not pure
+// Four cases:
+//  1. Pure function whose result may be its argument: trace the argument
+//  2. IIFE (Immediately Invoked Function Expression): trace through returns
+//  3. Gorm method call: STOP - this call is the mutable root
+//  4. Non-gorm function returning *gorm.DB: treat as root if not pure
 //
 // Example IIFE tracing:
 //
@@ -312,6 +361,18 @@ func (t *RootTracer) trace(v ssa.Value, visited map[ssa.Value]bool, loopInfo *cf
 //	      │                        └─── Inner call is traced
 //	      └─── Outer IIFE call triggers traceIIFEReturns
 func (t *RootTracer) traceCall(call *ssa.Call, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) ssa.Value {
+	// The result of a pure function may be its argument (#188).
+	if args := t.pureReturnedArgs(call); len(args) > 0 {
+		for _, arg := range args {
+			if root := t.trace(arg, cloneVisited(visited), loopInfo); root != nil {
+				return root
+			}
+		}
+		if t.returnsOnlyParams(call.Call.StaticCallee()) {
+			return nil
+		}
+	}
+
 	// Handle closures (IIFE)
 	if mc, ok := call.Call.Value.(*ssa.MakeClosure); ok {
 		if closureFn, ok := mc.Fn.(*ssa.Function); ok {
@@ -1412,6 +1473,16 @@ func (t *RootTracer) traceAll(v ssa.Value, visited map[ssa.Value]bool, loopInfo 
 		return t.traceAllFreeVar(val, visited, loopInfo)
 
 	case *ssa.Call:
+		// The result of a pure function may be any argument it returns (#188).
+		// Like a Session result, a call that trace() finds immutable may stay
+		// in this list: nothing branches it, so it is never polluted.
+		var argRoots []ssa.Value
+		for _, arg := range t.pureReturnedArgs(val) {
+			argRoots = append(argRoots, t.traceAll(arg, cloneVisited(visited), loopInfo)...)
+		}
+		if len(argRoots) > 0 {
+			return argRoots
+		}
 		// Handle closure calls (IIFE) - collect ALL roots from all returns
 		if mc, ok := val.Call.Value.(*ssa.MakeClosure); ok {
 			if closureFn, ok := mc.Fn.(*ssa.Function); ok {
@@ -1660,6 +1731,56 @@ func builtinCallEffect(call *ssa.Call) typeutil.BuiltinEffect {
 		sessionConfig = call.Call.Args[1]
 	}
 	return typeutil.ImmutableBuiltinEffect(call.Call.StaticCallee().Name(), sessionConfig)
+}
+
+// pureReturnedArgs returns the arguments of a call to a trusted
+// //gormreuse:pure function that its *gorm.DB result may be (#188), or nil.
+//
+// The result is traced to these arguments first, so `r := pReturn(q)` makes r
+// a branch of q's root. When none of them has a mutable root (they are all
+// immutable, or the tracer cannot follow them), the result is immutable only
+// if the function returns nothing else (returnsOnlyParams). Otherwise the call
+// stays its own root: the function may also return a fresh mutable chain.
+func (t *RootTracer) pureReturnedArgs(call *ssa.Call) []ssa.Value {
+	if !typeutil.IsGormDB(call.Type()) {
+		return nil
+	}
+	callee := call.Call.StaticCallee()
+	args := t.pure.ReturnedArgs(callee, call.Call.Args)
+	if len(args) == 0 || !t.IsPureFunction(callee) {
+		return nil
+	}
+	return args
+}
+
+// returnsOnlyParams reports whether every mutable root of the values fn
+// returns is one of fn's own parameters, so fn returns an immutable value when
+// its arguments are immutable. `if c { return db.Session(s).Where("x") };
+// return db` also returns a fresh chain, so it does not.
+func (t *RootTracer) returnsOnlyParams(fn *ssa.Function) bool {
+	// An instance or a bound method wrapper runs the declared body.
+	fn = directive.DeclaredFunc(fn)
+	if only, ok := t.onlyParams[fn]; ok {
+		return only
+	}
+	// A recursive call may return anything until fn is decided.
+	t.onlyParams[fn] = false
+	only := true
+	for _, block := range fn.Blocks {
+		for _, instr := range block.Instrs {
+			ret, ok := instr.(*ssa.Return)
+			if !ok || len(ret.Results) == 0 {
+				continue
+			}
+			for _, root := range t.traceAll(ret.Results[0], make(map[ssa.Value]bool), nil) {
+				if p, isParam := root.(*ssa.Parameter); !isParam || p.Parent() != fn {
+					only = false
+				}
+			}
+		}
+	}
+	t.onlyParams[fn] = only
+	return only
 }
 
 // returnsImmutable reports whether a call to callee yields an immutable

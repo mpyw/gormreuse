@@ -100,3 +100,10 @@ func ApplyFilters(tx *gorm.DB) {
 func WithFresh(db *gorm.DB, cb func(*gorm.DB)) {
 	cb(db.Session(&gorm.Session{}))
 }
+
+// ReturnArg does not pollute db, but returns it.
+//
+//gormreuse:pure
+func ReturnArg(db *gorm.DB) *gorm.DB {
+	return db
+}

@@ -81,7 +81,7 @@ Limitations:
 
 - A copy taken through a method value (`s := q.Session; c := s(cfg)`) is not recognized as a copy; `c` is treated as a mutable root of its own, as before.
 - `go`/`defer` uses of a copy are not alias uses.
-- A copy returned from a function, or stored in a struct field and read in another function, is not followed. A `//gormreuse:pure` function that returns a copy of its argument hides the sharing from its caller (related: #187, #188).
+- A copy returned from a function, or stored in a struct field and read in another function, is not followed. A `//gormreuse:pure` function that returns a copy of its argument hides the sharing from its caller. The copy is not the argument itself, so it is not in `PureVerdicts.Returned` (see [Returned arguments](#returned-arguments-188)). Treating it as the argument would count each use of the copy as a branch, which the rejected approach above shows is wrong.
 - The `//gormreuse:immutable-return` body check still trusts `Session(&gorm.Session{Initialized: true})` as immutable (related: #194), and the fix generator's Phi-edge check treats it as already immutable.
 
 ### Directives
@@ -432,12 +432,13 @@ Only the body closure itself is treated as a loop. A closure nested inside the b
 | --- | --- |
 | Seed | Every parameter whose type holds a `*gorm.DB` without going through an interface: `*gorm.DB`, `**gorm.DB`, `[]*gorm.DB` (variadic too), maps, channels, arrays, and structs with such a field. A method's receiver is not seeded. |
 | Propagate | Through Phi, Extract, call results, loads (`*p`), channel receives, `FieldAddr`/`Field`/`IndexAddr`/`Index`/`Lookup`/`Slice`, conversions, range iteration, and stores into a local `Alloc` (`p := &db`, `h := holder{db: db}`). It repeats until nothing changes, so loop Phis and later stores are seen. |
+| Call results | The result of a gorm chain method on a derived receiver, or of a call that is not trusted as pure with a derived argument, is derived. So is the result of a closure that returns a derived value it captures (`func() *gorm.DB { return db }()`), and of a trusted pure function when one of the parameters it may return (`ReturnedParams`) gets a derived argument. Session, WithContext, Debug and `immutable-return` functions return a fresh handle, so their results are not derived. |
 | Closures | A `MakeClosure` whose bindings are derived seeds the closure's free variables and validates the closure body as part of the pure function (IIFE, `go func(){...}()`, stored closures). |
 | Check | `Call`, `Go` and `Defer` share one check. `*gorm.DB` method values (`Find$bound`) are checked where they are created. Stores outside local variables and `pollutionsource.Leak` cover escapes. |
 
-A violation is **definitive** (`Violation.Definitive`) when the argument is polluted by a gorm chain method, escapes, or is passed to a pure function that already failed. Only definitive violations put the function in `failedPure`, which makes the tracer stop trusting it at call sites. Passing the argument to a function that is not marked pure stays conservative and does not revoke trust (`nestedClosureOuterPureViolation`, PV117).
+A violation is **definitive** (`Violation.Definitive`) when the argument is polluted by a gorm chain method, escapes, or is passed to a pure function that already failed. Only definitive violations put the function in `PureVerdicts.Failed`, which makes the tracer stop trusting it at call sites. Passing the argument to a function that is not marked pure stays conservative and does not revoke trust (`nestedClosureOuterPureViolation`, PV117).
 
-Failure is transitive (#187). `validatePureFuncs` in `internal/analyzer.go` validates all pure functions repeatedly until `failedPure` stops growing, then reports from a final round. The set only grows, and a larger set only adds violations, so this ends within one round per pure function.
+Failure is transitive (#187). `validatePureFuncs` in `internal/analyzer.go` validates all pure functions repeatedly until `PureVerdicts` stops changing, then reports from a final round. The failed set and each returned set only grow, and larger ones only add violations and returned parameters, so this ends.
 
 Decisions and limitations:
 
@@ -445,7 +446,26 @@ Decisions and limitations:
 - **Interfaces are not followed.** A `*gorm.DB` boxed in an `interface{}` is caught only when it is passed or stored directly (`pollutionsource.UnwrapGormDB`). Types that hold one only through an interface are not seeded.
 - **Builtins.** `len(dbs)` and `cap(dbs)` cannot pollute and are not reported. `append` and `copy` count every derived argument. Other builtins count only a `*gorm.DB` argument itself.
 - **Captured variables.** A closure that assigns a derived value to a variable captured from the pure function (`func() { x = db }()`) is reported as a store through a pointer. The free variable is not traced back to the enclosing `Alloc`.
-- **Returning the argument.** A pure function that returns its argument is still trusted as returning a fresh value, so `pureReturnsArg(db).Find(nil)` in another pure function is not reported. That is #188.
+
+### Returned arguments (#188)
+
+A pure function does not pollute its argument, but it may return it: `func p(db *gorm.DB) *gorm.DB { return db }`. The result is then the same `*gorm.DB`, so `r := p(q); r.Find(nil); q.Count(nil)` branches `q` twice. Each trusted pure function therefore records the parameters its result may be in `PureVerdicts.Returned`.
+
+| Step | What it does |
+| --- | --- |
+| Summary | `Validator.ReturnedParams` seeds one parameter at a time, propagates as above, and reports the parameter when a `Return` carries a derived value. Seeding one at a time keeps `func(a, b *gorm.DB) *gorm.DB { return a }` from aliasing `b`. |
+| Transitivity | The result of a trusted pure call is derived when it may return a derived argument, so a pure wrapper of `p` returns its argument too. `validatePureFuncs` repeats until the summaries stop growing. |
+| Caller | `RootTracer.pureReturnedArgs` traces the call result to the arguments it may be. The first one with a mutable root is the root; `traceAll` returns the roots of all of them. The summary is keyed by the declared function, so a generic instance and a method value (`same := r.Same; same(q)`, whose arguments lack the receiver) use it too (`PureVerdicts.ReturnedArgs`). |
+| Immutable argument | When no returned argument has a mutable root, the result is immutable only when every root of the callee's returns is one of its own parameters (`returnsOnlyParams`). `p(db.Session(s))` is then immutable. `if c { return db.Session(s).Where("x") }; return db` can also return a fresh chain, so its call stays its own root. |
+| Inside a pure function | Branching such a result branches the argument, so `p(db).Find(nil)` inside a pure function is a definitive violation, and that function is no longer trusted at its call sites. |
+
+Decisions and limitations:
+
+- **The argument wins when the result may be either.** A result that may be the argument or a fresh chain is treated as the argument. A branch from it is then counted against the argument, which can report a reuse on the fresh path. Treating it as fresh would miss the reuse on the other path.
+- **A Session-isolated result is not an alias.** `db.Session(&gorm.Session{}).Where(...)` gets its own Statement copy at the `Where` (`TestPureSessionResultIsolated` in `e2e/internal`), so the documented `withTenant` pattern keeps a fresh root, as the README says.
+- **Only a `*gorm.DB` result is traced.** A tuple result (`(*gorm.DB, error)`) is still not followed by the tracer (#176), although the validator follows it.
+- **Across packages.** `ReturnedParams` needs the callee's body, so a pure function in another package is still trusted to return a fresh value (#195, `pureReturnedArgUnknown` in `testdata/src/externalpure/use.go`).
+- **The receiver.** The receiver is not seeded, so a pure method that returns `r.db` is not an alias of anything.
 
 ## Reassignment Fix Target
 

@@ -564,7 +564,7 @@ helper2 := func(q *gorm.DB) { //gormreuse:pure
 > ```
 >
 > Valid pure functions must:
-> - NOT call polluting methods ([`Where`](https://pkg.go.dev/gorm.io/gorm#DB.Where), [`Find`](https://pkg.go.dev/gorm.io/gorm#DB.Find), etc.) on [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) **arguments**. This includes `go db.Find(nil)`, `defer db.Find(nil)`, a method value (`f := db.Find`), a closure the function creates (`func() { db.Find(nil) }()`), and an argument reached through a pointer, slice, variadic or struct parameter (`(*pp).Find`, `dbs[0].Find`, `h.db.Find`)
+> - NOT call polluting methods ([`Where`](https://pkg.go.dev/gorm.io/gorm#DB.Where), [`Find`](https://pkg.go.dev/gorm.io/gorm#DB.Find), etc.) on [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) **arguments**. This includes `go db.Find(nil)`, `defer db.Find(nil)`, a method value (`f := db.Find`), a closure the function creates (`func() { db.Find(nil) }()`), and an argument reached through a pointer, slice, variadic or struct parameter (`(*pp).Find`, `dbs[0].Find`, `h.db.Find`), or returned from another pure function that returns its argument (`same(db).Find`, see the note below)
 > - NOT let an argument escape: channel send, slice/array or map store, a store to a package-level variable, or a store through a pointer (`h.db = db`)
 > - NOT pass an argument to a function that is not pure, or to a pure function that fails this contract itself
 > - MAY call polluting methods on **immutable values** (e.g., `db.Session(&gorm.Session{}).Where(...)` is OK)
@@ -578,6 +578,17 @@ helper2 := func(q *gorm.DB) { //gormreuse:pure
 > q.Find(&users)          // first branch - OK
 > q.Count(&count)         // VIOLATION - second branch from mutable q
 > ```
+>
+> A pure function MAY also return its argument. Its result is then the same value as the argument, so a branch from the result is a branch from the argument:
+> ```go
+> //gormreuse:pure
+> func same(db *gorm.DB) *gorm.DB { return db }
+>
+> q := db.Where("x")
+> same(q).Find(&users)    // first branch from q - OK
+> q.Count(&count)         // VIOLATION - second branch from q
+> ```
+> A result that comes only from immutable values, like `withTenant`'s `db.Session(...).Where(...)`, is a new chain and does not share the argument. This is known only for a pure function in the same package.
 
 ### `//gormreuse:immutable-return`
 

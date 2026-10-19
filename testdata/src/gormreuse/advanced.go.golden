@@ -464,7 +464,7 @@ func passToReturnsDB(db *gorm.DB) {
 // The result is mutable.
 func passToPureReturnsDB(db *gorm.DB) {
 	q := db.Where("base").Session(&gorm.Session{})
-	result := pureReturnsDB(q.Where("a")).Session(&gorm.Session{})
+	result := pureReturnsDB(q.Where("a").Session(&gorm.Session{}))
 	q.Find(nil)      // want `\*gorm\.DB reused: second branch from mutable root`
 	result.Find(nil) // OK: first use of result
 	result.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
