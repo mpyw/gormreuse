@@ -132,6 +132,10 @@ func RunSSA(
 	// mutable-by-default treatment (#60 SC103, #61, #62 case 2.2).
 	immutableCallbacks := tracer.CollectImmutableCallbacks(ssaInfo.SrcFuncs)
 	tracer.CollectImmutableInputCallbacks(ssaInfo.SrcFuncs, immutableInputSet, immutableCallbacks)
+	// The sets are keyed by function, so keep only the functions that nothing
+	// else can call: a named callback that is also called directly, or that is
+	// exported, keeps a mutable parameter (#191).
+	tracer.DropReachableCallbacks(ssaInfo.SrcFuncs, immutableInputSet, immutableCallbacks)
 
 	// Enforce the body-side immutable-input contract (#62 cases 2.3/2.4) and
 	// report unused immutable-input directives (U1-U3). Uses a tracer with the
