@@ -59,6 +59,13 @@ type UsageInfo struct {
 	Pos   token.Pos
 }
 
+// aliasUse is a use of a Session/Debug copy, with the position of the call
+// that took the copy.
+type aliasUse struct {
+	UsageInfo
+	copyPos token.Pos
+}
+
 // Tracker tracks pollution state of mutable *gorm.DB roots.
 //
 // Design principle:
@@ -89,6 +96,15 @@ type Tracker struct {
 	// isPolluted/IsPollutedAt, which do consult this map.
 	branchUses map[ssa.Value][]UsageInfo
 
+	// aliasUses maps roots to uses of a Session/Debug copy that shares the
+	// root's Statement (#174). Such a use reads the Statement as it is at that
+	// moment, so any earlier in-place change to the root leaks into it: a
+	// polluting use, and also an assignment use (q = q.Where(...) changes a
+	// clone==0 Statement in place). Only a change after the copy was taken
+	// counts: a change before it already makes the Session/Debug call itself a
+	// second branch. Copies never change the root, so these uses do not pollute.
+	aliasUses map[ssa.Value][]aliasUse
+
 	// violations tracks detected violations.
 	violations []Violation
 
@@ -113,6 +129,7 @@ func New(cfgAnalyzer CFGAnalyzer, fset *token.FileSet) *Tracker {
 		pureUses:       make(map[ssa.Value][]UsageInfo),
 		assignmentUses: make(map[ssa.Value][]UsageInfo),
 		branchUses:     make(map[ssa.Value][]UsageInfo),
+		aliasUses:      make(map[ssa.Value][]aliasUse),
 		cfgAnalyzer:    cfgAnalyzer,
 		fset:           fset,
 	}
@@ -146,6 +163,13 @@ func (t *Tracker) RecordAssignment(root ssa.Value, block *ssa.BasicBlock, pos to
 // not nil.
 func (t *Tracker) RecordBranchUse(root ssa.Value, block *ssa.BasicBlock, pos token.Pos) {
 	t.branchUses[root] = append(t.branchUses[root], UsageInfo{Block: block, Pos: pos})
+}
+
+// RecordAliasUse records a use of a Session/Debug copy that shares root's
+// Statement (see the aliasUses field doc). copyPos is the position of the
+// Session/Debug call that took the copy. Caller must ensure root is not nil.
+func (t *Tracker) RecordAliasUse(root ssa.Value, copyPos token.Pos, block *ssa.BasicBlock, pos token.Pos) {
+	t.aliasUses[root] = append(t.aliasUses[root], aliasUse{Block: block, Pos: pos, copyPos: copyPos})
 }
 
 // IsPollutedAt checks if a root has polluting usage that can reach the target block.
@@ -185,7 +209,7 @@ func (t *Tracker) AddViolationWithRoot(pos token.Pos, root ssa.Value) {
 // the suggested fix (#184).
 func (t *Tracker) DetectViolations() {
 	// Check violations between polluting uses (non-pure methods)
-	for _, root := range t.sortedRoots(t.pollutingUses) {
+	for _, root := range sortedRoots(t, t.pollutingUses) {
 		uses := t.pollutingUses[root]
 		if len(uses) <= 1 {
 			continue // Need at least 2 polluting uses for a violation
@@ -196,7 +220,7 @@ func (t *Tracker) DetectViolations() {
 
 	// Check pure uses against polluting uses
 	// A pure use after a polluting use is a violation
-	for _, root := range t.sortedRoots(t.pureUses) {
+	for _, root := range sortedRoots(t, t.pureUses) {
 		pollutingUses := t.pollutingUses[root]
 		if len(pollutingUses) == 0 {
 			continue
@@ -207,7 +231,7 @@ func (t *Tracker) DetectViolations() {
 
 	// Check assignment uses against polluting uses
 	// An assignment use after a polluting use is a violation (using polluted root)
-	for _, root := range t.sortedRoots(t.assignmentUses) {
+	for _, root := range sortedRoots(t, t.assignmentUses) {
 		pollutingUses := t.pollutingUses[root]
 		if len(pollutingUses) == 0 {
 			continue
@@ -215,13 +239,62 @@ func (t *Tracker) DetectViolations() {
 		allUses := t.getAllUses(root)
 		t.checkViolationsBetween(t.assignmentUses[root], pollutingUses, root, allUses)
 	}
+
+	// Check uses of a Session/Debug copy against changes to the root it shares
+	// a Statement with. These carry no suggested fix: the reuse-fix strategies
+	// rewrite the root's branches, not the copy.
+	for _, root := range sortedRoots(t, t.aliasUses) {
+		changes := slices.Concat(t.pollutingUses[root], t.assignmentUses[root])
+		for _, use := range t.aliasUses[root] {
+			if change, ok := t.earlierReaching(changes, use.UsageInfo, use.copyPos); ok {
+				t.violations = append(t.violations, Violation{Pos: use.Pos, Message: t.aliasMessage(root, change.Pos)})
+			}
+		}
+	}
+}
+
+// earlierReaching returns a use in sources that comes after the position
+// after and before target, and can reach target, under the same rules as
+// checkViolationsBetween.
+func (t *Tracker) earlierReaching(sources []UsageInfo, target UsageInfo, after token.Pos) (UsageInfo, bool) {
+	for _, src := range sources {
+		if src.Pos >= target.Pos || src.Pos <= after {
+			continue
+		}
+		if src.Block != nil && target.Block != nil && src.Block.Parent() != target.Block.Parent() {
+			return src, true
+		}
+		if t.isReachable(src.Block, target.Block) {
+			return src, true
+		}
+	}
+	return UsageInfo{}, false
+}
+
+// aliasMessage builds the diagnostic for a use of a Session/Debug copy after
+// the root it shares a Statement with was changed at changePos.
+func (t *Tracker) aliasMessage(root ssa.Value, changePos token.Pos) string {
+	msg := "*gorm.DB reused: Session/Debug copy shares the Statement of a mutable root"
+
+	var locs []string
+	if root != nil && root.Pos().IsValid() {
+		locs = append(locs, "root at "+t.loc(root.Pos()))
+	}
+	if changePos.IsValid() {
+		locs = append(locs, "changed at "+t.loc(changePos))
+	}
+	if len(locs) > 0 && t.fset != nil {
+		msg += " (" + strings.Join(locs, ", ") + ")"
+	}
+
+	return msg + ", so the copy sees that change; end the root's chain with .Session(&gorm.Session{}) before copying it"
 }
 
 // sortedRoots returns the roots of uses ordered by root position, then by
 // earliest recorded use, then by SSA name, function, and instruction text. The
 // later keys only break ties between roots without a source position (such as
-// Phi nodes).
-func (t *Tracker) sortedRoots(uses map[ssa.Value][]UsageInfo) []ssa.Value {
+// Phi nodes). It is generic so the aliasUses map sorts the same way.
+func sortedRoots[U any](t *Tracker, uses map[ssa.Value][]U) []ssa.Value {
 	roots := slices.Collect(maps.Keys(uses))
 	slices.SortFunc(roots, func(a, b ssa.Value) int {
 		return cmp.Or(

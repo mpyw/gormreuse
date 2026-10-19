@@ -2,11 +2,14 @@
 // behavior with sqlmock. They guard the linter's core premise: a mid-chain
 // (clone==0) *gorm.DB shares its Statement, so branching it twice accumulates
 // conditions, whereas root / Session()-derived (clone>0) handles fork a fresh
-// Statement per chain and are safe to reuse. Every test asserts (t.Errorf) —
-// none merely logs both outcomes.
+// Statement per chain and are safe to reuse. A Session()/Debug() copy of a
+// mid-chain value still reads that value's Statement, though, so later changes
+// to the value leak into it (#174). Every test asserts (t.Errorf) — none merely
+// logs both outcomes.
 package internal
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -356,4 +359,135 @@ func conditionalReassign(db *gorm.DB, cond bool) {
 		q = db.Where("alt = ?", 2)
 	}
 	q.Find(&[]User{})
+}
+
+// =============================================================================
+// Session/Debug copies of a mid-chain value (#174)
+// =============================================================================
+
+// TestCopyOfMidChain_LaterChangeLeaks asserts that Session(&gorm.Session{}) and
+// Debug() on a clone==0 value return a copy that points at the same Statement:
+// a change to the original after the copy is taken shows up in the copy. A
+// change by reassignment (q = q.Where(...)) changes it in place too.
+func TestCopyOfMidChain_LaterChangeLeaks(t *testing.T) {
+	copies := map[string]func(q *gorm.DB) *gorm.DB{
+		"Session": func(q *gorm.DB) *gorm.DB { return q.Session(&gorm.Session{}) },
+		"Debug":   func(q *gorm.DB) *gorm.DB { return q.Debug() },
+		"Session(QueryFields)": func(q *gorm.DB) *gorm.DB {
+			return q.Session(&gorm.Session{QueryFields: true})
+		},
+	}
+	changes := map[string]func(q *gorm.DB){
+		"branch": func(q *gorm.DB) { q.Where("active = ?", true).Find(&[]User{}) },
+		"reassignment": func(q *gorm.DB) {
+			q = q.Where("active = ?", true)
+			q.Find(&[]User{})
+		},
+	}
+	for copyName, takeCopy := range copies {
+		for changeName, change := range changes {
+			t.Run(copyName+"/"+changeName, func(t *testing.T) {
+				db, captured := setupDB(t)
+
+				q := db.Model(&User{}).Where("tenant = ?", 1) // clone==0
+				countQ := takeCopy(q)
+				change(q)
+				countQ.Count(new(int64))
+
+				if len(*captured) < 2 {
+					t.Fatalf("Expected at least 2 queries, got %d", len(*captured))
+				}
+				if last := (*captured)[len(*captured)-1]; !strings.Contains(last, "active") {
+					t.Errorf("copy taken before the change should see it (shared Statement): %s", last)
+				}
+			})
+		}
+	}
+}
+
+// TestCopyOfMidChain_UseDoesNotChangeOriginal asserts the other direction: using
+// the copy forks its own Statement, so the original is unchanged. This is why a
+// copy used before the original changes is safe.
+func TestCopyOfMidChain_UseDoesNotChangeOriginal(t *testing.T) {
+	db, captured := setupDB(t)
+
+	q := db.Model(&User{}).Where("tenant = ?", 1) // clone==0
+	countQ := q.Session(&gorm.Session{})
+	countQ.Where("copy_only = ?", 1).Count(new(int64))
+	q.Find(&[]User{})
+
+	if len(*captured) < 2 {
+		t.Fatalf("Expected at least 2 queries, got %d", len(*captured))
+	}
+	if last := (*captured)[len(*captured)-1]; strings.Contains(last, "copy_only") {
+		t.Errorf("using the copy must not change the original: %s", last)
+	}
+}
+
+// TestCopyOfMidChain_IsolatingConfigsDoNotLeak asserts that WithContext, and
+// Session with Context, PrepareStmt, SkipHooks or NewDB, do not share the
+// Statement: a later change to the original does not show up in the copy.
+func TestCopyOfMidChain_IsolatingConfigsDoNotLeak(t *testing.T) {
+	ctx := context.Background()
+	copies := map[string]func(q *gorm.DB) *gorm.DB{
+		"WithContext":        func(q *gorm.DB) *gorm.DB { return q.WithContext(ctx) },
+		"Session(Context)":   func(q *gorm.DB) *gorm.DB { return q.Session(&gorm.Session{Context: ctx}) },
+		"Session(SkipHooks)": func(q *gorm.DB) *gorm.DB { return q.Session(&gorm.Session{SkipHooks: true}) },
+		"Session(NewDB)":     func(q *gorm.DB) *gorm.DB { return q.Session(&gorm.Session{NewDB: true}) },
+	}
+	for name, takeCopy := range copies {
+		t.Run(name, func(t *testing.T) {
+			db, captured := setupDB(t)
+
+			q := db.Model(&User{}).Where("tenant = ?", 1) // clone==0
+			countQ := takeCopy(q)
+			q.Where("active = ?", true).Find(&[]User{})
+			countQ.Model(&User{}).Count(new(int64))
+
+			if len(*captured) < 2 {
+				t.Fatalf("Expected at least 2 queries, got %d", len(*captured))
+			}
+			if last := (*captured)[len(*captured)-1]; strings.Contains(last, "active") {
+				t.Errorf("%s must not share the Statement: %s", name, last)
+			}
+		})
+	}
+}
+
+// TestSessionInitialized_ReturnsMidChain asserts that
+// Session(&gorm.Session{Initialized: true}) returns a clone==0 value: branching
+// it twice accumulates conditions, even on the root DB.
+func TestSessionInitialized_ReturnsMidChain(t *testing.T) {
+	db, captured := setupDB(t)
+
+	q := db.Model(&User{}).Session(&gorm.Session{Initialized: true})
+	q.Where("a = ?", 10).Find(&[]User{})
+	q.Where("b = ?", 20).Find(&[]User{})
+
+	if len(*captured) < 2 {
+		t.Fatalf("Expected at least 2 queries, got %d", len(*captured))
+	}
+	second := (*captured)[1]
+	if !strings.Contains(second, "a =") || !strings.Contains(second, "b =") {
+		t.Errorf("Initialized result should be mid-chain and accumulate both 'a' and 'b': %s", second)
+	}
+}
+
+// TestSessionInitialized_SnapshotsReceiver asserts that the Initialized result
+// has its own copy of the receiver's Statement: a later change to the receiver
+// does not show up in it.
+func TestSessionInitialized_SnapshotsReceiver(t *testing.T) {
+	db, captured := setupDB(t)
+
+	q := db.Model(&User{}).Where("tenant = ?", 1) // clone==0
+	init := q.Session(&gorm.Session{Initialized: true})
+	q.Where("active = ?", true).Find(&[]User{})
+	init.Count(new(int64))
+
+	if len(*captured) < 2 {
+		t.Fatalf("Expected at least 2 queries, got %d", len(*captured))
+	}
+	if last := (*captured)[len(*captured)-1]; strings.Contains(last, "active") {
+		t.Errorf("Initialized result must not share the receiver's Statement: %s", last)
+	}
 }

@@ -227,6 +227,15 @@ func (h *callHandler) handle(call *ssa.Call, ctx *Context) {
 	}
 	recv := call.Call.Args[0]
 
+	// pos is the effective position (call-site override inside an invoked
+	// closure, else the call's own position) — see Context.pos / #68.
+	pos := ctx.pos(call.Pos())
+
+	// A receiver that is a Session/Debug copy reads the Statement of the root
+	// it was copied from (#174). This holds even though the copy itself is
+	// immutable, so it is checked before the immutable-source return below.
+	recordCallAliasUses(recv, call.Block(), pos, ctx)
+
 	// Find mutable root
 	root := ctx.RootTracer.FindMutableRoot(recv, ctx.LoopInfo)
 	if root == nil {
@@ -235,9 +244,6 @@ func (h *callHandler) handle(call *ssa.Call, ctx *Context) {
 
 	// KEY CHANGE: Process ALL calls uniformly (no isTerminal skip)
 	// Record usage (violations detected later in DetectViolations).
-	// pos is the effective position (call-site override inside an invoked
-	// closure, else the call's own position) — see Context.pos / #68.
-	pos := ctx.pos(call.Pos())
 	if isImmutableReturning {
 		// Pure methods check for pollution but don't pollute
 		ctx.Tracker.RecordPureUse(root, call.Block(), pos)
@@ -291,6 +297,9 @@ func (h *callHandler) processBoundMethodCall(call *ssa.Call, mc *ssa.MakeClosure
 	methodName := strings.TrimSuffix(mc.Fn.Name(), "$bound")
 	isImmutableReturning := typeutil.IsImmutableReturningBuiltin(methodName)
 
+	pos := ctx.pos(call.Pos())
+	recordCallAliasUses(recv, call.Block(), pos, ctx)
+
 	root := ctx.RootTracer.FindMutableRoot(recv, ctx.LoopInfo)
 	if root == nil {
 		return
@@ -298,8 +307,6 @@ func (h *callHandler) processBoundMethodCall(call *ssa.Call, mc *ssa.MakeClosure
 
 	// Get ALL possible roots BEFORE recording usage (needed for pollution check)
 	allRoots := ctx.RootTracer.FindAllMutableRoots(recv, ctx.LoopInfo)
-
-	pos := ctx.pos(call.Pos())
 
 	// Check if ANY root was already polluted BEFORE this call
 	for _, r := range allRoots {
@@ -342,6 +349,16 @@ func (h *callHandler) processBoundMethodCall(call *ssa.Call, mc *ssa.MakeClosure
 //	q.Count(nil)   // OK (first use)
 func (h *callHandler) checkFunctionCallPollution(call *ssa.Call, ctx *Context) {
 	callee := call.Call.StaticCallee()
+
+	// A Session/Debug copy passed to a function may be read there, pure or not.
+	// The receiver of a gorm method is handled in handle.
+	if !h.isGormDBMethodCall(call) {
+		for _, arg := range call.Call.Args {
+			if gormArg, ok := pollutionsource.UnwrapGormDB(arg); ok {
+				recordCallAliasUses(gormArg, call.Block(), ctx.pos(call.Pos()), ctx)
+			}
+		}
+	}
 
 	// Check if this is a pure function - pure functions don't pollute args
 	if callee != nil && ctx.RootTracer.IsPureFunction(callee) {
@@ -390,6 +407,15 @@ func (h *callHandler) checkFunctionCallPollution(call *ssa.Call, ctx *Context) {
 			// Mark polluted (function may use the value)
 			ctx.Tracker.MarkPolluted(root, call.Block(), ctx.pos(call.Pos()))
 		}
+	}
+}
+
+// recordCallAliasUses records a use, at pos, of every mutable root whose
+// Statement v shares through a Session/Debug copy (#174). Violations are found
+// later in DetectViolations.
+func recordCallAliasUses(v ssa.Value, block *ssa.BasicBlock, pos token.Pos, ctx *Context) {
+	for _, aliased := range ctx.RootTracer.FindAliasedRoots(v, ctx.LoopInfo) {
+		ctx.Tracker.RecordAliasUse(aliased.Root, aliased.Copy.Pos(), block, pos)
 	}
 }
 

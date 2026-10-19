@@ -239,6 +239,7 @@ This linter detects when a **mutable [`*gorm.DB`](https://pkg.go.dev/gorm.io/gor
 1. **Immutable-returning methods** ([`Session`](https://pkg.go.dev/gorm.io/gorm#DB.Session), [`WithContext`](https://pkg.go.dev/gorm.io/gorm#DB.WithContext), [`Debug`](https://pkg.go.dev/gorm.io/gorm#DB.Debug), etc.) return an **immutable** instance that can branch freely
 2. **All other methods** on a mutable instance create a **branch** that consumes the instance
 3. **Second branch** from the same mutable root is a **violation**
+4. A **`Session`/`Debug` copy** of a mutable instance still reads that instance's `Statement`, so using the copy **after the instance changed** is a **violation** (see [Session and Debug copies](#session-and-debug-copies))
 
 ### Method Classification
 
@@ -305,6 +306,30 @@ q.Find(&users)                       // first branch - OK
 q.Session(&gorm.Session{}).Count(&c) // VIOLATION: second branch from q
 ```
 
+#### Session and Debug copies
+
+On a mutable value, [`Session(&gorm.Session{})`](https://pkg.go.dev/gorm.io/gorm#DB.Session) and [`Debug()`](https://pkg.go.dev/gorm.io/gorm#DB.Debug) return a copy that **points at the same `Statement`**. Using the copy does not change the original. But a change to the original after the copy was taken shows up in every later use of the copy:
+
+```go
+q := db.Model(&User{}).Where("tenant = 1") // q is mutable
+countQ := q.Session(&gorm.Session{})       // countQ shares q's Statement
+countQ.Count(&before)                      // OK - q has not changed yet
+q.Where("active = 1").Find(&users)         // first branch - changes q in place
+countQ.Count(&n)                           // VIOLATION: runs WHERE tenant = 1 AND active = 1
+```
+
+A change by reassignment (`q = q.Where(...)`) counts too, since it changes a mutable `Statement` in place. To fix it, end the root's chain with `.Session(&gorm.Session{})` before you copy it, or take the copy with an option that clones the `Statement`.
+
+| Call on a mutable value | Shares the `Statement`? | Result |
+| --- | --- | --- |
+| `Session(&gorm.Session{})`, `Debug()` | Yes | Immutable |
+| `Session` with only other options (`DryRun`, `QueryFields`, `Logger`, …) | Yes | Immutable |
+| [`WithContext(ctx)`](https://pkg.go.dev/gorm.io/gorm#DB.WithContext), `Session` with `Context`, `PrepareStmt`, `SkipHooks` or `NewDB` | No | Immutable |
+| `Session(&gorm.Session{Initialized: true})` | No (it takes a snapshot) | **Mutable** (`clone == 0`), even on `db` |
+| `Session(cfg)` where `cfg` is not a `&gorm.Session{...}` literal | Assumed yes | Assumed **mutable** |
+
+The linter reads the `&gorm.Session{...}` literal at the call. It treats an option set to a non-constant value, or set in only some branches, as unknown and assumes the worst case. A `Context` set to anything other than `nil` counts as set, as for `WithContext(ctx)`.
+
 > [!IMPORTANT]
 > **Chaining without reassignment is a violation!** Each statement using the same variable creates a separate branch:
 > ```go
@@ -353,7 +378,8 @@ Reuse safety is determined by GORM's internal `clone` field: a handle with `clon
 
 | Source | `clone` | Reusable? |
 | --- | --- | --- |
-| [`gorm.Open`](https://pkg.go.dev/gorm.io/gorm#Open), [`Session`](https://pkg.go.dev/gorm.io/gorm#DB.Session), [`WithContext`](https://pkg.go.dev/gorm.io/gorm#DB.WithContext), [`Debug`](https://pkg.go.dev/gorm.io/gorm#DB.Debug) | `> 0` | ✅ forks a fresh Statement |
+| [`gorm.Open`](https://pkg.go.dev/gorm.io/gorm#Open), [`Session`](https://pkg.go.dev/gorm.io/gorm#DB.Session), [`WithContext`](https://pkg.go.dev/gorm.io/gorm#DB.WithContext), [`Debug`](https://pkg.go.dev/gorm.io/gorm#DB.Debug) | `> 0` | ✅ forks a fresh Statement (but see [Session and Debug copies](#session-and-debug-copies)) |
+| `Session(&gorm.Session{Initialized: true})` | `== 0` | ❌ shares Statement |
 | [`Begin`](https://pkg.go.dev/gorm.io/gorm#DB.Begin) result, [`Transaction`](https://pkg.go.dev/gorm.io/gorm#DB.Transaction) callback `tx` | `> 0` | ✅ fresh transaction handle |
 | [`FindInBatches`](https://pkg.go.dev/gorm.io/gorm#DB.FindInBatches) callback `tx` | `> 0` | ✅ fresh handle per batch |
 | Mid-chain ([`Where`](https://pkg.go.dev/gorm.io/gorm#DB.Where), [`Order`](https://pkg.go.dev/gorm.io/gorm#DB.Order), …) | `== 0` | ❌ shares Statement |

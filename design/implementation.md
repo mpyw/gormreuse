@@ -56,6 +56,33 @@ The linter detects when a mutable `*gorm.DB` branches into multiple code paths:
 1. **Immutable-returning methods** ([`Session`](https://pkg.go.dev/gorm.io/gorm#DB.Session), [`WithContext`](https://pkg.go.dev/gorm.io/gorm#DB.WithContext), [`Debug`](https://pkg.go.dev/gorm.io/gorm#DB.Debug), [`Open`](https://pkg.go.dev/gorm.io/gorm#Open), [`Begin`](https://pkg.go.dev/gorm.io/gorm#DB.Begin), [`Transaction`](https://pkg.go.dev/gorm.io/gorm#DB.Transaction)) return a new immutable instance
 2. **All other methods** on a mutable instance create a **branch** that consumes the instance
 3. **Second branch** from the same mutable root is a **violation**
+4. A **use of a `Session`/`Debug` copy** after its mutable root changed is a **violation** (see below)
+
+#### Session and Debug copies (#174)
+
+The name-based "immutable-returning" class is not exact. In GORM v1.31, `Session` builds a new `*DB` with `Statement: db.Statement` and clones the Statement only when `Context`, `PrepareStmt` or `SkipHooks` is set. `Debug` is `getInstance()` followed by `Session` with only a `Logger`, and `getInstance()` returns the receiver itself when it is `clone == 0`. The E2E tests in `e2e/internal` (`TestCopyOfMidChain_*`, `TestSessionInitialized_*`) check each claim below.
+
+| Call on a `clone == 0` receiver | Effect | Model |
+| --- | --- | --- |
+| `Session(&gorm.Session{})`, `Debug()`, `Session` with only other options | Copy points at the receiver's Statement. Each use of the copy forks its own Statement (`clone == 2`), so it never changes the receiver. But it reads the receiver's Statement as it is at that moment. | Pure use of the receiver's root at the call. Each later use of the copy is an **alias use** of that root. |
+| `WithContext`, `Session` with `Context`, `PrepareStmt`, `SkipHooks` | Statement cloned at the call | Pure use only (unchanged) |
+| `Session` with `NewDB` | `clone == 1`: each use starts a new Statement | Pure use only (unchanged) |
+| `Session` with `Initialized` | Returns `tx.getInstance()`: a `clone == 0` handle with its own copy | Pure use of the receiver; the result is a **new mutable root** |
+
+`typeutil.ImmutableBuiltinEffect` decides this from the `&gorm.Session{...}` literal. In SSA the literal is an `Alloc` with one `FieldAddr`+`Store` per set field. Any other use of the `Alloc`, a store in another block than the `Alloc`, or a non-constant bool makes the field unknown. An unknown config is assumed to both share and return a mutable value. A `Context` set to any non-constant value counts as set, matching the existing trust in `WithContext(ctx)`.
+
+`RootTracer.FindAliasedRoots` finds the copies a value reaches through `FindAllMutableRoots` (so Phi, variables and closure captures work) and returns each copy's receiver root, following copies of copies. The call handler records an alias use for a gorm method receiver, a bound-method receiver, and a `*gorm.DB` argument of a non-gorm function. `DetectViolations` reports an alias use when a polluting **or assignment** use of the root lies between the copy and the use and reaches the use. Assignment uses count here because `q = q.Where(...)` changes a `clone == 0` Statement in place. A change before the copy is not counted: it already makes the `Session`/`Debug` call itself a second branch, so counting it again would duplicate that report.
+
+**Rejected: count the copy as a branch of the receiver.** The issue suggested this. It would also report `q.Session(&gorm.Session{}).Count(); q.Session(&gorm.Session{}).Find()` and "copy used, then the original changed", which are safe at runtime (`TestSessionBeforeFinisher`, `TestCopyOfMidChain_UseDoesNotChangeOriginal`). The alias-use model reports only the order that leaks.
+
+Alias violations carry no suggested fix. The reuse-fix strategies rewrite the root's branches, and the right fix (`.Session(&gorm.Session{})` at the end of the root's chain, or an isolating copy) depends on intent.
+
+Limitations:
+
+- A copy taken through a method value (`s := q.Session; c := s(cfg)`) is not recognized as a copy; `c` is treated as a mutable root of its own, as before.
+- `go`/`defer` uses of a copy are not alias uses.
+- A copy returned from a function, or stored in a struct field and read in another function, is not followed. A `//gormreuse:pure` function that returns a copy of its argument hides the sharing from its caller (related: #187, #188).
+- The `//gormreuse:immutable-return` body check still trusts `Session(&gorm.Session{Initialized: true})` as immutable (related: #194), and the fix generator's Phi-edge check treats it as already immutable.
 
 ### Directives
 
@@ -444,6 +471,7 @@ testdata/src/gormreuse/
 ├── basic.go         # Basic reuse patterns, Session at end/middle
 ├── advanced.go      # Derived variables, helper functions, conditional reuse
 ├── evil.go          # Edge cases: closures, defer, goroutines, struct fields, loops
+├── session_alias.go # Session/Debug copies sharing a Statement; Session{Initialized} (#174)
 └── ignore.go        # //gormreuse:ignore directive tests
 ```
 
@@ -451,7 +479,7 @@ Directives across packages are tested by `TestCrossPackageDirectives`: `testdata
 
 ### E2E Tests
 
-The `e2e/internal/` directory contains tests that verify actual GORM SQL behavior using sqlmock. This is a separate Go module (its own `go.mod`) to avoid dependency conflicts, and CI tests and lints it on every PR (`cd e2e/internal && go test ./... && golangci-lint run ./...`). Dependabot covers it, so GORM bumps arrive as PRs; re-check go-gorm/gorm#7592 on each (see the README). Every test asserts (`t.Errorf`) — the suite guards the linter's core clone-semantics premise: mid-chain (`clone==0`) reuse accumulates conditions; root / `Session()` / `Transaction`- and `FindInBatches`-callback (`clone>0`) handles fork a fresh Statement and are safe; a `Connection`-callback handle is `clone==0` and accumulates. `scopes_session_test.go` pins which Session-family calls inside a `Scopes` callback leak the transaction (go-gorm/gorm#7592): only a returned one.
+The `e2e/internal/` directory contains tests that verify actual GORM SQL behavior using sqlmock. This is a separate Go module (its own `go.mod`) to avoid dependency conflicts, and CI tests and lints it on every PR (`cd e2e/internal && go test ./... && golangci-lint run ./...`). Dependabot covers it, so GORM bumps arrive as PRs; re-check go-gorm/gorm#7592 on each (see the README). Every test asserts (`t.Errorf`) — the suite guards the linter's core clone-semantics premise: mid-chain (`clone==0`) reuse accumulates conditions; root / `Session()` / `Transaction`- and `FindInBatches`-callback (`clone>0`) handles fork a fresh Statement and are safe; a `Connection`-callback handle is `clone==0` and accumulates. `scopes_session_test.go` pins which Session-family calls inside a `Scopes` callback leak the transaction (go-gorm/gorm#7592): only a returned one. It also pins the exceptions in [Session and Debug copies](#session-and-debug-copies-174): a `Session()`/`Debug()` copy of a mid-chain value sees later changes to it, and `Session{Initialized: true}` returns a mid-chain value.
 
 ## Code Style
 

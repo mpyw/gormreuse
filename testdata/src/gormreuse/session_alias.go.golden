@@ -1,0 +1,232 @@
+package internal
+
+import (
+	"context"
+
+	"gorm.io/gorm"
+)
+
+// Regression fixtures for #174.
+//
+// On a mid-chain (clone==0) receiver, Session(&gorm.Session{}) and Debug()
+// return a handle that points at the receiver's Statement. The copy forks a
+// fresh Statement on each use, so using it never changes the original. But a
+// later in-place change to the original leaks into every later use of the
+// copy. WithContext, and Session with Context, PrepareStmt, SkipHooks or
+// NewDB, do not share: they clone the Statement (or start a new one) at once.
+//
+// Session(&gorm.Session{Initialized: true}) returns a clone==0 handle: the
+// result is itself mutable.
+
+// =============================================================================
+// SHOULD REPORT - copy used after the original changed
+// =============================================================================
+
+func sessionAliasUsedAfterBranch(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Model(&User{}).Where("tenant = 1")
+	countQ := q.Session(&gorm.Session{})
+	q.Where("active = 1").Find(&[]User{})
+	countQ.Count(new(int64)) // want `\*gorm\.DB reused: Session/Debug copy shares the Statement of a mutable root`
+}
+
+func debugAliasUsedAfterBranch(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Model(&User{}).Where("tenant = 1")
+	debugQ := q.Debug()
+	q.Where("active = 1").Find(&[]User{})
+	debugQ.Count(new(int64)) // want `\*gorm\.DB reused: Session/Debug copy shares the Statement of a mutable root`
+}
+
+func sessionAliasUsedAfterReassignment(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Model(&User{}).Where("tenant = 1")
+	countQ := q.Session(&gorm.Session{})
+	q = q.Where("active = 1") // changes the shared Statement in place
+	q.Find(&[]User{})
+	countQ.Count(new(int64)) // want `\*gorm\.DB reused: Session/Debug copy shares the Statement of a mutable root`
+}
+
+func sessionAliasOfAliasUsedAfterBranch(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("tenant = 1")
+	countQ := q.Session(&gorm.Session{}).Session(&gorm.Session{DryRun: true})
+	q.Where("active = 1").Find(&[]User{})
+	countQ.Count(new(int64)) // want `\*gorm\.DB reused: Session/Debug copy shares the Statement of a mutable root`
+}
+
+func sessionAliasChainUsedAfterBranch(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("tenant = 1")
+	countQ := q.Session(&gorm.Session{})
+	q.Where("active = 1").Find(&[]User{})
+	countQ.Where("x").Count(new(int64)) // want `\*gorm\.DB reused: Session/Debug copy shares the Statement of a mutable root`
+}
+
+func sessionAliasInClosureAfterBranch(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("tenant = 1")
+	countQ := q.Session(&gorm.Session{})
+	q.Where("active = 1").Find(&[]User{})
+	func() {
+		countQ.Count(new(int64)) // want `\*gorm\.DB reused: Session/Debug copy shares the Statement of a mutable root`
+	}()
+}
+
+func sessionAliasThroughPhiAfterBranch(db *gorm.DB, cond bool) {
+	q := db.Session(&gorm.Session{}).Where("tenant = 1")
+	var countQ *gorm.DB
+	if cond {
+		countQ = q.Session(&gorm.Session{})
+	} else {
+		countQ = q.Debug()
+	}
+	q.Where("active = 1").Find(&[]User{})
+	countQ.Count(new(int64)) // want `\*gorm\.DB reused: Session/Debug copy shares the Statement of a mutable root`
+}
+
+func sessionAliasBoundMethodAfterBranch(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("tenant = 1")
+	countQ := q.Session(&gorm.Session{})
+	q.Where("active = 1").Find(&[]User{})
+	count := countQ.Count
+	count(new(int64)) // want `\*gorm\.DB reused: Session/Debug copy shares the Statement of a mutable root`
+}
+
+// A non-isolating config field (DryRun, QueryFields, Logger...) does not stop
+// the sharing.
+func sessionAliasDryRunAfterBranch(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("tenant = 1")
+	countQ := q.Session(&gorm.Session{DryRun: true, PrepareStmt: false})
+	q.Where("active = 1").Find(&[]User{})
+	countQ.Count(new(int64)) // want `\*gorm\.DB reused: Session/Debug copy shares the Statement of a mutable root`
+}
+
+// A config the linter cannot read is assumed to share.
+func sessionAliasUnknownConfigAfterBranch(db *gorm.DB, cfg *gorm.Session) {
+	q := db.Session(&gorm.Session{}).Where("tenant = 1")
+	countQ := q.Session(cfg)
+	q.Where("active = 1").Find(&[]User{})
+	countQ.Count(new(int64)) // want `\*gorm\.DB reused: Session/Debug copy shares the Statement of a mutable root`
+}
+
+func sessionAliasNonConstFlagAfterBranch(db *gorm.DB, prepare bool) {
+	q := db.Session(&gorm.Session{}).Where("tenant = 1")
+	countQ := q.Session(&gorm.Session{PrepareStmt: prepare})
+	q.Where("active = 1").Find(&[]User{})
+	countQ.Count(new(int64)) // want `\*gorm\.DB reused: Session/Debug copy shares the Statement of a mutable root`
+}
+
+func sessionAliasConfigSetConditionallyAfterBranch(db *gorm.DB, cond bool) {
+	q := db.Session(&gorm.Session{}).Where("tenant = 1")
+	cfg := &gorm.Session{}
+	if cond {
+		cfg.NewDB = true
+	}
+	countQ := q.Session(cfg)
+	q.Where("active = 1").Find(&[]User{})
+	countQ.Count(new(int64)) // want `\*gorm\.DB reused: Session/Debug copy shares the Statement of a mutable root`
+}
+
+// A *gorm.DB parameter is a mutable root (Phase 1b), so its Session copy is
+// checked too.
+func sessionAliasOfParamAfterBranch(tx *gorm.DB) {
+	countQ := tx.Session(&gorm.Session{})
+	tx.Where("active = 1").Find(&[]User{})
+	countQ.Count(new(int64)) // want `\*gorm\.DB reused: Session/Debug copy shares the Statement of a mutable root`
+}
+
+// Session{Initialized: true} returns a mutable value.
+func sessionInitializedIsMutable(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Model(&User{}).Session(&gorm.Session{Initialized: true}).Session(&gorm.Session{})
+	q.Where("a").Find(&[]User{})
+	q.Where("b").Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+func sessionInitializedOnRootIsMutable(db *gorm.DB) {
+	q := db.Session(&gorm.Session{Initialized: true, NewDB: true}).Session(&gorm.Session{})
+	q.Where("a").Find(&[]User{})
+	q.Where("b").Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+func sessionUnknownConfigIsMutable(db *gorm.DB, cfg *gorm.Session) {
+	q := db.Session(&gorm.Session{}).Session(cfg).Session(&gorm.Session{})
+	q.Where("a").Find(&[]User{})
+	q.Where("b").Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+func sessionNonConstInitializedIsMutable(db *gorm.DB, init bool) {
+	q := db.Session(&gorm.Session{}).Session(&gorm.Session{Initialized: init}).Session(&gorm.Session{})
+	q.Where("a").Find(&[]User{})
+	q.Where("b").Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// =============================================================================
+// SHOULD NOT REPORT
+// =============================================================================
+
+// The copy is used before the original changes: the copy forks its own
+// Statement on use, so the original is untouched.
+func sessionAliasUsedBeforeBranch(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("tenant = 1")
+	countQ := q.Session(&gorm.Session{})
+	countQ.Count(new(int64)) // OK
+	q.Where("active = 1").Find(&[]User{})
+}
+
+// Session before each finisher (see e2e TestSessionBeforeFinisher).
+func sessionAliasBeforeEachFinisher(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("tenant = 1")
+	q.Session(&gorm.Session{}).Count(new(int64))
+	q.Session(&gorm.Session{}).Find(&[]User{}) // OK
+	q.Debug().Find(&[]User{})                  // OK
+}
+
+// The copy can branch freely while the original is unchanged.
+func sessionAliasBranchesFreely(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("tenant = 1")
+	s := q.Session(&gorm.Session{})
+	s.Where("a").Find(&[]User{})
+	s.Where("b").Find(&[]User{}) // OK
+	s.Count(new(int64))          // OK
+}
+
+// WithContext clones the Statement at call time.
+func withContextSnapshotIsSafe(ctx context.Context, db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("tenant = 1")
+	ctxQ := q.WithContext(ctx)
+	q.Where("active = 1").Find(&[]User{})
+	ctxQ.Count(new(int64)) // OK
+}
+
+// Session with Context, PrepareStmt, SkipHooks or NewDB does not share.
+func sessionIsolatingConfigsAreSafe(ctx context.Context, db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("tenant = 1")
+	a := q.Session(&gorm.Session{Context: ctx})
+	b := q.Session(&gorm.Session{PrepareStmt: true})
+	c := q.Session(&gorm.Session{SkipHooks: true})
+	d := q.Session(&gorm.Session{NewDB: true})
+	q.Where("active = 1").Find(&[]User{})
+	a.Count(new(int64)) // OK
+	b.Count(new(int64)) // OK
+	c.Count(new(int64)) // OK
+	d.Count(new(int64)) // OK
+}
+
+// A copy of an immutable value never shares a mutable Statement.
+func sessionAliasOfImmutableIsSafe(db *gorm.DB) {
+	base := db.Session(&gorm.Session{})
+	s := base.Session(&gorm.Session{})
+	base.Where("active = 1").Find(&[]User{})
+	base.Where("x").Find(&[]User{})
+	s.Count(new(int64)) // OK
+}
+
+// Initialized snapshots the Statement, so the original is not shared.
+func sessionInitializedSnapshotIsSafe(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("tenant = 1")
+	init := q.Session(&gorm.Session{Initialized: true})
+	q.Where("active = 1").Find(&[]User{})
+	init.Count(new(int64)) // OK: first branch of init
+}
+
+// Initialized with a known false value keeps the result immutable.
+func sessionInitializedFalseIsImmutable(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x").Session(&gorm.Session{Initialized: false})
+	q.Where("a").Find(&[]User{})
+	q.Where("b").Find(&[]User{}) // OK
+}
