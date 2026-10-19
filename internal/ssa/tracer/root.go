@@ -76,7 +76,6 @@ import (
 	"github.com/mpyw/gormreuse/internal/directive"
 	"github.com/mpyw/gormreuse/internal/ssa/callsite"
 	"github.com/mpyw/gormreuse/internal/ssa/cfg"
-	"github.com/mpyw/gormreuse/internal/ssa/pollutionsource"
 	"github.com/mpyw/gormreuse/internal/typeutil"
 )
 
@@ -107,17 +106,22 @@ import (
 // Note: User-defined pure functions (//gormreuse:pure) are NOT immutable sources.
 // They may return mutable values - only builtin pure methods guarantee immutable returns.
 type RootTracer struct {
-	pureFuncs            *directive.DirectiveFuncSet // User-defined pure functions
 	immutableReturnFuncs *directive.DirectiveFuncSet // Functions returning immutable *gorm.DB
 	immutableParamFuncs  *directive.DirectiveFuncSet // Functions whose *gorm.DB params are immutable (opt out of Phase 1b)
-	pure                 *PureVerdicts               // What validating the pure functions found
-	onlyParams           map[*ssa.Function]bool      // Memo of returnsOnlyParams
 	scopesCallbacks      map[*ssa.Function]bool      // Scopes/Preload callbacks (params are mutable roots)
 	immutableCallbacks   map[*ssa.Function]bool      // Transaction/FindInBatches callbacks (fresh tx)
 	fieldRoots           map[fieldRootKey]*FieldRoot // Interned FieldRoots (one per call and field path)
 	allRoots             map[allRootsKey][]ssa.Value // Memo of FindAllMutableRoots
-	aliases              map[aliasedRootsKey]bool    // Memo of mayAlias
 	funcVars             callsite.FuncVars           // Package-level variables that hold one function (#183)
+
+	//declscope:shared // pure.go's IsPureFunction reads it
+	pureFuncs *directive.DirectiveFuncSet // User-defined pure functions
+	//declscope:shared // pure.go reads the verdicts
+	pure *PureVerdicts // What validating the pure functions found
+	//declscope:shared // pure.go's pureReturnsOnlyParams fills it
+	onlyParams map[*ssa.Function]bool // Memo of pureReturnsOnlyParams
+	//declscope:shared // alias.go's mayAlias fills it
+	aliases map[aliasedRootsKey]bool // Memo of mayAlias
 }
 
 // NewRootTracer creates a new RootTracer.
@@ -159,6 +163,15 @@ func NewRootTracer(pureFuncs, immutableReturnFuncs, immutableParamFuncs *directi
 type allRootsKey struct {
 	v        ssa.Value
 	loopInfo *cfg.LoopInfo
+}
+
+// aliasedRootsKey is a collectAliasedRoots search that mayAlias answers.
+//
+//declscope:shared // alias.go's mayAlias keys its memo by it
+type aliasedRootsKey struct {
+	v        ssa.Value
+	loopInfo *cfg.LoopInfo
+	copies   bool
 }
 
 // FindMutableRoot finds the mutable root for a receiver value.
@@ -211,30 +224,6 @@ func (t *RootTracer) FindAllMutableRoots(v ssa.Value, loopInfo *cfg.LoopInfo) []
 	return roots
 }
 
-// IsPureFunction checks if a function is marked as pure (doesn't pollute arguments).
-//
-// A function is pure if:
-//   - It's a builtin pure method (Session, WithContext, Debug, Open, Begin, Transaction)
-//   - It's marked with //gormreuse:pure directive
-//
-// Pure functions don't pollute their *gorm.DB arguments.
-// Note: User-defined pure functions may return mutable values - only builtin pure
-// methods are guaranteed to return immutable values.
-func (t *RootTracer) IsPureFunction(fn *ssa.Function) bool {
-	if fn == nil {
-		return false
-	}
-	if t.isImmutableReturningBuiltin(fn) {
-		return true
-	}
-	// A //gormreuse:pure function that failed its own contract validation is
-	// NOT trusted here: its callers must see the leak it hides.
-	if t.pure.HasFailed(fn) {
-		return false
-	}
-	return t.pureFuncs.Contains(fn)
-}
-
 // Site reads instr as a callsite.Site, resolving a call through a
 // package-level variable that holds one function (#183).
 func (t *RootTracer) Site(instr ssa.CallInstruction) callsite.Site {
@@ -260,6 +249,8 @@ func (t *RootTracer) IsScopesCallbackFunc(fn *ssa.Function) bool {
 // user-defined function sharing a builtin name — a method named Session, a
 // helper named Open — would be silently trusted as immutable-returning (and,
 // via IsPureFunction, as pure), disabling reuse detection around it.
+//
+//declscope:shared // pure.go's IsPureFunction and alias.go's aliasSharesStatement trust gorm builtins with it
 func (t *RootTracer) isImmutableReturningBuiltin(fn *ssa.Function) bool {
 	if fn == nil {
 		return false
@@ -355,7 +346,7 @@ func (t *RootTracer) trace(v ssa.Value, visited map[ssa.Value]bool, loopInfo *cf
 //	_ = func() *gorm.DB { return q.Where("y") }().Find(nil)
 //	      │                        │
 //	      │                        └─── Inner call is traced
-//	      └─── Outer IIFE call triggers traceIIFEReturns
+//	      └─── Outer IIFE call triggers traceClosureReturns
 func (t *RootTracer) traceCall(call *ssa.Call, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) ssa.Value {
 	site := t.Site(call)
 
@@ -366,14 +357,14 @@ func (t *RootTracer) traceCall(call *ssa.Call, visited map[ssa.Value]bool, loopI
 				return root
 			}
 		}
-		if t.returnsOnlyParams(site.Declared) {
+		if t.pureReturnsOnlyParams(site.Declared) {
 			return nil
 		}
 	}
 
 	// Handle closures (IIFE)
 	if site.Kind == callsite.SiteClosure {
-		if root := t.traceIIFEReturns(site.Callee, visited, loopInfo); root != nil {
+		if root := t.traceClosureReturns(site.Callee, visited, loopInfo); root != nil {
 			// If closure result is stored in a variable (Extract instruction),
 			// treat each call as independent root.
 			// Only trace through IIFE when result is directly chained.
@@ -464,285 +455,6 @@ func (t *RootTracer) traceNonCall(v ssa.Value, visited map[ssa.Value]bool, loopI
 	}
 }
 
-// collectInitialEdgeRoots collects roots from INITIAL edges (entry edges) of
-// loop-header Phis, used to detect pre-loop pollution that can propagate through swaps.
-//
-// # Why Only Initial Edges?
-//
-// Loop-header Phis have two types of edges:
-//  1. Initial edge (index 0): Value entering the loop from outside
-//  2. Back-edge (index 1+): Value from loop body (loop iteration update)
-//
-// For loop variable swaps, we only care about pollution from BEFORE the loop starts:
-//   - If variables are clean entering the loop → they stay independent during iteration
-//   - If one is polluted before loop → swap propagates pollution to both
-//
-// Back-edges represent loop-internal assignments (e.g., q1 = q1.Where(...)) which
-// don't pollute the variables themselves - they're just updates.
-//
-// # The Two Scenarios
-//
-// ## Scenario 1: Clean Variables Before Loop (No Violation)
-//
-// Go code:
-//
-//	q1 := db.Where("q1")  // Clean
-//	q2 := db.Where("q2")  // Clean
-//	for _, item := range items {
-//	    if item%2 == 0 {
-//	        q1, q2 = q2, q1  // Swap
-//	    }
-//	    q1 = q1.Where(...)   // Assignment (not polluting)
-//	}
-//	q1.Find(nil)  // First actual use - OK
-//	q2.Find(nil)  // First actual use - OK
-//
-// SSA trace for q2.Find():
-//
-//	Block 1 (loop header):
-//	  t5 = phi [entry: t1, back: t23] #q1
-//	            initial ^^       ^^^ back-edge (assignment result)
-//	  t6 = phi [entry: t3, back: t17] #q2
-//	            initial ^^       ^^^ back-edge (swap result)
-//
-//	Block 5 (swap merge):
-//	  t16 = phi [t5, t6]  ← Swap-phi for q1
-//	  t17 = phi [t6, t5]  ← Swap-phi for q2
-//
-// For q2.Find():
-//   - FindMutableRoot(t6) → t17 (swap-phi, treated as independent)
-//   - FindAllMutableRoots(t6) calls this function:
-//     → collectInitialEdgeRoots([t5, t6], t17, ...)
-//     → Traces t5's initial edge: t1 (clean, no pollution)
-//     → Traces t6's initial edge: t3 (clean, no pollution)
-//     → Returns [t1, t3, t17]
-//   - Check pollution: t1 (clean), t3 (clean), t17 (clean)
-//   - Result: No violation ✓
-//
-// ## Scenario 2: Pre-Polluted Variable (Violation Detected)
-//
-// Go code:
-//
-//	q1 := db.Where("q1")
-//	q2 := db.Where("q2")
-//	q1.Find(nil)  // ← Pollute q1 BEFORE loop
-//	for _, item := range items {
-//	    if item%2 == 0 {
-//	        q1, q2 = q2, q1  // Swap propagates pollution!
-//	    }
-//	    q1 = q1.Where(...)  // ← Uses potentially polluted value
-//	}
-//
-// SSA trace for q1.Where() inside loop:
-//
-//	Block 0:
-//	  t1 = db.Where("q1")
-//	  t3 = db.Where("q2")
-//	  t1.Find(nil)  ← t1 is now polluted
-//
-//	Block 1 (loop header):
-//	  t5 = phi [entry: t1, back: t23]  ← t1 is polluted!
-//	            initial ^^
-//	  t6 = phi [entry: t3, back: t17]
-//	            initial ^^
-//
-//	Block 5 (swap merge):
-//	  t16 = phi [t5, t6]  ← May contain t1 (polluted) or t6 (clean)
-//	  t17 = phi [t6, t5]  ← May contain t6 (clean) or t5 (polluted)
-//
-// For t16.Where() (the assignment in loop):
-//   - FindMutableRoot(t16) → t16 (swap-phi)
-//   - FindAllMutableRoots(t16) calls this function:
-//     → collectInitialEdgeRoots([t5, t6], t16, ...)
-//     → Traces t5's initial edge: t1 (POLLUTED! ✗)
-//     → Traces t6's initial edge: t3 (clean)
-//     → Returns [t1, t3, t16]
-//   - Check pollution: t1 is polluted!
-//   - Result: Violation detected ✓
-//
-// # Implementation Details
-//
-// For each loop-header Phi:
-//  1. Get the first edge (index 0) - this is the initial/entry edge
-//  2. Skip if nil constant or already visited (cycle detection)
-//  3. Recursively trace using traceAll() to find all possible roots
-//  4. Collect all roots from all loop-header Phis
-//  5. Add the swap-phi itself as a root (for independent tracking)
-//
-// # Return Value
-//
-// Returns a list of roots that includes:
-//   - All roots from initial edges of all loop-header Phis
-//   - The swap-phi itself (for treating it as an independent root in some contexts)
-//
-// This allows pollution detection to:
-//   - Check if ANY initial value was polluted before the loop
-//   - Treat the swap-phi as a separate entity for FindMutableRoot()
-func (t *RootTracer) collectInitialEdgeRoots(loopHeaderPhis []*ssa.Phi, swapPhi ssa.Value, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) []ssa.Value {
-	var roots []ssa.Value
-	for _, loopPhi := range loopHeaderPhis {
-		// Get the initial edge (first edge, not back-edge)
-		if len(loopPhi.Edges) > 0 {
-			initialEdge := loopPhi.Edges[0]
-			if !isNilPhiEdge(initialEdge) && !visited[initialEdge] {
-				roots = append(roots, t.traceAll(initialEdge, visited, loopInfo)...)
-			}
-		}
-	}
-	// Also include the swap-phi itself as a root
-	roots = append(roots, swapPhi)
-	return roots
-}
-
-func (t *RootTracer) tracePhi(phi *ssa.Phi, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) ssa.Value {
-	// For loop-header Phi nodes, prioritize back-edges over initial edges
-	// This ensures we return the loop-internal assignment result, not the pre-loop initial value
-	if loopInfo != nil && loopInfo.IsLoopHeader(phi.Block()) {
-		phiBlock := phi.Block()
-		phiBlockIndex := slices.Index(phi.Parent().Blocks, phiBlock)
-
-		// First pass: try back-edges (predecessors with higher indices)
-		if phiBlockIndex >= 0 {
-			for i, edge := range phi.Edges {
-				if isNilPhiEdge(edge) || visited[edge] {
-					continue
-				}
-				// Check if this is a back-edge (predecessor comes after phi block)
-				predIndex := slices.Index(phi.Parent().Blocks, phiBlock.Preds[i])
-				// Back-edge: predecessor comes after phi block (loops back)
-				if predIndex > phiBlockIndex {
-					if root := t.trace(edge, visited, loopInfo); root != nil {
-						return root
-					}
-				}
-			}
-
-			// Second pass: try forward-edges if no back-edge root found
-			for _, edge := range phi.Edges {
-				if isNilPhiEdge(edge) || visited[edge] {
-					continue
-				}
-				if root := t.trace(edge, visited, loopInfo); root != nil {
-					return root
-				}
-			}
-		}
-		return nil
-	}
-
-	// =========================================================================
-	// NON-LOOP-HEADER PHI: Conditional Merge Patterns
-	// =========================================================================
-	//
-	// Non-loop-header Phis represent merges in conditional code (if/else).
-	// We need to handle several patterns correctly:
-	//
-	// ## Pattern 1: Loop Variable Swap (Special Case)
-	//
-	// When variables are swapped inside a loop:
-	//
-	//   for _, item := range items {
-	//       if item%2 == 0 {
-	//           q1, q2 = q2, q1  // ← Creates swap-phi
-	//       }
-	//       q1 = q1.Where(...)    // ← Uses merged value
-	//   }
-	//
-	// SSA:
-	//   Block 1 (loop header):
-	//     t5 = phi [entry, back] #q1
-	//     t6 = phi [entry, back] #q2
-	//   Block 5 (after if):
-	//     t16 = phi [no-swap: t5, swap: t6]  ← Swap-phi
-	//     t17 = phi [no-swap: t6, swap: t5]  ← Swap-phi sibling
-	//
-	// For loop variable swaps, we treat the swap-phi itself as the root,
-	// keeping q1 and q2 independent during loop iteration.
-	//
-	// ## Pattern 2: Reassignment to Same Symbol in If (Regular Phi)
-	//
-	// When a variable is reassigned in only one branch:
-	//
-	//   q := db.Where("base")
-	//   if cond {
-	//       q = q.Where("extra")  // ← Reassignment
-	//   }
-	//   q.Find(nil)  // ← Uses merged value
-	//
-	// SSA:
-	//   Block 0:
-	//     t1 = db.Where("base")
-	//   Block 1 (if.then):
-	//     t2 = t1.Where("extra")
-	//   Block 2 (if.done):
-	//     t3 = phi [no-if: t1, if: t2] #q
-	//                      ^^      ^^
-	//                      Different values, but same LINEAGE
-	//
-	// This is NOT a swap (no sibling), just a regular conditional update.
-	// We trace through the phi normally to find the root (t1 or t2's root).
-	//
-	// ## Pattern 3: Different Symbols Merged (Regular Phi)
-	//
-	// When different variables are assigned in different branches:
-	//
-	//   var q *gorm.DB
-	//   if cond {
-	//       q = db.Where("a")  // ← First definition
-	//   } else {
-	//       q = db.Where("b")  // ← Second definition
-	//   }
-	//   q.Find(nil)  // ← Uses merged value
-	//
-	// SSA:
-	//   Block 2 (if.done):
-	//     t3 = phi [if: t1, else: t2] #q
-	//                   ^^       ^^
-	//                   Different roots, need to check ALL
-	//
-	// This is also NOT a swap, we trace through normally and FindAllMutableRoots
-	// will collect all possible roots (t1 and t2) for pollution checking.
-	//
-	// ## Detection Logic
-	//
-	// We only apply special swap-phi handling if ALL conditions are met:
-	//   1. loopInfo != nil (we're inside a loop context)
-	//   2. findSwapPhiSibling(phi) != nil (this phi has a swap sibling)
-	//   3. getLoopHeaderPhiEdges(phi) != nil (edges are loop-header phis)
-	//
-	// If any condition fails, we fall through to regular tracing.
-	//
-	if loopSwapPhis(phi, loopInfo) != nil {
-		// Loop variable swap detected - return phi as independent root
-		// This prevents cross-contamination between swapped loop variables
-		return phi
-	}
-
-	// =========================================================================
-	// REGULAR TRACING: Standard Phi Handling
-	// =========================================================================
-	//
-	// For all other cases (non-swap phis, or swaps without loop context):
-	//   - Trace through all edges to find the first mutable root
-	//   - Skip nil constants and already-visited values (cycle detection)
-	//   - Return the first root found, or nil if no root exists
-	//
-	// This handles:
-	//   - Simple reassignment in if: q = q.Where("x") in one branch
-	//   - Different values merged: if { q = a } else { q = b }
-	//   - Conditional swaps outside loops
-	//
-	for _, edge := range phi.Edges {
-		if isNilPhiEdge(edge) || visited[edge] {
-			continue
-		}
-		if root := t.trace(edge, visited, loopInfo); root != nil {
-			return root
-		}
-	}
-	return nil
-}
-
 func (t *RootTracer) traceUnOp(unop *ssa.UnOp, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) ssa.Value {
 	if unop.Op == token.MUL {
 		// Pointer dereference - trace through the pointer
@@ -814,93 +526,6 @@ func (t *RootTracer) internFieldRoot(r *FieldRoot) ssa.Value {
 	}
 	t.fieldRoots[key] = r
 	return r
-}
-
-// traceIIFEReturns traces through an immediately invoked function expression.
-//
-// IIFE pattern:
-//
-//	_ = func() *gorm.DB {
-//	    return q.Where("y")   // ← trace this return value
-//	}().Find(nil)
-//
-// This allows treating the entire IIFE chain as a single branch from q,
-// rather than two separate branches (IIFE internal + Find external).
-//
-// We clone the visited map to avoid polluting the parent's tracking state.
-func (t *RootTracer) traceIIFEReturns(fn *ssa.Function, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) ssa.Value {
-	if fn.Signature == nil {
-		return nil
-	}
-	results := fn.Signature.Results()
-	if results == nil || results.Len() == 0 || !typeutil.IsGormDB(results.At(0).Type()) {
-		return nil
-	}
-
-	// Collect ALL roots from all return statements
-	var allRoots []ssa.Value
-	for _, block := range fn.Blocks {
-		for _, instr := range block.Instrs {
-			ret, ok := instr.(*ssa.Return)
-			if !ok || len(ret.Results) == 0 {
-				continue
-			}
-			// Clone visited map to isolate closure's tracing state
-			retVisited := maps.Clone(visited)
-			if root := t.trace(ret.Results[0], retVisited, loopInfo); root != nil {
-				allRoots = append(allRoots, root)
-			}
-		}
-	}
-
-	if len(allRoots) == 0 {
-		return nil
-	}
-
-	// If all roots are the same, return that root
-	firstRoot := allRoots[0]
-	allSame := true
-	for _, root := range allRoots[1:] {
-		if root != firstRoot {
-			allSame = false
-			break
-		}
-	}
-
-	if allSame {
-		return firstRoot
-	}
-
-	// Multiple different roots - return nil to signal caller should use call itself
-	// This happens with conditional returns like:
-	//   func() *gorm.DB { if cond { return q1 } else { return q2 } }()
-	return nil
-}
-
-// traceAllIIFEReturns is the multi-root version of traceIIFEReturns.
-// It collects roots from ALL return statements in the closure.
-func (t *RootTracer) traceAllIIFEReturns(fn *ssa.Function, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) []ssa.Value {
-	if fn.Signature == nil {
-		return nil
-	}
-	results := fn.Signature.Results()
-	if results == nil || results.Len() == 0 || !typeutil.IsGormDB(results.At(0).Type()) {
-		return nil
-	}
-
-	var allRoots []ssa.Value
-	for _, block := range fn.Blocks {
-		for _, instr := range block.Instrs {
-			ret, ok := instr.(*ssa.Return)
-			if !ok || len(ret.Results) == 0 {
-				continue
-			}
-			retVisited := maps.Clone(visited)
-			roots := t.traceAll(ret.Results[0], retVisited, loopInfo)
-			allRoots = append(allRoots, roots...)
-		}
-	}
-	return allRoots
 }
 
 // traceAll finds ALL possible mutable roots, handling Phi nodes specially.
@@ -990,7 +615,7 @@ func (t *RootTracer) traceAll(v ssa.Value, visited map[ssa.Value]bool, loopInfo 
 		if loopHeaderPhis := loopSwapPhis(val, loopInfo); loopHeaderPhis != nil {
 			// Loop variable swap detected:
 			// Return initial edges (to check pre-loop pollution) + swap-phi itself
-			return t.collectInitialEdgeRoots(loopHeaderPhis, val, visited, loopInfo)
+			return t.collectInitialPhiEdgeRoots(loopHeaderPhis, val, visited, loopInfo)
 		}
 
 		// =====================================================================
@@ -1043,7 +668,7 @@ func (t *RootTracer) traceAll(v ssa.Value, visited map[ssa.Value]bool, loopInfo 
 		// Handle closure calls (IIFE) - collect ALL roots from all returns. A
 		// call through a method value is a call of its own (see traceCall).
 		if site.Kind == callsite.SiteClosure {
-			if roots := t.traceAllIIFEReturns(site.Callee, visited, loopInfo); len(roots) > 0 {
+			if roots := t.traceAllClosureReturns(site.Callee, visited, loopInfo); len(roots) > 0 {
 				// If closure result is stored, treat call itself as root
 				if isClosureResultStored(val) {
 					return []ssa.Value{val}
@@ -1085,7 +710,7 @@ func (t *RootTracer) traceAllPointerLoads(load *ssa.UnOp, visited map[ssa.Value]
 	case *ssa.Phi:
 		// Check for loop variable swap pattern
 		if loopHeaderPhis := loopSwapPhis(p, loopInfo); loopHeaderPhis != nil {
-			return t.collectInitialEdgeRoots(loopHeaderPhis, p, visited, loopInfo)
+			return t.collectInitialPhiEdgeRoots(loopHeaderPhis, p, visited, loopInfo)
 		}
 
 		// Regular Phi - traverse all edges
@@ -1093,20 +718,6 @@ func (t *RootTracer) traceAllPointerLoads(load *ssa.UnOp, visited map[ssa.Value]
 	default:
 		return t.traceAll(p, visited, loopInfo)
 	}
-}
-
-// traceAllPhiEdges collects all mutable roots reachable through a Phi node's
-// incoming edges, skipping nil constants and already-visited values. Shared by
-// the Phi cases of traceAll and traceAllPointerLoads.
-func (t *RootTracer) traceAllPhiEdges(phi *ssa.Phi, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) []ssa.Value {
-	var roots []ssa.Value
-	for _, edge := range phi.Edges {
-		if isNilPhiEdge(edge) || visited[edge] {
-			continue
-		}
-		roots = append(roots, t.traceAll(edge, visited, loopInfo)...)
-	}
-	return roots
 }
 
 // isMutableParam reports whether p should be treated as a mutable root.
@@ -1185,232 +796,6 @@ func (t *RootTracer) isImmutableSource(v ssa.Value) bool {
 func (t *RootTracer) IsImmutableCall(v ssa.Value) bool {
 	call, ok := v.(*ssa.Call)
 	return ok && t.isImmutableSource(call)
-}
-
-// FindAliasedRoots returns the mutable roots whose Statement v may read later:
-// through a Session or Debug copy (#174), or as a read-only argument of a call
-// in v's chain, such as a subquery (#185).
-//
-// On a clone==0 receiver, Session(&gorm.Session{}) and Debug() return a handle
-// that shares the receiver's Statement. Each use of the copy forks its own
-// Statement, so it does not change the receiver. But it reads the receiver's
-// Statement as it is at that moment. So each use of the copy is a pure use of
-// the receiver's root at the use's own position:
-//
-//	q := db.Where("tenant")       // root
-//	countQ := q.Session(&gorm.Session{})
-//	q.Where("active").Find(nil)   // changes q's Statement in place
-//	countQ.Count(nil)             // reads it: pure use of q's root, after a branch
-//
-// Copies of copies are followed, so q.Session(...).Debug() still reaches q's
-// root. A copy reached through a Phi, a variable, or a closure capture is found
-// the same way as a mutable root.
-//
-// A subquery is kept in the Statement of the chain it is passed to, and GORM
-// builds it from the argument when the chain runs. So each use of the chain
-// reads the argument's root too:
-//
-//	x := db.Where("id IN (?)", sub)
-//	sub.Where("age > 1").Find(nil) // changes sub's Statement in place
-//	x.Find(nil)                    // builds the subquery from it
-//
-// Every call in v's chain is searched for such arguments, through Session and
-// WithContext too, since a cloned Statement still holds the argument. A
-// Session copy below another chain call is not an alias: that call forked its
-// own Statement.
-func (t *RootTracer) FindAliasedRoots(v ssa.Value, loopInfo *cfg.LoopInfo) []AliasedRoot {
-	var roots []AliasedRoot
-	t.collectAliasedRoots(v, loopInfo, true, make(map[aliasedRootVisit]bool), &roots)
-	return roots
-}
-
-// AliasedRoot is a mutable root that a value reads, and the call it reads it
-// through: the Session or Debug call that took the copy, or, when Argument is
-// set, the call that took the root as a read-only argument.
-type AliasedRoot struct {
-	Root     ssa.Value
-	Copy     *ssa.Call
-	Argument bool
-}
-
-// aliasedRootVisit is a call visited by collectAliasedRoots, and whether Session
-// and Debug copies still counted there.
-type aliasedRootVisit struct {
-	call   *ssa.Call
-	copies bool
-}
-
-// collectAliasedRoots adds to roots the mutable roots that v reaches through
-// Statement-sharing builtin calls, while copies is set, and through read-only
-// arguments of the gorm calls in its chain. seen stops cycles through loops.
-//
-// A search that mayAlias says adds nothing is skipped. Without that, a chain
-// of n conditional reassignments takes time cubic in n (#260): each of the n
-// calls searches n steps down the chain, and each step goes through the n
-// roots of its receiver. Skipping such a search does not change what is added
-// or in what order: everything it would reach adds nothing either.
-func (t *RootTracer) collectAliasedRoots(v ssa.Value, loopInfo *cfg.LoopInfo, copies bool, seen map[aliasedRootVisit]bool, roots *[]AliasedRoot) {
-	if !t.mayAlias(v, loopInfo, copies) {
-		return
-	}
-	for _, candidate := range t.FindAllMutableRoots(v, loopInfo) {
-		call, site, ok := t.aliasStep(candidate)
-		if !ok || seen[aliasedRootVisit{call, copies}] {
-			continue
-		}
-		seen[aliasedRootVisit{call, copies}] = true
-		isCopy := copies && t.sharesReceiverStatement(site)
-		if isCopy {
-			if r := t.FindMutableRoot(site.Recv, loopInfo); r != nil {
-				*roots = append(*roots, AliasedRoot{Root: r, Copy: call})
-			}
-		}
-		for _, arg := range pollutionsource.ReadOnlyGormArgs(site) {
-			if r := t.FindMutableRoot(arg, loopInfo); r != nil {
-				*roots = append(*roots, AliasedRoot{Root: r, Copy: call, Argument: true})
-			}
-			t.collectAliasedRoots(arg, loopInfo, true, seen, roots)
-		}
-		t.collectAliasedRoots(site.Recv, loopInfo, isCopy, seen, roots)
-	}
-}
-
-// aliasedRootsKey is a collectAliasedRoots search that mayAlias answers.
-type aliasedRootsKey struct {
-	v        ssa.Value
-	loopInfo *cfg.LoopInfo
-	copies   bool
-}
-
-// mayAlias reports whether collectAliasedRoots(v, loopInfo, copies, ...) may
-// add a root. The answer is computed once per search. A search that reaches
-// itself again through a loop is assumed to add one.
-func (t *RootTracer) mayAlias(v ssa.Value, loopInfo *cfg.LoopInfo, copies bool) bool {
-	key := aliasedRootsKey{v, loopInfo, copies}
-	if may, ok := t.aliases[key]; ok {
-		return may
-	}
-	t.aliases[key] = true
-	may := slices.ContainsFunc(t.FindAllMutableRoots(v, loopInfo), func(candidate ssa.Value) bool {
-		_, site, ok := t.aliasStep(candidate)
-		if !ok {
-			return false
-		}
-		isCopy := copies && t.sharesReceiverStatement(site)
-		if isCopy && t.FindMutableRoot(site.Recv, loopInfo) != nil {
-			return true
-		}
-		for _, arg := range pollutionsource.ReadOnlyGormArgs(site) {
-			if t.FindMutableRoot(arg, loopInfo) != nil || t.mayAlias(arg, loopInfo, true) {
-				return true
-			}
-		}
-		return t.mayAlias(site.Recv, loopInfo, isCopy)
-	})
-	t.aliases[key] = may
-	return may
-}
-
-// aliasStep returns the gorm method call that collectAliasedRoots goes
-// through at candidate, and its Site, or false when it does not go through
-// candidate. A call through a method value (w := q.Where; w(x, sub)) is read
-// as the method call it stands for (#178).
-func (t *RootTracer) aliasStep(candidate ssa.Value) (*ssa.Call, callsite.Site, bool) {
-	call, ok := candidate.(*ssa.Call)
-	if !ok {
-		return nil, callsite.Site{}, false
-	}
-	site := t.Site(call)
-	if !site.IsGormMethod() || site.Recv == nil {
-		return nil, callsite.Site{}, false
-	}
-	return call, site, true
-}
-
-// sharesReceiverStatement reports whether site is a gorm Session or Debug
-// method call whose result may share its receiver's Statement.
-func (t *RootTracer) sharesReceiverStatement(site callsite.Site) bool {
-	if !t.isImmutableReturningBuiltin(site.Declared) || site.Recv == nil {
-		return false
-	}
-	return site.SessionEffect().SharesStatement
-}
-
-// pureReturnedArgs returns the arguments of a call to a trusted
-// //gormreuse:pure function that its *gorm.DB result may be (#188), or nil.
-//
-// The result is traced to these arguments first, so `r := pReturn(q)` makes r
-// a branch of q's root. When none of them has a mutable root (they are all
-// immutable, or the tracer cannot follow them), the result is immutable only
-// if the function returns nothing else (returnsOnlyParams). Otherwise the call
-// stays its own root: the function may also return a fresh mutable chain.
-//
-// A tuple result such as (*gorm.DB, error) follows the same rule (#176): its
-// *gorm.DB elements share the call as their root, so they are traced to the
-// returned arguments together.
-func (t *RootTracer) pureReturnedArgs(site callsite.Site) []ssa.Value {
-	if !typeutil.HasGormDBResult(site.Instr.(*ssa.Call).Type()) {
-		return nil
-	}
-	// A call through a method value passes its receiver as a binding, not
-	// as an argument; put it back so a pure method returning it is followed.
-	args := site.Args
-	if site.Recv != nil {
-		args = append([]ssa.Value{site.Recv}, args...)
-	}
-	args = t.pure.ReturnedArgs(site.Declared, args)
-	if len(args) == 0 || !t.IsPureFunction(site.Declared) {
-		return nil
-	}
-	return args
-}
-
-// ReturnsOnlyParams reports whether every mutable root of the values fn
-// returns is one of fn's own parameters. The analyzer exports it for the pure
-// functions that may return an argument (#195).
-func (t *RootTracer) ReturnsOnlyParams(fn *ssa.Function) bool {
-	return t.returnsOnlyParams(fn)
-}
-
-// returnsOnlyParams reports whether every mutable root of the values fn
-// returns is one of fn's own parameters, so fn returns an immutable value when
-// its arguments are immutable. `if c { return db.Session(s).Where("x") };
-// return db` also returns a fresh chain, so it does not.
-func (t *RootTracer) returnsOnlyParams(fn *ssa.Function) bool {
-	// An instance or a bound method wrapper runs the declared body.
-	fn = directive.DeclaredFunc(fn)
-	if only, ok := t.onlyParams[fn]; ok {
-		return only
-	}
-	// The body of a function of another package is not built, so its package
-	// decided (#195).
-	if fn.Blocks == nil {
-		return t.pure != nil && t.pure.Imported.Of(fn).ReturnsOnlyParams
-	}
-	// A recursive call may return anything until fn is decided.
-	t.onlyParams[fn] = false
-	only := true
-	for _, block := range fn.Blocks {
-		for _, instr := range block.Instrs {
-			ret, ok := instr.(*ssa.Return)
-			if !ok {
-				continue
-			}
-			// Every *gorm.DB result counts, in any position of a tuple (#176).
-			for _, res := range ret.Results {
-				if !typeutil.IsGormDB(res.Type()) {
-					continue
-				}
-				for _, root := range t.traceAll(res, make(map[ssa.Value]bool), nil) {
-					if p, isParam := root.(*ssa.Parameter); !isParam || p.Parent() != fn {
-						only = false
-					}
-				}
-			}
-		}
-	}
-	t.onlyParams[fn] = only
-	return only
 }
 
 // returnsImmutable reports whether a call to callee yields an immutable

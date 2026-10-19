@@ -256,13 +256,14 @@ gormreuse/
 │       │   ├── collect.go       # Scopes/Preload, Transaction/FindInBatches, immutable-input collectors; CollectedCallbackArgs
 │       │   └── reach.go         # DropReachableCallbacks: drop callbacks that something else calls (#191)
 │       ├── tracer/              # Where a *gorm.DB value's mutable root is
-│       │   ├── root.go          # RootTracer, NewRootTracer, RootBlock: trace dispatch, aliases, IIFEs
+│       │   ├── root.go          # RootTracer, NewRootTracer, RootBlock: trace dispatch, calls, immutable sources
 │       │   ├── store.go         # AllocStoredValues, FieldStoredValues: which stores reach a load
 │       │   ├── field.go         # FieldRoot, SameField: field paths and roots of returned structs
 │       │   ├── freevar.go       # FreeVarBinding: the value a closure captured
-│       │   ├── phi.go           # Loop variable swaps through Phis
-│       │   ├── pure.go          # PureVerdicts: what validating the pure functions found
-│       │   └── closure.go       # ClosureCapturesGormDB, stored closure results
+│       │   ├── phi.go           # Phi edges, loop variable swaps through Phis
+│       │   ├── pure.go          # PureVerdicts, IsPureFunction: pure calls and the arguments they return
+│       │   ├── alias.go         # FindAliasedRoots: Session/Debug copies and read-only arguments a value reads
+│       │   └── closure.go       # ClosureCapturesGormDB, IIFE returns, stored closure results
 │       ├── pollution/tracker.go # Tracker: records uses, DetectViolations
 │       ├── pollutionsource/     # Which uses leak a *gorm.DB; read-only query arguments
 │       ├── cfg/                 # Control flow of one function
@@ -511,7 +512,7 @@ Limitation: every `*gorm.DB` element of one tuple shares the call as its root. `
 
 ### Calls through a method value (#178)
 
-The tracer resolves a call `w(x)` through a method value `w := r.m` as the call `r.m(x)`. `callsite.SiteOf` reads it as a `SiteBound` site: `Declared` is the declared method (`directive.DeclaredFunc` of the `m$bound` wrapper), `Recv` the receiver (`MakeClosure.Bindings[0]`), and `Args` the other arguments. `traceCall`, `traceAll`, `isImmutableSource`, `pureReturnedArgs` and the Session/Debug copy checks (`sharesReceiverStatement`, `Site.SessionEffect`, `collectAliasedRoots`) all read the call through it. The call handler, the pure validator and `pollutionsource.CallReadOnlyArgs` read it the same way. Code that still reads the `m$bound` wrapper as a plain function, such as `go`/`defer` of a method value, calls `Site.StaticSite()` (#266). So:
+The tracer resolves a call `w(x)` through a method value `w := r.m` as the call `r.m(x)`. `callsite.SiteOf` reads it as a `SiteBound` site: `Declared` is the declared method (`directive.DeclaredFunc` of the `m$bound` wrapper), `Recv` the receiver (`MakeClosure.Bindings[0]`), and `Args` the other arguments. `traceCall`, `traceAll`, `isImmutableSource`, `pureReturnedArgs` and the Session/Debug copy checks (`aliasSharesStatement`, `Site.SessionEffect`, `collectAliasedRoots`) all read the call through it. The call handler, the pure validator and `pollutionsource.CallReadOnlyArgs` read it the same way. Code that still reads the `m$bound` wrapper as a plain function, such as `go`/`defer` of a method value, calls `Site.StaticSite()` (#266). So:
 
 | Code | Result |
 | --- | --- |
@@ -663,15 +664,15 @@ A pure function does not pollute its argument, but it may return it: `func p(db 
 | Summary | `Validator.ReturnedParams` seeds one parameter at a time, propagates as above, and reports the parameter when a `Return` carries a derived value. Seeding one at a time keeps `func(a, b *gorm.DB) *gorm.DB { return a }` from aliasing `b`. |
 | Transitivity | The result of a trusted pure call is derived when it may return a derived argument, so a pure wrapper of `p` returns its argument too. `validatePureFuncs` repeats until the summaries stop growing. |
 | Caller | `RootTracer.pureReturnedArgs` traces the call result to the arguments it may be. The first one with a mutable root is the root; `traceAll` returns the roots of all of them. The summary is keyed by the declared function, so a generic instance and a method value (`same := r.Same; same(q)`, whose arguments lack the receiver) use it too (`PureVerdicts.ReturnedArgs`). |
-| Immutable argument | When no returned argument has a mutable root, the result is immutable only when every root of the callee's returns is one of its own parameters (`returnsOnlyParams`). `p(db.Session(s))` is then immutable. `if c { return db.Session(s).Where("x") }; return db` can also return a fresh chain, so its call stays its own root. |
+| Immutable argument | When no returned argument has a mutable root, the result is immutable only when every root of the callee's returns is one of its own parameters (`pureReturnsOnlyParams`). `p(db.Session(s))` is then immutable. `if c { return db.Session(s).Where("x") }; return db` can also return a fresh chain, so its call stays its own root. |
 | Inside a pure function | Branching such a result branches the argument, so `p(db).Find(nil)` inside a pure function is a definitive violation, and that function is no longer trusted at its call sites. |
 
 Decisions and limitations:
 
 - **The argument wins when the result may be either.** A result that may be the argument or a fresh chain is treated as the argument. A branch from it is then counted against the argument, which can report a reuse on the fresh path. Treating it as fresh would miss the reuse on the other path.
 - **A Session-isolated result is not an alias.** `db.Session(&gorm.Session{}).Where(...)` gets its own Statement copy at the `Where` (`TestPureSessionResultIsolated` in `e2e/internal`), so the documented `withTenant` pattern keeps a fresh root, as the README says.
-- **A tuple result follows the same rule (#176).** `Validator.ReturnedParams` already looks at every operand of each `Return`, so `return db, nil` records `db`. `pureReturnedArgs` accepts a tuple result, and `returnsOnlyParams` checks every `*gorm.DB` operand, in any position. The `*gorm.DB` elements of one tuple share the call as their root (see [Results the tracer cannot see through](#results-the-tracer-cannot-see-through-176)), so they are all traced to the returned arguments.
-- **Across packages.** `ReturnedParams` needs the callee's body, so the declaring package exports the summary and `returnsOnlyParams` in its fact (#195, `pureReturnedArg` in `testdata/src/externalpure/use.go`).
+- **A tuple result follows the same rule (#176).** `Validator.ReturnedParams` already looks at every operand of each `Return`, so `return db, nil` records `db`. `pureReturnedArgs` accepts a tuple result, and `pureReturnsOnlyParams` checks every `*gorm.DB` operand, in any position. The `*gorm.DB` elements of one tuple share the call as their root (see [Results the tracer cannot see through](#results-the-tracer-cannot-see-through-176)), so they are all traced to the returned arguments.
+- **Across packages.** `ReturnedParams` needs the callee's body, so the declaring package exports the summary and `pureReturnsOnlyParams` in its fact (#195, `pureReturnedArg` in `testdata/src/externalpure/use.go`).
 - **The receiver.** The receiver is not seeded, so a pure method that returns `r.db` is not an alias of anything.
 
 ## Immutable-return body contract (#194)
@@ -705,7 +706,7 @@ Now `exportFacts` in `internal/analyzer.go` exports a `facts.Func` object fact f
 | --- | --- | --- |
 | `Pure` | Marked `pure`, valid or not, as `DirectiveFuncSet.Contains` decides in the package | `DirectiveFuncSet.Import` on the pure set |
 | `PureFailed` | The body definitively breaks the contract | `PureVerdicts.HasFailed`. So a pure function that passes its argument to it fails too (#187) |
-| `Returned`, `ReturnsOnlyParams` | The parameters the result may be (#188), and whether nothing else is returned | `PureVerdicts.ReturnedArgs`, `RootTracer.returnsOnlyParams` |
+| `Returned`, `ReturnsOnlyParams` | The parameters the result may be (#188), and whether nothing else is returned | `PureVerdicts.ReturnedArgs`, `RootTracer.pureReturnsOnlyParams` |
 | `ImmutableReturn` | Marked `immutable-return`, and `ImmutableReturnValidator` reports nothing | `DirectiveFuncSet.Import` on the immutable-return set |
 | `BranchesImmutableParam` | In `needsImmutableParam` | The caller-side check (`handler.Context.NeedsImmutableParam`) |
 | `ImmutableInput` | Marked `immutable-input(name)`, and `ValidateImmutableInputs` reports nothing | `ImmutableInputSet.Import`. The callback collectors and the body check then see the callee's callbacks |
