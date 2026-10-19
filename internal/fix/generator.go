@@ -39,12 +39,14 @@ import (
 	"cmp"
 	"go/ast"
 	"go/token"
+	"go/types"
 	"slices"
 	"strconv"
 
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/analysis/passes/inspect"
 	"golang.org/x/tools/go/ast/astutil"
+	"golang.org/x/tools/go/ast/edge"
 	"golang.org/x/tools/go/ast/inspector"
 	"golang.org/x/tools/go/ssa"
 
@@ -111,11 +113,15 @@ func (g *Generator) Generate(v pollution.Violation) []analysis.SuggestedFix {
 		return nil // No uses to fix
 	}
 
+	// The variable a reassignment rewrites. nil means no reassignment is safe,
+	// and the fix falls back to a Session at the root.
+	target := g.findReassignTarget(root, allUses)
+
 	// Phase 1: Identify non-finisher uses that need reassignment
-	nonFinisherUses := g.findNonFinisherUses(allUses)
+	nonFinisherUses := g.findNonFinisherUses(allUses, target)
 
 	// Phase 2: Simulate reassignments and find roots needing Session
-	virtualUses := g.simulateReassignments(root, allUses)
+	virtualUses := g.simulateReassignments(root, allUses, target)
 	rootsNeedingSession := g.findRootsNeedingSession(virtualUses)
 
 	// Generate TextEdits
@@ -126,7 +132,7 @@ func (g *Generator) Generate(v pollution.Violation) []analysis.SuggestedFix {
 
 	// PHASE 1: Add reassignments for non-finisher uses (Rule 1)
 	for _, use := range nonFinisherUses {
-		if edit := g.generateReassignmentEdit(use.Pos); edit != nil {
+		if edit := g.generateReassignmentEdit(use.Pos, target); edit != nil {
 			edits = append(edits, *edit)
 		}
 	}
@@ -218,30 +224,37 @@ func (g *Generator) generateImmutableParamFix(p *ssa.Parameter) []analysis.Sugge
 	}}
 }
 
-// findNonFinisherUses finds uses that are non-finisher expression statements.
-func (g *Generator) findNonFinisherUses(uses []pollution.UsageInfo) []pollution.UsageInfo {
+// findNonFinisherUses finds uses that are non-finisher expression statements
+// on target.
+func (g *Generator) findNonFinisherUses(uses []pollution.UsageInfo, target *types.Var) []pollution.UsageInfo {
 	var nonFinishers []pollution.UsageInfo
 	for _, use := range uses {
-		if g.isNonFinisherExprStmt(use.Pos) {
+		if g.isNonFinisherExprStmt(use.Pos, target) {
 			nonFinishers = append(nonFinishers, use)
 		}
 	}
 	return nonFinishers
 }
 
-// isNonFinisherExprStmt checks if a position is a non-finisher expression statement.
-// Non-finisher means the result is not used (e.g., q.Where("a") without assignment).
+// isNonFinisherExprStmt checks if a position is a non-finisher expression
+// statement on target. Non-finisher means the result is not used (e.g.,
+// q.Where("a") without assignment).
 //
 // Returns true only when ALL of the following conditions are met:
 //  1. The statement is an ExprStmt (expression used as statement)
-//  2. The top-level expression is a *gorm.DB method call (checked via receiver type)
-//  3. The method is a non-finisher (chainable method like Where, Limit, etc.)
-//  4. The receiver is assignable (variable, field, etc.)
+//  2. The use is the statement's own top-level call, not a call nested in it
+//  3. The top-level expression is a *gorm.DB method call (checked via receiver type)
+//  4. The method is a non-finisher (chainable method like Where, Limit, etc.)
+//  5. The receiver is an identifier that resolves to target
 //
 // This prevents inappropriate fixes for non-GORM expressions like:
 //
 //	require.NoError(t, tx.Create(...).Error)
-func (g *Generator) isNonFinisherExprStmt(pos token.Pos) bool {
+func (g *Generator) isNonFinisherExprStmt(pos token.Pos, target *types.Var) bool {
+	if target == nil {
+		return false
+	}
+
 	// Find the AST node at this position
 	file := g.findFileContaining(pos)
 	if file == nil {
@@ -271,13 +284,14 @@ func (g *Generator) isNonFinisherExprStmt(pos token.Pos) bool {
 		return false
 	}
 
-	// If the use sits inside an ARGUMENT of the statement's top-level call
-	// (e.g. the reused q in `base.Or(q.Where("y"))`), the use is nested, not on
-	// the receiver spine. Reassigning the whole statement would rebind the wrong
-	// variable (base) and never address the violation root (q) — issue #71
-	// defect 1. Such a use is not a reassignable non-finisher; the root instead
-	// gets a Session at its own definition (Phase 2).
-	if slices.ContainsFunc(callExpr.Args, func(arg ast.Expr) bool { return arg.Pos() <= pos && pos <= arg.End() }) {
+	// A use is recorded at its call's Lparen. A use anywhere else in the
+	// statement is nested: inside an argument (the reused q in
+	// `base.Or(q.Where("y"))`, issue #71 defect 1) or in a call on the
+	// receiver spine. Reassigning the whole statement would rebind the wrong
+	// variable and never address the violation root. Such a use is not a
+	// reassignable non-finisher; the root instead gets a Session at its own
+	// definition (Phase 2).
+	if callExpr.Lparen != pos {
 		return false
 	}
 
@@ -296,9 +310,10 @@ func (g *Generator) isNonFinisherExprStmt(pos token.Pos) bool {
 		}
 	}
 
-	// Check if the receiver is assignable (variable, field, etc.)
-	// This prevents fixes for non-assignable receivers like function call results
-	if g.extractAssignableLHS(sel.X) == "" {
+	// The receiver must be the variable that holds the root. In `base.Or(q)`
+	// the root q is an argument, and in `r.Where("a")` r is an alias of q;
+	// rebinding base or r would not address q (issue #198).
+	if !g.refersTo(sel.X, target) {
 		return false
 	}
 
@@ -342,7 +357,7 @@ type virtualRootKey struct {
 
 // simulateReassignments simulates Phase 1 reassignments and returns virtual uses.
 // Returns a map from virtual root keys to their uses.
-func (g *Generator) simulateReassignments(root ssa.Value, uses []pollution.UsageInfo) map[virtualRootKey][]pollution.UsageInfo {
+func (g *Generator) simulateReassignments(root ssa.Value, uses []pollution.UsageInfo, target *types.Var) map[virtualRootKey][]pollution.UsageInfo {
 	// Sort uses by position
 	sortedUses := slices.Clone(uses)
 	slices.SortFunc(sortedUses, func(a, b pollution.UsageInfo) int {
@@ -358,7 +373,7 @@ func (g *Generator) simulateReassignments(root ssa.Value, uses []pollution.Usage
 		virtualUses[currentRootKey] = append(virtualUses[currentRootKey], use)
 
 		// If non-finisher, this use's result becomes the new root
-		if g.isNonFinisherExprStmt(use.Pos) {
+		if g.isNonFinisherExprStmt(use.Pos, target) {
 			// Create a new virtual root at this position
 			currentRootKey = virtualRootKey{isOriginal: false, pos: use.Pos}
 		}
@@ -389,13 +404,8 @@ func (g *Generator) findRootsNeedingSession(virtualUses map[virtualRootKey][]pol
 }
 
 // generateReassignmentEdit generates a TextEdit for reassignment.
-// Inserts "q = " before the statement.
-func (g *Generator) generateReassignmentEdit(pos token.Pos) *analysis.TextEdit {
-	varName := g.getVariableNameAtPos(pos)
-	if varName == "" {
-		return nil
-	}
-
+// Inserts "q = " before the statement, where q is target.
+func (g *Generator) generateReassignmentEdit(pos token.Pos, target *types.Var) *analysis.TextEdit {
 	// Find the statement containing this position
 	file := g.findFileContaining(pos)
 	if file == nil {
@@ -411,7 +421,7 @@ func (g *Generator) generateReassignmentEdit(pos token.Pos) *analysis.TextEdit {
 	return &analysis.TextEdit{
 		Pos:     stmt.Pos(),
 		End:     stmt.Pos(),
-		NewText: []byte(varName + " = "),
+		NewText: []byte(target.Name() + " = "),
 	}
 }
 
@@ -718,112 +728,154 @@ func (g *Generator) findStmtAtPos(file *ast.File, pos token.Pos) ast.Stmt {
 // callExprNodeTypes contains CallExpr for inspector filtering.
 var callExprNodeTypes = []ast.Node{(*ast.CallExpr)(nil)}
 
-// getVariableNameAtPos gets the assignable left-hand side expression at the given position.
-// Returns the full expression that can be assigned to (e.g., "q", "obj.field").
-// Returns empty string if not assignable (e.g., function call result).
-func (g *Generator) getVariableNameAtPos(pos token.Pos) string {
+// findReassignTarget returns the local variable that holds root, when a
+// reassignment `v = v.Where(...)` of it is safe. The reassignment fix rewrites
+// only this variable (issue #198). It returns nil, and the fix falls back to a
+// Session at the root, when:
+//   - the root is not a call assigned to a named variable (a field, an
+//     argument of another call);
+//   - the variable is not local to a function, such as a package-level DB;
+//   - a closure captures the variable. A goroutine that rewrites it races with
+//     its parent, and a deferred or stored closure would see the new value;
+//   - a use does not mention the variable, such as a use through an alias
+//     `r := q`. Rebinding q would leave that branch on the old root.
+func (g *Generator) findReassignTarget(root ssa.Value, uses []pollution.UsageInfo) *types.Var {
+	v := g.findRootVar(root)
+	if v == nil || v.Parent() == v.Pkg().Scope() {
+		return nil
+	}
+	// v is local, so its declaration and every use of the root are inside one
+	// function of this file.
+	file := g.findFileContaining(v.Pos())
+	if g.isCapturedVar(file, v) {
+		return nil
+	}
+	for _, use := range uses {
+		call := findCallAtLparen(g.fileCursor(file), use.Pos)
+		if call == nil || !g.mentions(call, v) {
+			return nil
+		}
+	}
+	return v
+}
+
+// findRootVar returns the variable that root, a call, is assigned to by
+// `v := <call>`, `v = <call>` or `var v = <call>`, or nil. SSA places a call
+// at its Lparen. A root that is not a call, such as a Phi, gets nil, so the
+// fix falls back to a Session. The tracer usually resolves a Phi to its
+// edges; a loop variable swap keeps the Phi as the root.
+func (g *Generator) findRootVar(root ssa.Value) *types.Var {
+	// A Phi has no position, and a call inside a synthetic wrapper, such as
+	// the one behind a method value `where := db.Where`, is in no file of the
+	// pass. Any other value matches no call's Lparen below.
+	pos := root.Pos()
 	file := g.findFileContaining(pos)
 	if file == nil {
-		return ""
+		return nil
 	}
-
-	// Find the outermost method call (CallExpr with SelectorExpr) that contains this position.
-	// We need outermost because for `base.Or(q.Where("y"))`, we want `base`, not `q`.
-	// We must check for SelectorExpr because FuncLit calls like `func(){}()` are also CallExpr.
-	var result *ast.CallExpr
-	for c := range g.fileCursor(file).Preorder(callExprNodeTypes...) {
-		callExpr := c.Node().(*ast.CallExpr)
-		// Only consider method calls (SelectorExpr), not FuncLit calls
-		if _, ok := callExpr.Fun.(*ast.SelectorExpr); ok && callExpr.Pos() <= pos && pos <= callExpr.End() {
-			// Keep the outermost (widest) call - first match in preorder is outermost
-			result = callExpr
-			break
+	isRoot := func(e ast.Expr) bool {
+		call, ok := ast.Unparen(e).(*ast.CallExpr)
+		return ok && call.Lparen == pos
+	}
+	for c := range g.fileCursor(file).Preorder((*ast.AssignStmt)(nil), (*ast.ValueSpec)(nil)) {
+		var lhs []ast.Expr
+		var rhs []ast.Expr
+		switch n := c.Node().(type) {
+		case *ast.AssignStmt:
+			lhs, rhs = n.Lhs, n.Rhs
+		case *ast.ValueSpec:
+			for _, name := range n.Names {
+				lhs = append(lhs, name)
+			}
+			rhs = n.Values
+		}
+		if len(lhs) != len(rhs) {
+			continue
+		}
+		for i, e := range rhs {
+			if !isRoot(e) {
+				continue
+			}
+			id, ok := ast.Unparen(lhs[i]).(*ast.Ident)
+			if !ok {
+				return nil
+			}
+			v, _ := g.pass.TypesInfo.ObjectOf(id).(*types.Var)
+			return v
 		}
 	}
-
-	if result == nil {
-		return ""
-	}
-
-	// Extract receiver from selector (e.g., q.Where -> q)
-	sel := result.Fun.(*ast.SelectorExpr)
-	return g.extractAssignableLHS(sel.X)
+	return nil
 }
 
-// extractAssignableLHS extracts the assignable left-hand side from an expression.
-// Returns empty string if the expression is not assignable.
-//
-// Assignable expressions in Go:
-// - Identifiers: x
-// - Field selectors: x.f
-// - Index expressions: x[i]
-// - Pointer indirection: *ptr
-// - Parenthesized expressions: (x)
-//
-// Not assignable:
-// - Function calls: f()
-// - Slice expressions: x[i:j]
-// - Type assertions: x.(T)
-// - Literals, composite literals
-func (g *Generator) extractAssignableLHS(expr ast.Expr) string {
-	// Use a buffer to reconstruct the expression as we traverse
-	return g.extractAssignableLHSImpl(expr)
+// isCapturedVar reports whether a closure inside the function that declares v
+// refers to v. An immediately invoked closure `func() { ... }()` runs in
+// program order, so it does not count; one run by a go or defer statement
+// does.
+func (g *Generator) isCapturedVar(file *ast.File, v *types.Var) bool {
+	cur, _ := g.fileCursor(file).FindByPos(v.Pos(), v.Pos())
+	declFn := enclosingFunc(cur)
+	for c := range declFn.Preorder((*ast.Ident)(nil)) {
+		if g.pass.TypesInfo.Uses[c.Node().(*ast.Ident)] != v {
+			continue
+		}
+		for fn := enclosingFunc(c); fn != declFn; fn = enclosingFunc(fn.Parent()) {
+			if !isInlineCall(fn) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
-func (g *Generator) extractAssignableLHSImpl(expr ast.Expr) string {
-	switch e := expr.(type) {
-	case *ast.Ident:
-		// Simple identifier: q
-		return e.Name
-
-	case *ast.SelectorExpr:
-		// Field selector: obj.field
-		base := g.extractAssignableLHSImpl(e.X)
-		if base == "" {
-			return ""
-		}
-		return base + "." + e.Sel.Name
-
-	case *ast.IndexExpr:
-		// Index expression: arr[i], map[key]
-		// Assignable, but complex to reconstruct with dynamic index
-		// For now, return empty to skip
-		// TODO: Could use go/printer to format the full expression
-		return ""
-
-	case *ast.StarExpr:
-		// Pointer indirection: *ptr
-		base := g.extractAssignableLHSImpl(e.X)
-		if base == "" {
-			return ""
-		}
-		return "*" + base
-
-	case *ast.ParenExpr:
-		// Parenthesized expression: (x)
-		// Recurse to unwrap
-		return g.extractAssignableLHSImpl(e.X)
-
-	case *ast.CallExpr:
-		// Function call: not assignable
-		return ""
-
-	case *ast.SliceExpr:
-		// Slice expression: not assignable
-		return ""
-
-	case *ast.TypeAssertExpr:
-		// Type assertion: not assignable
-		return ""
-
-	case *ast.BasicLit, *ast.CompositeLit:
-		// Literals: not assignable
-		return ""
-
-	default:
-		// Other expressions: conservatively treat as not assignable
-		return ""
+// isInlineCall reports whether lit, a function literal, is called where it is
+// written, and not by a go or defer statement.
+func isInlineCall(lit inspector.Cursor) bool {
+	if lit.ParentEdgeKind() != edge.CallExpr_Fun {
+		return false
 	}
+	switch lit.Parent().ParentEdgeKind() {
+	case edge.GoStmt_Call, edge.DeferStmt_Call:
+		return false
+	}
+	return true
+}
+
+// enclosingFunc returns the innermost function declaration or literal that
+// encloses cur, or cur itself when it is one.
+func enclosingFunc(cur inspector.Cursor) (fn inspector.Cursor) {
+	for fn = range cur.Enclosing((*ast.FuncDecl)(nil), (*ast.FuncLit)(nil)) {
+		break
+	}
+	return fn
+}
+
+// findCallAtLparen returns the call under cur whose Lparen is pos, which is
+// where SSA places a call and so where a use is recorded.
+func findCallAtLparen(cur inspector.Cursor, pos token.Pos) *ast.CallExpr {
+	for c := range cur.Preorder(callExprNodeTypes...) {
+		if call := c.Node().(*ast.CallExpr); call.Lparen == pos {
+			return call
+		}
+	}
+	return nil
+}
+
+// mentions reports whether an identifier in n refers to v.
+func (g *Generator) mentions(n ast.Node, v *types.Var) bool {
+	found := false
+	ast.Inspect(n, func(n ast.Node) bool {
+		if id, ok := n.(*ast.Ident); ok && g.pass.TypesInfo.Uses[id] == v {
+			found = true
+		}
+		return !found
+	})
+	return found
+}
+
+// refersTo reports whether expr is an identifier that refers to v.
+func (g *Generator) refersTo(expr ast.Expr, v *types.Var) bool {
+	id, ok := ast.Unparen(expr).(*ast.Ident)
+	return ok && g.pass.TypesInfo.Uses[id] == v
 }
 
 // getCallExprEndPos gets the end position of the CallExpr at the given position.

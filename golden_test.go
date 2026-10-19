@@ -1,10 +1,12 @@
 package gormreuse_test
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
 	"golang.org/x/tools/go/analysis/analysistest"
+	"golang.org/x/tools/go/packages"
 
 	"github.com/mpyw/gormreuse"
 	"github.com/mpyw/gormreuse/internal/goldentest"
@@ -50,4 +52,51 @@ func TestGoldenFiles(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestGoldenFilesCompile type-checks the gormreuse fixture package with every
+// fixture replaced by its .golden, so a suggested fix that rewrites the wrong
+// variable into a type error (`t = q.Where(...)` inside t.Run, issue #198)
+// fails here. TestGoldenFiles and RunWithSuggestedFixes only compare text.
+func TestGoldenFilesCompile(t *testing.T) {
+	t.Parallel()
+	testdata := analysistest.TestData()
+	srcDir := filepath.Join(testdata, "src", "gormreuse")
+
+	fixtures, err := goldentest.Fixtures(srcDir)
+	if err != nil {
+		t.Fatalf("list fixtures: %v", err)
+	}
+	if len(fixtures) == 0 {
+		t.Fatalf("no fixtures in %s", srcDir)
+	}
+
+	gopath := t.TempDir()
+	if err := os.CopyFS(filepath.Join(gopath, "src"), os.DirFS(filepath.Join(testdata, "src"))); err != nil {
+		t.Fatalf("copy testdata: %v", err)
+	}
+	pkgDir := filepath.Join(gopath, "src", "gormreuse")
+	for _, name := range fixtures {
+		golden, err := os.ReadFile(filepath.Join(srcDir, name+".golden"))
+		if err != nil {
+			t.Fatalf("read golden: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(pkgDir, name), golden, 0o644); err != nil {
+			t.Fatalf("write golden: %v", err)
+		}
+	}
+
+	pkgs, err := packages.Load(&packages.Config{
+		Mode: packages.NeedName | packages.NeedTypes | packages.NeedSyntax | packages.NeedTypesInfo,
+		Dir:  pkgDir,
+		Env:  append(os.Environ(), "GOPATH="+gopath, "GO111MODULE=off", "GOPROXY=off", "GOFLAGS="),
+	}, "gormreuse")
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	packages.Visit(pkgs, nil, func(p *packages.Package) {
+		for _, e := range p.Errors {
+			t.Errorf("golden output does not compile: %v", e)
+		}
+	})
 }

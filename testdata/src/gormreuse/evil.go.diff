@@ -2384,8 +2384,7 @@
  	}
  	q2 := fn()         // q2 holds first branch from q1
  	q2.Where("y", 2)   // Continues q2's chain (OK)
--	q1.Where("z", 3)   // want `\*gorm\.DB reused: second branch from mutable root`
-+	q1 = q1.Where("z", 3)   // want `\*gorm\.DB reused: second branch from mutable root`
+ 	q1.Where("z", 3)   // want `\*gorm\.DB reused: second branch from mutable root`
  }
  
  // storedClosureReordered demonstrates order of calls with stored closure.
@@ -2401,8 +2400,7 @@
  		return q1.Where("from closure", 1) // Pollutes q1 (closure body processed first in SSA)
  	}
  	q2 := fn()
--	q1.Where("z", 3) // want `\*gorm\.DB reused: second branch from mutable root`
-+	q1 = q1.Where("z", 3) // want `\*gorm\.DB reused: second branch from mutable root`
+ 	q1.Where("z", 3) // want `\*gorm\.DB reused: second branch from mutable root`
  	q2.Where("y", 2) // OK: q2 is fresh root
  }
  
@@ -2846,11 +2844,11 @@
  // whereOnlyGoroutine demonstrates goroutine with Where-only.
  // Note: Both goroutine closure and main code pollute q - analyzer detects reuse.
  func whereOnlyGoroutine(db *gorm.DB) {
- 	q := db.Where("x = ?", 1)
+-	q := db.Where("x = ?", 1)
++	q := db.Where("x = ?", 1).Session(&gorm.Session{})
  
  	go func() {
--		q.Where("in goroutine")
-+		q = q.Where("in goroutine").Session(&gorm.Session{})
+ 		q.Where("in goroutine")
  	}()
  
  	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
@@ -2866,8 +2864,7 @@
  	}
  	fn()
  
--	q.Where("after stored closure") // want `\*gorm\.DB reused: second branch from mutable root`
-+	q = q.Where("after stored closure") // want `\*gorm\.DB reused: second branch from mutable root`
+ 	q.Where("after stored closure") // want `\*gorm\.DB reused: second branch from mutable root`
  }
  
  // whereOnlyStoredClosureReturn demonstrates stored closure returning chain.
@@ -2880,8 +2877,7 @@
  	}
  	_ = fn().Find(nil) // First branch
  
--	q.Where("after") // want `\*gorm\.DB reused: second branch from mutable root`
-+	q = q.Where("after") // want `\*gorm\.DB reused: second branch from mutable root`
+ 	q.Where("after") // want `\*gorm\.DB reused: second branch from mutable root`
  }
  
  // whereOnlyIIFEStored demonstrates stored IIFE result with Where-only.
@@ -2907,8 +2903,7 @@
  	where := q.Where
  	where("bound method call") // First use - pollutes q
  
--	q.Where("after bound") // want `\*gorm\.DB reused: second branch from mutable root`
-+	q = q.Where("after bound") // want `\*gorm\.DB reused: second branch from mutable root`
+ 	q.Where("after bound") // want `\*gorm\.DB reused: second branch from mutable root`
  }
  
  // whereOnlyNestedIIFE demonstrates nested IIFE with Where-only.
@@ -2968,8 +2963,7 @@
  	}
  	h.fn()
  
--	q.Where("after struct field closure") // want `\*gorm\.DB reused: second branch from mutable root`
-+	q = q.Where("after struct field closure") // want `\*gorm\.DB reused: second branch from mutable root`
+ 	q.Where("after struct field closure") // want `\*gorm\.DB reused: second branch from mutable root`
  }
  
  // whereOnlyMultipleBranches demonstrates multiple Where-only branches.

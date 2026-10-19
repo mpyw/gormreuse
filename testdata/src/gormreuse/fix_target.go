@@ -1,0 +1,235 @@
+package internal
+
+import (
+	"fmt"
+	"sync"
+	"testing"
+
+	"gorm.io/gorm"
+)
+
+// Fixtures for issue #198: the reassignment fix must rewrite the variable that
+// holds the reused root, never the receiver of an enclosing call, an alias, a
+// call that takes the root as an argument, or a captured variable.
+// immutable-param on a fixture that calls db twice keeps db's own branches
+// out of it, so each fixture reports only the local root it is about.
+
+// fixTargetDB is a package-level handle. A closure passed to its Transaction
+// must not get `fixTargetDB = q.Where(...)`.
+var fixTargetDB *gorm.DB
+
+// fixTargetPackageTransaction: the reassignment targets q, not fixTargetDB.
+func fixTargetPackageTransaction() error {
+	return fixTargetDB.Transaction(func(tx *gorm.DB) error {
+		q := tx.Model(nil).Where("tenant = ?", 1)
+		q.Where("active")
+		q.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+		return nil
+	})
+}
+
+// fixTargetParamTransaction: the reassignment targets q, not the db parameter.
+func fixTargetParamTransaction(db *gorm.DB) error {
+	return db.Transaction(func(tx *gorm.DB) error {
+		q := tx.Model(nil).Where("tenant = ?", 1)
+		q.Where("active")
+		q.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+		return nil
+	})
+}
+
+// fixTargetTestingRun: the reassignment targets q, not t.
+func fixTargetTestingRun(t *testing.T, db *gorm.DB) {
+	t.Run("x", func(t *testing.T) {
+		q := db.Where("x").Session(&gorm.Session{}).Where("y")
+		q.Where("active")
+		q.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	})
+}
+
+// fixTargetWaitGroupGo: the reassignment targets q, not wg.
+func fixTargetWaitGroupGo(db *gorm.DB) {
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		q := db.Where("x").Session(&gorm.Session{}).Where("y")
+		q.Where("active")
+		q.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	})
+	wg.Wait()
+}
+
+// fixTargetPackageCall: the reassignment targets q, not the fmt qualifier.
+func fixTargetPackageCall(db *gorm.DB) {
+	fmt.Println(func() {
+		q := db.Where("x").Session(&gorm.Session{}).Where("y")
+		q.Where("active")
+		q.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	})
+}
+
+// fixTargetAliasReceiver: r aliases q. Reassigning r would leave q's branch in
+// place, so no reassignment is made; the root gets a Session instead.
+func fixTargetAliasReceiver(db *gorm.DB) {
+	q := db.Where("x")
+	r := q
+	r.Where("a")
+	q.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixTargetArgumentOr: q is an argument of base.Or. Rebinding base would not
+// address q, so the root gets a Session instead.
+func fixTargetArgumentOr(db, base *gorm.DB) {
+	q := db.Where("x")
+	base.Or(q)
+	q.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixTargetArgumentWhere: q is an argument of db.Where. Rebinding db would not
+// address q, so the root gets a Session instead.
+//
+//gormreuse:immutable-param
+func fixTargetArgumentWhere(db *gorm.DB) {
+	q := db.Where("x")
+	db.Where(q)
+	q.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixTargetGoroutine: q is captured by a goroutine. Writing q inside it while
+// the parent reads q would be a data race, so no reassignment is made.
+func fixTargetGoroutine(db *gorm.DB) {
+	q := db.Where("x")
+	go func() {
+		q.Where("a")
+		q.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	}()
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixTargetDefer: q is captured by a deferred closure. Reassigning q in the
+// parent would change what the deferred call sees, so no reassignment is made.
+func fixTargetDefer(db *gorm.DB) {
+	q := db.Where("x")
+	defer func() {
+		q.Find(nil)
+	}()
+	q.Where("a")           // want `\*gorm\.DB reused: second branch from mutable root`
+	q.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixTargetVarDecl: a root defined by `var q = <call>` is reassigned as usual.
+func fixTargetVarDecl(db *gorm.DB) {
+	var q = db.Where("x")
+	q.Where("a")
+	q.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixTargetPhiSameVar: the uses join two roots, and each is assigned to q, so
+// q is reassigned.
+//
+//gormreuse:immutable-param
+func fixTargetPhiSameVar(db *gorm.DB, c bool) {
+	q := db.Where("x")
+	if c {
+		q = db.Where("y")
+	}
+	q.Where("a")
+	q.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixTargetPhiNilEdge: q may also be nil; the root assigned to q is
+// reassigned.
+func fixTargetPhiNilEdge(db *gorm.DB, c bool) {
+	var q *gorm.DB
+	if c {
+		q = db.Where("x")
+	}
+	q.Where("a")
+	q.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixTargetPhiLoop: the uses join roots across a loop, and each is assigned
+// to q, so q is reassigned.
+//
+//gormreuse:immutable-param
+func fixTargetPhiLoop(db *gorm.DB, n int) {
+	q := db.Where("x")
+	for i := 0; i < n; i++ {
+		if i == 1 {
+			q = db.Where("y")
+		}
+	}
+	q.Where("a")
+	q.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixTargetPhiOtherVars: the roots are held by a and b, and the uses go
+// through q, so nothing is reassigned.
+//
+//gormreuse:immutable-param
+func fixTargetPhiOtherVars(db *gorm.DB, c bool) {
+	a := db.Where("a")
+	b := db.Where("b")
+	q := a
+	if c {
+		q = b
+	}
+	q.Where("x")
+	q.Where("y").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixTargetHolder holds a *gorm.DB in a field.
+type fixTargetHolder struct{ db *gorm.DB }
+
+// fixTargetField: the root is assigned to a field, not a local variable, so
+// nothing is reassigned.
+func fixTargetField(db *gorm.DB) {
+	var h fixTargetHolder
+	h.db = db.Where("x")
+	q := h.db
+	q.Where("a")
+	q.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixTargetLoopSwap: swapping a and b in a loop makes the first report's root
+// a Phi, not a call, so that report gets no reassignment. The second report's
+// root is the call assigned to a.
+//
+//gormreuse:immutable-param
+func fixTargetLoopSwap(db *gorm.DB, n int) {
+	a := db.Where("a")
+	b := db.Where("b")
+	for i := 0; i < n; i++ {
+		a, b = b, a
+		a.Where("x")           // want `\*gorm\.DB reused: second branch from mutable root`
+		a.Where("y").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	}
+}
+
+// fixTargetMethodValue: `where := q.Where` aliases q, so nothing is reassigned.
+func fixTargetMethodValue(db *gorm.DB) {
+	q := db.Where("x")
+	where := q.Where
+	where("a")
+	q.Where("b")           // want `\*gorm\.DB reused: second branch from mutable root`
+	q.Where("c").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixTargetStoredClosure: a stored closure captures q and would see a
+// reassignment, so nothing is reassigned.
+func fixTargetStoredClosure(db *gorm.DB) {
+	q := db.Where("x")
+	fn := func() { q.Find(nil) }
+	q.Where("a")
+	q.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	fn()                   // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixTargetInlineClosure: a closure called inline runs in program order, so
+// the captured q is reassigned.
+func fixTargetInlineClosure(db *gorm.DB) {
+	q := db.Where("x")
+	func() {
+		q.Where("a")
+	}()
+	q.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
