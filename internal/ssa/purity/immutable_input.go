@@ -9,6 +9,7 @@ import (
 	"golang.org/x/tools/go/ssa"
 
 	"github.com/mpyw/gormreuse/internal/directive"
+	"github.com/mpyw/gormreuse/internal/ssa/callback"
 	"github.com/mpyw/gormreuse/internal/ssa/callsite"
 	"github.com/mpyw/gormreuse/internal/ssa/tracer"
 	"github.com/mpyw/gormreuse/internal/typeutil"
@@ -211,18 +212,15 @@ func (f *immutableInputFlow) visitImmutableInputCall(v ssa.Value, call ssa.CallI
 // that parameter. site is read from the static callee, so a method value call
 // is a call of its wrapper.
 func (f *immutableInputFlow) keepsImmutableInputPromise(site callsite.Site, idx int) bool {
-	callee := site.Callee
-	if callee == nil {
+	if site.Callee == nil {
 		return false
 	}
-	if tracer.IsImmutableCallbackMethod(callee) {
+	// Any argument of a Transaction or FindInBatches call, not only one that
+	// CollectedCallbackArgs reads as a callback.
+	if callback.CollectsFreshCallbacks(site) {
 		return true
 	}
-	// ParamIdx counts from the first non-receiver parameter.
-	param := site.ArgParam(idx)
-	return slices.ContainsFunc(f.set.Callbacks(callee), func(cb directive.ImmutableInputCallback) bool {
-		return cb.ParamIdx == param
-	})
+	return slices.Contains(callback.CollectedCallbackArgs(site, f.set), idx)
 }
 
 // checkImmutableInputArgs checks the arguments of one call of the callback.

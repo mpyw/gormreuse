@@ -1160,24 +1160,24 @@ func AllocStoredValues(alloc *ssa.Alloc) []ssa.Value {
 // load.
 func (t *RootTracer) traceFieldStore(fa *ssa.FieldAddr, load *ssa.UnOp, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) ssa.Value {
 	// Single-root: trace the first value stored into the same field.
-	if vals := fieldStoredValues(fa, load); len(vals) > 0 {
+	if vals := FieldStoredValues(fa, load); len(vals) > 0 {
 		return t.trace(vals[0], visited, loopInfo)
 	}
 	return nil
 }
 
-// fieldStoredValues returns, in program order, the values stored into the same
+// FieldStoredValues returns, in program order, the values stored into the same
 // struct field as fa. Shared by traceFieldStore (first), traceAllFieldStores
 // (all), and the Scopes callback resolver.
 //
 // With a load, only the stores that can reach it are returned (see
 // fieldStores). With a nil load, every store in the function is returned.
-func fieldStoredValues(fa *ssa.FieldAddr, load ssa.Instruction) []ssa.Value {
+func FieldStoredValues(fa *ssa.FieldAddr, load ssa.Instruction) []ssa.Value {
 	root, path := fieldAddrPath(fa)
 	return fieldStoredValuesAt(fa.Parent(), root, path, load)
 }
 
-// fieldValueStoredValues is fieldStoredValues for a field read from a struct
+// fieldValueStoredValues is FieldStoredValues for a field read from a struct
 // held in a register rather than through its address (#181):
 //
 //	t4 = *t0             // e := embedded{q}; e.Where("a")
@@ -1426,7 +1426,7 @@ func fieldAddrPath(fa *ssa.FieldAddr) (root ssa.Value, path []int) {
 
 // SameField reports whether a and b select the same field path from the same
 // address. Two accesses to one field are separate FieldAddr chains, so this
-// compares them as fieldStoredValues does.
+// compares them as FieldStoredValues does.
 func SameField(a, b *ssa.FieldAddr) bool {
 	rootA, pathA := fieldAddrPath(a)
 	rootB, pathB := fieldAddrPath(b)
@@ -1434,7 +1434,7 @@ func SameField(a, b *ssa.FieldAddr) bool {
 }
 
 // fieldRef identifies one (aggregate, field path, load) search. Every path
-// visited during a single fieldStoredValues query is a suffix of the original
+// visited during a single FieldStoredValues query is a suffix of the original
 // path, so its length identifies it uniquely.
 type fieldRef struct {
 	root  ssa.Value
@@ -1953,7 +1953,7 @@ func (t *RootTracer) traceAllAllocStores(alloc *ssa.Alloc, visited map[ssa.Value
 //	h.db.Find(nil)  // Need to check BOTH q1 and q2
 func (t *RootTracer) traceAllFieldStores(fa *ssa.FieldAddr, load *ssa.UnOp, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) []ssa.Value {
 	var roots []ssa.Value
-	for _, v := range fieldStoredValues(fa, load) {
+	for _, v := range FieldStoredValues(fa, load) {
 		roots = append(roots, t.traceAll(v, visited, loopInfo)...)
 	}
 	return roots
@@ -2312,243 +2312,6 @@ func ClosureCapturesGormDB(mc *ssa.MakeClosure) bool {
 	})
 }
 
-// CollectScopesCallbacks returns the set of functions passed as callbacks to
-// gorm's Scopes / Preload across all given functions and their nested closures.
-//
-// Such callbacks receive a mid-chain (clone==0) *gorm.DB at runtime, so their
-// *gorm.DB parameter is a mutable root and reuse inside them interferes (#60).
-// This is deliberately narrow — only functions actually handed to Scopes/Preload
-// qualify, NOT every func(*gorm.DB) *gorm.DB (that broader treatment is Phase
-// 1b, not 1a).
-//
-// Scopes(funcs ...func(*DB) *DB) and Preload(query, args ...interface{}) are
-// variadic, so the callbacks are packed into a varargs array (the last call
-// argument is a slice of it); Preload additionally boxes them in interface{}.
-func CollectScopesCallbacks(funcs []*ssa.Function) map[*ssa.Function]bool {
-	return collectCallbacksPassedTo(funcs, isScopesOrPreloadMethod)
-}
-
-// CollectScopesOnlyCallbacks is CollectScopesCallbacks without Preload: the
-// functions passed to gorm's Scopes, resolved the same way. The temporary
-// Session-in-Scopes warning (go-gorm/gorm#7592) uses it, so it covers the same
-// callbacks as reuse detection (#196).
-func CollectScopesOnlyCallbacks(funcs []*ssa.Function) map[*ssa.Function]bool {
-	return collectCallbacksPassedTo(funcs, isScopesMethod)
-}
-
-// CollectImmutableCallbacks returns the set of function literals passed as the
-// callback to gorm's Transaction or FindInBatches across all given functions and
-// their nested closures.
-//
-// Each of these methods hands the callback a FRESH, forkable (clone>0) handle
-// (Transaction via Begin, FindInBatches via Session(&Session{NewDB: true})), so — unlike an ordinary Phase
-// 1b parameter — the callback's *gorm.DB parameter is NOT a mutable root and
-// reuse inside the callback is safe (verified against gorm's clone semantics; see
-// the epic's pivotal finding). It must be exempted from the mutable-by-default
-// treatment (#60 SC103, #62).
-func CollectImmutableCallbacks(funcs []*ssa.Function) map[*ssa.Function]bool {
-	set := make(map[*ssa.Function]bool)
-	// Go and defer statements count too: the callee hands the callback the
-	// same value however the callee itself is invoked (#256).
-	callsite.EachSite(funcs, nil, func(s callsite.Site) {
-		call := s.Instr.Common()
-		collectImmutableCallbacksFromCall(call, set)
-	})
-	return set
-}
-
-// CollectImmutableInputCallbacks adds, to into, every closure passed as the
-// callback argument declared by a //gormreuse:immutable-input(name) function.
-// Such a callback receives an immutable *gorm.DB (the declaring function promised
-// to hand it one), so — like a Transaction callback — its *gorm.DB parameter is
-// exempt from the Phase 1b mutable-by-default treatment (#62 case 2.2).
-func CollectImmutableInputCallbacks(funcs []*ssa.Function, set *directive.ImmutableInputSet, into map[*ssa.Function]bool) {
-	if set == nil || into == nil {
-		return
-	}
-	// Go and defer statements count too: the callee hands the callback the
-	// same value however the callee itself is invoked (#256).
-	callsite.EachSite(funcs, nil, func(s callsite.Site) {
-		call := s.Instr.Common()
-		callee := call.StaticCallee()
-		if callee == nil {
-			return
-		}
-		args := call.Args
-		for _, idx := range immutableInputArgIndices(callee, set, len(args)) {
-			if fn := callbackFuncValue(args[idx]); fn != nil {
-				into[fn] = true
-			}
-		}
-	})
-}
-
-// immutableInputArgIndices returns the argument indices of a call to callee
-// (with nargs arguments) that are its //gormreuse:immutable-input callbacks.
-func immutableInputArgIndices(callee *ssa.Function, set *directive.ImmutableInputSet, nargs int) []int {
-	// A method call carries its receiver as Args[0]; ParamIdx counts from the
-	// first non-receiver parameter, so shift when the callee has a receiver.
-	shift := 0
-	if callee.Signature != nil && callee.Signature.Recv() != nil {
-		shift = 1
-	}
-	var idxs []int
-	for _, cb := range set.Callbacks(callee) {
-		if idx := cb.ParamIdx + shift; idx >= 0 && idx < nargs {
-			idxs = append(idxs, idx)
-		}
-	}
-	return idxs
-}
-
-// DropReachableCallbacks removes from set every callback whose *gorm.DB
-// parameter can receive something other than the fresh value of an immutable
-// callback position (#191). set is keyed by the declared function, so without
-// this a named function passed to Transaction once would be exempt for every
-// caller, including a direct call with a mid-chain value.
-//
-// A function stays in set only when every reference to it in funcs (and in the
-// package initializers) is an argument in an immutable callback position: a
-// Transaction/FindInBatches callback or an immutable-input(name) argument,
-// directly or as a closure or method value. It is dropped when:
-//   - any other reference exists: a direct call (also under go and defer, and
-//     recursion), a method expression, a store, a Phi, a capture, a return
-//   - it is exported, so another package may call it directly (#195)
-//   - it is a method and an interface call, method value or method expression
-//     in the package names a method of the same name, which may dispatch to it
-func DropReachableCallbacks(funcs []*ssa.Function, inputs *directive.ImmutableInputSet, set map[*ssa.Function]bool) {
-	for fn := range set {
-		if obj := fn.Object(); obj != nil && obj.Exported() {
-			delete(set, fn)
-		}
-	}
-	if len(set) == 0 {
-		return
-	}
-	scan := slices.Clone(funcs)
-	seenPkg := make(map[*ssa.Package]bool)
-	for _, fn := range funcs {
-		if fn.Pkg != nil && !seenPkg[fn.Pkg] {
-			seenPkg[fn.Pkg] = true
-			if init := fn.Pkg.Func("init"); init != nil {
-				scan = append(scan, init)
-			}
-		}
-	}
-	var invoked []string
-	callsite.WalkInstrs(scan, func(instr ssa.Instruction) {
-		if call, ok := instr.(ssa.CallInstruction); ok && call.Common().IsInvoke() {
-			invoked = append(invoked, call.Common().Method.Name())
-		}
-		for _, op := range instr.Operands(nil) {
-			ref, ok := (*op).(*ssa.Function)
-			if !ok {
-				continue
-			}
-			if name, ok := interfaceMethodName(ref); ok {
-				invoked = append(invoked, name)
-			}
-			if fn := referencedFunc(ref); set[fn] && !isImmutableCallbackRef(instr, ref, inputs) {
-				delete(set, fn)
-			}
-		}
-	})
-	for fn := range set {
-		if fn.Signature.Recv() != nil && slices.Contains(invoked, fn.Name()) {
-			delete(set, fn)
-		}
-	}
-}
-
-// interfaceMethodName returns the method name of a wrapper that calls an
-// interface method: a method value (i.m) or method expression (I.m) of an
-// interface. Its dispatch happens inside the wrapper, so no invoke call in the
-// package shows it.
-func interfaceMethodName(fn *ssa.Function) (string, bool) {
-	obj, ok := fn.Object().(*types.Func)
-	if !ok {
-		return "", false
-	}
-	recv := obj.Signature().Recv()
-	if recv == nil || !types.IsInterface(recv.Type()) {
-		return "", false
-	}
-	return obj.Name(), true
-}
-
-// referencedFunc maps a function value to the declared function whose body it
-// runs: a generic instance or bound method wrapper as DeclaredFunc does, and a
-// method expression thunk (T.m) to its method.
-func referencedFunc(fn *ssa.Function) *ssa.Function {
-	if fn.Synthetic != "" && strings.HasSuffix(fn.Name(), "$thunk") {
-		if obj, ok := fn.Object().(*types.Func); ok {
-			if method := fn.Prog.FuncValue(obj.Origin()); method != nil {
-				return method
-			}
-		}
-	}
-	return directive.DeclaredFunc(fn)
-}
-
-// isImmutableCallbackRef reports whether instr uses v only to hand it to an
-// immutable callback position: v is a call argument in such a position, or it
-// is the function of a closure (a capturing literal or a bound method value)
-// that is itself used only that way. Any other use, such as an interface
-// conversion, a store or a Phi, is not: Transaction and immutable-input take a
-// func-typed argument, so such a value never reaches one directly.
-func isImmutableCallbackRef(instr ssa.Instruction, v ssa.Value, inputs *directive.ImmutableInputSet) bool {
-	switch x := instr.(type) {
-	case *ssa.MakeClosure:
-		return x.Fn == v && usedOnlyAsImmutableCallback(x, inputs)
-	case ssa.CallInstruction:
-		common := x.Common()
-		if common.Value == v {
-			return false
-		}
-		positions := immutableCallbackArgIndices(common, inputs)
-		for i, arg := range common.Args {
-			if arg == v && !slices.Contains(positions, i) {
-				return false
-			}
-		}
-		return true
-	}
-	return false
-}
-
-// usedOnlyAsImmutableCallback reports whether every use of the closure c hands
-// it to an immutable callback position.
-func usedOnlyAsImmutableCallback(c *ssa.MakeClosure, inputs *directive.ImmutableInputSet) bool {
-	for _, ref := range *c.Referrers() {
-		if !isImmutableCallbackRef(ref, c, inputs) {
-			return false
-		}
-	}
-	return true
-}
-
-// immutableCallbackArgIndices returns the argument indices of a call whose
-// function argument receives a fresh *gorm.DB: every function argument with a
-// *gorm.DB parameter of Transaction/FindInBatches (as
-// collectImmutableCallbacksFromCall collects them), and the immutable-input
-// callbacks of a user function.
-func immutableCallbackArgIndices(common *ssa.CallCommon, inputs *directive.ImmutableInputSet) []int {
-	callee := common.StaticCallee()
-	if callee == nil {
-		return nil
-	}
-	if !IsImmutableCallbackMethod(callee) {
-		return immutableInputArgIndices(callee, inputs, len(common.Args))
-	}
-	var idxs []int
-	for i, arg := range common.Args {
-		if cb := callbackFuncValue(arg); cb != nil && cb.Signature != nil && directive.HasGormDBParameter(cb.Signature) {
-			idxs = append(idxs, i)
-		}
-	}
-	return idxs
-}
-
 // isNilConst checks if a value is a nil constant.
 func isNilConst(v ssa.Value) bool {
 	c, ok := v.(*ssa.Const)
@@ -2635,247 +2398,6 @@ func cloneVisited(visited map[ssa.Value]bool) map[ssa.Value]bool {
 	clone := make(map[ssa.Value]bool, len(visited))
 	maps.Copy(clone, visited)
 	return clone
-}
-
-// collectCallbacksPassedTo returns every function passed as a variadic
-// callback to a call whose static callee satisfies match, resolved by a
-// scopesCallbackResolver.
-func collectCallbacksPassedTo(funcs []*ssa.Function, match func(*ssa.Function) bool) map[*ssa.Function]bool {
-	set := make(map[*ssa.Function]bool)
-	r := &scopesCallbackResolver{funcs: funcs, set: set, seen: make(map[ssa.Value]bool)}
-	// Go and defer statements count too: the callee hands the callback the
-	// same value however the callee itself is invoked (#256).
-	callsite.EachSite(funcs, nil, func(s callsite.Site) {
-		call := s.Instr.Common()
-		callee := call.StaticCallee()
-		if callee == nil || !match(callee) {
-			return
-		}
-		// The variadic callbacks arrive as a slice in the last argument.
-		if args := call.Args; len(args) > 0 {
-			r.addSliceElems(args[len(args)-1])
-		}
-	})
-	return set
-}
-
-// scopesCallbackResolver resolves the slice handed to Scopes/Preload back to
-// the functions it can hold (#196). It follows:
-//
-//   - the varargs array (`Scopes(a, b)`) and slice literals
-//   - `append` (`s = append(s, f)`; `Scopes(s...)`) and Phi edges
-//   - local, captured and package-level variables, and struct fields
-//   - method values (`Scopes(r.scope)`): both the $bound wrapper and the method
-//
-// It stays a may-hold set: an unresolvable source (a parameter, an interface
-// call) adds nothing.
-type scopesCallbackResolver struct {
-	funcs        []*ssa.Function
-	set          map[*ssa.Function]bool
-	seen         map[ssa.Value]bool
-	globalStores map[*ssa.Global][]ssa.Value // built on first use
-}
-
-// addSliceElems adds the functions that the slice (or array pointer) v may hold.
-func (r *scopesCallbackResolver) addSliceElems(v ssa.Value) {
-	if v == nil || r.seen[v] {
-		return
-	}
-	r.seen[v] = true
-
-	// Element stores: `arr[i] = f` for varargs and literals, `s[i] = f` for make.
-	if refs := v.Referrers(); refs != nil {
-		for _, ref := range *refs {
-			idx, ok := ref.(*ssa.IndexAddr)
-			if !ok || idx.X != v || idx.Referrers() == nil {
-				continue
-			}
-			for _, ir := range *idx.Referrers() {
-				if store, ok := ir.(*ssa.Store); ok && store.Addr == idx {
-					r.addFunc(store.Val)
-				}
-			}
-		}
-	}
-
-	switch x := v.(type) {
-	case *ssa.Slice:
-		r.addSliceElems(x.X)
-	case *ssa.Phi:
-		for _, e := range x.Edges {
-			r.addSliceElems(e)
-		}
-	case *ssa.Call:
-		if b, ok := x.Call.Value.(*ssa.Builtin); ok && b.Name() == "append" {
-			for _, a := range x.Call.Args {
-				r.addSliceElems(a)
-			}
-		}
-	case *ssa.UnOp:
-		if x.Op == token.MUL {
-			for _, sv := range r.storedValues(x.X) {
-				r.addSliceElems(sv)
-			}
-		}
-	case *ssa.FreeVar:
-		r.addSliceElems(FreeVarBinding(x))
-	case *ssa.ChangeType:
-		r.addSliceElems(x.X)
-	}
-}
-
-// addFunc adds the functions that the func value v may be.
-func (r *scopesCallbackResolver) addFunc(v ssa.Value) {
-	if v == nil || r.seen[v] {
-		return
-	}
-	r.seen[v] = true
-
-	switch x := v.(type) {
-	case *ssa.Function:
-		r.set[directive.DeclaredFunc(x)] = true
-	case *ssa.MakeClosure:
-		fn, ok := x.Fn.(*ssa.Function)
-		if !ok {
-			return
-		}
-		r.set[fn] = true
-		// A method value is a closure over a synthetic $bound wrapper; the
-		// declared method receives the *gorm.DB, so it is a callback too (#180).
-		r.set[directive.DeclaredFunc(fn)] = true
-	case *ssa.MakeInterface:
-		r.addFunc(x.X)
-	case *ssa.ChangeType:
-		r.addFunc(x.X)
-	case *ssa.Phi:
-		for _, e := range x.Edges {
-			r.addFunc(e)
-		}
-	case *ssa.UnOp:
-		if x.Op == token.MUL {
-			for _, sv := range r.storedValues(x.X) {
-				r.addFunc(sv)
-			}
-		}
-	case *ssa.FreeVar:
-		r.addFunc(FreeVarBinding(x))
-	}
-}
-
-// storedValues returns the values stored at addr: a local, a captured local, a
-// struct field, or a package-level variable.
-func (r *scopesCallbackResolver) storedValues(addr ssa.Value) []ssa.Value {
-	switch a := addr.(type) {
-	case *ssa.Alloc:
-		return AllocStoredValues(a)
-	case *ssa.FieldAddr:
-		// Every store, not only the ones that reach the load: a larger
-		// callback set only makes more parameters mutable roots, so the
-		// over-approximation stays on the reporting side.
-		return fieldStoredValues(a, nil)
-	case *ssa.FreeVar:
-		return r.storedValues(FreeVarBinding(a))
-	case *ssa.Global:
-		return r.globalStoredValues(a)
-	}
-	return nil
-}
-
-// globalStoredValues returns the values stored into g by the analyzed functions
-// and by the package initializer, which runs package-level `var x = ...`
-// initializers but is not a source function.
-func (r *scopesCallbackResolver) globalStoredValues(g *ssa.Global) []ssa.Value {
-	if r.globalStores == nil {
-		r.globalStores = make(map[*ssa.Global][]ssa.Value)
-		funcs := slices.Clone(r.funcs)
-		if g.Pkg != nil {
-			if init := g.Pkg.Func("init"); init != nil {
-				funcs = append(funcs, init)
-			}
-		}
-		callsite.WalkInstrs(funcs, func(instr ssa.Instruction) {
-			if store, ok := instr.(*ssa.Store); ok {
-				if sg, ok := store.Addr.(*ssa.Global); ok {
-					r.globalStores[sg] = append(r.globalStores[sg], store.Val)
-				}
-			}
-		})
-	}
-	return r.globalStores[g]
-}
-
-// isScopesOrPreloadMethod reports whether callee is gorm's Scopes or Preload
-// method (gated on a gorm.DB receiver so a same-named user method is excluded).
-func isScopesOrPreloadMethod(callee *ssa.Function) bool {
-	name := callee.Name()
-	if name != "Scopes" && name != "Preload" {
-		return false
-	}
-	return isGormDBMethod(callee)
-}
-
-// isScopesMethod reports whether callee is gorm's Scopes method.
-func isScopesMethod(callee *ssa.Function) bool {
-	return callee.Name() == "Scopes" && isGormDBMethod(callee)
-}
-
-// isGormDBMethod reports whether callee is a method with a gorm.DB receiver.
-func isGormDBMethod(callee *ssa.Function) bool {
-	sig := callee.Signature
-	return sig != nil && sig.Recv() != nil && typeutil.IsGormDB(sig.Recv().Type())
-}
-
-// collectImmutableCallbacksFromCall adds the callback function passed to a gorm
-// Transaction/FindInBatches call to set. The callback sits at a different
-// argument position per method (Transaction: first argument; FindInBatches:
-// third), so scan for the func-typed argument whose
-// signature takes a *gorm.DB rather than hard-coding an index.
-func collectImmutableCallbacksFromCall(call *ssa.CallCommon, set map[*ssa.Function]bool) {
-	callee := call.StaticCallee()
-	if callee == nil || !IsImmutableCallbackMethod(callee) {
-		return
-	}
-	for _, arg := range call.Args {
-		cb := callbackFuncValue(arg)
-		if cb != nil && cb.Signature != nil && directive.HasGormDBParameter(cb.Signature) {
-			set[cb] = true
-		}
-	}
-}
-
-// IsImmutableCallbackMethod reports whether callee is a gorm method that hands a
-// fresh (clone>0) *gorm.DB to a callback — Transaction or FindInBatches — gated
-// on a gorm.DB receiver so a same-named user method is excluded.
-//
-// Connection is deliberately absent: it calls fc(db.getInstance()), and
-// getInstance yields a clone==0 handle, so its callback's tx accumulates
-// conditions like any mid-chain value (#173).
-func IsImmutableCallbackMethod(callee *ssa.Function) bool {
-	switch callee.Name() {
-	case "Transaction", "FindInBatches":
-	default:
-		return false
-	}
-	return isGormDBMethod(callee)
-}
-
-// callbackFuncValue extracts the concrete function from a value stored into a
-// Scopes/Preload varargs slot: a MakeClosure (capturing closure), a bare
-// *ssa.Function (named function reference), or either boxed in an interface
-// (Preload's args are ...interface{}). A generic instance or a bound method
-// wrapper is mapped to the function whose body receives the argument (#180).
-func callbackFuncValue(v ssa.Value) *ssa.Function {
-	switch x := v.(type) {
-	case *ssa.MakeClosure:
-		if fn, ok := x.Fn.(*ssa.Function); ok {
-			return directive.DeclaredFunc(fn)
-		}
-	case *ssa.Function:
-		return directive.DeclaredFunc(x)
-	case *ssa.MakeInterface:
-		return callbackFuncValue(x.X)
-	}
-	return nil
 }
 
 // holdsGormDB reports whether a value of type t holds a *gorm.DB the tracer can

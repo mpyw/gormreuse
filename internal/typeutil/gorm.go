@@ -144,7 +144,7 @@ func isGormDBNamed(t types.Type) bool {
 //   - Safe methods: Session, WithContext, Debug (can be used mid-chain)
 //   - Init methods: Open, Begin (start new chains)
 //   - Transaction returns an error. It runs its callback on a Begin result,
-//     and the callback's fresh tx is handled by CollectImmutableCallbacks.
+//     and the callback's fresh tx is handled by callback.CollectImmutableCallbacks.
 //
 // This map is unexported to prevent external modification.
 var immutableReturningMethods = map[string]struct{}{

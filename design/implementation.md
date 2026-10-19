@@ -155,9 +155,9 @@ Decisions and limitations:
 
 Also: gorm's built-in `Transaction` (via `Begin`) and `FindInBatches` (via `Session(&Session{NewDB: true})`) pass a fresh (`clone>0`) handle to their callbacks, so reuse inside those callbacks is always allowed. `Connection` is deliberately **not** in this set: it calls `fc(db.getInstance())`, which is a `clone==0` handle, so its callback's `tx` is an ordinary mutable parameter and reuse inside it is reported (#173). `e2e/internal` guards all three premises against real gorm.
 
-**Callbacks under `go` and `defer` (#256).** The callee hands the callback the same value however the callee itself is invoked. So the callback collectors (`CollectImmutableCallbacks`, `CollectImmutableInputCallbacks` and the Scopes/Preload resolver) read the call of every `CallInstruction`, not only `*ssa.Call`, through `walkCalls`. Before #256, `go db.Transaction(func(tx *gorm.DB) error {...})` and `defer withFresh(db, cb)` lost the exemption, and a callback of a deferred `Scopes` call lost the Session warning. `DropReachableCallbacks`, the immutable-param caller check and the immutable-input body check already read every `CallInstruction`.
+**Callbacks under `go` and `defer` (#256).** The callee hands the callback the same value however the callee itself is invoked. So the callback collectors in `callback/collect.go` (`CollectImmutableCallbacks`, `CollectImmutableInputCallbacks` and the Scopes/Preload collectors) read the call of every `CallInstruction`, not only `*ssa.Call`, through `callsite.EachSite`. Before #256, `go db.Transaction(func(tx *gorm.DB) error {...})` and `defer withFresh(db, cb)` lost the exemption, and a callback of a deferred `Scopes` call lost the Session warning. `DropReachableCallbacks`, the immutable-param caller check and the immutable-input body check already read every `CallInstruction`.
 
-**Named callbacks (#191).** The callback sets are keyed by the declared function, not by the call that passes it. A function's `*gorm.DB` parameter receives a fresh value only when every caller is a callback position, so `DropReachableCallbacks` runs after both collectors and removes a function from the set when:
+**Named callbacks (#191).** The callback sets are keyed by the declared function, not by the call that passes it. A function's `*gorm.DB` parameter receives a fresh value only when every caller is a callback position, so `callback.DropReachableCallbacks` runs after both collectors and removes a function from the set when:
 
 | Case | Why |
 | --- | --- |
@@ -165,7 +165,7 @@ Also: gorm's built-in `Transaction` (via `Begin`) and `FindInBatches` (via `Sess
 | The function or method is exported | Another package can call it, and the analyzer cannot see that call. Facts do not change this: they flow from a package to the packages that import it, so the declaring package is analyzed before any caller in another package (#195) |
 | A method whose name matches an interface call, interface method value or interface method expression in the package | Dynamic dispatch can reach it |
 
-A reference counts as a callback position when it is the Transaction/FindInBatches callback argument or an `immutable-input(name)` argument. A closure (`MakeClosure`, including a bound method value `r.m`) is followed: it counts only when all its uses are callback positions. Any other wrapper, such as an interface conversion, counts as a non-callback reference, because both callback positions are func-typed. The scan covers the source functions, their nested literals and the package `init` (package-level variable initializers). A function that is dropped falls back to the rules for an ordinary parameter, so it can opt in with `immutable-param`, whose caller-side check then covers the direct calls. A capture of a local variable holding the function (`cb := f; go func() { _ = db.Transaction(cb) }()`) is treated as a non-callback reference, which may report a callback that is only ever passed to Transaction. That direction is the conservative one.
+A reference counts as a callback position when it is the Transaction/FindInBatches callback argument or an `immutable-input(name)` argument. `callback.CollectedCallbackArgs` lists these positions for a call, and the collectors use the same function. A closure (`MakeClosure`, including a bound method value `r.m`) is followed: it counts only when all its uses are callback positions. Any other wrapper, such as an interface conversion, counts as a non-callback reference, because both callback positions are func-typed. The scan covers the source functions, their nested literals and the package `init` (package-level variable initializers). A function that is dropped falls back to the rules for an ordinary parameter, so it can opt in with `immutable-param`, whose caller-side check then covers the direct calls. A capture of a local variable holding the function (`cb := f; go func() { _ = db.Transaction(cb) }()`) is treated as a non-callback reference, which may report a callback that is only ever passed to Transaction. That direction is the conservative one.
 
 Only `//gormreuse:name[,name...]` (lowercase, no spaces, line comment) is a directive. `readDirective` in `directive.go` reads every comment once, in this order:
 
@@ -180,7 +180,7 @@ Problems are reported by `FindDirectiveProblems` through `pass.Reportf`, at the 
 
 Directives can be combined with commas: `//gormreuse:pure,immutable-return`
 
-**Generic instances and method values (#180).** A call can resolve to a stand-in for the function the directive is written on: an instance of a generic function or method (`genBranch[int]`), or a bound method wrapper (`f := r.m`, named `m$bound`). The directive sets and the maps keyed by `*ssa.Function` (`failedPure`, `needsImmutableParam`, the Scopes and immutable callback sets) are keyed by the declared function. `directive.DeclaredFunc` maps a stand-in to it: an instance to its `Origin()`, a bound wrapper to the declared method (`Prog.FuncValue`). Every lookup goes through it: `DirectiveFuncSet.Contains`, `ImmutableInputSet.Callbacks`, the `failedPure` check in `IsPureFunction`, the immutable-param caller check, and the callback collectors (`scopesCallbackResolver` for Scopes/Preload, `callbackFuncValue` for Transaction/FindInBatches and immutable-input). Code that reads the arguments of a call keeps the resolved callee: a bound wrapper has no receiver argument, so the receiver shift is decided from its own signature. An interface method value has no declared body, so `DeclaredFunc` leaves it unchanged and it carries no directive.
+**Generic instances and method values (#180).** A call can resolve to a stand-in for the function the directive is written on: an instance of a generic function or method (`genBranch[int]`), or a bound method wrapper (`f := r.m`, named `m$bound`). The directive sets and the maps keyed by `*ssa.Function` (`failedPure`, `needsImmutableParam`, the Scopes and immutable callback sets) are keyed by the declared function. `directive.DeclaredFunc` maps a stand-in to it: an instance to its `Origin()`, a bound wrapper to the declared method (`Prog.FuncValue`). Every lookup goes through it: `DirectiveFuncSet.Contains`, `ImmutableInputSet.Callbacks`, the `failedPure` check in `IsPureFunction`, the immutable-param caller check, and the callback collectors (`callback/resolve.go`: `resolveMayFuncs` for Scopes/Preload, `resolveExactFunc` for Transaction/FindInBatches and immutable-input). Code that reads the arguments of a call keeps the resolved callee: a bound wrapper has no receiver argument, so the receiver shift is decided from its own signature. An interface method value has no declared body, so `DeclaredFunc` leaves it unchanged and it carries no directive.
 
 All internal positions (file keys, ignore lines, directive placement, the generated-file skip, fix offsets) use `PositionFor(pos, false)`, so `//line` directives cannot move them (#151, #152, #153). This includes the line and column that indent the parameter Session fix: a `//line` without a column sets every adjusted column to 0 (#244). Only the `root at file:line` text in messages stays adjusted, to match the position the driver prints. `TestNoAdjustedPositions` in `internal/position_guard_test.go` fails on any other `Position` call, or `PositionFor` without `false`, in non-test code under `internal/`. Its allowlist names the message function `Tracker.loc`.
 
@@ -250,7 +250,11 @@ gormreuse/
 │       │   ├── session.go       # SessionEffect: what a Session/Debug call shares (#174)
 │       │   ├── funcvar.go       # FuncVars: package-level variables that hold one function
 │       │   └── walk.go          # WalkInstrs: every instruction, nested closures included
-│       ├── tracer/root.go       # RootTracer: mutable roots, aliases, callbacks
+│       ├── callback/            # Functions that gorm or an immutable-input function calls back
+│       │   ├── resolve.go       # resolveMayFuncs (may-hold), resolveExactFunc (exact): what a func value is
+│       │   ├── collect.go       # Scopes/Preload, Transaction/FindInBatches, immutable-input collectors; CollectedCallbackArgs
+│       │   └── reach.go         # DropReachableCallbacks: drop callbacks that something else calls (#191)
+│       ├── tracer/root.go       # RootTracer: mutable roots, aliases
 │       ├── pollution/tracker.go # Tracker: records uses, DetectViolations
 │       ├── pollutionsource/     # Which uses leak a *gorm.DB; read-only query arguments
 │       ├── cfg/analyzer.go      # Loops and reachability
@@ -280,7 +284,7 @@ The `plugin` package registers `Analyzer` with golangci-lint's module plugin sys
 │                      internal/analyzer.go  RunSSA                       │
 │  Every report goes through directive.Ignores. Package-level passes:     │
 │    1. Validate pure functions to a fixed point (purity.Validator)       │
-│    2. Collect Scopes and immutable callbacks, DropReachableCallbacks    │
+│    2. Collect Scopes and immutable callbacks (callback package)         │
 │    3. Check immutable-input and immutable-return bodies                 │
 │    4. Scopes Session warning (scopeswarn)                               │
 │    5. For each function: detect violations (ssa.Analyzer), add fixes    │
@@ -1032,7 +1036,7 @@ So `return q.Session(...).Where("x")` is safe, and `return other.Session(...)` l
 
 How the rule finds its input:
 
-- **Callbacks**: `tracer.CollectScopesOnlyCallbacks`, the Scopes half of the resolver that reuse detection uses (`scopesCallbackResolver`). It follows the varargs array, slice literals, `append`, Phi edges, local, captured and package-level variables, struct fields, and method values (both the `$bound` wrapper and the method). Package-level initializers live in the synthetic `init`, which is not in `SrcFuncs`, so the resolver scans it for stores to globals.
+- **Callbacks**: `callback.CollectScopesOnlyCallbacks`, the Scopes half of the collector that reuse detection uses (`resolveMayFuncs`). It follows the varargs array, slice literals, `append`, Phi edges, local, captured and package-level variables, struct fields, and method values (both the `$bound` wrapper and the method). Package-level initializers live in the synthetic `init`, which is not in `SrcFuncs`, so the resolver scans it for stores to globals.
 - **Returned value**: followed through Phi edges, local and captured variables, `Extract`, and the returns of static callees (helpers, invoked closures). A callee's parameter maps back to the caller's argument, so `return passThrough(q.Debug())` is reported. Calls are followed to depth 16 and never into a function already on the stack.
 
 Limitations:
