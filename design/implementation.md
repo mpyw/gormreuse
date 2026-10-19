@@ -107,6 +107,8 @@ Problems are reported by `FindDirectiveProblems` through `pass.Reportf`, at the 
 
 Directives can be combined with commas: `//gormreuse:pure,immutable-return`
 
+**Generic instances and method values (#180).** A call can resolve to a stand-in for the function the directive is written on: an instance of a generic function or method (`genBranch[int]`), or a bound method wrapper (`f := r.m`, named `m$bound`). The directive sets and the maps keyed by `*ssa.Function` (`failedPure`, `needsImmutableParam`, the Scopes and immutable callback sets) are keyed by the declared function. `directive.DeclaredFunc` maps a stand-in to it: an instance to its `Origin()`, a bound wrapper to the declared method (`Prog.FuncValue`). Every lookup goes through it: `DirectiveFuncSet.Contains`, `ImmutableInputSet.Callbacks`, the `failedPure` check in `IsPureFunction`, the immutable-param caller check, and the callback collectors (`scopesCallbackResolver` for Scopes/Preload, `callbackFuncValue` for Transaction/FindInBatches and immutable-input). Code that reads the arguments of a call keeps the resolved callee: a bound wrapper has no receiver argument, so the receiver shift is decided from its own signature. An interface method value has no declared body, so `DeclaredFunc` leaves it unchanged and it carries no directive.
+
 All internal positions (file keys, ignore lines, directive placement, the generated-file skip, the disk fallback in `funcset.go`, fix offsets) use `PositionFor(pos, false)`, so `//line` directives cannot move them (#151, #152, #153). Only the `root at file:line` text in messages stays adjusted, to match the position the driver prints.
 
 **Directive placement for closures:**

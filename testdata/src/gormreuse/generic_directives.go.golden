@@ -1,0 +1,232 @@
+package internal
+
+import "gorm.io/gorm"
+
+// =============================================================================
+// DIRECTIVES ON GENERIC FUNCTIONS AND METHODS (#180)
+//
+// A call to a generic function or method calls an instance (genLeak[int]),
+// while the directive sets and the per-function maps are keyed by the generic
+// origin. Every lookup normalizes the callee to its origin first, so each
+// directive behaves exactly as on the matching non-generic function. Method
+// values (r.m, a $bound wrapper) normalize to the declared method too.
+// =============================================================================
+
+type genRepo struct{}
+
+// ===== pure =====
+
+//gormreuse:pure
+func genPure[T any](db *gorm.DB, out *T) {
+	_, _ = db, out
+}
+
+// genUsePure: a valid pure generic function does not consume its argument.
+func genUsePure(db *gorm.DB) {
+	q := db.Where("x")
+	var out int
+	genPure(q, &out)
+	q.Find(nil) // OK: genPure is pure
+}
+
+// genLeak breaks its pure contract by leaking the argument, so its callers do
+// not trust it as pure.
+//
+//gormreuse:pure
+func genLeak[T any](db *gorm.DB, ch chan *gorm.DB) {
+	ch <- db // want `pure function leaks \*gorm\.DB argument via channel send`
+}
+
+// genUseFailedPure: the failed pure contract is revoked for the instance too.
+func genUseFailedPure(db *gorm.DB, ch chan *gorm.DB) {
+	q := db.Where("x").Session(&gorm.Session{})
+	genLeak[int](q, ch)
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+//gormreuse:pure
+func (r genRepo) leak[T any](db *gorm.DB, ch chan *gorm.DB) {
+	ch <- db // want `pure function leaks \*gorm\.DB argument via channel send`
+}
+
+// genUseFailedPureMethod: the same for a generic method.
+func genUseFailedPureMethod(db *gorm.DB, ch chan *gorm.DB) {
+	q := db.Where("x").Session(&gorm.Session{})
+	genRepo{}.leak[int](q, ch)
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+//gormreuse:pure
+func (r genRepo) pure[T any](db *gorm.DB, out *T) {
+	_, _ = db, out
+}
+
+// genUsePureMethodValue: a pure method called through a method value.
+func genUsePureMethodValue(db *gorm.DB) {
+	q := db.Where("x")
+	f := genRepo{}.pure[int]
+	var out int
+	f(q, &out)
+	q.Find(nil) // OK: pure is pure
+}
+
+type genApplier interface{ apply(db *gorm.DB) }
+
+// genInterfaceMethodValue: an interface method has no declared body, so its
+// method value carries no directive and consumes its argument.
+func genInterfaceMethodValue(db *gorm.DB, a genApplier) {
+	q := db.Where("x").Session(&gorm.Session{})
+	f := a.apply
+	f(q)
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// ===== immutable-return =====
+
+//gormreuse:immutable-return
+func genConn[T any](db *gorm.DB) *gorm.DB {
+	return db.Session(&gorm.Session{})
+}
+
+// genUseImmutableReturn: the result of an immutable-return instance branches
+// freely.
+func genUseImmutableReturn(db *gorm.DB) {
+	q := genConn[int](db)
+	q.Where("a").Find(nil)
+	q.Where("b").Find(nil) // OK: q is immutable
+}
+
+// genBadImmutableReturn breaks its immutable-return contract.
+//
+//gormreuse:immutable-return
+func genBadImmutableReturn[T any](db *gorm.DB) *gorm.DB { // want `immutable-return declared but function returns mutable \*gorm\.DB`
+	return db.Session(&gorm.Session{}).Where("x")
+}
+
+// genUseImmutableReturnMethodValue: the result of an immutable-return method
+// called through a method value.
+func genUseImmutableReturnMethodValue(db *gorm.DB) {
+	conn := genRepo{}.conn[int]
+	q := conn(db)
+	q.Where("a").Find(nil)
+	q.Where("b").Find(nil) // OK: q is immutable
+}
+
+//gormreuse:immutable-return
+func (r genRepo) conn[T any](db *gorm.DB) *gorm.DB {
+	return db.Session(&gorm.Session{})
+}
+
+// ===== immutable-param =====
+
+// genBranch relies on immutability: it branches its parameter.
+//
+//gormreuse:immutable-param
+func genBranch[T any](db *gorm.DB) {
+	db.Where("a").Find(nil)
+	db.Where("b").Find(nil)
+}
+
+// genPassMutable: the caller-side contract is checked for the instance.
+func genPassMutable(root *gorm.DB) {
+	genBranch[int](root.Session(&gorm.Session{}).Where("x")) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of genBranch`
+}
+
+// genPassIsolated: an isolated value satisfies the contract.
+func genPassIsolated(root *gorm.DB) {
+	genBranch[int](root.Session(&gorm.Session{})) // OK: isolated
+}
+
+//gormreuse:immutable-param
+func (r genRepo) branch[T any](db *gorm.DB) {
+	db.Where("a").Find(nil)
+	db.Where("b").Find(nil)
+}
+
+// genPassMutableMethod: the same for a generic method.
+func genPassMutableMethod(root *gorm.DB) {
+	genRepo{}.branch[int](root.Session(&gorm.Session{}).Where("x")) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of branch`
+}
+
+// genPassMutableMethodValue: through a method value, the first argument is
+// the parameter, not the receiver.
+func genPassMutableMethodValue(root *gorm.DB) {
+	f := genRepo{}.branch[int]
+	f(root.Session(&gorm.Session{}).Where("x")) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of branch`
+}
+
+// ===== immutable-input =====
+
+//gormreuse:immutable-input(cb)
+func genRun[T any](db *gorm.DB, cb func(*gorm.DB)) {
+	cb(db.Session(&gorm.Session{}))
+}
+
+// genUseRun: the callback of an immutable-input instance reuses freely.
+func genUseRun(db *gorm.DB) {
+	genRun[int](db, func(tx *gorm.DB) {
+		tx.Where("a").Find(nil)
+		tx.Where("b").Find(nil) // OK: tx is immutable
+	})
+}
+
+// genBadRun breaks its immutable-input contract.
+//
+//gormreuse:immutable-input(cb)
+func genBadRun[T any](db *gorm.DB, cb func(*gorm.DB)) {
+	cb(db.Where("x")) // want `immutable-input\(cb\) declared but mutable \*gorm\.DB passed to callback`
+}
+
+//gormreuse:immutable-input(cb)
+func (r genRepo) run[T any](db *gorm.DB, cb func(*gorm.DB)) {
+	cb(db.Session(&gorm.Session{}))
+}
+
+// genUseRunMethod: the same for a generic method.
+func genUseRunMethod(db *gorm.DB) {
+	genRepo{}.run[int](db, func(tx *gorm.DB) {
+		tx.Where("a").Find(nil)
+		tx.Where("b").Find(nil) // OK: tx is immutable
+	})
+}
+
+// genUseRunMethodValue: the callback is at the same index through a method
+// value, which has no receiver argument.
+func genUseRunMethodValue(db *gorm.DB) {
+	run := genRepo{}.run[int]
+	run(db, func(tx *gorm.DB) {
+		tx.Where("a").Find(nil)
+		tx.Where("b").Find(nil) // OK: tx is immutable
+	})
+}
+
+//gormreuse:immutable-input(cb)
+func (r genRepo) badRun[T any](db *gorm.DB, cb func(*gorm.DB)) {
+	cb(db.Where("x")) // want `immutable-input\(cb\) declared but mutable \*gorm\.DB passed to callback`
+}
+
+// ===== generic callbacks of gorm methods =====
+
+// genScope is passed to Scopes as an instance. Its parameter receives a
+// mid-chain value, so immutable-param cannot exempt it.
+//
+//gormreuse:immutable-param
+func genScope[T any](tx *gorm.DB) *gorm.DB {
+	tx.Where("a").Find(nil)
+	return tx.Where("b") // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+func genUseScope(db *gorm.DB) {
+	db.Scopes(genScope[int])
+}
+
+// genTx is passed to Transaction as an instance, which hands it a fresh tx.
+func genTx[T any](tx *gorm.DB) error {
+	tx.Where("a").Find(nil)
+	tx.Where("b").Find(nil) // OK: tx is fresh
+	return nil
+}
+
+func genUseTx(db *gorm.DB) {
+	_ = db.Transaction(genTx[int])
+}

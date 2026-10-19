@@ -78,19 +78,14 @@ func (s *ImmutableInputSet) AddFile(file *ast.File, pkgPath string) {
 
 // Callbacks returns the registered immutable-input callbacks for fn, used to
 // exempt callback arguments (case 2.2) and to validate the declaring function's
-// body contract (cases 2.3/2.4).
+// body contract (cases 2.3/2.4). fn may be a generic instance or a bound method
+// wrapper (see DeclaredFunc); ParamIdx never counts a receiver, so it indexes
+// the arguments of a call to either.
 func (s *ImmutableInputSet) Callbacks(fn *ssa.Function) []ImmutableInputCallback {
 	if s == nil || fn == nil {
 		return nil
 	}
-	key := FuncKey{FuncName: fn.Name()}
-	if fn.Pkg != nil && fn.Pkg.Pkg != nil {
-		key.PkgPath = fn.Pkg.Pkg.Path()
-	}
-	if sig := fn.Signature; sig != nil && sig.Recv() != nil {
-		key.ReceiverType = receiverTypeString(sig.Recv().Type())
-	}
-	return slices.Clone(s.known[key])
+	return slices.Clone(s.known[funcKeyOf(DeclaredFunc(fn))])
 }
 
 // GetUnused returns the diagnostics for directives that don't apply to any usable
