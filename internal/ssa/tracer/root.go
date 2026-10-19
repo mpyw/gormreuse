@@ -112,6 +112,7 @@ type RootTracer struct {
 	onlyParams           map[*ssa.Function]bool      // Memo of returnsOnlyParams
 	scopesCallbacks      map[*ssa.Function]bool      // Scopes/Preload callbacks (params are mutable roots)
 	immutableCallbacks   map[*ssa.Function]bool      // Transaction/FindInBatches callbacks (fresh tx)
+	fieldRoots           map[fieldRootKey]*FieldRoot // Interned FieldRoots (one per call and field path)
 }
 
 // PureVerdicts is what validating the //gormreuse:pure functions found. The
@@ -185,6 +186,7 @@ func New(pureFuncs, immutableReturnFuncs, immutableParamFuncs *directive.Directi
 		scopesCallbacks:      scopesCallbacks,
 		immutableCallbacks:   immutableCallbacks,
 		onlyParams:           make(map[*ssa.Function]bool),
+		fieldRoots:           make(map[fieldRootKey]*FieldRoot),
 	}
 }
 
@@ -458,6 +460,18 @@ func (t *RootTracer) traceNonCall(v ssa.Value, visited map[ssa.Value]bool, loopI
 	case *ssa.Alloc:
 		// Alloc: local variable allocation
 		return t.traceAlloc(val, visited, loopInfo)
+
+	case *ssa.Field:
+		// Field: a field of a struct held in a register, as promoted methods
+		// of an embedded *gorm.DB read it (#181)
+		if vals := fieldValueStoredValues(val); len(vals) > 0 {
+			return t.trace(vals[0], visited, loopInfo)
+		}
+		return nil
+
+	case *FieldRoot:
+		// FieldRoot: a field of a struct a call returned (#181)
+		return t.internFieldRoot(val)
 
 	default:
 		return nil
@@ -1097,7 +1111,193 @@ func (t *RootTracer) traceFieldStore(fa *ssa.FieldAddr, load *ssa.UnOp, visited 
 // fieldStores). With a nil load, every store in the function is returned.
 func fieldStoredValues(fa *ssa.FieldAddr, load ssa.Instruction) []ssa.Value {
 	root, path := fieldAddrPath(fa)
-	return fieldStoredValuesFrom(fa.Parent(), root, path, load, make(map[fieldRef]bool))
+	return fieldStoredValuesAt(fa.Parent(), root, path, load)
+}
+
+// fieldValueStoredValues is fieldStoredValues for a field read from a struct
+// held in a register rather than through its address (#181):
+//
+//	t4 = *t0             // e := embedded{q}; e.Where("a")
+//	t5 = t4.DB           // Field, not FieldAddr: promoted methods read this way
+//
+// A Field chain over a load resolves to the address that was loaded, so it
+// matches the same stores as a FieldAddr chain. A Field chain over a call that
+// returns a struct yields that call's FieldRoot. A struct that a Phi merges
+// yields the field of every edge.
+func fieldValueStoredValues(f *ssa.Field) []ssa.Value {
+	return structFieldValues(f, nil, make(map[ssa.Value]bool))
+}
+
+// structFieldValues returns the values of the field that path selects from the
+// struct value x. seen stops Phi cycles through loops.
+func structFieldValues(x ssa.Value, path []int, seen map[ssa.Value]bool) []ssa.Value {
+	for {
+		field, ok := x.(*ssa.Field)
+		if !ok {
+			break
+		}
+		path = append([]int{field.Field}, path...)
+		x = field.X
+	}
+	switch base := x.(type) {
+	case *ssa.Call:
+		return []ssa.Value{&FieldRoot{Call: base, Path: path}}
+	case *ssa.Phi:
+		if seen[base] {
+			return nil
+		}
+		seen[base] = true
+		var vals []ssa.Value
+		for _, edge := range base.Edges {
+			vals = append(vals, structFieldValues(edge, path, seen)...)
+		}
+		return vals
+	case *ssa.UnOp:
+		if base.Op != token.MUL {
+			return nil
+		}
+		root, prefix := base.X, []int(nil)
+		if fa, ok := base.X.(*ssa.FieldAddr); ok {
+			root, prefix = fieldAddrPath(fa)
+		}
+		return fieldStoredValuesAt(base.Parent(), root, append(prefix, path...), base)
+	default:
+		return nil
+	}
+}
+
+// fieldStoredValuesAt returns the values stored into the field that path
+// selects from root, as read by load in fn. Each address root may stand for
+// (see fieldBaseAddrs) is searched in the function that defines it, or in fn
+// for one without a function, such as a global. Only the stores that reach load
+// are returned when the address is defined in fn. Stores in an enclosing
+// function have no CFG path to a load in a closure, so all of them are returned.
+func fieldStoredValuesAt(fn *ssa.Function, root ssa.Value, path []int, load ssa.Instruction) []ssa.Value {
+	var vals []ssa.Value
+	for _, base := range fieldBaseAddrs(root, make(map[ssa.Value]bool)) {
+		baseFn, baseLoad := base.Parent(), load
+		if baseFn == nil {
+			baseFn = fn
+		}
+		if baseFn != fn {
+			baseLoad = nil
+		}
+		vals = append(vals, fieldStoredValuesFrom(baseFn, base, path, baseLoad, make(map[fieldRef]bool))...)
+	}
+	return vals
+}
+
+// fieldBaseAddrs returns the addresses whose stores a field access through root
+// can see. Two forms of root do not hold the stores themselves (#181):
+//
+//   - A FreeVar: a closure reads a captured struct through it, while the stores
+//     are in the enclosing function, on the captured Alloc. The binding stands
+//     for it.
+//   - A load of a pointer variable (`*h`, where `h := &T{...}` is captured or
+//     has its address taken, so it lives in an Alloc): every access loads h
+//     afresh, so no two accesses share the load. Each pointer stored into the
+//     variable stands for it.
+//
+// Any other root stands for itself.
+func fieldBaseAddrs(root ssa.Value, seen map[ssa.Value]bool) []ssa.Value {
+	if seen[root] {
+		return nil
+	}
+	seen[root] = true
+	switch r := root.(type) {
+	case *ssa.FreeVar:
+		if binding := FreeVarBinding(r); binding != nil {
+			return fieldBaseAddrs(binding, seen)
+		}
+	case *ssa.UnOp:
+		if r.Op != token.MUL {
+			break
+		}
+		slot := r.X
+		if fv, ok := slot.(*ssa.FreeVar); ok {
+			slot = FreeVarBinding(fv)
+		}
+		if alloc, ok := slot.(*ssa.Alloc); ok {
+			var bases []ssa.Value
+			for _, ptr := range AllocStoredValues(alloc) {
+				bases = append(bases, fieldBaseAddrs(ptr, seen)...)
+			}
+			return bases
+		}
+	}
+	return []ssa.Value{root}
+}
+
+// FieldRoot is the mutable root of a *gorm.DB field of a struct value that a
+// call returned (#181):
+//
+//	s := mk(db)          // t1 = mk(db); *t0 = t1
+//	s.DB.Where("a")      // root: FieldRoot{t1, [DB]}
+//	s.DB.Where("b")      // the same FieldRoot: second branch
+//
+// It extends "a call returning *gorm.DB is a root" to a call returning a struct
+// that holds one. The SSA has no value for "field DB of t1", so the tracer
+// makes one per (call, field path) and returns the same pointer for each (see
+// RootTracer.internFieldRoot). Fields read through a parameter or a receiver
+// stay untracked.
+type FieldRoot struct {
+	Call *ssa.Call
+	Path []int
+}
+
+// Name names the field of the call: "t1.DB".
+func (r *FieldRoot) Name() string { return r.Call.Name() + r.pathString() }
+
+// String describes the field of the call: "makeTwoDB().DB".
+func (r *FieldRoot) String() string { return r.Call.String() + r.pathString() }
+
+// Type returns the type of the field.
+func (r *FieldRoot) Type() types.Type {
+	t := r.Call.Type()
+	for _, i := range r.Path {
+		t = t.Underlying().(*types.Struct).Field(i).Type()
+	}
+	return t
+}
+
+// Parent returns the function that makes the call.
+func (r *FieldRoot) Parent() *ssa.Function { return r.Call.Parent() }
+
+// Referrers returns nil: no instruction refers to a FieldRoot.
+func (r *FieldRoot) Referrers() *[]ssa.Instruction { return nil }
+
+// Pos returns the position of the call, which the diagnostics name as the root.
+func (r *FieldRoot) Pos() token.Pos { return r.Call.Pos() }
+
+func (r *FieldRoot) pathString() string {
+	var b strings.Builder
+	t := r.Call.Type()
+	for _, i := range r.Path {
+		field := t.Underlying().(*types.Struct).Field(i)
+		b.WriteString("." + field.Name())
+		t = field.Type()
+	}
+	return b.String()
+}
+
+type fieldRootKey struct {
+	call *ssa.Call
+	path string
+}
+
+// internFieldRoot returns the one FieldRoot for r's call and path, or nil when
+// the call returns immutable values (a builtin or //gormreuse:immutable-return
+// function).
+func (t *RootTracer) internFieldRoot(r *FieldRoot) ssa.Value {
+	if t.returnsImmutable(r.Call.Call.StaticCallee()) {
+		return nil
+	}
+	key := fieldRootKey{call: r.Call, path: r.pathString()}
+	if existing, ok := t.fieldRoots[key]; ok {
+		return existing
+	}
+	t.fieldRoots[key] = r
+	return r
 }
 
 // fieldAddrPath resolves fa to the address it ultimately selects from together
@@ -1176,9 +1376,15 @@ func fieldStoredValuesFrom(fn *ssa.Function, root ssa.Value, path []int, load ss
 		}
 		// A whole sub-aggregate was copied over a prefix of the path being
 		// read; resume the search at the address it was loaded from, for the
-		// remainder of the path.
-		if agg, ok := store.Val.(*ssa.UnOp); ok && agg.Op == token.MUL {
-			vals = append(vals, fieldStoredValuesFrom(fn, agg.X, path[len(storePath):], agg, seen)...)
+		// remainder of the path. A struct a call returned has no stores to
+		// follow: its field is a FieldRoot (#181).
+		switch agg := store.Val.(type) {
+		case *ssa.UnOp:
+			if agg.Op == token.MUL {
+				vals = append(vals, fieldStoredValuesFrom(fn, agg.X, path[len(storePath):], agg, seen)...)
+			}
+		case *ssa.Call:
+			vals = append(vals, &FieldRoot{Call: agg, Path: slices.Clone(path[len(storePath):])})
 		}
 	}
 	return vals
@@ -1477,6 +1683,13 @@ func (t *RootTracer) traceAll(v ssa.Value, visited map[ssa.Value]bool, loopInfo 
 
 	case *ssa.FreeVar:
 		return t.traceAllFreeVar(val, visited, loopInfo)
+
+	case *ssa.Field:
+		var roots []ssa.Value
+		for _, stored := range fieldValueStoredValues(val) {
+			roots = append(roots, t.traceAll(stored, visited, loopInfo)...)
+		}
+		return roots
 
 	case *ssa.Call:
 		// The result of a pure function may be any argument it returns (#188).
@@ -1819,10 +2032,11 @@ func (t *RootTracer) returnsImmutable(callee *ssa.Function) bool {
 // Used to determine if a closure needs recursive analysis. A closure
 // that doesn't capture *gorm.DB can be skipped for efficiency.
 //
-// Recursively checks pointer chains: *gorm.DB, **gorm.DB, ***gorm.DB, etc.
+// Looks through pointer chains (*gorm.DB, **gorm.DB, ...) and struct fields, so
+// a closure capturing a struct that holds a *gorm.DB is analyzed too (#181).
 func ClosureCapturesGormDB(mc *ssa.MakeClosure) bool {
 	return slices.ContainsFunc(mc.Bindings, func(binding ssa.Value) bool {
-		return containsGormDBThroughPointers(binding.Type())
+		return holdsGormDB(binding.Type(), make(map[types.Type]bool))
 	})
 }
 
@@ -2417,25 +2631,32 @@ func callbackFuncValue(v ssa.Value) *ssa.Function {
 	return nil
 }
 
-// containsGormDBThroughPointers checks if a type contains *gorm.DB through pointer chain.
-// It recursively unwraps pointers: *gorm.DB, **gorm.DB, ***gorm.DB, etc.
-// Unlike containsGormDB in directive package, this does NOT check:
+// holdsGormDB reports whether a value of type t holds a *gorm.DB the tracer can
+// follow: t is *gorm.DB or gorm.DB, a pointer to such a type (**gorm.DB, ...),
+// or a struct with such a field, embedded or not (#181). seen stops recursive
+// struct types.
+//
+// Unlike containsGormDB in the directive package, this does NOT check:
 //   - interface{} (would cause false positives in SSA analysis)
-//   - struct fields, slices, maps, channels (SSA handles these differently)
-func containsGormDBThroughPointers(t types.Type) bool {
-	if t == nil {
+//   - slices, maps, channels (SSA handles these differently)
+func holdsGormDB(t types.Type, seen map[types.Type]bool) bool {
+	if t == nil || seen[t] {
 		return false
 	}
+	seen[t] = true
 
-	// Direct *gorm.DB or gorm.DB check
 	if typeutil.IsGormDB(t) {
 		return true
 	}
-
-	// Unwrap pointer and check recursively
-	if ptr, ok := types.Unalias(t).(*types.Pointer); ok {
-		return containsGormDBThroughPointers(ptr.Elem())
+	switch u := t.Underlying().(type) {
+	case *types.Pointer:
+		return holdsGormDB(u.Elem(), seen)
+	case *types.Struct:
+		for field := range u.Fields() {
+			if holdsGormDB(field.Type(), seen) {
+				return true
+			}
+		}
 	}
-
 	return false
 }
