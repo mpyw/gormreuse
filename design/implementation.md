@@ -662,7 +662,7 @@ Cost: with `FactTypes` set, the drivers also run the analyzer, and `buildssa`, o
 | Shortcut | Why it is safe |
 | --- | --- |
 | `run` skips the directive scans of a file with no comment that contains `gormreuse:` | Every directive, and every comment `FindDirectiveProblems` reports, contains it |
-| `RunSSA` skips the SSA passes of a package that does not reach `gorm.io/gorm` through its imports (`typeutil.ReachesGorm`). It still reports unused directives and ignores | No value in such a package can hold a `*gorm.DB`, since its type would name `gorm.DB` and so record gorm among the imports |
+| `run` builds SSA, by calling `buildssa.Analyzer.Run` itself, only for a package that reaches `gorm.io/gorm` through its imports (`typeutil.ReachesGorm`). `Analyzer` requires `ctrlflow`, which buildssa needs and which already runs on every dependency for its own facts, instead of `buildssa`. `RunSSA` gets a nil `ssaInfo` for any other package and still reports unused directives and ignores | No value in such a package can hold a `*gorm.DB`, since its type would name `gorm.DB` and so record gorm among the imports |
 
 On `e2e/internal`, the command used about 2.8 s of CPU with both, 4.6 s with only the second, and 7.5 s with neither. v0.22.0, without facts, used about 1.6 to 2.4 s.
 
