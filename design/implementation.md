@@ -315,6 +315,7 @@ The `plugin` package registers `Analyzer` with golangci-lint's module plugin sys
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                      internal/analyzer.go  RunSSA                       │
 │  Every report goes through directive.Ignores. Package-level passes:     │
+│    0. Infer immutable-return functions (#261)                           │
 │    1. Validate pure functions to a fixed point (purity.Validator)       │
 │    2. Collect Scopes and immutable callbacks (callback package)         │
 │    3. Check immutable-input and immutable-return bodies                 │
@@ -802,7 +803,7 @@ Now `exportFacts` in `internal/analyzer.go` exports a `facts.Func` object fact f
 | `Pure` | Marked `pure`, valid or not, as `DirectiveFuncSet.Contains` decides in the package | `DirectiveFuncSet.Import` on the pure set |
 | `PureFailed` | The body definitively breaks the contract | `PureVerdicts.HasFailed`. So a pure function that passes its argument to it fails too (#187) |
 | `Returned`, `ReturnsOnlyParams` | The parameters the result may be (#188), and whether nothing else is returned | `PureVerdicts.ReturnedArgs`, `RootTracer.pureReturnsOnlyParams` |
-| `ImmutableReturn` | Marked `immutable-return`, and `ImmutableReturnValidator` reports nothing | `DirectiveFuncSet.Import` on the immutable-return set |
+| `ImmutableReturn` | Marked `immutable-return`, and `ImmutableReturnValidator` reports nothing. Or inferred without relying on a broken contract (#261) | `DirectiveFuncSet.Import` on the immutable-return set |
 | `BranchesImmutableParam` | In `needsImmutableParam` | The caller-side check (`handler.Context.NeedsImmutableParam`) |
 | `ImmutableInput` | Marked `immutable-input(name)`, and `ValidateImmutableInputs` reports nothing | `ImmutableInputSet.Import`. The callback collectors and the body check then see the callee's callbacks |
 
@@ -823,6 +824,38 @@ Cost: with `FactTypes` set, the drivers also run the analyzer, and `buildssa`, o
 | `run` builds SSA, by calling `buildssa.Analyzer.Run` itself, only for a package that reaches `gorm.io/gorm` through its imports (`typeutil.ReachesGorm`). `Analyzer` requires `ctrlflow`, which buildssa needs and which already runs on every dependency for its own facts, instead of `buildssa`. `RunSSA` gets a nil `ssaInfo` for any other package and still reports unused directives and ignores | No value in such a package can hold a `*gorm.DB`, since its type would name `gorm.DB` and so record gorm among the imports |
 
 On `e2e/internal`, the command used about 2.8 s of CPU with both, 4.6 s with only the second, and 7.5 s with neither. v0.22.0, without facts, used about 1.6 to 2.4 s.
+
+## Inferred immutable-return (#261)
+
+After #227 a helper's result is a mutable root, so on gorm's own `tests` module most new reports came from `db, err := OpenTestConnection(...)`, and in services from helpers such as `r.conn(ctx)` returning `r.db.WithContext(ctx)`. Each needed a manual `//gormreuse:immutable-return`. Now `inferImmutableReturns` in `internal/analyzer.go` adds such functions to the immutable-return set with `DirectiveFuncSet.Infer`, right after the facts are imported and before any pass reads the set. Every consumer (the tracer, the pure validator, the callback and fix code, `exportFacts`) then sees them through `Contains`.
+
+`purity.InferImmutableReturns` proves a function when every `*gorm.DB` operand of every `Return` is, through Phi edges:
+
+| Value | Proved when |
+| --- | --- |
+| A `Call`, or an `Extract` of a tuple `Call` such as `gorm.Open`'s | `RootTracer.IsImmutableCall` accepts it with a tracer that has no immutable-return set: its last call is `Session` (with a config literal whose `Initialized` is known false), `WithContext`, `Debug`, `Begin` or `gorm.Open`. Or the declared callee is trusted (declared, or imported from a fact) or already inferred |
+| The nil constant | Always |
+| Anything else: a parameter, a load of a field, a global or a captured local (a named result a deferred closure writes is one), a dynamic or interface call | Never |
+
+A function needs at least one such result, so a function that only panics is not inferred. Candidates are the analyzed functions and closures with a body and a `*gorm.DB` result, not in a skipped file, and without the directive.
+
+Decisions:
+
+- **Positive proof, not the benefit of the doubt.** `ImmutableReturnValidator` reports only what is provably mutable, because a declared directive is the user's assertion. Inference has no assertion behind it, so it accepts only what is provably immutable. Between the two, a function stays unmarked.
+- **A least fixed point.** A worklist proves each candidate. A candidate that fails only on calls to other candidates waits on them, and is proved again when one of them is added. The set only grows, and a larger set only proves more, so the result is the least fixed point, whatever the order. A function is never added on the strength of itself, which is why recursion is not inferred: `if n > 0 { return rec(n-1) }; return db.Session(...)` is immutable, but proving it needs a greatest fixed point, and an assumed-true cycle is harder to trust. `TestInferImmutableReturns` checks every rotation of the candidates, forwards and backwards.
+- **A broken declared contract: trusted at home, not abroad.** A declared `immutable-return` whose body breaks the contract is trusted in its package (see [Directives across packages](#directives-across-packages-195)). A function that returns its result is inferred there too, so the mistake is still reported once. `distrustedReturns` proves the inferred functions again with the broken ones distrusted, and the ones that no longer hold export no fact, like the broken function itself. The broken contracts are known only after the pure pass, which inference must precede, so this is a second, smaller fixed point and not a single one.
+- **A declared directive stays used.** An inferable function with the directive is not a candidate, keeps its body check, and its directive is not reported unused or redundant. It documents the intent, and a later change to the body is reported at the declaration instead of turning into reports at the call sites.
+- **`Validate` skips inferred functions.** Their bodies were proved, and a report would say "declared" about a function without the directive.
+- **No `-fix` to insert the directive.** The issue suggested it as an alternative to implicit inference. Inference is the same check the analyzer would make when validating an inserted directive, so inserting it adds a comment and no information.
+
+Measured with the command on gorm's repository (v1.31.2):
+
+| Module | Before | After | Removed reports |
+| --- | --- | --- | --- |
+| Root | 160 | 150 | 10 in `Migrator.AutoMigrate`, all on the results of `GetQueryAndExecTx`, which returns two `Session` results |
+| `tests` | 34 | 15 | 19, all on the result of `OpenTestConnection`, which returns `gorm.Open`'s result or nil |
+
+Each removed report branched a `clone > 0` handle, so none was a real reuse. No report was added.
 
 ## Reassignment Fix Target
 
@@ -1160,6 +1193,7 @@ Each fixture function marked `[LIMITATION]` under `testdata/src` pins one of the
 | --- | --- | --- |
 | `a, b := pair(db)`, then `a.Find(nil); b.Find(nil)` | `opaqueTuplePairShared` | Every `*gorm.DB` of one tuple shares the call as its root (#176) |
 | `G = db.Where("x"); if c { G = G.Where("a") }; G.Find(nil)` for a global or a field | `pvConditionalRebuildOfStore` | A store is not a merge point the way a local's Phi is |
+| A recursive helper that returns only immutable values, branched twice | `notInferredRecursive` | Inference is a least fixed point, so a function that returns its own result is never inferred ([Inferred immutable-return](#inferred-immutable-return-261)) |
 
 **Wrong position.** Uses in a deferred closure are ordered by their source position, not by when they run. `defer func() { q.Count(nil) }(); q.Find(nil)` is reported at `q.Find`, which runs first. A deferred call such as `defer q.Count(nil)` is ordered after the function's other uses and reported at the `defer`. Fixtures: `ifInsideDefer`, `ifElseInsideDefer`, `nestedIfInsideDefer`, `tripleNestingIfForDefer`, `tripleNestingForIfDefer`, `deferCapturingLoopVar`, `nestedDeferClosures`, `tripleNestedDeferClosures`, `nestedDeferWithFor`, `ultimateIfForDeferChaos`.
 

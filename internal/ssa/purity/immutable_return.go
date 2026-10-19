@@ -60,9 +60,10 @@ func NewImmutableReturnValidator(funcs []*ssa.Function, set *directive.Directive
 }
 
 // Validate reports fn when it is marked //gormreuse:immutable-return and
-// returns a provably mutable *gorm.DB.
+// returns a provably mutable *gorm.DB. An inferred function is not checked:
+// its body was proved immutable (#261).
 func (v *ImmutableReturnValidator) Validate(fn *ssa.Function) []Violation {
-	if fn == nil || v.set == nil || v.rt == nil || !v.set.Contains(fn) {
+	if fn == nil || v.set == nil || v.rt == nil || !v.set.Contains(fn) || v.set.Inferred(fn) {
 		return nil
 	}
 	if !v.returnsMutable(fn, make(map[ssa.Value]bool)) {
@@ -395,4 +396,123 @@ func immutableReturnStoreAlwaysRuns(store *ssa.Store) bool {
 		}
 	}
 	return true
+}
+
+// InferImmutableReturns returns the functions of candidates whose every
+// *gorm.DB result is provably immutable, so that they can be treated as
+// //gormreuse:immutable-return without the directive (#261). A result is
+// provably immutable when it is, through Phi edges:
+//   - the nil constant;
+//   - a call, or a result of a call such as gorm.Open's (*gorm.DB, error),
+//     whose callee is Session, WithContext, Debug, Begin or gorm.Open. A
+//     Session config must be a literal that leaves Initialized unset or false
+//     (callsite.Site.SessionEffect);
+//   - a call to a function that trusted accepts, or to another function this
+//     returns.
+//
+// Anything else, such as a parameter, a field, a captured variable or a call
+// the rule does not prove, rules the function out. So does a function with no
+// return that carries a *gorm.DB.
+//
+// The result is the least fixed point: a function is added only once its
+// body is proved with the functions already added, so a function never
+// relies on itself or on a function whose body breaks the contract, and the
+// result is the same in any order. rt must resolve builtins only: a tracer
+// without an immutable-return set, so that IsImmutableCall accepts only the
+// gorm builtins.
+func InferImmutableReturns(candidates []*ssa.Function, trusted func(*ssa.Function) bool, rt *tracer.RootTracer) map[*ssa.Function]bool {
+	inferred := make(map[*ssa.Function]bool)
+	accept := func(fn *ssa.Function) bool { return inferred[fn] || trusted(fn) }
+	isCandidate := make(map[*ssa.Function]bool, len(candidates))
+	for _, fn := range candidates {
+		isCandidate[fn] = true
+	}
+
+	// A function that waits on a candidate is proved again once that
+	// candidate is added, so each function is proved at most once per callee.
+	waiting := make(map[*ssa.Function][]*ssa.Function)
+	queue := slices.Clone(candidates)
+	for len(queue) > 0 {
+		fn := queue[0]
+		queue = queue[1:]
+		if inferred[fn] {
+			continue
+		}
+		proved, blockers := immutableReturnProof(fn, accept, rt)
+		if proved {
+			inferred[fn] = true
+			queue = append(queue, waiting[fn]...)
+			delete(waiting, fn)
+			continue
+		}
+		for _, callee := range blockers {
+			if isCandidate[callee] {
+				waiting[callee] = append(waiting[callee], fn)
+			}
+		}
+	}
+	return inferred
+}
+
+// immutableReturnProof reports whether every *gorm.DB result of fn is
+// provably immutable when accept decides the functions it calls. When it is
+// not, blockers are the callees that accept refused and that alone kept the
+// proof from holding; they are nil when something else is unprovable.
+func immutableReturnProof(fn *ssa.Function, accept func(*ssa.Function) bool, rt *tracer.RootTracer) (proved bool, blockers []*ssa.Function) {
+	results := 0
+	unprovable := false
+	seen := make(map[ssa.Value]bool)
+	callProved := func(call *ssa.Call) {
+		if rt.IsImmutableCall(call) {
+			return
+		}
+		callee := directive.DeclaredFunc(rt.Site(call).Declared)
+		switch {
+		case callee == nil:
+			unprovable = true
+		case !accept(callee):
+			blockers = append(blockers, callee)
+		}
+	}
+	var prove func(v ssa.Value)
+	prove = func(v ssa.Value) {
+		if seen[v] || unprovable {
+			return
+		}
+		seen[v] = true
+		switch x := v.(type) {
+		case *ssa.Phi:
+			for _, edge := range x.Edges {
+				prove(edge)
+			}
+		case *ssa.Const:
+			// nil: there is no handle to reuse.
+		case *ssa.Call:
+			callProved(x)
+		case *ssa.Extract:
+			if call, ok := x.Tuple.(*ssa.Call); ok {
+				callProved(call)
+			} else {
+				unprovable = true
+			}
+		default:
+			unprovable = true
+		}
+	}
+	for _, block := range fn.Blocks {
+		ret, ok := block.Instrs[len(block.Instrs)-1].(*ssa.Return)
+		if !ok {
+			continue
+		}
+		for _, res := range ret.Results {
+			if typeutil.IsGormDB(res.Type()) {
+				results++
+				prove(res)
+			}
+		}
+	}
+	if unprovable || results == 0 {
+		return false, nil
+	}
+	return len(blockers) == 0, blockers
 }

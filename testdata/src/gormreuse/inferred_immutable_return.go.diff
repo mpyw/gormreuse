@@ -1,0 +1,326 @@
+--- inferred_immutable_return.go	1970-01-01 00:00:00
++++ inferred_immutable_return.go.golden	1970-01-01 00:00:00
+@@ -1,313 +1,313 @@
+ package internal
+ 
+ import (
+ 	"context"
+ 
+ 	"gorm.io/gorm"
+ )
+ 
+ // =============================================================================
+ // Inferred immutable-return (#261)
+ //
+ // A function without //gormreuse:immutable-return is treated as if it had the
+ // directive when every *gorm.DB it returns is provably immutable: the nil
+ // constant, a Session, WithContext, Debug, Begin or gorm.Open result, or the
+ // result of another immutable-return function, declared or inferred. Anything
+ // the analyzer cannot prove leaves the function unmarked, so its result stays
+ // a mutable root.
+ // =============================================================================
+ 
+ type inferredRepo struct {
+ 	db *gorm.DB
+ }
+ 
+ func (r *inferredRepo) conn(ctx context.Context) *gorm.DB {
+ 	return r.db.WithContext(ctx)
+ }
+ 
+ func inferredWithContext(r *inferredRepo) {
+ 	q := r.conn(context.Background())
+ 	q.Where("a").Find(nil)
+ 	q.Where("b").Find(nil) // OK: conn is inferred
+ }
+ 
+ func inferredMethodValue(r *inferredRepo) {
+ 	conn := r.conn
+ 	q := conn(context.Background())
+ 	q.Find(nil)
+ 	q.Find(nil) // OK: a method value calls the inferred method
+ }
+ 
+ func inferredSessionAfterChain(db *gorm.DB) *gorm.DB {
+ 	return db.Where("tenant").Session(&gorm.Session{})
+ }
+ 
+ func inferredSessionAfterChainUse(db *gorm.DB) {
+ 	q := inferredSessionAfterChain(db)
+ 	q.Find(nil)
+ 	q.Find(nil) // OK: the last call is Session
+ }
+ 
+ func inferredDebug(db *gorm.DB) *gorm.DB { return db.Debug() }
+ 
+ func inferredBegin(db *gorm.DB) *gorm.DB { return db.Begin() }
+ 
+ func inferredDebugUse(db *gorm.DB) {
+ 	q := inferredDebug(db)
+ 	q.Find(nil)
+ 	q.Find(nil) // OK
+ }
+ 
+ func inferredBeginUse(db *gorm.DB) {
+ 	tx := inferredBegin(db)
+ 	tx.Find(nil)
+ 	tx.Find(nil) // OK
+ }
+ 
+ // openTestConnection is the shape of gorm's own test helper (#227): named
+ // results, gorm.Open on every path, and nil on error.
+ func openTestConnection(dialect string) (db *gorm.DB, err error) {
+ 	switch dialect {
+ 	case "mysql":
+ 		db, err = gorm.Open("mysql")
+ 	default:
+ 		db, err = gorm.Open("sqlite")
+ 		if err == nil {
+ 			db.Exec("PRAGMA foreign_keys = ON")
+ 		}
+ 	}
+ 	if err != nil {
+ 		return
+ 	}
+ 	return db, nil
+ }
+ 
+ func setupDB() (*gorm.DB, error) {
+ 	db, err := openTestConnection("sqlite")
+ 	if err != nil {
+ 		return nil, err
+ 	}
+ 	return db, nil
+ }
+ 
+ func inferredTupleUse() {
+ 	db, err := openTestConnection("mysql")
+ 	if err != nil {
+ 		return
+ 	}
+ 	db.Where("a").Find(nil)
+ 	db.Where("b").Find(nil) // OK: openTestConnection is inferred
+ 
+ 	s, _ := setupDB()
+ 	s.Find(nil)
+ 	s.Find(nil) // OK: setupDB returns an inferred function's result
+ }
+ 
+ // Declared after its callers: inference does not depend on the order.
+ func inferredOuter(db *gorm.DB) *gorm.DB { return inferredMiddle(db) }
+ 
+ func inferredOuterUse(db *gorm.DB) {
+ 	q := inferredOuter(db)
+ 	q.Find(nil)
+ 	q.Find(nil) // OK
+ }
+ 
+ func inferredMiddle(db *gorm.DB) *gorm.DB { return inferredInner(db) }
+ 
+ func inferredInner(db *gorm.DB) *gorm.DB { return db.Session(&gorm.Session{}) }
+ 
+ func inferredBranches(db *gorm.DB, ctx context.Context, c bool) *gorm.DB {
+ 	if c {
+ 		return db.WithContext(ctx)
+ 	}
+ 	return db.Session(&gorm.Session{NewDB: true})
+ }
+ 
+ func inferredEither(c bool) *gorm.DB {
+ 	if c {
+ 		return inferredInner(DB)
+ 	}
+ 	return inferredDebug(DB)
+ }
+ 
+ func inferredEitherUse() {
+ 	q := inferredEither(true)
+ 	q.Find(nil)
+ 	q.Find(nil) // OK: both callees are inferred
+ }
+ 
+ func inferredBranchesUse(db *gorm.DB, ctx context.Context) {
+ 	q := inferredBranches(db, ctx, true)
+ 	q.Find(nil)
+ 	q.Find(nil) // OK: every return is immutable
+ }
+ 
+ func inferredClosure(db *gorm.DB) {
+ 	conn := func() *gorm.DB { return db.Session(&gorm.Session{}) }
+ 	q := conn()
+ 	q.Find(nil)
+ 	q.Find(nil) // OK: the closure is inferred too
+ }
+ 
+ // declaredAndInferable keeps its directive: it is used, not reported unused.
+ //
+ //gormreuse:immutable-return
+ func declaredAndInferable(db *gorm.DB) *gorm.DB {
+ 	return db.Session(&gorm.Session{})
+ }
+ 
+ func viaDeclared(db *gorm.DB) *gorm.DB { return declaredAndInferable(db) }
+ 
+ func viaDeclaredUse(db *gorm.DB) {
+ 	q := viaDeclared(db)
+ 	q.Find(nil)
+ 	q.Find(nil) // OK: a declared immutable-return result
+ }
+ 
+ // brokenImmutableReturn breaks its contract and is reported once, here. In
+ // this package it is still trusted, and so is a function that returns its
+ // result. Neither exports a fact (see purelib).
+ //
+ //gormreuse:immutable-return
+ func brokenImmutableReturn(db *gorm.DB) *gorm.DB { // want `immutable-return declared but function returns mutable \*gorm\.DB`
+ 	return db.Where("x")
+ }
+ 
+ func viaBroken(db *gorm.DB) *gorm.DB { return brokenImmutableReturn(db) }
+ 
+ func viaBrokenUse(db *gorm.DB) {
+ 	q := viaBroken(db)
+ 	q.Find(nil)
+ 	q.Find(nil) // OK: trusted at home, like brokenImmutableReturn
+ }
+ 
+ // =============================================================================
+ // Not inferred: the result stays a mutable root
+ // =============================================================================
+ 
+ func notInferredChain(db *gorm.DB) *gorm.DB {
+ 	return db.Session(&gorm.Session{}).Where("x")
+ }
+ 
+ func notInferredInitialized(db *gorm.DB) *gorm.DB {
+ 	return db.Session(&gorm.Session{Initialized: true})
+ }
+ 
+ func notInferredConfig(db *gorm.DB, cfg *gorm.Session) *gorm.DB {
+ 	return db.Session(cfg) // the config may set Initialized
+ }
+ 
+ func notInferredParam(db *gorm.DB) *gorm.DB {
+ 	return db
+ }
+ 
+ func notInferredField(r *inferredRepo) *gorm.DB {
+ 	return r.db
+ }
+ 
+ func notInferredOneEdge(db *gorm.DB, c bool) *gorm.DB {
+ 	if c {
+ 		return db.Session(&gorm.Session{})
+ 	}
+ 	return db
+ }
+ 
+ func notInferredDynamic(f func() *gorm.DB) *gorm.DB {
+ 	return f()
+ }
+ 
+ func notInferredUnmarkedCallee(db *gorm.DB) *gorm.DB {
+ 	return notInferredParam(db)
+ }
+ 
+ func notInferredDeferred(db *gorm.DB) (r *gorm.DB) {
+ 	defer func() {
+ 		if r == nil {
+ 			r = db
+ 		}
+ 	}()
+ 	return db.Session(&gorm.Session{})
+ }
+ 
+ func notInferredChainUse(db *gorm.DB) {
+-	q := notInferredChain(db)
++	q := notInferredChain(db).Session(&gorm.Session{})
+ 	q.Find(nil)
+ 	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ func notInferredInitializedUse(db *gorm.DB) {
+-	q := notInferredInitialized(db)
++	q := notInferredInitialized(db).Session(&gorm.Session{})
+ 	q.Find(nil)
+ 	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ func notInferredConfigUse(db *gorm.DB, cfg *gorm.Session) {
+-	q := notInferredConfig(db, cfg)
++	q := notInferredConfig(db, cfg).Session(&gorm.Session{})
+ 	q.Find(nil)
+ 	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ func notInferredParamUse() {
+-	q := notInferredParam(DB)
++	q := notInferredParam(DB).Session(&gorm.Session{})
+ 	q.Find(nil)
+ 	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ func notInferredFieldUse(r *inferredRepo) {
+-	q := notInferredField(r)
++	q := notInferredField(r).Session(&gorm.Session{})
+ 	q.Find(nil)
+ 	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ func notInferredOneEdgeUse() {
+-	q := notInferredOneEdge(DB, true)
++	q := notInferredOneEdge(DB, true).Session(&gorm.Session{})
+ 	q.Find(nil)
+ 	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ func notInferredDynamicUse(f func() *gorm.DB) {
+-	q := notInferredDynamic(f)
++	q := notInferredDynamic(f).Session(&gorm.Session{})
+ 	q.Find(nil)
+ 	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ func notInferredUnmarkedCalleeUse() {
+-	q := notInferredUnmarkedCallee(DB)
++	q := notInferredUnmarkedCallee(DB).Session(&gorm.Session{})
+ 	q.Find(nil)
+ 	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ func notInferredDeferredUse(db *gorm.DB) {
+-	q := notInferredDeferred(db)
++	q := notInferredDeferred(db).Session(&gorm.Session{})
+ 	q.Find(nil)
+ 	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // [LIMITATION] notInferredRecursive is immutable on every path that returns,
+ // but inference only adds a function once its body is proved without it, so
+ // a function that returns its own result is never inferred. Mark it
+ // //gormreuse:immutable-return.
+ func notInferredRecursive(db *gorm.DB, n int) *gorm.DB {
+ 	if n > 0 {
+ 		return notInferredRecursive(db, n-1)
+ 	}
+ 	return db.Session(&gorm.Session{})
+ }
+ 
+ func notInferredRecursiveUse(db *gorm.DB) {
+-	q := notInferredRecursive(db, 3)
++	q := notInferredRecursive(db, 3).Session(&gorm.Session{})
+ 	q.Find(nil)
+ 	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // notInferredCommaOk returns a value from a comma-ok type assertion, which is
+ // not a call.
+ func notInferredCommaOk(v any) *gorm.DB {
+ 	db, _ := v.(*gorm.DB)
+ 	return db
+ }
+ 
+ // notInferredPanics returns no *gorm.DB at all, so there is nothing to prove.
+ func notInferredPanics() *gorm.DB {
+ 	panic("not implemented")
+ }

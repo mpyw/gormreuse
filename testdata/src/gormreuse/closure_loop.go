@@ -10,7 +10,7 @@ type bannerRepo struct {
 	db *gorm.DB
 }
 
-func (r *bannerRepo) DB() *gorm.DB {
+func (r *bannerRepo) DB() *gorm.DB { // want DB:"gormreuse immutable-return"
 	return r.db.Session(&gorm.Session{})
 }
 
