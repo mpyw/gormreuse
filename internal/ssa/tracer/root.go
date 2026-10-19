@@ -68,15 +68,12 @@ package tracer
 
 import (
 	"go/token"
-	"go/types"
 	"maps"
 	"slices"
-	"strings"
 
 	"golang.org/x/tools/go/ssa"
 
 	"github.com/mpyw/gormreuse/internal/directive"
-	"github.com/mpyw/gormreuse/internal/facts"
 	"github.com/mpyw/gormreuse/internal/ssa/callsite"
 	"github.com/mpyw/gormreuse/internal/ssa/cfg"
 	"github.com/mpyw/gormreuse/internal/ssa/pollutionsource"
@@ -119,74 +116,11 @@ type RootTracer struct {
 	immutableCallbacks   map[*ssa.Function]bool      // Transaction/FindInBatches callbacks (fresh tx)
 	fieldRoots           map[fieldRootKey]*FieldRoot // Interned FieldRoots (one per call and field path)
 	allRoots             map[allRootsKey][]ssa.Value // Memo of FindAllMutableRoots
-	aliases              map[aliasKey]bool           // Memo of mayAlias
+	aliases              map[aliasedRootsKey]bool    // Memo of mayAlias
 	funcVars             callsite.FuncVars           // Package-level variables that hold one function (#183)
 }
 
-// PureVerdicts is what validating the //gormreuse:pure functions found. The
-// purity package fills it before the reuse analysis runs.
-type PureVerdicts struct {
-	// Failed lists the pure functions whose bodies definitively break the
-	// contract (pollute or leak an argument). They must NOT be trusted as pure
-	// at call sites, since that would hide reuse of the value they leak (#66).
-	Failed map[*ssa.Function]bool
-
-	// Returned lists, for each pure function that keeps the contract, the
-	// indexes into fn.Params of the parameters its result may be (#188). A
-	// pure function does not pollute its argument, but `return db` hands the
-	// same *gorm.DB back, so a branch from the result is a branch from the
-	// argument.
-	Returned map[*ssa.Function][]int
-
-	// Imported holds the verdicts that other packages exported for their pure
-	// functions (#195). Failed and Returned hold only this package's.
-	Imported *facts.Table
-}
-
-// HasFailed reports whether fn is a pure function that broke its contract. The
-// verdicts are keyed by the declared function, and fn may be a generic instance
-// or a bound method wrapper of it (#180).
-func (p *PureVerdicts) HasFailed(fn *ssa.Function) bool {
-	if p == nil {
-		return false
-	}
-	declared := directive.DeclaredFunc(fn)
-	return p.Failed[declared] || p.Imported.Of(declared).PureFailed
-}
-
-// ReturnedArgs returns the arguments of a call to fn (args, as in
-// CallCommon.Args) that its result may be. A bound method wrapper (f := x.M;
-// f(a)) takes no receiver argument, so the indexes are shifted by the
-// parameters it lacks; the receiver itself is never in Returned. The count of
-// parameters comes from the signature, since a function of another package
-// has no Params.
-func (p *PureVerdicts) ReturnedArgs(fn *ssa.Function, args []ssa.Value) []ssa.Value {
-	if p == nil {
-		return nil
-	}
-	declared := directive.DeclaredFunc(fn)
-	indexes := p.Returned[declared]
-	if len(indexes) == 0 {
-		indexes = p.Imported.Of(declared).Returned
-	}
-	if len(indexes) == 0 {
-		return nil
-	}
-	nparams := declared.Signature.Params().Len()
-	if declared.Signature.Recv() != nil {
-		nparams++
-	}
-	shift := nparams - len(args)
-	var returned []ssa.Value
-	for _, i := range indexes {
-		if j := i - shift; j >= 0 && j < len(args) {
-			returned = append(returned, args[j])
-		}
-	}
-	return returned
-}
-
-// New creates a new RootTracer.
+// NewRootTracer creates a new RootTracer.
 //
 // pure holds the verdicts of validating the //gormreuse:pure functions earlier
 // this pass: the ones that failed are not trusted as pure, and the result of a
@@ -205,7 +139,7 @@ func (p *PureVerdicts) ReturnedArgs(fn *ssa.Function, args []ssa.Value) []ssa.Va
 //
 // funcVars resolves a call through a package-level variable that holds one
 // function to that function, so its directives apply (#183). It may be nil.
-func New(pureFuncs, immutableReturnFuncs, immutableParamFuncs *directive.DirectiveFuncSet, pure *PureVerdicts, scopesCallbacks, immutableCallbacks map[*ssa.Function]bool, funcVars callsite.FuncVars) *RootTracer {
+func NewRootTracer(pureFuncs, immutableReturnFuncs, immutableParamFuncs *directive.DirectiveFuncSet, pure *PureVerdicts, scopesCallbacks, immutableCallbacks map[*ssa.Function]bool, funcVars callsite.FuncVars) *RootTracer {
 	return &RootTracer{
 		pureFuncs:            pureFuncs,
 		immutableReturnFuncs: immutableReturnFuncs,
@@ -217,7 +151,7 @@ func New(pureFuncs, immutableReturnFuncs, immutableParamFuncs *directive.Directi
 		onlyParams:           make(map[*ssa.Function]bool),
 		fieldRoots:           make(map[fieldRootKey]*FieldRoot),
 		allRoots:             make(map[allRootsKey][]ssa.Value),
-		aliases:              make(map[aliasKey]bool),
+		aliases:              make(map[aliasedRootsKey]bool),
 	}
 }
 
@@ -319,11 +253,13 @@ func (t *RootTracer) IsScopesCallbackFunc(fn *ssa.Function) bool {
 // Builtin methods (Session, WithContext, Debug, etc.) return immutable *gorm.DB.
 // This is used for tracing - only builtin methods have immutable return values.
 //
-// The name lookup is gated on the function actually belonging to gorm.io/gorm
-// (see isGormBuiltinFunc). Without this gate, any user-defined function sharing a
-// builtin name — a method named Session, a helper named Open — would be silently
-// trusted as immutable-returning (and, via IsPureFunction, as pure), disabling
-// reuse detection around it.
+// The name lookup is gated on the function being genuinely defined by
+// gorm.io/gorm: either a method whose receiver is gorm.DB
+// (Session, WithContext, Debug, Begin, Transaction), or a package-level
+// function in the gorm.io/gorm package (gorm.Open). Without this gate, any
+// user-defined function sharing a builtin name — a method named Session, a
+// helper named Open — would be silently trusted as immutable-returning (and,
+// via IsPureFunction, as pure), disabling reuse detection around it.
 func (t *RootTracer) isImmutableReturningBuiltin(fn *ssa.Function) bool {
 	if fn == nil {
 		return false
@@ -331,14 +267,6 @@ func (t *RootTracer) isImmutableReturningBuiltin(fn *ssa.Function) bool {
 	if !typeutil.IsImmutableReturningBuiltin(fn.Name()) {
 		return false
 	}
-	return isGormBuiltinFunc(fn)
-}
-
-// isGormBuiltinFunc reports whether fn is genuinely defined by gorm.io/gorm:
-// either a method whose receiver is gorm.DB (Session, WithContext, Debug, Begin,
-// Transaction), or a package-level function in the gorm.io/gorm package
-// (gorm.Open). User-defined functions that merely share a builtin name return false.
-func isGormBuiltinFunc(fn *ssa.Function) bool {
 	if sig := fn.Signature; sig != nil && sig.Recv() != nil {
 		return typeutil.IsGormDB(sig.Recv().Type())
 	}
@@ -378,6 +306,8 @@ func isGormBuiltinFunc(fn *ssa.Function) bool {
 //	│  traceNonCall()  │
 //	│ (Phi/UnOp/etc.)  │
 //	└──────────────────┘
+//
+//declscope:shared // field.go, freevar.go and store.go trace the values they resolve with it
 func (t *RootTracer) trace(v ssa.Value, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) ssa.Value {
 	if v == nil || visited[v] {
 		return nil
@@ -432,7 +362,7 @@ func (t *RootTracer) traceCall(call *ssa.Call, visited map[ssa.Value]bool, loopI
 	// The result of a pure function may be its argument (#188).
 	if args := t.pureReturnedArgs(site); len(args) > 0 {
 		for _, arg := range args {
-			if root := t.trace(arg, cloneVisited(visited), loopInfo); root != nil {
+			if root := t.trace(arg, maps.Clone(visited), loopInfo); root != nil {
 				return root
 			}
 		}
@@ -515,7 +445,7 @@ func (t *RootTracer) traceNonCall(v ssa.Value, visited map[ssa.Value]bool, loopI
 
 	case *ssa.Alloc:
 		// Alloc: local variable allocation
-		return t.traceAlloc(val, visited, loopInfo)
+		return t.traceAllocStore(val, visited, loopInfo)
 
 	case *ssa.Field:
 		// Field: a field of a struct held in a register, as promoted methods
@@ -532,211 +462,6 @@ func (t *RootTracer) traceNonCall(v ssa.Value, visited map[ssa.Value]bool, loopI
 	default:
 		return nil
 	}
-}
-
-// isSwapPhiPair checks if two Phi nodes form a swap pattern.
-//
-// A swap pattern occurs when two Phi nodes in the same block have edges that are
-// swapped versions of each other. This typically happens when variables are swapped
-// in conditional code.
-//
-// # Pattern Detection
-//
-// Given two Phi nodes:
-//
-//	phiA = phi [pred0: x, pred1: y, ...]
-//	phiB = phi [pred0: y, pred1: x, ...]
-//	                ^^^       ^^^
-//	                swapped!
-//
-// The function returns true if there exists at least one pair of edges (i, j) where:
-//   - phiA.Edges[i] == phiB.Edges[j]  AND
-//   - phiA.Edges[j] == phiB.Edges[i]
-//
-// # Example 1: Variable Swap in Loop
-//
-// Go code:
-//
-//	q1 := db.Where("q1")
-//	q2 := db.Where("q2")
-//	for _, item := range items {
-//	    if item%2 == 0 {
-//	        temp := q1
-//	        q1 = q2  // Swap
-//	        q2 = temp
-//	    }
-//	    q1 = q1.Where(...)
-//	}
-//
-// SSA representation:
-//
-//	Block 1 (loop header):
-//	  t5 = phi [entry: t1, back: t23] #q1
-//	  t6 = phi [entry: t3, back: t17] #q2
-//
-//	Block 5 (after if, inside loop):
-//	  t16 = phi [no-swap: t5, swap: t6] #q1
-//	  t17 = phi [no-swap: t6, swap: t5] #q2
-//	                      ^^        ^^
-//	                      These are swapped!
-//
-// In this case:
-//   - t16 has edges [t5, t6]
-//   - t17 has edges [t6, t5]  ← swapped!
-//   - isSwapPhiPair(t16, t17) returns true
-//
-// # Example 2: Conditional Swap (Non-Loop)
-//
-// Go code:
-//
-//	q1 := db.Where("q1")
-//	q2 := db.Where("q2")
-//	if swap {
-//	    q1, q2 = q2, q1  // Modern swap syntax
-//	}
-//	q1.Find(nil)
-//
-// SSA representation:
-//
-//	Block 0 (entry):
-//	  t1 = db.Where("q1")
-//	  t3 = db.Where("q2")
-//
-//	Block 2 (after if):
-//	  t7 = phi [no-swap: t1, swap: t3] #q1
-//	  t8 = phi [no-swap: t3, swap: t1] #q2
-//	                      ^^        ^^
-//	                      Also swapped!
-//
-// In this case:
-//   - t7 has edges [t1, t3]
-//   - t8 has edges [t3, t1]  ← swapped!
-//   - isSwapPhiPair(t7, t8) returns true
-//
-// # Why This Matters
-//
-// Detecting swap patterns is crucial for correct pollution tracking:
-//   - In loops with only assignments: swapped variables remain independent
-//   - In conditionals with pre-pollution: swap propagates pollution to both
-//
-// See collectInitialEdgeRoots() for how this is used in pollution detection.
-func isSwapPhiPair(phiA, phiB *ssa.Phi) bool {
-	if len(phiA.Edges) != len(phiB.Edges) {
-		return false
-	}
-
-	// Check if there's at least one pair of swapped edges
-	for i := range phiA.Edges {
-		edgeA := phiA.Edges[i]
-		edgeB := phiB.Edges[i]
-
-		// Look for the swapped pattern in other edges
-		for j := range phiA.Edges {
-			if i == j {
-				continue
-			}
-			otherA := phiA.Edges[j]
-			otherB := phiB.Edges[j]
-
-			// Check if (edgeA, edgeB) == (otherB, otherA) - swap pattern
-			if edgeA == otherB && edgeB == otherA {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// findSwapPhiSibling finds a swap-pair sibling of phi in the same block.
-//
-// When variables are swapped (e.g., q1, q2 = q2, q1), SSA creates two Phi nodes
-// in the same block with swapped edges. This function searches for that sibling.
-//
-// # Search Process
-//
-// Given a Phi node, this function:
-//  1. Iterates through all instructions in the same basic block
-//  2. For each Phi instruction found:
-//     - Skip if it's the same phi (self)
-//     - Check if it forms a swap-pair using isSwapPhiPair()
-//  3. Returns the first matching sibling, or nil if none found
-//
-// # Example: Loop Variable Swap
-//
-// SSA block structure:
-//
-//	Block 5 (if.done - after conditional swap):
-//	  t16 = phi [no-swap: t5, swap: t6] #q1  ← Input phi
-//	  t17 = phi [no-swap: t6, swap: t5] #q2  ← Sibling found!
-//	  t18 = phi [...]                        ← Not a swap-pair, skipped
-//	  ...
-//
-// Given t16 as input:
-//   - findSwapPhiSibling(t16) returns t17
-//   - findSwapPhiSibling(t17) returns t16 (symmetric)
-//
-// # Why Search in Same Block?
-//
-// Swap Phi nodes ALWAYS appear in the same basic block because:
-//   - They represent the merge point after a conditional branch
-//   - Both variables are updated at the exact same control flow point
-//   - SSA ensures all Phi nodes for a block are at the block's start
-//
-// # Usage Pattern
-//
-// This is used as a quick check to detect swap patterns:
-//
-//	if findSwapPhiSibling(phi) != nil {
-//	    // This phi is part of a swap - apply special handling
-//	    ...
-//	}
-//
-// See tracePhi(), traceAll(), and traceAllPointerLoads() for actual usage.
-func findSwapPhiSibling(phi *ssa.Phi) *ssa.Phi {
-	block := phi.Block()
-	for _, instr := range block.Instrs {
-		if otherPhi, ok := instr.(*ssa.Phi); ok && otherPhi != phi && isSwapPhiPair(phi, otherPhi) {
-			return otherPhi
-		}
-	}
-	return nil
-}
-
-// isLoopVariableSwap checks if a Phi node is part of a loop variable swap pattern.
-// Returns the loop-header Phis if this is a swap, nil otherwise.
-// This is a convenience function that combines swap detection checks.
-func isLoopVariableSwap(phi *ssa.Phi, loopInfo *cfg.LoopInfo) []*ssa.Phi {
-	if loopInfo == nil {
-		return nil
-	}
-	// Don't apply to loop-header phis themselves
-	if loopInfo.IsLoopHeader(phi.Block()) {
-		return nil
-	}
-	// Must have a swap sibling
-	if findSwapPhiSibling(phi) == nil {
-		return nil
-	}
-	// Edges must all be loop-header phis
-	return getLoopHeaderPhiEdges(phi, loopInfo)
-}
-
-// getLoopHeaderPhiEdges checks if all edges of a Phi are loop-header Phis.
-// Returns the list of loop-header Phis if all edges qualify, nil otherwise.
-func getLoopHeaderPhiEdges(phi *ssa.Phi, loopInfo *cfg.LoopInfo) []*ssa.Phi {
-	if loopInfo == nil {
-		return nil
-	}
-
-	var loopHeaderPhis []*ssa.Phi
-	for _, edge := range phi.Edges {
-		edgePhi, ok := edge.(*ssa.Phi)
-		if !ok || !loopInfo.IsLoopHeader(edgePhi.Block()) {
-			return nil
-		}
-		loopHeaderPhis = append(loopHeaderPhis, edgePhi)
-	}
-	return loopHeaderPhis
 }
 
 // collectInitialEdgeRoots collects roots from INITIAL edges (entry edges) of
@@ -859,7 +584,7 @@ func (t *RootTracer) collectInitialEdgeRoots(loopHeaderPhis []*ssa.Phi, swapPhi 
 		// Get the initial edge (first edge, not back-edge)
 		if len(loopPhi.Edges) > 0 {
 			initialEdge := loopPhi.Edges[0]
-			if !isNilConst(initialEdge) && !visited[initialEdge] {
+			if !isNilPhiEdge(initialEdge) && !visited[initialEdge] {
 				roots = append(roots, t.traceAll(initialEdge, visited, loopInfo)...)
 			}
 		}
@@ -879,7 +604,7 @@ func (t *RootTracer) tracePhi(phi *ssa.Phi, visited map[ssa.Value]bool, loopInfo
 		// First pass: try back-edges (predecessors with higher indices)
 		if phiBlockIndex >= 0 {
 			for i, edge := range phi.Edges {
-				if isNilConst(edge) || visited[edge] {
+				if isNilPhiEdge(edge) || visited[edge] {
 					continue
 				}
 				// Check if this is a back-edge (predecessor comes after phi block)
@@ -894,7 +619,7 @@ func (t *RootTracer) tracePhi(phi *ssa.Phi, visited map[ssa.Value]bool, loopInfo
 
 			// Second pass: try forward-edges if no back-edge root found
 			for _, edge := range phi.Edges {
-				if isNilConst(edge) || visited[edge] {
+				if isNilPhiEdge(edge) || visited[edge] {
 					continue
 				}
 				if root := t.trace(edge, visited, loopInfo); root != nil {
@@ -987,7 +712,7 @@ func (t *RootTracer) tracePhi(phi *ssa.Phi, visited map[ssa.Value]bool, loopInfo
 	//
 	// If any condition fails, we fall through to regular tracing.
 	//
-	if isLoopVariableSwap(phi, loopInfo) != nil {
+	if loopSwapPhis(phi, loopInfo) != nil {
 		// Loop variable swap detected - return phi as independent root
 		// This prevents cross-contamination between swapped loop variables
 		return phi
@@ -1008,7 +733,7 @@ func (t *RootTracer) tracePhi(phi *ssa.Phi, visited map[ssa.Value]bool, loopInfo
 	//   - Conditional swaps outside loops
 	//
 	for _, edge := range phi.Edges {
-		if isNilConst(edge) || visited[edge] {
+		if isNilPhiEdge(edge) || visited[edge] {
 			continue
 		}
 		if root := t.trace(edge, visited, loopInfo); root != nil {
@@ -1031,7 +756,7 @@ func (t *RootTracer) tracePointerLoad(load *ssa.UnOp, visited map[ssa.Value]bool
 	case *ssa.FreeVar:
 		return t.traceFreeVar(p, visited, loopInfo)
 	case *ssa.Alloc:
-		return t.traceAlloc(p, visited, loopInfo)
+		return t.traceAllocStore(p, visited, loopInfo)
 	case *ssa.FieldAddr:
 		return t.traceFieldStore(p, load, visited, loopInfo)
 	case *ssa.Global:
@@ -1045,306 +770,6 @@ func (t *RootTracer) tracePointerLoad(load *ssa.UnOp, visited map[ssa.Value]bool
 		return t.trace(p, visited, loopInfo)
 	}
 }
-
-// traceFreeVar traces a captured variable in a closure back to its binding.
-//
-// When a closure captures a variable, SSA represents it as:
-//
-//	Parent function:
-//	    t1 = MakeClosure fn [q]    // q is bound to the closure
-//	                      ↑
-//	                      └─── Bindings[0] = q
-//
-//	Closure function (fn):
-//	    t2 = FreeVar [0]           // References Bindings[0] from parent
-//
-// This function finds the MakeClosure in the parent and traces the binding.
-func (t *RootTracer) traceFreeVar(fv *ssa.FreeVar, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) ssa.Value {
-	if binding := FreeVarBinding(fv); binding != nil {
-		return t.trace(binding, visited, loopInfo)
-	}
-	return nil
-}
-
-// FreeVarBinding resolves the value captured by fv: it locates the MakeClosure
-// that creates fv's parent closure and returns the binding at fv's index in the
-// captured-variable list. Returns nil if the closure or binding can't be found.
-// Shared by traceFreeVar (single root), traceAllFreeVar (all roots), the Scopes
-// callback resolver, and scopeswarn.
-func FreeVarBinding(fv *ssa.FreeVar) ssa.Value {
-	fn := fv.Parent()
-	if fn == nil {
-		return nil
-	}
-
-	// Find the index of this FreeVar in the function's FreeVars list
-	idx := slices.Index(fn.FreeVars, fv)
-	if idx < 0 {
-		return nil
-	}
-
-	// Find the MakeClosure instruction in the parent function
-	parent := fn.Parent()
-	if parent == nil {
-		return nil
-	}
-
-	for _, block := range parent.Blocks {
-		for _, instr := range block.Instrs {
-			mc, ok := instr.(*ssa.MakeClosure)
-			if !ok {
-				continue
-			}
-			closureFn, ok := mc.Fn.(*ssa.Function)
-			if !ok || closureFn != fn {
-				continue
-			}
-			if idx < len(mc.Bindings) {
-				return mc.Bindings[idx]
-			}
-		}
-	}
-	return nil
-}
-
-// traceAlloc traces a local variable (Alloc) by finding Store instructions.
-//
-// In SSA, local variables are represented as:
-//
-//	t1 = Alloc *gorm.DB (q)     // Allocate space for variable q
-//	Store t1 <value>            // Store a value into q
-//	t2 = UnOp * t1              // Load value from q (dereference)
-//
-// This function finds the Store instruction that writes to the Alloc.
-func (t *RootTracer) traceAlloc(alloc *ssa.Alloc, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) ssa.Value {
-	// Single-root: trace the first value stored into the Alloc.
-	if vals := AllocStoredValues(alloc); len(vals) > 0 {
-		return t.trace(vals[0], visited, loopInfo)
-	}
-	return nil
-}
-
-// AllocStoredValues returns, in program order, the values stored into alloc.
-// Shared by traceAlloc (first), traceAllAllocStores (all), the Scopes callback
-// resolver, and scopeswarn.
-func AllocStoredValues(alloc *ssa.Alloc) []ssa.Value {
-	fn := alloc.Parent()
-	if fn == nil {
-		return nil
-	}
-	var vals []ssa.Value
-	for _, block := range fn.Blocks {
-		for _, instr := range block.Instrs {
-			if store, ok := instr.(*ssa.Store); ok && store.Addr == alloc {
-				vals = append(vals, store.Val)
-			}
-		}
-	}
-	return vals
-}
-
-// traceFieldStore traces a struct field access by finding Store instructions.
-//
-// When a struct field is accessed:
-//
-//	type Handler struct { db *gorm.DB }
-//	h.db.Find(nil)
-//
-// SSA represents this as:
-//
-//	t1 = FieldAddr h.db        // Get address of field
-//	t2 = UnOp * t1             // Dereference to get value
-//	                           // (traced here to find the Store)
-//
-// This function finds the Store that wrote to the same field and can reach the
-// load.
-func (t *RootTracer) traceFieldStore(fa *ssa.FieldAddr, load *ssa.UnOp, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) ssa.Value {
-	// Single-root: trace the first value stored into the same field.
-	if vals := FieldStoredValues(fa, load); len(vals) > 0 {
-		return t.trace(vals[0], visited, loopInfo)
-	}
-	return nil
-}
-
-// FieldStoredValues returns, in program order, the values stored into the same
-// struct field as fa. Shared by traceFieldStore (first), traceAllFieldStores
-// (all), and the Scopes callback resolver.
-//
-// With a load, only the stores that can reach it are returned (see
-// fieldStores). With a nil load, every store in the function is returned.
-func FieldStoredValues(fa *ssa.FieldAddr, load ssa.Instruction) []ssa.Value {
-	root, path := fieldAddrPath(fa)
-	return fieldStoredValuesAt(fa.Parent(), root, path, load)
-}
-
-// fieldValueStoredValues is FieldStoredValues for a field read from a struct
-// held in a register rather than through its address (#181):
-//
-//	t4 = *t0             // e := embedded{q}; e.Where("a")
-//	t5 = t4.DB           // Field, not FieldAddr: promoted methods read this way
-//
-// A Field chain over a load resolves to the address that was loaded, so it
-// matches the same stores as a FieldAddr chain. A Field chain over a call that
-// returns a struct yields that call's FieldRoot. A struct that a Phi merges
-// yields the field of every edge.
-func fieldValueStoredValues(f *ssa.Field) []ssa.Value {
-	return structFieldValues(f, nil, make(map[ssa.Value]bool))
-}
-
-// structFieldValues returns the values of the field that path selects from the
-// struct value x. seen stops Phi cycles through loops.
-func structFieldValues(x ssa.Value, path []int, seen map[ssa.Value]bool) []ssa.Value {
-	for {
-		field, ok := x.(*ssa.Field)
-		if !ok {
-			break
-		}
-		path = append([]int{field.Field}, path...)
-		x = field.X
-	}
-	switch base := x.(type) {
-	case *ssa.Call:
-		return []ssa.Value{&FieldRoot{Call: base, Path: path}}
-	case *ssa.Phi:
-		if seen[base] {
-			return nil
-		}
-		seen[base] = true
-		var vals []ssa.Value
-		for _, edge := range base.Edges {
-			vals = append(vals, structFieldValues(edge, path, seen)...)
-		}
-		return vals
-	case *ssa.UnOp:
-		if base.Op != token.MUL {
-			return nil
-		}
-		root, prefix := base.X, []int(nil)
-		if fa, ok := base.X.(*ssa.FieldAddr); ok {
-			root, prefix = fieldAddrPath(fa)
-		}
-		return fieldStoredValuesAt(base.Parent(), root, append(prefix, path...), base)
-	default:
-		return nil
-	}
-}
-
-// fieldStoredValuesAt returns the values stored into the field that path
-// selects from root, as read by load in fn. Each address root may stand for
-// (see fieldBaseAddrs) is searched in the function that defines it, or in fn
-// for one without a function, such as a global. Only the stores that reach load
-// are returned when the address is defined in fn. Stores in an enclosing
-// function have no CFG path to a load in a closure, so all of them are returned.
-func fieldStoredValuesAt(fn *ssa.Function, root ssa.Value, path []int, load ssa.Instruction) []ssa.Value {
-	var vals []ssa.Value
-	for _, base := range fieldBaseAddrs(root, make(map[ssa.Value]bool)) {
-		baseFn, baseLoad := base.Parent(), load
-		if baseFn == nil {
-			baseFn = fn
-		}
-		if baseFn != fn {
-			baseLoad = nil
-		}
-		vals = append(vals, fieldStoredValuesFrom(baseFn, base, path, baseLoad, make(map[fieldRef]bool))...)
-	}
-	return vals
-}
-
-// fieldBaseAddrs returns the addresses whose stores a field access through root
-// can see. Two forms of root do not hold the stores themselves (#181):
-//
-//   - A FreeVar: a closure reads a captured struct through it, while the stores
-//     are in the enclosing function, on the captured Alloc. The binding stands
-//     for it.
-//   - A load of a pointer variable (`*h`, where `h := &T{...}` is captured or
-//     has its address taken, so it lives in an Alloc): every access loads h
-//     afresh, so no two accesses share the load. Each pointer stored into the
-//     variable stands for it.
-//
-// Any other root stands for itself.
-func fieldBaseAddrs(root ssa.Value, seen map[ssa.Value]bool) []ssa.Value {
-	if seen[root] {
-		return nil
-	}
-	seen[root] = true
-	switch r := root.(type) {
-	case *ssa.FreeVar:
-		if binding := FreeVarBinding(r); binding != nil {
-			return fieldBaseAddrs(binding, seen)
-		}
-	case *ssa.UnOp:
-		if r.Op != token.MUL {
-			break
-		}
-		slot := r.X
-		if fv, ok := slot.(*ssa.FreeVar); ok {
-			slot = FreeVarBinding(fv)
-		}
-		if alloc, ok := slot.(*ssa.Alloc); ok {
-			var bases []ssa.Value
-			for _, ptr := range AllocStoredValues(alloc) {
-				bases = append(bases, fieldBaseAddrs(ptr, seen)...)
-			}
-			return bases
-		}
-	}
-	return []ssa.Value{root}
-}
-
-// FieldRoot is the mutable root of a *gorm.DB field of a struct that a call
-// returned, by value (#181) or through a pointer (#250):
-//
-//	s := mk(db)          // t1 = mk(db); *t0 = t1
-//	s.DB.Where("a")      // root: FieldRoot{t1, [DB]}
-//	s.DB.Where("b")      // the same FieldRoot: second branch
-//
-// It extends "a call returning *gorm.DB is a root" to a call returning a struct
-// that holds one. The SSA has no value for "field DB of t1", so the tracer
-// makes one per (call, field path) and returns the same pointer for each (see
-// RootTracer.internFieldRoot). Path indexes the struct the call returns, or
-// the one its pointer result points to. Fields read through a parameter or a
-// receiver stay untracked.
-type FieldRoot struct {
-	Call *ssa.Call
-	Path []int
-}
-
-// fieldRootStruct returns the struct that a FieldRoot path step selects from:
-// t itself, or what it points to.
-func fieldRootStruct(t types.Type) *types.Struct {
-	if ptr, ok := t.Underlying().(*types.Pointer); ok {
-		t = ptr.Elem()
-	}
-	return t.Underlying().(*types.Struct)
-}
-
-// Name names the field of the call: "t1.DB".
-func (r *FieldRoot) Name() string { return r.Call.Name() + r.pathString() }
-
-// String describes the field of the call: "makeTwoDB().DB".
-func (r *FieldRoot) String() string { return r.Call.String() + r.pathString() }
-
-// Type returns the type of the field.
-func (r *FieldRoot) Type() types.Type {
-	t := r.Call.Type()
-	for _, i := range r.Path {
-		t = fieldRootStruct(t).Field(i).Type()
-	}
-	return t
-}
-
-// Parent returns the function that makes the call.
-func (r *FieldRoot) Parent() *ssa.Function { return r.Call.Parent() }
-
-// Referrers returns nil: no instruction refers to a FieldRoot.
-func (r *FieldRoot) Referrers() *[]ssa.Instruction { return nil }
-
-// Pos returns the position of the call, which the diagnostics name as the root.
-func (r *FieldRoot) Pos() token.Pos { return r.Call.Pos() }
-
-// Block returns the block of the call, which defines the field: a call inside a
-// loop returns a new struct on each iteration (#250). See RootBlock.
-func (r *FieldRoot) Block() *ssa.BasicBlock { return r.Call.Block() }
 
 // RootBlock returns the block that defines a mutable root, or nil when it has
 // none, such as a global. The loop check and the suggested fixes place a root
@@ -1369,17 +794,8 @@ func RootBlock(v ssa.Value) *ssa.BasicBlock {
 	return nil
 }
 
-func (r *FieldRoot) pathString() string {
-	var b strings.Builder
-	t := r.Call.Type()
-	for _, i := range r.Path {
-		field := fieldRootStruct(t).Field(i)
-		b.WriteString("." + field.Name())
-		t = field.Type()
-	}
-	return b.String()
-}
-
+// fieldRootKey is the call and field path that internFieldRoot interns a
+// FieldRoot by.
 type fieldRootKey struct {
 	call *ssa.Call
 	path string
@@ -1398,245 +814,6 @@ func (t *RootTracer) internFieldRoot(r *FieldRoot) ssa.Value {
 	}
 	t.fieldRoots[key] = r
 	return r
-}
-
-// fieldAddrPath resolves fa to the address it ultimately selects from together
-// with the chain of field indices it walks to get there:
-//
-//	t1 = &h.inner        // FieldAddr
-//	t2 = &t1.db          // FieldAddr    → fieldAddrPath(t2) = (h, [0 0])
-//
-// Matching on the whole path rather than on the immediate base value is what
-// makes promoted fields (`outer{db: q}`, where db is embedded, allowed since
-// Go 1.27) traceable: the SSA builder emits a fresh `&h.inner` FieldAddr for
-// every access, so two accesses to the same nested field are never the same
-// base value.
-func fieldAddrPath(fa *ssa.FieldAddr) (root ssa.Value, path []int) {
-	path = []int{fa.Field}
-	root = fa.X
-	for {
-		parent, ok := root.(*ssa.FieldAddr)
-		if !ok {
-			return root, path
-		}
-		path = append([]int{parent.Field}, path...)
-		root = parent.X
-	}
-}
-
-// SameField reports whether a and b select the same field path from the same
-// address. Two accesses to one field are separate FieldAddr chains, so this
-// compares them as FieldStoredValues does.
-func SameField(a, b *ssa.FieldAddr) bool {
-	rootA, pathA := fieldAddrPath(a)
-	rootB, pathB := fieldAddrPath(b)
-	return rootA == rootB && slices.Equal(pathA, pathB)
-}
-
-// fieldRef identifies one (aggregate, field path, load) search. Every path
-// visited during a single FieldStoredValues query is a suffix of the original
-// path, so its length identifies it uniquely.
-type fieldRef struct {
-	root  ssa.Value
-	depth int
-	load  ssa.Instruction
-}
-
-// fieldStoredValuesFrom returns, in program order, the values stored into the
-// field that path selects from root.
-//
-// Besides the direct stores it follows whole-aggregate copies into any prefix of
-// path, which is required because the SSA builder does not initialize a
-// composite literal in place at its destination: `h := T{f: q}` fills a separate
-// `local T (complit)` temporary and copies the finished struct over.
-//
-//	t2 = local T (h)
-//	t3 = local T (complit)
-//	t4 = &t3.f
-//	*t4 = q              // the store lives under the temporary
-//	t5 = *t3             // load the finished literal
-//	*t2 = t5             // copy it into h
-//
-// A FieldAddr on t2 has no matching field store of its own; following
-// `*t2 = *t3` back to t3 recovers the store of q, as it was when t3 was
-// loaded. seen guards against aggregates that copy into each other.
-func fieldStoredValuesFrom(fn *ssa.Function, root ssa.Value, path []int, load ssa.Instruction, seen map[fieldRef]bool) []ssa.Value {
-	ref := fieldRef{root: root, depth: len(path), load: load}
-	if fn == nil || root == nil || len(path) == 0 || seen[ref] {
-		return nil
-	}
-	seen[ref] = true
-
-	stores, open := reachingFieldStores(fn, root, path, load)
-	var vals []ssa.Value
-	if call, ok := root.(*ssa.Call); ok && open {
-		// A field reached through a pointer that a call returned holds what
-		// the call put there until a store replaces it (#250). That value is
-		// the call's FieldRoot, as for a struct returned by value.
-		vals = append(vals, &FieldRoot{Call: call, Path: slices.Clone(path)})
-	}
-	for _, store := range stores {
-		storePath, _ := fieldStorePath(store, root)
-		if len(storePath) == len(path) {
-			vals = append(vals, store.Val)
-			continue
-		}
-		// A whole sub-aggregate was copied over a prefix of the path being
-		// read; resume the search at the address it was loaded from, for the
-		// remainder of the path. A struct a call returned has no stores to
-		// follow: its field is a FieldRoot (#181).
-		switch agg := store.Val.(type) {
-		case *ssa.UnOp:
-			if agg.Op == token.MUL {
-				vals = append(vals, fieldStoredValuesFrom(fn, agg.X, path[len(storePath):], agg, seen)...)
-			}
-		case *ssa.Call:
-			vals = append(vals, &FieldRoot{Call: agg, Path: slices.Clone(path[len(storePath):])})
-		}
-	}
-	return vals
-}
-
-// fieldStorePath returns the field path that store writes below root. ok is
-// false when it writes somewhere else. A store to root itself has an empty
-// path.
-func fieldStorePath(store *ssa.Store, root ssa.Value) (path []int, ok bool) {
-	storeRoot := store.Addr
-	if storeFA, isFA := store.Addr.(*ssa.FieldAddr); isFA {
-		storeRoot, path = fieldAddrPath(storeFA)
-	}
-	return path, storeRoot == root
-}
-
-// writesFieldPath reports whether store writes the field that path selects
-// from root: either that field itself, or a whole aggregate over a prefix of
-// path.
-func writesFieldPath(store *ssa.Store, root ssa.Value, path []int) bool {
-	storePath, ok := fieldStorePath(store, root)
-	return ok && len(storePath) <= len(path) && slices.Equal(storePath, path[:len(storePath)])
-}
-
-// fieldStores returns, in program order, the stores that write the field that
-// path selects from root. With a nil load it returns all of them. Otherwise it
-// returns only the stores that reach load (#182): on some CFG path from the
-// store to load, no other store writes the field.
-//
-//	t0 = &r.db
-//	t1 = *t0                 // load: the store below does not reach it
-//	t2 = Where(t1, "tenant")
-//	t3 = &r.db
-//	*t3 = t2
-//	t4 = &r.db
-//	t5 = *t4                 // load: reached by *t3 = t2 only
-//
-// Without this, the load on the right of `r.db = r.db.Where(...)` resolved to
-// the value being stored, so the builder call counted as a branch of its own
-// result. Only stores to the same (root, field path) are seen. A write through
-// another pointer or inside a callee neither reaches the load nor replaces a
-// store, as before.
-func fieldStores(fn *ssa.Function, root ssa.Value, path []int, load ssa.Instruction) []*ssa.Store {
-	stores, _ := reachingFieldStores(fn, root, path, load)
-	return stores
-}
-
-// reachingFieldStores is fieldStores that also reports whether the field can
-// reach load unwritten: on some CFG path to load, no store writes it. A nil
-// load is open, since it stands for a read that may run before any store.
-//
-// When root is a call, which defines the address, the walk stops at the call:
-// a store above it on a loop path wrote the struct of an earlier iteration.
-func reachingFieldStores(fn *ssa.Function, root ssa.Value, path []int, load ssa.Instruction) (stores []*ssa.Store, open bool) {
-	if load == nil {
-		var all []*ssa.Store
-		for _, block := range fn.Blocks {
-			for _, instr := range block.Instrs {
-				if store, ok := instr.(*ssa.Store); ok && writesFieldPath(store, root, path) {
-					all = append(all, store)
-				}
-			}
-		}
-		return all, true
-	}
-
-	// lastIn returns the last store in instrs that writes the field.
-	lastIn := func(instrs []ssa.Instruction) *ssa.Store {
-		for _, instr := range slices.Backward(instrs) {
-			if store, ok := instr.(*ssa.Store); ok && writesFieldPath(store, root, path) {
-				return store
-			}
-		}
-		return nil
-	}
-
-	// def is the call that defines root, and the walk ends there.
-	def, _ := root.(*ssa.Call)
-	// afterDef returns the instructions of block that can write root's field
-	// before control leaves it, and whether def is among them.
-	afterDef := func(instrs []ssa.Instruction) ([]ssa.Instruction, bool) {
-		if def == nil {
-			return instrs, false
-		}
-		if i := slices.Index(instrs, ssa.Instruction(def)); i >= 0 {
-			return instrs[i+1:], true
-		}
-		return instrs, false
-	}
-
-	start := load.Block()
-	prefix, defined := afterDef(start.Instrs[:slices.Index(start.Instrs, load)])
-	if store := lastIn(prefix); store != nil {
-		return []*ssa.Store{store}, false
-	}
-	if defined || len(start.Preds) == 0 {
-		return nil, true
-	}
-
-	// Walk the CFG backward. A block that writes the field ends the walk on
-	// that path with its last such store. The load's own block is scanned in
-	// full when a loop leads back to it, since its later stores then run
-	// before the load on the next iteration.
-	var found []*ssa.Store
-	visitedBlocks := make(map[*ssa.BasicBlock]bool)
-	work := slices.Clone(start.Preds)
-	for len(work) > 0 {
-		block := work[len(work)-1]
-		work = work[:len(work)-1]
-		if visitedBlocks[block] {
-			continue
-		}
-		visitedBlocks[block] = true
-		instrs, defined := afterDef(block.Instrs)
-		if store := lastIn(instrs); store != nil {
-			found = append(found, store)
-			continue
-		}
-		if defined || len(block.Preds) == 0 {
-			open = true
-			continue
-		}
-		work = append(work, block.Preds...)
-	}
-	// Each block contributes at most one store, so block order is program
-	// order.
-	slices.SortFunc(found, func(a, b *ssa.Store) int { return a.Block().Index - b.Block().Index })
-	return found, open
-}
-
-// globalStoredValues returns, in program order, the values stored into the
-// package-level variable g that reach load (#183). Only stores in load's own
-// function are seen, matched as fieldStores matches a field. A load that no
-// such store reaches has no stored value, so it is immutable: a global the
-// function only reads usually holds a gorm.Open result, and treating every
-// read of it as mutable would report each second use of a shared handle.
-//
-//	DB = DB.Where("tenant")  // the load on the right sees no store
-//	DB.Find(nil)             // sees the store above
-func globalStoredValues(g *ssa.Global, load ssa.Instruction) []ssa.Value {
-	var vals []ssa.Value
-	for _, store := range fieldStores(load.Parent(), g, nil, load) {
-		vals = append(vals, store.Val)
-	}
-	return vals
 }
 
 // traceIIFEReturns traces through an immediately invoked function expression.
@@ -1669,7 +846,7 @@ func (t *RootTracer) traceIIFEReturns(fn *ssa.Function, visited map[ssa.Value]bo
 				continue
 			}
 			// Clone visited map to isolate closure's tracing state
-			retVisited := cloneVisited(visited)
+			retVisited := maps.Clone(visited)
 			if root := t.trace(ret.Results[0], retVisited, loopInfo); root != nil {
 				allRoots = append(allRoots, root)
 			}
@@ -1718,7 +895,7 @@ func (t *RootTracer) traceAllIIFEReturns(fn *ssa.Function, visited map[ssa.Value
 			if !ok || len(ret.Results) == 0 {
 				continue
 			}
-			retVisited := cloneVisited(visited)
+			retVisited := maps.Clone(visited)
 			roots := t.traceAll(ret.Results[0], retVisited, loopInfo)
 			allRoots = append(allRoots, roots...)
 		}
@@ -1739,6 +916,8 @@ func (t *RootTracer) traceAllIIFEReturns(fn *ssa.Function, visited map[ssa.Value
 //	}
 //	q.Find(nil)            // Phi has edges from both branches
 //	                       // Need to check pollution of BOTH roots
+//
+//declscope:shared // field.go, freevar.go and store.go trace the values they resolve with it
 func (t *RootTracer) traceAll(v ssa.Value, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) []ssa.Value {
 	if v == nil || visited[v] {
 		return nil
@@ -1808,7 +987,7 @@ func (t *RootTracer) traceAll(v ssa.Value, visited map[ssa.Value]bool, loopInfo 
 		//   - Detect pre-loop pollution: check if t1 or t3 is polluted
 		//   - Treat swap-phi independently: t16 and t17 have separate pollution
 		//
-		if loopHeaderPhis := isLoopVariableSwap(val, loopInfo); loopHeaderPhis != nil {
+		if loopHeaderPhis := loopSwapPhis(val, loopInfo); loopHeaderPhis != nil {
 			// Loop variable swap detected:
 			// Return initial edges (to check pre-loop pollution) + swap-phi itself
 			return t.collectInitialEdgeRoots(loopHeaderPhis, val, visited, loopInfo)
@@ -1856,7 +1035,7 @@ func (t *RootTracer) traceAll(v ssa.Value, visited map[ssa.Value]bool, loopInfo 
 		site := t.Site(val)
 		var argRoots []ssa.Value
 		for _, arg := range t.pureReturnedArgs(site) {
-			argRoots = append(argRoots, t.traceAll(arg, cloneVisited(visited), loopInfo)...)
+			argRoots = append(argRoots, t.traceAll(arg, maps.Clone(visited), loopInfo)...)
 		}
 		if len(argRoots) > 0 {
 			return argRoots
@@ -1882,7 +1061,7 @@ func (t *RootTracer) traceAll(v ssa.Value, visited map[ssa.Value]bool, loopInfo 
 		// For non-special cases (ChangeType, Extract, etc.), delegate to single-root trace.
 		// Clone visited and remove v to allow trace() to process it.
 		// This is safe because trace() doesn't call back to traceAll(), so no cycle risk.
-		freshVisited := cloneVisited(visited)
+		freshVisited := maps.Clone(visited)
 		delete(freshVisited, v)
 		if root := t.trace(v, freshVisited, loopInfo); root != nil {
 			return []ssa.Value{root}
@@ -1905,7 +1084,7 @@ func (t *RootTracer) traceAllPointerLoads(load *ssa.UnOp, visited map[ssa.Value]
 		return roots
 	case *ssa.Phi:
 		// Check for loop variable swap pattern
-		if loopHeaderPhis := isLoopVariableSwap(p, loopInfo); loopHeaderPhis != nil {
+		if loopHeaderPhis := loopSwapPhis(p, loopInfo); loopHeaderPhis != nil {
 			return t.collectInitialEdgeRoots(loopHeaderPhis, p, visited, loopInfo)
 		}
 
@@ -1922,62 +1101,12 @@ func (t *RootTracer) traceAllPointerLoads(load *ssa.UnOp, visited map[ssa.Value]
 func (t *RootTracer) traceAllPhiEdges(phi *ssa.Phi, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) []ssa.Value {
 	var roots []ssa.Value
 	for _, edge := range phi.Edges {
-		if isNilConst(edge) || visited[edge] {
+		if isNilPhiEdge(edge) || visited[edge] {
 			continue
 		}
 		roots = append(roots, t.traceAll(edge, visited, loopInfo)...)
 	}
 	return roots
-}
-
-func (t *RootTracer) traceAllAllocStores(alloc *ssa.Alloc, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) []ssa.Value {
-	var roots []ssa.Value
-	for _, v := range AllocStoredValues(alloc) {
-		roots = append(roots, t.traceAll(v, visited, loopInfo)...)
-	}
-	return roots
-}
-
-// traceAllFieldStores finds ALL possible roots from stores to a struct field.
-//
-// Unlike traceFieldStore which returns the first Store found, this collects
-// all roots from ALL Store instructions that write the same field and reach the
-// load. This is needed for conditional code where different branches may store
-// different values:
-//
-//	if cond {
-//	    h.db = q1  // Store #1
-//	} else {
-//	    h.db = q2  // Store #2
-//	}
-//	h.db.Find(nil)  // Need to check BOTH q1 and q2
-func (t *RootTracer) traceAllFieldStores(fa *ssa.FieldAddr, load *ssa.UnOp, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) []ssa.Value {
-	var roots []ssa.Value
-	for _, v := range FieldStoredValues(fa, load) {
-		roots = append(roots, t.traceAll(v, visited, loopInfo)...)
-	}
-	return roots
-}
-
-// traceAllFreeVar finds ALL possible roots from a captured closure variable.
-//
-// Unlike traceFreeVar which calls single-root trace on the binding, this calls
-// traceAll to get all possible roots. This is needed when the binding is a Phi
-// (from conditional code):
-//
-//	var q *gorm.DB
-//	if cond {
-//	    q = q1  // Branch 1
-//	} else {
-//	    q = q2  // Branch 2
-//	}
-//	fn := func() { q.Find(nil) }  // FreeVar captures Phi of [q1, q2]
-//	fn()  // Need to check BOTH q1 and q2
-func (t *RootTracer) traceAllFreeVar(fv *ssa.FreeVar, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) []ssa.Value {
-	if binding := FreeVarBinding(fv); binding != nil {
-		return t.traceAll(binding, visited, loopInfo)
-	}
-	return nil
 }
 
 // isMutableParam reports whether p should be treated as a mutable root.
@@ -2091,7 +1220,7 @@ func (t *RootTracer) IsImmutableCall(v ssa.Value) bool {
 // own Statement.
 func (t *RootTracer) FindAliasedRoots(v ssa.Value, loopInfo *cfg.LoopInfo) []AliasedRoot {
 	var roots []AliasedRoot
-	t.collectAliasedRoots(v, loopInfo, true, make(map[aliasVisit]bool), &roots)
+	t.collectAliasedRoots(v, loopInfo, true, make(map[aliasedRootVisit]bool), &roots)
 	return roots
 }
 
@@ -2104,9 +1233,9 @@ type AliasedRoot struct {
 	Argument bool
 }
 
-// aliasVisit is a call visited by collectAliasedRoots, and whether Session
+// aliasedRootVisit is a call visited by collectAliasedRoots, and whether Session
 // and Debug copies still counted there.
-type aliasVisit struct {
+type aliasedRootVisit struct {
 	call   *ssa.Call
 	copies bool
 }
@@ -2120,16 +1249,16 @@ type aliasVisit struct {
 // calls searches n steps down the chain, and each step goes through the n
 // roots of its receiver. Skipping such a search does not change what is added
 // or in what order: everything it would reach adds nothing either.
-func (t *RootTracer) collectAliasedRoots(v ssa.Value, loopInfo *cfg.LoopInfo, copies bool, seen map[aliasVisit]bool, roots *[]AliasedRoot) {
+func (t *RootTracer) collectAliasedRoots(v ssa.Value, loopInfo *cfg.LoopInfo, copies bool, seen map[aliasedRootVisit]bool, roots *[]AliasedRoot) {
 	if !t.mayAlias(v, loopInfo, copies) {
 		return
 	}
 	for _, candidate := range t.FindAllMutableRoots(v, loopInfo) {
 		call, site, ok := t.aliasStep(candidate)
-		if !ok || seen[aliasVisit{call, copies}] {
+		if !ok || seen[aliasedRootVisit{call, copies}] {
 			continue
 		}
-		seen[aliasVisit{call, copies}] = true
+		seen[aliasedRootVisit{call, copies}] = true
 		isCopy := copies && t.sharesReceiverStatement(site)
 		if isCopy {
 			if r := t.FindMutableRoot(site.Recv, loopInfo); r != nil {
@@ -2146,8 +1275,8 @@ func (t *RootTracer) collectAliasedRoots(v ssa.Value, loopInfo *cfg.LoopInfo, co
 	}
 }
 
-// aliasKey is a collectAliasedRoots search that mayAlias answers.
-type aliasKey struct {
+// aliasedRootsKey is a collectAliasedRoots search that mayAlias answers.
+type aliasedRootsKey struct {
 	v        ssa.Value
 	loopInfo *cfg.LoopInfo
 	copies   bool
@@ -2157,7 +1286,7 @@ type aliasKey struct {
 // add a root. The answer is computed once per search. A search that reaches
 // itself again through a loop is assumed to add one.
 func (t *RootTracer) mayAlias(v ssa.Value, loopInfo *cfg.LoopInfo, copies bool) bool {
-	key := aliasKey{v, loopInfo, copies}
+	key := aliasedRootsKey{v, loopInfo, copies}
 	if may, ok := t.aliases[key]; ok {
 		return may
 	}
@@ -2293,139 +1422,4 @@ func (t *RootTracer) returnsImmutable(callee *ssa.Function) bool {
 		return true
 	}
 	return t.immutableReturnFuncs != nil && t.immutableReturnFuncs.Contains(callee)
-}
-
-// =============================================================================
-// Helper Functions
-// =============================================================================
-
-// ClosureCapturesGormDB checks if a closure captures *gorm.DB values.
-//
-// Used to determine if a closure needs recursive analysis. A closure
-// that doesn't capture *gorm.DB can be skipped for efficiency.
-//
-// Looks through pointer chains (*gorm.DB, **gorm.DB, ...) and struct fields, so
-// a closure capturing a struct that holds a *gorm.DB is analyzed too (#181).
-func ClosureCapturesGormDB(mc *ssa.MakeClosure) bool {
-	return slices.ContainsFunc(mc.Bindings, func(binding ssa.Value) bool {
-		return holdsGormDB(binding.Type(), make(map[types.Type]bool))
-	})
-}
-
-// isNilConst checks if a value is a nil constant.
-func isNilConst(v ssa.Value) bool {
-	c, ok := v.(*ssa.Const)
-	return ok && c.Value == nil
-}
-
-// isClosureResultStored checks if a closure call's result is stored (assigned to
-// a variable) rather than directly chained in an IIFE pattern.
-//
-// Returns true (stored) for patterns like:
-//   - `q, err := closureFunc()` (flows to Extract → stored)
-//   - `q := closureFunc()` (flows to Store/Alloc → stored)
-//   - `if cond { q = closureFunc() }` (flows to Phi → stored)
-//   - `q := closureFunc().Where("x")` (chain eventually stored → stored)
-//
-// Returns false (chained IIFE) for patterns like:
-//   - `closureFunc().Find(nil)` (chain ends with terminal, never stored)
-func isClosureResultStored(call *ssa.Call) bool {
-	return isClosureResultStoredRecursive(call, make(map[*ssa.Call]bool))
-}
-
-func isClosureResultStoredRecursive(call *ssa.Call, visited map[*ssa.Call]bool) bool {
-	if visited[call] {
-		return false
-	}
-	visited[call] = true
-
-	refs := call.Referrers()
-	if refs == nil {
-		return false
-	}
-
-	for _, ref := range *refs {
-		switch user := ref.(type) {
-		case *ssa.Extract:
-			// Multi-return extraction → stored
-			return true
-
-		case *ssa.Phi:
-			// Flows to Phi → stored (conditional assignment)
-			return true
-
-		case *ssa.Store:
-			// Store to Alloc → stored (variable assignment)
-			if _, ok := user.Addr.(*ssa.Alloc); ok {
-				return true
-			}
-
-		case *ssa.MakeInterface:
-			// Value converted to interface{} (e.g., for variadic args) → stored
-			// This happens when passing *gorm.DB to methods with interface{} args
-			return true
-
-		case *ssa.Call:
-			callee := user.Call.StaticCallee()
-			if callee == nil {
-				continue
-			}
-			sig := callee.Signature
-			if sig == nil || sig.Recv() == nil || !typeutil.IsGormDB(sig.Recv().Type()) {
-				continue
-			}
-
-			// Check if our result is receiver of this gorm method
-			if len(user.Call.Args) > 0 && user.Call.Args[0] == call {
-				// Our result is receiver - check if THAT call is stored
-				if isClosureResultStoredRecursive(user, visited) {
-					return true
-				}
-			} else {
-				// Our result is passed as argument (e.g., condition.Or(ourResult))
-				// This is effectively "stored" - the value is consumed by another call
-				return true
-			}
-		}
-	}
-
-	return false
-}
-
-// cloneVisited creates a copy of the visited map.
-// Used to isolate tracing state when entering closures.
-func cloneVisited(visited map[ssa.Value]bool) map[ssa.Value]bool {
-	clone := make(map[ssa.Value]bool, len(visited))
-	maps.Copy(clone, visited)
-	return clone
-}
-
-// holdsGormDB reports whether a value of type t holds a *gorm.DB the tracer can
-// follow: t is *gorm.DB or gorm.DB, a pointer to such a type (**gorm.DB, ...),
-// or a struct with such a field, embedded or not (#181). seen stops recursive
-// struct types.
-//
-// Unlike containsGormDB in the directive package, this does NOT check:
-//   - interface{} (would cause false positives in SSA analysis)
-//   - slices, maps, channels (SSA handles these differently)
-func holdsGormDB(t types.Type, seen map[types.Type]bool) bool {
-	if t == nil || seen[t] {
-		return false
-	}
-	seen[t] = true
-
-	if typeutil.IsGormDB(t) {
-		return true
-	}
-	switch u := t.Underlying().(type) {
-	case *types.Pointer:
-		return holdsGormDB(u.Elem(), seen)
-	case *types.Struct:
-		for field := range u.Fields() {
-			if holdsGormDB(field.Type(), seen) {
-				return true
-			}
-		}
-	}
-	return false
 }

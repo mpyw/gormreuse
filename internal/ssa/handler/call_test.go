@@ -106,7 +106,7 @@ func TestIsAssignment(t *testing.T) {
 	// a Phi or Store-to-Alloc that can yield q's root → assignment) and other
 	// uses (q.Find(nil), or q2 = q.Where(...) into another variable → not an
 	// assignment), so both branches must be exercised.
-	ctx := &Context{RootTracer: tracer.New(nil, nil, nil, nil, nil, nil, nil)}
+	ctx := &Context{RootTracer: tracer.NewRootTracer(nil, nil, nil, nil, nil, nil, nil)}
 	var sawTrue, sawFalse bool
 	for _, c := range calls {
 		root := ctx.RootTracer.FindMutableRoot(c.Call.Args[0], nil)

@@ -175,7 +175,7 @@ func RunSSA(
 	// Enforce the body-side immutable-input contract (#62 cases 2.3/2.4) and
 	// report unused immutable-input directives (U1-U3). Uses a tracer with the
 	// full context so FindMutableRoot classifies immutable sources correctly.
-	inputTracer := tracer.New(pureFuncs, immutableReturnFuncs, immutableParamFuncs, pureVerdicts, scopesCallbacks, immutableCallbacks, funcVars)
+	inputTracer := tracer.NewRootTracer(pureFuncs, immutableReturnFuncs, immutableParamFuncs, pureVerdicts, scopesCallbacks, immutableCallbacks, funcVars)
 	failedInput := make(map[*ssa.Function]bool)
 	for _, fn := range funcs {
 		if skip(fn) {
