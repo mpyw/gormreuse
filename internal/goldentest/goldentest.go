@@ -99,23 +99,23 @@ func Analyze(testdata, pkg string, a *analysis.Analyzer) (*Analysis, error) {
 
 // ApplyFixes runs analyzer a over pkg (loaded from testdata) and returns
 // srcPath's original bytes together with the content produced by applying every
-// suggested-fix text edit targeting srcPath (see Analysis.ApplyFixes).
+// suggested-fix text edit targeting srcPath (see Analysis.applyFixes).
 func ApplyFixes(testdata, pkg, srcPath string, a *analysis.Analyzer) (original, fixed []byte, err error) {
 	run, err := Analyze(testdata, pkg, a)
 	if err != nil {
 		return nil, nil, err
 	}
-	return run.ApplyFixes(srcPath)
+	return run.applyFixes(srcPath)
 }
 
-// ApplyFixes returns srcPath's original bytes together with the content
+// applyFixes returns srcPath's original bytes together with the content
 // produced by applying every suggested-fix text edit of the run that targets
 // srcPath. Edits are matched to the file by their own position and applied
 // from the highest offset down so earlier offsets stay valid. Each
 // diagnostic's fix is complete on its own (#200), so two fixes may carry the
 // same edit, such as one gorm import. That edit is applied once, as the -fix
 // driver does.
-func (r *Analysis) ApplyFixes(srcPath string) (original, fixed []byte, err error) {
+func (r *Analysis) applyFixes(srcPath string) (original, fixed []byte, err error) {
 	original, err = os.ReadFile(srcPath)
 	if err != nil {
 		return nil, nil, err
@@ -155,11 +155,11 @@ func (r *Analysis) ApplyFixes(srcPath string) (original, fixed []byte, err error
 	return original, fixed, nil
 }
 
-// SyncFixture compares srcPath's committed .golden file (the source with every
+// syncFixture compares srcPath's committed .golden file (the source with every
 // suggested fix applied) and .diff file (see generateDiff) with what analyzer a
 // produces now, and returns the paths of those that are missing or stale. With
 // update set, it rewrites both files instead and returns nothing stale.
-func SyncFixture(testdata, pkg, srcPath string, a *analysis.Analyzer, update bool) (stale []string, err error) {
+func syncFixture(testdata, pkg, srcPath string, a *analysis.Analyzer, update bool) (stale []string, err error) {
 	run, err := Analyze(testdata, pkg, a)
 	if err != nil {
 		return nil, err
@@ -167,9 +167,9 @@ func SyncFixture(testdata, pkg, srcPath string, a *analysis.Analyzer, update boo
 	return run.SyncFixture(srcPath, update)
 }
 
-// SyncFixture is the package-level SyncFixture for a run that is already done.
+// SyncFixture is the package-level syncFixture for a run that is already done.
 func (r *Analysis) SyncFixture(srcPath string, update bool) (stale []string, err error) {
-	original, fixed, err := r.ApplyFixes(srcPath)
+	original, fixed, err := r.applyFixes(srcPath)
 	if err != nil {
 		return nil, err
 	}

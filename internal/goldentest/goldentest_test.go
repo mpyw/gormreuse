@@ -72,7 +72,7 @@ func TestSyncFixture(t *testing.T) {
 	testdata, srcPath := writeFixturePackage(t, "package p\n\nvar s = \"old\"\n")
 	golden, diff := srcPath+".golden", srcPath+".diff"
 
-	stale, err := SyncFixture(testdata, "p", srcPath, replaceOld, false)
+	stale, err := syncFixture(testdata, "p", srcPath, replaceOld, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +83,7 @@ func TestSyncFixture(t *testing.T) {
 		t.Fatalf("check mode wrote %s", golden)
 	}
 
-	if stale, err := SyncFixture(testdata, "p", srcPath, replaceOld, true); err != nil || stale != nil {
+	if stale, err := syncFixture(testdata, "p", srcPath, replaceOld, true); err != nil || stale != nil {
 		t.Fatalf("update: stale = %v, err = %v", stale, err)
 	}
 	gotGolden, err := os.ReadFile(golden)
@@ -103,14 +103,14 @@ func TestSyncFixture(t *testing.T) {
 		}
 	}
 
-	if stale, err := SyncFixture(testdata, "p", srcPath, replaceOld, false); err != nil || stale != nil {
+	if stale, err := syncFixture(testdata, "p", srcPath, replaceOld, false); err != nil || stale != nil {
 		t.Fatalf("after update: stale = %v, err = %v", stale, err)
 	}
 
 	if err := os.WriteFile(diff, []byte("garbage"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	stale, err = SyncFixture(testdata, "p", srcPath, replaceOld, false)
+	stale, err = syncFixture(testdata, "p", srcPath, replaceOld, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,7 +123,7 @@ func TestSyncFixtureWithoutFix(t *testing.T) {
 	src := "package p\n\nvar s = \"other\"\n"
 	testdata, srcPath := writeFixturePackage(t, src)
 
-	if _, err := SyncFixture(testdata, "p", srcPath, replaceOld, true); err != nil {
+	if _, err := syncFixture(testdata, "p", srcPath, replaceOld, true); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ := os.ReadFile(srcPath + ".golden"); string(got) != src {
@@ -137,7 +137,7 @@ func TestSyncFixtureWithoutFix(t *testing.T) {
 func TestSyncFixtureErrors(t *testing.T) {
 	testdata, srcPath := writeFixturePackage(t, "package p\n\nvar s = \"old\"\n")
 
-	if _, err := SyncFixture(testdata, "p", srcPath+".missing", replaceOld, false); err == nil {
+	if _, err := syncFixture(testdata, "p", srcPath+".missing", replaceOld, false); err == nil {
 		t.Error("missing source: want an error")
 	}
 
@@ -145,7 +145,7 @@ func TestSyncFixtureErrors(t *testing.T) {
 	if err := os.Mkdir(srcPath+".golden", 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := SyncFixture(testdata, "p", srcPath, replaceOld, true); err == nil {
+	if _, err := syncFixture(testdata, "p", srcPath, replaceOld, true); err == nil {
 		t.Error("unwritable .golden: want an error")
 	}
 
@@ -154,20 +154,20 @@ func TestSyncFixtureErrors(t *testing.T) {
 		Doc:  "always fails",
 		Run:  func(*analysis.Pass) (any, error) { return nil, errors.New("boom") },
 	}
-	if _, err := SyncFixture(testdata, "p", srcPath, failing, false); err == nil || !strings.Contains(err.Error(), "boom") {
+	if _, err := syncFixture(testdata, "p", srcPath, failing, false); err == nil || !strings.Contains(err.Error(), "boom") {
 		t.Errorf("failing analyzer: err = %v, want one containing boom", err)
 	}
 
 	t.Run("diff fails", func(t *testing.T) {
 		writeFakeDiff(t, "exit 2")
-		if _, err := SyncFixture(testdata, "p", srcPath, replaceOld, false); err == nil {
+		if _, err := syncFixture(testdata, "p", srcPath, replaceOld, false); err == nil {
 			t.Error("failing diff: want an error")
 		}
 	})
 
 	t.Run("no go on PATH", func(t *testing.T) {
 		t.Setenv("PATH", "")
-		if _, err := SyncFixture(testdata, "p", srcPath, replaceOld, false); err == nil {
+		if _, err := syncFixture(testdata, "p", srcPath, replaceOld, false); err == nil {
 			t.Error("package not loaded: want an error")
 		}
 	})
