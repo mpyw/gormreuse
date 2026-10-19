@@ -464,7 +464,7 @@ The tracer resolves a call `w(x)` through a method value `w := r.m` as the call 
 
 An interface method value has no declared method, so `DeclaredFunc` keeps the wrapper. Its signature has no receiver, so a call through it is handled like any other call whose result holds a `*gorm.DB`: a mutable root, as for an interface call `r.Query()` (#176).
 
-Limitation: a second branch made through a method value (`w := q.Where; w("a").Find(nil); w("b").Find(nil)`) gets no suggested fix. The fix generator's reassignment and Session strategies look for a `q.m(...)` selector at each use, and a call through `w` has none. A root created by a call through a method value (`q := w("a")`) does get `.Session(&gorm.Session{})` appended.
+Suggested fixes: a second branch made through a method value (`w := q.Where; w("a").Find(nil); w("b").Find(nil)`) gets `.Session(&gorm.Session{})` at `q`'s root. It never gets a reassignment, since a call through `w` names no variable to rebind. A root created by a call through a method value (`q := w("a")`) gets `.Session(&gorm.Session{})` appended.
 
 ### Which merges are reassignments (#175)
 

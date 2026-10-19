@@ -96,7 +96,7 @@ func boundUserMethod(r boundRepo) {
 // boundOnMutable: each call is a branch of the mutable q, so the second call
 // is reported once, at the call through the method value.
 func boundOnMutable(db *gorm.DB) {
-	q := db.Where("x")
+	q := db.Where("x").Session(&gorm.Session{})
 	w := q.Where
 	w("a").Find(nil)
 	w("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root \(root at [^)]+\)`
@@ -144,5 +144,48 @@ func boundUserMethodResultReused(r boundRepo) {
 	f := r.active
 	q := f().Session(&gorm.Session{})
 	q.Find(nil)
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root \(root at [^)]+\)`
+}
+
+// boundOpener returns a tuple holding a fresh mutable chain.
+type boundOpener struct{ db *gorm.DB }
+
+func (o boundOpener) open() (*gorm.DB, error) {
+	return o.db.Session(&gorm.Session{}).Where("x"), nil
+}
+
+// boundTupleResultReused: a tuple result of a call through a method value is a
+// mutable root, as for o.open() (#176).
+func boundTupleResultReused(o boundOpener) {
+	f := o.open
+	q, _ := f()
+	q.Find(nil)
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root \(root at [^)]+\)`
+}
+
+// boundQuerier is an interface whose method returns a handle.
+type boundQuerier interface{ Query() *gorm.DB }
+
+// boundInterfaceResultReused: a method value of an interface method has no
+// declared body, so its result is a mutable root, as for r.Query() (#176).
+func boundInterfaceResultReused(r boundQuerier) {
+	f := r.Query
+	q := f().Session(&gorm.Session{})
+	q.Find(nil)
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root \(root at [^)]+\)`
+}
+
+// boundHelper has a pure method that returns its argument.
+type boundHelper struct{}
+
+//gormreuse:pure
+func (boundHelper) same(db *gorm.DB) *gorm.DB { return db }
+
+// boundPureMethodReturnsArg: the result of a pure method called through a
+// method value is its argument, as for h.same(q) (#188).
+func boundPureMethodReturnsArg(h boundHelper, db *gorm.DB) {
+	q := db.Where("x").Session(&gorm.Session{})
+	f := h.same
+	f(q).Find(nil)
 	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root \(root at [^)]+\)`
 }
