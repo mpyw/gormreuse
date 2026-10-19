@@ -672,6 +672,21 @@ Limitations:
 - A chain that ends in a Session gets a second, redundant Session (#202).
 - Other ways of keeping a chain's effect away from its root, such as `_ = q.Where("a")`, are not treated as discarded statements.
 
+## Fixes That Compile (#200)
+
+Every suggested fix must compile, applied with all the others (`-fix`) or alone (an editor's quick fix). `internal/fix/generator.go` checks types before it writes an edit:
+
+| Edit | Rule | What went wrong before |
+| --- | --- | --- |
+| Reassignment `q = <statement>` | Each call in the chain must return `*gorm.DB` (`discardedChain`), and none may be a finisher (`isFinisher`) | `q = q.AddError(err)` assigned an `error`. `FindInBatches`, `CreateInBatches`, `UpdateColumn(s)`, `Commit`, `Rollback`, `SavePoint` and `RollbackTo` return `*gorm.DB` but run SQL or end a transaction, and were reassigned |
+| `.Session(...)` after a root or a Phi edge | Only after the call whose `Lparen` is the value's position, and only when it returns `*gorm.DB` (`sessionEndAfterCall`) | The innermost call that contained the position got it. For a closure parameter edge that was the call the closure is passed to: `run(db, func(tx *gorm.DB) { ... }).Session(...)` |
+| The `gorm` qualifier | `gormNameAt` resolves the name with `types.Scope.LookupParent` at each insertion point. It uses an import whose name resolves to `gorm.io/gorm` at all of them (a dot import if `Session` does). Otherwise it adds an import under the first free name of `gorm`, `gormio`, `gormio2`, ... | A blank import counted as an import (`undefined: gorm`). A parameter named `gorm` gave `gorm.Session is not a type`. A file importing another package as `gorm` got a second `gorm` (`gorm redeclared`) |
+| The import edit | Each diagnostic's fix carries every edit it needs. `internal/analyzer.go` no longer drops an edit that an earlier diagnostic already suggested | With two roots in a file without the import, only the first fix had it. Applying the second alone failed with `undefined: gorm` |
+
+A Phi edge with no call is left without a Session, as an edge without a position always was. The fix is then partial, and the diagnostic can remain after it.
+
+The `-fix` driver and `analysistest.RunWithSuggestedFixes` merge identical edits from several fixes. `goldentest.ApplyFixes` does the same. `TestGoldenFilesCompile` type-checks the fixtures with all fixes applied, and `TestEachFixCompiles` type-checks each `fix_*.go` diagnostic's fix applied alone. The cases are in `testdata/src/gormreuse/fix_result_type.go`, `fix_session_target.go` and `fix_import_*.go`, and in `testdata/src/converge/fix_compile.go`.
+
 ## Development Commands
 
 Develop on Go 1.27 or later: the fixtures use generic methods and promoted

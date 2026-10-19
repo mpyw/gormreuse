@@ -2,10 +2,19 @@ package gormreuse_test
 
 import (
 	"bytes"
+	"cmp"
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"go/types"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 
+	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/analysis/analysistest"
 	"golang.org/x/tools/go/packages"
 
@@ -153,3 +162,72 @@ func TestGoldenFilesE2E(t *testing.T) {
 		t.Errorf("%s is missing or out of date.\nRun: %s\nThen review and commit the changes.", afterPath, goldentest.UpdateCommand)
 	}
 }
+
+// TestEachFixCompiles applies the suggested fix of each diagnostic in the
+// fix_*.go fixtures on its own and type-checks the package. An editor applies
+// one quick fix at a time, so a fix must not rely on an edit, such as the gorm
+// import, that only another diagnostic's fix carries (#200).
+// TestGoldenFilesCompile checks all fixes applied together.
+func TestEachFixCompiles(t *testing.T) {
+	t.Parallel()
+	results := analysistest.Run(goldentest.NoopT{}, analysistest.TestData(), gormreuse.Analyzer, "gormreuse")
+	if len(results) != 1 || results[0].Err != nil {
+		t.Fatalf("analysis failed: %v", results)
+	}
+	pass := results[0].Pass
+	importer := importerFunc(func(path string) (*types.Package, error) {
+		for _, pkg := range pass.Pkg.Imports() {
+			if pkg.Path() == path {
+				return pkg, nil
+			}
+		}
+		return nil, fmt.Errorf("%s is not imported by the fixtures", path)
+	})
+
+	checked := 0
+	for _, diag := range results[0].Diagnostics {
+		filename := pass.Fset.File(diag.Pos).Name()
+		if !strings.HasPrefix(filepath.Base(filename), "fix_") || len(diag.SuggestedFixes) == 0 {
+			continue
+		}
+		src, err := os.ReadFile(filename)
+		if err != nil {
+			t.Fatal(err)
+		}
+		edits := slices.Clone(diag.SuggestedFixes[0].TextEdits)
+		slices.SortFunc(edits, func(a, b analysis.TextEdit) int { return cmp.Compare(b.Pos, a.Pos) })
+		fixed := src
+		for _, e := range edits {
+			start, end := pass.Fset.Position(e.Pos).Offset, pass.Fset.Position(e.End).Offset
+			fixed = slices.Concat(fixed[:start], e.NewText, fixed[end:])
+		}
+
+		fset := token.NewFileSet()
+		var files []*ast.File
+		for _, f := range pass.Files {
+			name := pass.Fset.File(f.Pos()).Name()
+			var content any
+			if name == filename {
+				content = fixed
+			}
+			parsed, err := parser.ParseFile(fset, name, content, 0)
+			if err != nil {
+				t.Fatalf("%s: the fix does not parse: %v", pass.Fset.Position(diag.Pos), err)
+			}
+			files = append(files, parsed)
+		}
+		conf := types.Config{Importer: importer}
+		if _, err := conf.Check("gormreuse", fset, files, nil); err != nil {
+			t.Errorf("%s: this diagnostic's fix alone does not compile: %v", pass.Fset.Position(diag.Pos), err)
+		}
+		checked++
+	}
+	if checked == 0 {
+		t.Fatal("no diagnostic in the fix_*.go fixtures has a fix")
+	}
+}
+
+// importerFunc imports a package by calling the function.
+type importerFunc func(path string) (*types.Package, error)
+
+func (f importerFunc) Import(path string) (*types.Package, error) { return f(path) }
