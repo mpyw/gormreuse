@@ -732,27 +732,26 @@ var callExprNodeTypes = []ast.Node{(*ast.CallExpr)(nil)}
 // reassignment `v = v.Where(...)` of it is safe. The reassignment fix rewrites
 // only this variable (issue #198). It returns nil, and the fix falls back to a
 // Session at the root, when:
-//   - the root is not assigned to one named variable (a field, a call result,
-//     a Phi of different variables);
+//   - the root is not a call assigned to a named variable (a field, an
+//     argument of another call);
 //   - the variable is not local to a function, such as a package-level DB;
 //   - a closure captures the variable. A goroutine that rewrites it races with
 //     its parent, and a deferred or stored closure would see the new value;
 //   - a use does not mention the variable, such as a use through an alias
 //     `r := q`. Rebinding q would leave that branch on the old root.
 func (g *Generator) findReassignTarget(root ssa.Value, uses []pollution.UsageInfo) *types.Var {
-	if g.pass.TypesInfo == nil {
+	v := g.findRootVar(root)
+	if v == nil || v.Parent() == v.Pkg().Scope() {
 		return nil
 	}
-	v := g.findRootVar(root, make(map[ssa.Value]bool))
-	if v == nil || v.Pkg() == nil || v.Parent() == nil || v.Parent() == v.Pkg().Scope() {
-		return nil
-	}
+	// v is local, so its declaration and every use of the root are inside one
+	// function of this file.
 	file := g.findFileContaining(v.Pos())
-	if file == nil || g.isCapturedVar(file, v) {
+	if g.isCapturedVar(file, v) {
 		return nil
 	}
 	for _, use := range uses {
-		call := g.findCallAtLparen(use.Pos)
+		call := findCallAtLparen(g.fileCursor(file), use.Pos)
 		if call == nil || !g.mentions(call, v) {
 			return nil
 		}
@@ -760,31 +759,15 @@ func (g *Generator) findReassignTarget(root ssa.Value, uses []pollution.UsageInf
 	return v
 }
 
-// findRootVar returns the variable that root is assigned to, or nil. A Phi
-// resolves only when all of its edges are assigned to the same variable.
-func (g *Generator) findRootVar(root ssa.Value, visited map[ssa.Value]bool) *types.Var {
-	if visited[root] {
-		return nil
-	}
-	visited[root] = true
-
-	if phi, ok := root.(*ssa.Phi); ok {
-		var v *types.Var
-		for _, edge := range phi.Edges {
-			if c, ok := edge.(*ssa.Const); ok && c.Value == nil {
-				continue
-			}
-			ev := g.findRootVar(edge, visited)
-			if ev == nil || (v != nil && ev != v) {
-				return nil
-			}
-			v = ev
-		}
-		return v
-	}
-
-	// A call root is defined by `v := <call>`, `v = <call>` or
-	// `var v = <call>`. SSA places the call at its Lparen.
+// findRootVar returns the variable that root, a call, is assigned to by
+// `v := <call>`, `v = <call>` or `var v = <call>`, or nil. SSA places a call
+// at its Lparen. A root that is not a call, such as a Phi, gets nil, so the
+// fix falls back to a Session. The tracer usually resolves a Phi to its
+// edges; a loop variable swap keeps the Phi as the root.
+func (g *Generator) findRootVar(root ssa.Value) *types.Var {
+	// A Phi has no position, and a call inside a synthetic wrapper, such as
+	// the one behind a method value `where := db.Where`, is in no file of the
+	// pass. Any other value matches no call's Lparen below.
 	pos := root.Pos()
 	file := g.findFileContaining(pos)
 	if file == nil {
@@ -829,20 +812,14 @@ func (g *Generator) findRootVar(root ssa.Value, visited map[ssa.Value]bool) *typ
 // program order, so it does not count; one run by a go or defer statement
 // does.
 func (g *Generator) isCapturedVar(file *ast.File, v *types.Var) bool {
-	cur, ok := g.fileCursor(file).FindByPos(v.Pos(), v.Pos())
-	if !ok {
-		return true
-	}
-	declFn, ok := enclosingFunc(cur)
-	if !ok {
-		return true
-	}
+	cur, _ := g.fileCursor(file).FindByPos(v.Pos(), v.Pos())
+	declFn := enclosingFunc(cur)
 	for c := range declFn.Preorder((*ast.Ident)(nil)) {
 		if g.pass.TypesInfo.Uses[c.Node().(*ast.Ident)] != v {
 			continue
 		}
-		for fn, ok := enclosingFunc(c); fn != declFn; fn, ok = enclosingFunc(fn.Parent()) {
-			if !ok || !isInlineCall(fn) {
+		for fn := enclosingFunc(c); fn != declFn; fn = enclosingFunc(fn.Parent()) {
+			if !isInlineCall(fn) {
 				return true
 			}
 		}
@@ -864,22 +841,18 @@ func isInlineCall(lit inspector.Cursor) bool {
 }
 
 // enclosingFunc returns the innermost function declaration or literal that
-// encloses cur.
-func enclosingFunc(cur inspector.Cursor) (inspector.Cursor, bool) {
-	for c := range cur.Enclosing((*ast.FuncDecl)(nil), (*ast.FuncLit)(nil)) {
-		return c, true
+// encloses cur, or cur itself when it is one.
+func enclosingFunc(cur inspector.Cursor) (fn inspector.Cursor) {
+	for fn = range cur.Enclosing((*ast.FuncDecl)(nil), (*ast.FuncLit)(nil)) {
+		break
 	}
-	return inspector.Cursor{}, false
+	return fn
 }
 
-// findCallAtLparen returns the call whose Lparen is pos, which is where SSA
-// places a call and so where a use is recorded.
-func (g *Generator) findCallAtLparen(pos token.Pos) *ast.CallExpr {
-	file := g.findFileContaining(pos)
-	if file == nil {
-		return nil
-	}
-	for c := range g.fileCursor(file).Preorder(callExprNodeTypes...) {
+// findCallAtLparen returns the call under cur whose Lparen is pos, which is
+// where SSA places a call and so where a use is recorded.
+func findCallAtLparen(cur inspector.Cursor, pos token.Pos) *ast.CallExpr {
+	for c := range cur.Preorder(callExprNodeTypes...) {
 		if call := c.Node().(*ast.CallExpr); call.Lparen == pos {
 			return call
 		}

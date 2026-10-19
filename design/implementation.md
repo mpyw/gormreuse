@@ -393,7 +393,7 @@ Decisions and limitations:
 
 ## Reassignment Fix Target
 
-The reassignment fix (`q.Where("a")` → `q = q.Where("a")`) rewrites one variable: the one that holds the reused root (#198). `findReassignTarget` in `internal/fix/generator.go` finds it from the root's own definition (`q := <call>`, `q = <call>` or `var q = <call>`; for a Phi, every edge must name the same variable). A statement is rewritten only when its own top-level call is the use and its receiver is an identifier that `types.Info.Uses` resolves to that variable.
+The reassignment fix (`q.Where("a")` → `q = q.Where("a")`) rewrites one variable: the one that holds the reused root (#198). `findReassignTarget` in `internal/fix/generator.go` finds it from the root's own definition (`q := <call>`, `q = <call>` or `var q = <call>`; a root that is not a call, such as a Phi, gets no reassignment). A statement is rewritten only when its own top-level call is the use and its receiver is an identifier that `types.Info.Uses` resolves to that variable.
 
 No statement is rewritten, and the root gets a Session instead, when:
 
