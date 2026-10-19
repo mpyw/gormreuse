@@ -140,9 +140,15 @@ func isAssignment(call *ssa.Call, root ssa.Value, ctx *Context) bool {
 				// Control flow merge: q = ... on one path
 				next, merge = u, u
 			case *ssa.Store:
-				// A variable kept in memory, e.g. one captured by a closure
-				if alloc, ok := u.Addr.(*ssa.Alloc); ok {
-					merge = alloc
+				// A variable kept in memory, e.g. one captured by a closure. A
+				// store to a FreeVar is the same assignment made from inside
+				// the closure, such as `q = q.Where(v)` in a range-over-func
+				// body (#177): the FreeVar's values are those of the captured
+				// variable, so it yields root only when the closure updates
+				// the variable that holds root.
+				switch addr := u.Addr.(type) {
+				case *ssa.Alloc, *ssa.FreeVar:
+					merge = addr
 				}
 			case *ssa.Call:
 				// Chain intermediate: q.Where("x").Where("y") is an assignment

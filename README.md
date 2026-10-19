@@ -304,6 +304,13 @@ q.Count(&count)  // VIOLATION: second branch
 q := db.Where("x")
 q.Find(&users)                       // first branch - OK
 q.Session(&gorm.Session{}).Count(&c) // VIOLATION: second branch from q
+
+// A loop body runs more than once, so one use inside it is reuse.
+// Range-over-func loops (Go 1.23+) count as loops too.
+q := db.Where("x")
+for v := range slices.Values(ids) {
+    q.Where("id = ?", v).Find(&users) // VIOLATION: reused on every iteration
+}
 ```
 
 #### Session and Debug copies
