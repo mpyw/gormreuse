@@ -162,7 +162,7 @@ gormreuse has no flags of its own. These come from the analysis driver:
 
 The command exits with status 3 when it reports a diagnostic, and with 0 when it reports none. With `-json` it exits with 0 either way.
 
-Generated files (containing `// Code generated ... DO NOT EDIT.`) are always excluded and cannot be opted in. Files that import `"C"` are analyzed: the header that cgo adds to its output does not count. `-fix` does not edit them, because the driver treats cgo's output as generated.
+Generated files (containing `// Code generated ... DO NOT EDIT.`) are always excluded and cannot be opted in. Their directives are not checked, so another package does not trust them: a `pure` or `immutable-return` function in a generated file counts as unmarked at a call from another package. Files that import `"C"` are analyzed: the header that cgo adds to its output does not count. `-fix` does not edit them, because the driver treats cgo's output as generated.
 
 If gormreuse fails inside a function, it reports `gormreuse: internal error analyzing <func>: ...` at that function. Please [open an issue](https://github.com/mpyw/gormreuse/issues) with the code. Set `GORMREUSE_DEBUG_PANIC=1` to get the stack trace instead.
 
@@ -909,6 +909,8 @@ func useIt(db *gorm.DB) {
 > | Called with a value that holds a `*gorm.DB` the checker cannot trace (a `**gorm.DB` parameter, a struct) | `cannot verify the *gorm.DB passed to callback` |
 >
 > The directive is reported **unused** when `name` isn't a parameter, isn't a function type, or the callback has no [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) parameter. It is also reported when it is attached to no function or closure.
+>
+> A variadic callback parameter (`cbs ...func(*gorm.DB)`) is not supported. The directive is reported unused with `variadic callbacks are not supported`, and the callbacks are checked like ordinary ones.
 
 Write it where `pure` goes: in the function's doc comment, after its opening brace on the same line, or on the line before a closure:
 

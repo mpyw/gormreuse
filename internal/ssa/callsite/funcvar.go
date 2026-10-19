@@ -4,6 +4,8 @@ import (
 	"go/token"
 
 	"golang.org/x/tools/go/ssa"
+
+	"github.com/mpyw/gormreuse/internal/directive"
 )
 
 // FuncVars maps each package-level variable that always holds one function to
@@ -76,4 +78,33 @@ func (vars FuncVars) callee(common *ssa.CallCommon) *ssa.Function {
 		}
 	}
 	return nil
+}
+
+// varOf returns the package-level variable that holds fn, or nil when no
+// variable in vars holds it. A function literal is stored in at most one
+// variable, since a second variable initialized from the first stores a load,
+// not the function.
+func (vars FuncVars) varOf(fn *ssa.Function) *ssa.Global {
+	for g, held := range vars {
+		if held == fn && fn.Object() == nil {
+			return g
+		}
+	}
+	return nil
+}
+
+// FuncName names fn in a diagnostic as the source spells it (#259): the
+// variable that holds a package-level closure instead of "init$1", the
+// declared method of a method value or method expression wrapper instead of
+// "m$bound" or "m$thunk", and the generic function of an instance instead of
+// "f[int]". Every diagnostic that names a called function goes through it.
+func (vars FuncVars) FuncName(fn *ssa.Function) string {
+	fn = directive.DeclaredFunc(fn)
+	if g := vars.varOf(fn); g != nil {
+		return g.Name()
+	}
+	if obj := fn.Object(); obj != nil && fn.Synthetic != "" {
+		return obj.Name()
+	}
+	return fn.Name()
 }

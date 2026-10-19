@@ -543,9 +543,7 @@ func (v *Validator) isTrustedPure(callee *ssa.Function) bool {
 // calls through a func value.
 func (v *Validator) calleeName(common *ssa.CallCommon, callee *ssa.Function) string {
 	if callee != nil {
-		// A method value or method expression wrapper is named after the
-		// method it calls, which is what the source names (#258).
-		return directive.DeclaredFunc(callee).Name()
+		return v.funcVars.FuncName(callee)
 	}
 	if b, ok := common.Value.(*ssa.Builtin); ok {
 		return b.Name()

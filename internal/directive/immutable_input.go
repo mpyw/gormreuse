@@ -250,9 +250,18 @@ func (s *ImmutableInputSet) extractParamsFromComments(list []*ast.Comment) []imm
 // resolveImmutableInputRef validates ref against the parameters of ft. It
 // returns the usable callback, or the reason the directive is unused.
 func (s *ImmutableInputSet) resolveImmutableInputRef(ft *ast.FuncType, ref immutableInputRef) (ImmutableInputCallback, string) {
-	idx, paramType := s.lookupParam(ft, ref.name)
+	idx, field := lookupImmutableInputParam(ft, ref.name)
 	if idx < 0 {
 		return ImmutableInputCallback{}, fmt.Sprintf("unused gormreuse:immutable-input directive: parameter %q not found", ref.name)
+	}
+	// Each element of a variadic parameter would be a callback, and the
+	// caller packs them into a slice the collectors do not read (#259).
+	if _, ok := field.Type.(*ast.Ellipsis); ok {
+		return ImmutableInputCallback{}, fmt.Sprintf("unused gormreuse:immutable-input directive: parameter %q is variadic; variadic callbacks are not supported", ref.name)
+	}
+	var paramType types.Type
+	if s.typesInfo != nil {
+		paramType = s.typesInfo.TypeOf(field.Type)
 	}
 	funcSig := asFunctionSignature(paramType)
 	if funcSig == nil {
@@ -275,10 +284,10 @@ func immutableInputPart(name string) string {
 	return "immutable-input(" + name + ")"
 }
 
-// lookupParam finds a parameter by name in a function type and returns
-// (index counting from the first non-receiver parameter, recorded type). Returns
-// idx=-1 if not found.
-func (s *ImmutableInputSet) lookupParam(ft *ast.FuncType, name string) (int, types.Type) {
+// lookupImmutableInputParam finds a parameter by name in a function type and returns its
+// index, counting from the first non-receiver parameter, and its field.
+// Returns idx=-1 if not found.
+func lookupImmutableInputParam(ft *ast.FuncType, name string) (int, *ast.Field) {
 	idx := 0
 	for _, field := range ft.Params.List {
 		// A field with no names still occupies one parameter position but cannot
@@ -289,11 +298,7 @@ func (s *ImmutableInputSet) lookupParam(ft *ast.FuncType, name string) (int, typ
 		}
 		for _, ident := range field.Names {
 			if ident.Name == name {
-				var t types.Type
-				if s.typesInfo != nil {
-					t = s.typesInfo.TypeOf(field.Type)
-				}
-				return idx, t
+				return idx, field
 			}
 			idx++
 		}

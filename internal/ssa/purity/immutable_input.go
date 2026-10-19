@@ -198,11 +198,11 @@ func (f *immutableInputFlow) visitImmutableInputCall(v ssa.Value, call ssa.CallI
 				continue
 			}
 		}
-		site := f.rt.Site(call).StaticSite()
-		if f.keepsImmutableInputPromise(site, idx) {
+		site := f.rt.Site(call)
+		if f.keepsImmutableInputPromise(site.StaticSite(), idx) {
 			continue
 		}
-		f.escapeImmutableInput(call.Pos(), "passed to "+immutableInputCalleeName(site))
+		f.escapeImmutableInput(call.Pos(), "passed to "+f.immutableInputCalleeName(site))
 	}
 }
 
@@ -347,11 +347,10 @@ func immutableInputLocalRoot(addr ssa.Value) ssa.Value {
 	}
 }
 
-// immutableInputCalleeName names a call's target for an escape report. site
-// is read from the static callee.
-func immutableInputCalleeName(site callsite.Site) string {
+// immutableInputCalleeName names a call's target for an escape report.
+func (f *immutableInputFlow) immutableInputCalleeName(site callsite.Site) string {
 	if site.Callee != nil {
-		return site.Callee.Name()
+		return f.rt.FuncName(site.Callee)
 	}
 	if site.Kind == callsite.SiteInvoke {
 		return site.Instr.Common().Method.Name()
