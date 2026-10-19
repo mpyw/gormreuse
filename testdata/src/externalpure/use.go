@@ -1,6 +1,6 @@
 // Package externalpure calls functions whose gormreuse directives are declared
-// in another package (purelib). The analyzer exports no facts yet, so these
-// directives are read back from purelib's source on disk (#195).
+// in another package (purelib). The analysis of purelib exports what it found
+// as facts, and this package reads them (#195).
 package externalpure
 
 import (
@@ -81,52 +81,166 @@ func pureMutableResult(db *gorm.DB) {
 }
 
 // =============================================================================
-// [LIMITATION] #195 - the directive is trusted or ignored across packages
+// Directives placed anywhere, and on generic functions (#195)
 // =============================================================================
 
-// [LIMITATION] #195: BadPure's body pollutes its argument. That is reported in
-// purelib only; here the directive is still trusted.
-// Expected: violation on q.Find(nil). Actual: not reported.
-func badPureTrusted(db *gorm.DB) {
+func sameLinePure(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+	purelib.SameLinePure(q)
+	q.Find(nil) // OK: SameLinePure is pure
+}
+
+func genericPure(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+	purelib.GenericPure(q, 1)
+	purelib.GenericPure[string](q, "a")
+	q.Find(nil) // OK: GenericPure is pure
+}
+
+func genericMethodPure(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+	var b purelib.Box[int]
+	b.Inspect(q)
+	inspect := b.Inspect
+	inspect(q)
+	q.Find(nil) // OK: Box.Inspect is pure
+}
+
+// =============================================================================
+// Contracts the callee's body breaks are not trusted (#195)
+// =============================================================================
+
+// BadPure's body pollutes its argument, so it is not trusted as pure.
+func badPureNotTrusted(db *gorm.DB) {
 	q := db.Where("x = ?", 1)
 	purelib.BadPure(q)
-	q.Find(nil)
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
-// [LIMITATION] #195: BadImmutableReturn returns a mutable chain. That is
-// reported in purelib only; here the directive is still trusted.
-// Expected: violation on the second q.Find(nil). Actual: not reported.
-func badImmutableReturnTrusted() {
+// BadImmutableReturn returns a mutable chain, so its result is mutable.
+func badImmutableReturnNotTrusted() {
 	q := purelib.BadImmutableReturn()
 	q.Find(nil)
-	q.Find(nil)
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
-// [LIMITATION] #195: the immutable-param caller contract is not checked for a
-// callee in another package.
-// Expected: `mutable *gorm.DB passed to //gormreuse:immutable-param parameter
-// of ApplyFilters`. Actual: not reported.
-func immutableParamMutableArg(db *gorm.DB) {
-	q := db.Where("x = ?", 1)
-	purelib.ApplyFilters(q)
-}
-
-// [LIMITATION] #195: immutable-input(cb) is ignored for a callee in another
-// package, so tx is treated as an ordinary mutable parameter.
-// Expected: no report. Actual: false report on tx.Count(nil).
-func immutableInputIgnored(db *gorm.DB) {
-	purelib.WithFresh(db, func(tx *gorm.DB) {
+// BadWithFresh hands its callback a mutable value, so tx is mutable.
+func badImmutableInputNotTrusted(db *gorm.DB) {
+	purelib.BadWithFresh(db, func(tx *gorm.DB) {
 		tx.Find(nil)
 		tx.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 	})
 }
 
-// [LIMITATION] #195: which parameters a pure function may return (#188) is
-// known only for a callee in this package. ReturnArg returns q, but its result
-// is treated as a fresh chain here.
-// Expected: violation on q.Count(nil). Actual: not reported.
-func pureReturnedArgUnknown(db *gorm.DB) {
+// A pure function that passes its argument to a pure function of another
+// package that broke the contract breaks it too (#187).
+//
+//gormreuse:pure
+func wrapsBadPure(db *gorm.DB) {
+	purelib.BadPure(db) // want `pure function passes \*gorm\.DB argument to BadPure, which violates its pure contract`
+}
+
+// =============================================================================
+// Caller contracts of another package (#195)
+// =============================================================================
+
+// ApplyFilters branches its parameter, so it needs an isolated value.
+func immutableParamMutableArg(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+	purelib.ApplyFilters(q) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of ApplyFilters`
+}
+
+func immutableParamIsolatedArg(db *gorm.DB) {
+	purelib.ApplyFilters(db.Where("x = ?", 1).Session(&gorm.Session{})) // OK: isolated
+}
+
+func immutableParamUnderDefer(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+	defer purelib.ApplyFilters(q) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of ApplyFilters`
+}
+
+// WithFresh hands cb an isolated value, so tx may be reused.
+func immutableInputCallback(db *gorm.DB) {
+	purelib.WithFresh(db, func(tx *gorm.DB) {
+		tx.Find(nil)
+		tx.Count(nil) // OK: tx is isolated
+	})
+}
+
+// Forwarding a callback to another package's immutable-input function keeps
+// the promise.
+//
+//gormreuse:immutable-input(cb)
+func forwardsCallback(db *gorm.DB, cb func(*gorm.DB)) {
+	purelib.WithFresh(db, cb)
+}
+
+func forwardedCallback(db *gorm.DB) {
+	forwardsCallback(db, func(tx *gorm.DB) {
+		tx.Find(nil)
+		tx.Count(nil) // OK: tx is isolated
+	})
+}
+
+// =============================================================================
+// Returned arguments of another package's pure function (#188, #195)
+// =============================================================================
+
+// ReturnArg returns q, so a branch from its result is a branch from q.
+func pureReturnedArg(db *gorm.DB) {
 	q := db.Where("x = ?", 1)
 	purelib.ReturnArg(q).Find(nil)
-	q.Count(nil)
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// ReturnArg returns only its argument, so an isolated argument gives an
+// isolated result.
+func pureReturnedIsolatedArg(db *gorm.DB) {
+	q := purelib.ReturnArg(db.Session(&gorm.Session{}))
+	q.Find(nil)
+	q.Count(nil) // OK: q is the isolated argument
+}
+
+// ReturnArgOrChain may also return a fresh chain, so its result stays mutable
+// even when its argument is isolated.
+func pureReturnedArgOrChain(db *gorm.DB) {
+	q := purelib.ReturnArgOrChain(db.Session(&gorm.Session{}), true)
+	q.Find(nil)
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// A pure wrapper of ReturnArg returns its argument too.
+//
+//gormreuse:pure
+func wrapsReturnArg(db *gorm.DB) *gorm.DB {
+	return purelib.ReturnArg(db)
+}
+
+func pureWrapperReturnedArg(db *gorm.DB) {
+	q := db.Where("x = ?", 1)
+	wrapsReturnArg(q).Find(nil)
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// =============================================================================
+// Subquery arguments through another package's functions (#238, #195)
+// =============================================================================
+
+// ReturnArg returns sub itself, so the subquery is still sub's Statement.
+func subqueryThroughReturnArg(db *gorm.DB) {
+	db = db.Session(&gorm.Session{})
+	sub := db.Model(nil).Select("id")
+	x := db.Where("id IN (?)", purelib.ReturnArg(sub))
+	sub.Where("age > 1").Find(nil)
+	x.Find(nil) // want `\*gorm\.DB reused: mutable root passed as a query argument`
+}
+
+// TenantDB is pure and immutable-return, so its result is a fresh value that a
+// later change to sub cannot reach.
+func subqueryThroughImmutableReturn(db *gorm.DB) {
+	db = db.Session(&gorm.Session{})
+	sub := db.Model(nil).Select("id")
+	x := db.Where("id IN (?)", purelib.TenantDB(sub, 1))
+	sub.Where("age > 1").Find(nil)
+	x.Find(nil) // OK: the subquery is isolated
 }

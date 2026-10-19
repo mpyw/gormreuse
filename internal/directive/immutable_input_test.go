@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"golang.org/x/tools/go/ast/inspector"
+	"golang.org/x/tools/go/ssa"
 )
 
 // parseImmutableInputSrc parses src as a single Go file in package "demo" and
@@ -54,6 +55,30 @@ func TestImmutableInputSet_NilSafety(t *testing.T) {
 	}
 	if got := nilSet.GetUnused(); got != nil {
 		t.Errorf("GetUnused() = %v, want nil", got)
+	}
+}
+
+// TestImmutableInputSet_Import checks that the callbacks of a function without
+// syntax, which is a function of another package, come from the imported fact
+// (#195).
+func TestImmutableInputSet_Import(t *testing.T) {
+	t.Parallel()
+
+	external := &ssa.Function{}
+	set := NewImmutableInputSet(nil, nil)
+	if got := set.Callbacks(external); got != nil {
+		t.Errorf("Callbacks = %v without an import, want nil", got)
+	}
+	want := []ImmutableInputCallback{{ParamIdx: 1, ParamName: "cb"}}
+	set.Import(func(*ssa.Function) []ImmutableInputCallback { return want })
+	if got := set.Callbacks(external); !slices.Equal(got, want) {
+		t.Errorf("Callbacks = %v, want %v", got, want)
+	}
+
+	var nilSet *ImmutableInputSet
+	nilSet.Import(func(*ssa.Function) []ImmutableInputCallback { return want })
+	if got := nilSet.Callbacks(external); got != nil {
+		t.Errorf("nil set Callbacks = %v, want nil", got)
 	}
 }
 

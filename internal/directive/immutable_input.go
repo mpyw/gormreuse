@@ -47,6 +47,9 @@ type ImmutableInputSet struct {
 	known    map[FuncKey][]ImmutableInputCallback
 	closures map[token.Pos][]ImmutableInputCallback // keyed by the FuncLit's position
 	unused   []ImmutableInputUnused
+	// imported returns the callbacks of a function of another package, from
+	// the fact its package exported (#195). It may be nil.
+	imported func(fn *ssa.Function) []ImmutableInputCallback
 
 	fset      *token.FileSet
 	typesInfo *types.Info
@@ -142,6 +145,14 @@ func (s *ImmutableInputSet) AddFile(cur inspector.Cursor, pkgPath string) {
 	}
 }
 
+// Import sets how the set finds the callbacks of a function that has no
+// syntax, which is a function of another package (see DirectiveFuncSet.Import).
+func (s *ImmutableInputSet) Import(imported func(fn *ssa.Function) []ImmutableInputCallback) {
+	if s != nil {
+		s.imported = imported
+	}
+}
+
 // Callbacks returns the registered immutable-input callbacks for fn, used to
 // exempt callback arguments (case 2.2) and to validate the declaring function's
 // body contract (cases 2.3/2.4). fn may be a closure, a generic instance or a
@@ -152,8 +163,14 @@ func (s *ImmutableInputSet) Callbacks(fn *ssa.Function) []ImmutableInputCallback
 		return nil
 	}
 	fn = DeclaredFunc(fn)
-	if fl, ok := fn.Syntax().(*ast.FuncLit); ok {
-		return slices.Clone(s.closures[fl.Pos()])
+	switch syntax := fn.Syntax().(type) {
+	case *ast.FuncLit:
+		return slices.Clone(s.closures[syntax.Pos()])
+	case nil:
+		if s.imported == nil {
+			return nil
+		}
+		return slices.Clone(s.imported(fn))
 	}
 	return slices.Clone(s.known[funcKeyOf(fn)])
 }

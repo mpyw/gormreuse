@@ -76,6 +76,7 @@ import (
 	"golang.org/x/tools/go/ssa"
 
 	"github.com/mpyw/gormreuse/internal/directive"
+	"github.com/mpyw/gormreuse/internal/facts"
 	"github.com/mpyw/gormreuse/internal/ssa/cfg"
 	"github.com/mpyw/gormreuse/internal/ssa/pollutionsource"
 	"github.com/mpyw/gormreuse/internal/typeutil"
@@ -133,19 +134,29 @@ type PureVerdicts struct {
 	// same *gorm.DB back, so a branch from the result is a branch from the
 	// argument.
 	Returned map[*ssa.Function][]int
+
+	// Imported holds the verdicts that other packages exported for their pure
+	// functions (#195). Failed and Returned hold only this package's.
+	Imported *facts.Table
 }
 
 // HasFailed reports whether fn is a pure function that broke its contract. The
 // verdicts are keyed by the declared function, and fn may be a generic instance
 // or a bound method wrapper of it (#180).
 func (p *PureVerdicts) HasFailed(fn *ssa.Function) bool {
-	return p != nil && p.Failed[directive.DeclaredFunc(fn)]
+	if p == nil {
+		return false
+	}
+	declared := directive.DeclaredFunc(fn)
+	return p.Failed[declared] || p.Imported.Of(declared).PureFailed
 }
 
 // ReturnedArgs returns the arguments of a call to fn (args, as in
 // CallCommon.Args) that its result may be. A bound method wrapper (f := x.M;
 // f(a)) takes no receiver argument, so the indexes are shifted by the
-// parameters it lacks; the receiver itself is never in Returned.
+// parameters it lacks; the receiver itself is never in Returned. The count of
+// parameters comes from the signature, since a function of another package
+// has no Params.
 func (p *PureVerdicts) ReturnedArgs(fn *ssa.Function, args []ssa.Value) []ssa.Value {
 	if p == nil {
 		return nil
@@ -153,9 +164,16 @@ func (p *PureVerdicts) ReturnedArgs(fn *ssa.Function, args []ssa.Value) []ssa.Va
 	declared := directive.DeclaredFunc(fn)
 	indexes := p.Returned[declared]
 	if len(indexes) == 0 {
+		indexes = p.Imported.Of(declared).Returned
+	}
+	if len(indexes) == 0 {
 		return nil
 	}
-	shift := len(declared.Params) - len(args)
+	nparams := declared.Signature.Params().Len()
+	if declared.Signature.Recv() != nil {
+		nparams++
+	}
+	shift := nparams - len(args)
 	var returned []ssa.Value
 	for _, i := range indexes {
 		if j := i - shift; j >= 0 && j < len(args) {
@@ -2113,6 +2131,13 @@ func (t *RootTracer) pureReturnedArgs(call *ssa.Call) []ssa.Value {
 	return args
 }
 
+// ReturnsOnlyParams reports whether every mutable root of the values fn
+// returns is one of fn's own parameters. The analyzer exports it for the pure
+// functions that may return an argument (#195).
+func (t *RootTracer) ReturnsOnlyParams(fn *ssa.Function) bool {
+	return t.returnsOnlyParams(fn)
+}
+
 // returnsOnlyParams reports whether every mutable root of the values fn
 // returns is one of fn's own parameters, so fn returns an immutable value when
 // its arguments are immutable. `if c { return db.Session(s).Where("x") };
@@ -2122,6 +2147,11 @@ func (t *RootTracer) returnsOnlyParams(fn *ssa.Function) bool {
 	fn = directive.DeclaredFunc(fn)
 	if only, ok := t.onlyParams[fn]; ok {
 		return only
+	}
+	// The body of a function of another package is not built, so its package
+	// decided (#195).
+	if fn.Blocks == nil {
+		return t.pure != nil && t.pure.Imported.Of(fn).ReturnsOnlyParams
 	}
 	// A recursive call may return anything until fn is decided.
 	t.onlyParams[fn] = false

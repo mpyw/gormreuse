@@ -2615,7 +2615,7 @@ type OrmWrapper struct{}
 // GetDB is a pure method that returns a new *gorm.DB.
 //
 //gormreuse:pure // want `unused gormreuse:pure directive`
-func (o *OrmWrapper) GetDB() *gorm.DB {
+func (o *OrmWrapper) GetDB() *gorm.DB { // want GetDB:"gormreuse pure"
 	return DB.WithContext(nil)
 }
 

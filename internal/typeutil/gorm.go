@@ -44,6 +44,7 @@ package typeutil
 import (
 	"go/constant"
 	"go/types"
+	"slices"
 
 	"golang.org/x/tools/go/ssa"
 )
@@ -99,6 +100,23 @@ func HasGormDBResult(t types.Type) bool {
 // It uses exact path matching, consistent with isGormDBNamed.
 func IsGormPackage(pkg *types.Package) bool {
 	return pkg != nil && pkg.Path() == gormPkgPath
+}
+
+// ReachesGorm reports whether pkg is gorm.io/gorm or imports it, directly or
+// through other packages. Only then can a value in pkg hold a *gorm.DB: its
+// type would name gorm.DB, so the package that declares that type is among
+// the imports that the type information of pkg records.
+func ReachesGorm(pkg *types.Package) bool {
+	seen := make(map[*types.Package]bool)
+	var reaches func(p *types.Package) bool
+	reaches = func(p *types.Package) bool {
+		if seen[p] {
+			return false
+		}
+		seen[p] = true
+		return IsGormPackage(p) || slices.ContainsFunc(p.Imports(), reaches)
+	}
+	return pkg != nil && reaches(pkg)
 }
 
 // isGormDBNamed checks if the type is gorm.DB (named type).

@@ -44,23 +44,32 @@ package gormreuse
 
 import (
 	"go/ast"
+	"slices"
 	"strings"
 
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/analysis/passes/buildssa"
+	"golang.org/x/tools/go/analysis/passes/ctrlflow"
 	"golang.org/x/tools/go/analysis/passes/inspect"
 	"golang.org/x/tools/go/ast/inspector"
 
 	"github.com/mpyw/gormreuse/internal"
 	"github.com/mpyw/gormreuse/internal/directive"
+	"github.com/mpyw/gormreuse/internal/facts"
+	"github.com/mpyw/gormreuse/internal/typeutil"
 )
 
 // Analyzer is the main analyzer for gormreuse.
 //
-// It requires the buildssa analyzer to build SSA form of the code,
-// then performs reuse detection via pollution tracking. It also requires the
-// inspect analyzer, which buildssa already depends on, so the directive scans
-// share one AST traversal instead of walking each file again.
+// It builds SSA form of the code with the buildssa analyzer, then performs
+// reuse detection via pollution tracking. It exports what it finds about the
+// directive functions of a package as facts, so drivers run it on every
+// dependency first, the standard library included. buildssa is therefore not
+// required but run from run, only for a package that reaches gorm.io/gorm: in
+// any other package no value holds a *gorm.DB (#195). gormreuse requires
+// ctrlflow, which buildssa needs and which already runs on every dependency
+// for its own facts, and the inspect analyzer, so the directive scans share
+// one AST traversal instead of walking each file again.
 //
 // Usage with go vet:
 //
@@ -72,13 +81,26 @@ import (
 var Analyzer = &analysis.Analyzer{
 	Name:     "gormreuse",
 	Doc:      "detects unsafe *gorm.DB instance reuse after chain methods",
-	Requires: []*analysis.Analyzer{buildssa.Analyzer, inspect.Analyzer},
-	Run:      run,
+	Requires: []*analysis.Analyzer{ctrlflow.Analyzer, inspect.Analyzer},
+	// What a package's analysis finds about its directive functions is
+	// exported to the packages that call them (#195).
+	FactTypes: []analysis.Fact{new(facts.Func)},
+	Run:       run,
 }
 
 func run(pass *analysis.Pass) (any, error) {
-	ssaInfo := pass.ResultOf[buildssa.Analyzer].(*buildssa.SSA)
 	insp := pass.ResultOf[inspect.Analyzer].(*inspector.Inspector)
+
+	// SSA is built only where it can find something (see Analyzer). It needs
+	// the ctrlflow result, which this pass requires.
+	var ssaInfo *buildssa.SSA
+	if typeutil.ReachesGorm(pass.Pkg) {
+		result, err := buildssa.Analyzer.Run(pass)
+		if err != nil {
+			return nil, err
+		}
+		ssaInfo = result.(*buildssa.SSA)
+	}
 
 	// Build set of files to skip
 	skipFiles := buildSkipFiles(pass)
@@ -95,7 +117,10 @@ func run(pass *analysis.Pass) (any, error) {
 	for cur := range insp.Root().Children() {
 		file := cur.Node().(*ast.File)
 		filename := pass.Fset.PositionFor(file.Pos(), false).Filename
-		if skipFiles[filename] {
+		// A file with no comment that names gormreuse holds no directive and
+		// no directive problem. The drivers run the analyzer on every
+		// dependency for its facts, so this keeps those runs cheap (#195).
+		if skipFiles[filename] || !mentionsGormreuse(file) {
 			continue
 		}
 		ignores.AddFile(cur)
@@ -130,6 +155,14 @@ func run(pass *analysis.Pass) (any, error) {
 	internal.RunSSA(pass, ssaInfo, ignores, pureFuncs, immutableReturnFuncs, immutableParamFuncs, immutableInputSet, skipFiles)
 
 	return nil, nil
+}
+
+// mentionsGormreuse reports whether a comment of file contains "gormreuse:".
+// Every directive, and every comment reported as a malformed one, does.
+func mentionsGormreuse(file *ast.File) bool {
+	return slices.ContainsFunc(file.Comments, func(cg *ast.CommentGroup) bool {
+		return slices.ContainsFunc(cg.List, func(c *ast.Comment) bool { return strings.Contains(c.Text, "gormreuse:") })
+	})
 }
 
 // buildSkipFiles creates a set of filenames to skip.

@@ -60,12 +60,14 @@ type Context struct {
 	LoopInfo   *cfg.LoopInfo      // Loop detection results for current function
 	CurrentFn  *ssa.Function      // The function being analyzed
 
-	// NeedsImmutableParam holds the functions marked //gormreuse:immutable-param
-	// that genuinely rely on immutability (they branch a *gorm.DB parameter). A
-	// call passing a mutable *gorm.DB to such a function violates the contract
-	// (Phase 1b stage 2b). Functions whose annotation is redundant (never branch
-	// a param) are excluded, so they impose no caller-side obligation.
-	NeedsImmutableParam map[*ssa.Function]bool
+	// NeedsImmutableParam reports whether a declared function is marked
+	// //gormreuse:immutable-param and genuinely relies on immutability (it
+	// branches a *gorm.DB parameter). A call passing a mutable *gorm.DB to such
+	// a function violates the contract (Phase 1b stage 2b). Functions whose
+	// annotation is redundant (never branch a param) are excluded, so they
+	// impose no caller-side obligation. A function of another package is
+	// decided by its package's fact (#195). It may be nil.
+	NeedsImmutableParam func(fn *ssa.Function) bool
 
 	// PosOverride, when valid, replaces the source position recorded for uses
 	// inside this function. It is set when analyzing a closure that is invoked
@@ -555,7 +557,7 @@ func recordArgumentRead(v ssa.Value, call *ssa.Call, ctx *Context) {
 // receiver as Args[0]; the directive governs parameters, not the receiver, so
 // that argument is skipped. A bound method wrapper has no receiver argument.
 func checksImmutableParamArg(callee *ssa.Function, i int, ctx *Context) bool {
-	if callee == nil || !ctx.NeedsImmutableParam[directive.DeclaredFunc(callee)] {
+	if callee == nil || ctx.NeedsImmutableParam == nil || !ctx.NeedsImmutableParam(directive.DeclaredFunc(callee)) {
 		return false
 	}
 	return callee.Signature.Recv() == nil || i != 0

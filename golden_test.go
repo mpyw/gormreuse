@@ -48,12 +48,18 @@ func TestGoldenFiles(t *testing.T) {
 		t.Errorf("%s has no source fixture.\nRun: %s\nThen review and commit the changes.", path, goldentest.UpdateCommand)
 	}
 
+	// One run gives the fixes of every fixture. A run per fixture repeated
+	// the analysis of the package and of all its dependencies (#195).
+	run, err := goldentest.Analyze(testdata, "gormreuse", gormreuse.Analyzer)
+	if err != nil {
+		t.Fatalf("Failed to analyze the fixtures: %v", err)
+	}
 	for _, filename := range fixtures {
 		t.Run(filename, func(t *testing.T) {
 			t.Parallel()
 			srcPath := filepath.Join(srcDir, filename)
 
-			stale, err := goldentest.SyncFixture(testdata, "gormreuse", srcPath, gormreuse.Analyzer, update)
+			stale, err := run.SyncFixture(srcPath, update)
 			if err != nil {
 				t.Fatalf("Failed to check fixtures for %s: %v", srcPath, err)
 			}

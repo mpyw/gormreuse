@@ -65,10 +65,10 @@ type Violation = pollution.Violation
 //	    report(v.Pos, v.Message)
 //	}
 type Analyzer struct {
-	fn                  *ssa.Function          // Function being analyzed
-	rootTracer          *tracer.RootTracer     // Traces values to mutable roots
-	cfgAnalyzer         *cfg.Analyzer          // Control flow analysis
-	needsImmutableParam map[*ssa.Function]bool // immutable-param fns that branch a param (2b caller check)
+	fn                  *ssa.Function            // Function being analyzed
+	rootTracer          *tracer.RootTracer       // Traces values to mutable roots
+	cfgAnalyzer         *cfg.Analyzer            // Control flow analysis
+	needsImmutableParam func(*ssa.Function) bool // immutable-param fns that branch a param (2b caller check)
 }
 
 // NewAnalyzer creates a new Analyzer for the given function.
@@ -82,11 +82,12 @@ type Analyzer struct {
 //   - scopesCallbacks: Scopes/Preload callbacks whose *gorm.DB param is a mutable root
 //   - immutableParamFuncs: Functions marked //gormreuse:immutable-param (params opt out of Phase 1b)
 //   - immutableCallbacks: Transaction callbacks whose tx param is forkable (immutable)
-//   - needsImmutableParam: immutable-param functions that actually branch a param, so a caller
-//     passing a mutable value to them violates the contract (Phase 1b stage 2b)
+//   - needsImmutableParam: reports the immutable-param functions that actually branch a param,
+//     so a caller passing a mutable value to them violates the contract (Phase 1b stage 2b).
+//     It may be nil
 //   - funcVars: Package-level variables that hold one function, so a call through one
 //     honours that function's directives (#183)
-func NewAnalyzer(fn *ssa.Function, pureFuncs, immutableReturnFuncs, immutableParamFuncs *directive.DirectiveFuncSet, pure *tracer.PureVerdicts, scopesCallbacks, immutableCallbacks, needsImmutableParam map[*ssa.Function]bool, funcVars tracer.FuncVars) *Analyzer {
+func NewAnalyzer(fn *ssa.Function, pureFuncs, immutableReturnFuncs, immutableParamFuncs *directive.DirectiveFuncSet, pure *tracer.PureVerdicts, scopesCallbacks, immutableCallbacks map[*ssa.Function]bool, needsImmutableParam func(*ssa.Function) bool, funcVars tracer.FuncVars) *Analyzer {
 	return &Analyzer{
 		fn:                  fn,
 		rootTracer:          tracer.New(pureFuncs, immutableReturnFuncs, immutableParamFuncs, pure, scopesCallbacks, immutableCallbacks, funcVars),

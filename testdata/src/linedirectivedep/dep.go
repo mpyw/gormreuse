@@ -1,5 +1,6 @@
-// Package linedirectivedep holds a pure helper below a //line directive. The
-// directive is read back by parsing this file from disk (issue #152).
+// Package linedirectivedep holds a pure helper below a //line directive
+// (issue #152). Callers in another package read it from the fact this
+// package's analysis exports (#195).
 package linedirectivedep
 
 import "gorm.io/gorm"

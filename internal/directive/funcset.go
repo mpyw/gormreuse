@@ -2,7 +2,6 @@ package directive
 
 import (
 	"go/ast"
-	"go/parser"
 	"go/token"
 	"go/types"
 	"maps"
@@ -15,25 +14,25 @@ import (
 
 // DirectiveFuncSet is a generic set of functions matching a directive.
 // It supports both pre-built sets (for current package) and on-demand
-// directive checking (for external packages via source parsing).
+// directive checking: a function of the package by its syntax, and a function
+// of another package by the fact that package exported (see Import).
 // It also tracks which directives have invalid signatures to report unused directives.
 type DirectiveFuncSet struct {
 	known               map[FuncKey]struct{}
 	fset                *token.FileSet
-	typesInfo           *types.Info            // Type info for signature validation
-	files               map[string]*ast.File   // Original parsed files (from analysis)
-	cache               map[string]*ast.File   // Cache for external files (re-parsed)
-	isDirective         directiveChecker       // Checks if comment is this directive
-	validateSignature   signatureValidator     // Checks if signature is valid for this directive
-	invalidDirectives   map[token.Pos]struct{} // Directives on functions with invalid signatures
-	processedDirectives map[token.Pos]struct{} // All directive positions processed by this set
+	typesInfo           *types.Info                 // Type info for signature validation
+	files               map[string]*ast.File        // Original parsed files (from analysis)
+	imported            func(fn *ssa.Function) bool // Directive of a function without syntax (another package)
+	isDirective         directiveChecker            // Checks if comment is this directive
+	validateSignature   signatureValidator          // Checks if signature is valid for this directive
+	invalidDirectives   map[token.Pos]struct{}      // Directives on functions with invalid signatures
+	processedDirectives map[token.Pos]struct{}      // All directive positions processed by this set
 
 	// Cache for hasCodeBeforeComment results to avoid O(comments * nodes) complexity
 	codeBeforeCommentCache map[*ast.File]map[token.Pos]bool
 	// Cache for FuncLit line numbers per file to avoid O(nodes) lookup per line check
 	funcLitLinesCache map[*ast.File]map[int]bool
-	// File cursors: pass files use the shared pass inspector; a re-parsed
-	// file gets its own inspector on first use.
+	// Cursors of the files added with AddFile in the shared pass inspector
 	cursors map[*ast.File]inspector.Cursor
 }
 
@@ -66,7 +65,6 @@ func newDirectiveFuncSet(fset *token.FileSet, typesInfo *types.Info, isDirective
 		fset:                   fset,
 		typesInfo:              typesInfo,
 		files:                  make(map[string]*ast.File),
-		cache:                  make(map[string]*ast.File),
 		isDirective:            isDirective,
 		validateSignature:      validateSignature,
 		invalidDirectives:      make(map[token.Pos]struct{}),
@@ -78,7 +76,7 @@ func newDirectiveFuncSet(fset *token.FileSet, typesInfo *types.Info, isDirective
 }
 
 // AddFile adds an original parsed file to the set and collects all directive positions.
-// This should be called for all files in the current package to avoid re-parsing.
+// Directives are only looked for in the files added with it.
 // cur is the file's cursor in the pass inspector.
 func (s *DirectiveFuncSet) AddFile(cur inspector.Cursor) {
 	if s == nil || s.fset == nil || !cur.Valid() {
@@ -93,6 +91,16 @@ func (s *DirectiveFuncSet) AddFile(cur inspector.Cursor) {
 
 	// Collect all directive positions in this file for unused detection
 	s.collectDirectivePositions(file)
+}
+
+// Import sets how the set decides a function that has no syntax, which is a
+// function of another package: imported reports whether its package's analysis
+// found the directive on it and trusts it (#195). Without it, such a function
+// has no directive.
+func (s *DirectiveFuncSet) Import(imported func(fn *ssa.Function) bool) {
+	if s != nil {
+		s.imported = imported
+	}
 }
 
 // Add adds a function key to the set.
@@ -148,19 +156,15 @@ func (s *DirectiveFuncSet) Contains(fn *ssa.Function) bool {
 		}
 	}
 
-	// Second, check the SSA function's syntax for directive (for external packages)
+	// Second, check the SSA function's syntax, or the fact of a function of
+	// another package
 	return s.hasDirective(fn)
 }
 
-// fileCursor returns the cursor for the given file. A file added with AddFile
-// uses its cursor in the pass inspector; any other file gets its own inspector.
+// fileCursor returns the cursor in the pass inspector of a file added with
+// AddFile. Directives are only looked for in those files.
 func (s *DirectiveFuncSet) fileCursor(file *ast.File) inspector.Cursor {
-	if cur, ok := s.cursors[file]; ok {
-		return cur
-	}
-	cur, _ := inspector.New([]*ast.File{file}).Root().FirstChild()
-	s.cursors[file] = cur
-	return cur
+	return s.cursors[file]
 }
 
 // collectDirectivePositions scans a file for all directives and validates their signatures.
@@ -283,7 +287,6 @@ func (s *DirectiveFuncSet) hasDirective(fn *ssa.Function) bool {
 		return false
 	}
 
-	// Try getting syntax from the SSA function (works for current package)
 	switch syntax := fn.Syntax().(type) {
 	case *ast.FuncDecl:
 		// Check Doc comments (next-line pattern)
@@ -300,35 +303,14 @@ func (s *DirectiveFuncSet) hasDirective(fn *ssa.Function) bool {
 		if pos := s.findDirectiveForFuncLit(syntax); pos.IsValid() {
 			return true
 		}
+	case nil:
+		// A function of another package has no syntax. Its directive comes
+		// from the fact its package exported, never from its source on disk:
+		// that source may be missing, and only the fact says whether the
+		// body keeps the contract (#195).
+		return s != nil && s.imported != nil && s.imported(fn)
 	}
-
-	// Fallback: parse the source file for external packages
-	if s == nil || s.fset == nil {
-		return false
-	}
-	obj := fn.Object()
-	if obj == nil {
-		return false
-	}
-	pos := obj.Pos()
-	if !pos.IsValid() {
-		return false
-	}
-	filename := s.fset.PositionFor(pos, false).Filename
-	if filename == "" {
-		return false
-	}
-	file := s.parseFile(filename)
-	if file == nil {
-		return false
-	}
-
-	funcName := fn.Name()
-	var receiverType string
-	if sig := fn.Signature; sig != nil && sig.Recv() != nil {
-		receiverType = receiverTypeString(sig.Recv().Type())
-	}
-	return s.hasDirectiveInFile(file, funcName, receiverType)
+	return false
 }
 
 // hasMatchingDirective finds a directive comment in the file that satisfies the given predicate.
@@ -457,23 +439,14 @@ func (s *DirectiveFuncSet) findDirectiveForFuncLit(funcLit *ast.FuncLit) token.P
 	})
 }
 
-// getFileForNode returns the AST file containing the given node.
-// It first checks for original files (from analysis), then falls back to re-parsing.
+// getFileForNode returns the file added with AddFile that contains the given
+// node, or nil.
 func (s *DirectiveFuncSet) getFileForNode(node ast.Node) *ast.File {
 	pos := node.Pos()
 	if !pos.IsValid() {
 		return nil
 	}
-	filename := s.fset.PositionFor(pos, false).Filename
-	if filename == "" {
-		return nil
-	}
-	// First, try to use the original file (avoids position mismatch)
-	if file, ok := s.files[filename]; ok {
-		return file
-	}
-	// Fall back to re-parsing (for external packages)
-	return s.parseFile(filename)
+	return s.files[s.fset.PositionFor(pos, false).Filename]
 }
 
 // commentGroupHasDirective checks if a comment group contains our directive.
@@ -707,8 +680,7 @@ func (s *DirectiveFuncSet) isFirstStatementOnLine(file *ast.File, target ast.Stm
 // isDirectRHSValue checks if the FuncLit is a direct RHS value in the statement,
 // not nested inside a composite literal (struct, slice, map, array).
 //
-// Note: We use position matching because the target FuncLit may be from a different
-// AST parse than stmt (SSA analysis vs our re-parsed file).
+// The target is matched by position, not by identity.
 func (s *DirectiveFuncSet) isDirectRHSValue(stmt ast.Stmt, target *ast.FuncLit) bool {
 	var rhsExprs []ast.Expr
 
@@ -863,41 +835,6 @@ func (s *DirectiveFuncSet) hasNestedFuncLitBetween(parent *ast.FuncLit, startCol
 		return true
 	})
 	return found
-}
-
-// parseFile parses a Go source file with caching.
-func (s *DirectiveFuncSet) parseFile(filename string) *ast.File {
-	if file, ok := s.cache[filename]; ok {
-		return file
-	}
-	file, err := parser.ParseFile(s.fset, filename, nil, parser.ParseComments)
-	if err != nil {
-		s.cache[filename] = nil
-		return nil
-	}
-	s.cache[filename] = file
-	return file
-}
-
-// hasDirectiveInFile checks if a function in a file has the directive.
-func (s *DirectiveFuncSet) hasDirectiveInFile(file *ast.File, funcName, receiverType string) bool {
-	for _, decl := range file.Decls {
-		funcDecl, ok := decl.(*ast.FuncDecl)
-		if !ok || funcDecl.Name.Name != funcName {
-			continue
-		}
-		declReceiverType := ""
-		if funcDecl.Recv != nil && len(funcDecl.Recv.List) > 0 {
-			declReceiverType = receiverTypeStringFromExpr(funcDecl.Recv.List[0].Type)
-		}
-		if declReceiverType != receiverType {
-			continue
-		}
-		if funcDecl.Doc != nil && s.commentGroupHasDirective(funcDecl.Doc) {
-			return true
-		}
-	}
-	return false
 }
 
 // BuildPureFuncSet builds a set of functions marked with //gormreuse:pure.
