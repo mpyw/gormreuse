@@ -189,6 +189,41 @@ func TestApplyFixesSeveralEdits(t *testing.T) {
 	}
 }
 
+// TestApplyFixesSharedEdit checks that an edit two diagnostics' fixes both
+// carry, such as one import, is applied once.
+func TestApplyFixesSharedEdit(t *testing.T) {
+	commentEach := &analysis.Analyzer{
+		Name: "commenteach",
+		Doc:  "suggests the same comment above the package clause for each var",
+		Run: func(pass *analysis.Pass) (any, error) {
+			for _, f := range pass.Files {
+				for _, decl := range f.Decls {
+					pass.Report(analysis.Diagnostic{
+						Pos:     decl.Pos(),
+						Message: "var",
+						SuggestedFixes: []analysis.SuggestedFix{{
+							Message: "comment",
+							TextEdits: []analysis.TextEdit{
+								{Pos: f.Package, End: f.Package, NewText: []byte("// c\n")},
+								{Pos: decl.Pos(), End: decl.Pos(), NewText: []byte("// v\n")},
+							},
+						}},
+					})
+				}
+			}
+			return nil, nil
+		},
+	}
+	testdata, srcPath := writeFixturePackage(t, "package p\n\nvar a int\n\nvar b int\n")
+	_, fixed, err := ApplyFixes(testdata, "p", srcPath, commentEach)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "// c\npackage p\n\n// v\nvar a int\n\n// v\nvar b int\n"; string(fixed) != want {
+		t.Errorf("fixed = %q, want %q", fixed, want)
+	}
+}
+
 func TestSyncOrphans(t *testing.T) {
 	dir := t.TempDir()
 	for _, name := range []string{"a.go", "a.go.golden", "a.go.diff", "generated.go", "generated.go.golden", "gone.go.diff"} {

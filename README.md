@@ -183,7 +183,7 @@ q.Where("b").Find(nil) // OK: first branch from new root
 ```
 
 **When applied:**
-- Non-finisher methods (chain builders like `Where`, `Order`, `Limit`)
+- Non-finisher methods (chain builders like `Where`, `Order`, `Limit`) whose result is a `*gorm.DB`. Calls that return something else (`AddError`, `DB()`, `Association`, `Migrator`, `AutoMigrate`) and calls that run SQL or end a transaction (`FindInBatches`, `CreateInBatches`, `UpdateColumn(s)`, `Commit`, `Rollback`, `SavePoint`, `RollbackTo`) are not reassigned
 - Result is not assigned to a variable
 - Expression used as a statement. A chain such as `q.Where("a").Limit(10)` is reassigned as a whole, and a Session it needs goes after its last call
 - The receiver is the local variable that holds the reused root. Aliases (`r := q`), calls that take the root as an argument (`base.Or(q)`), package-level variables, and variables captured by a closure that is not called inline (`go func() { ... }()`, `defer func() { ... }()`) are not rewritten. The fix relies on a Session at the root instead, unless that would drop a discarded statement (see below)
@@ -211,6 +211,9 @@ q.Where("b").Find(nil) // OK: independent chain from immutable root
 **When applied:**
 - A root still has 2+ branches after simulating Phase 1 reassignments
 - Special handling for Phi nodes (conditional branches): adds Session to each incoming edge
+- Session goes only after a call that returns `*gorm.DB`. An edge that has no such call, such as a closure parameter (`if c { q = tx }`) or one result of `q, err := open()`, gets none
+
+`Session` is written with a name that refers to `gorm.io/gorm` where it is inserted. When the file has no such name, the fix adds an import: `"gorm.io/gorm"`, or `gormio "gorm.io/gorm"` when `gorm` is taken there, such as by a parameter or local variable named `gorm`, or by another package imported as `gorm`. A blank import (`_ "gorm.io/gorm"`) gives no name. Each diagnostic's fix carries its own import edit, so an editor can apply one quick fix alone.
 
 ### Combined Example
 

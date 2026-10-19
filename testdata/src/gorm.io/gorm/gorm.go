@@ -199,3 +199,41 @@ func (db *DB) SavePoint(name string) *DB { return db }
 
 // RollbackTo rollbacks to save point.
 func (db *DB) RollbackTo(name string) *DB { return db }
+
+// =============================================================================
+// Methods That Return No *DB, and More Finishers (#200)
+// =============================================================================
+
+// CreateInBatches creates records in batches.
+func (db *DB) CreateInBatches(value interface{}, batchSize int) *DB { return db }
+
+// UpdateColumn updates a column without hooks.
+func (db *DB) UpdateColumn(column string, value interface{}) *DB { return db }
+
+// UpdateColumns updates columns without hooks.
+func (db *DB) UpdateColumns(values interface{}) *DB { return db }
+
+// AddError adds an error to db.
+func (db *DB) AddError(err error) error { return err }
+
+// DB returns the underlying *sql.DB.
+func (db *DB) DB() (interface{}, error) { return nil, nil }
+
+// Association is a model's association.
+type Association struct {
+	Error error
+}
+
+// Association starts association mode.
+func (db *DB) Association(column string) *Association { return &Association{} }
+
+// Migrator migrates the schema.
+type Migrator interface {
+	AutoMigrate(dst ...interface{}) error
+}
+
+// Migrator returns a migrator.
+func (db *DB) Migrator() Migrator { return nil }
+
+// AutoMigrate migrates the schema of dst.
+func (db *DB) AutoMigrate(dst ...interface{}) error { return nil }

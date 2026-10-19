@@ -77,7 +77,9 @@ func Fixtures(srcDir string) ([]string, error) {
 // srcPath's original bytes together with the content produced by applying every
 // suggested-fix text edit targeting srcPath. Edits are matched to the file by
 // their own position and applied from the highest offset down so earlier offsets
-// stay valid.
+// stay valid. Each diagnostic's fix is complete on its own (#200), so two fixes
+// may carry the same edit, such as one gorm import. That edit is applied once,
+// as the -fix driver does.
 func ApplyFixes(testdata, pkg, srcPath string, a *analysis.Analyzer) (original, fixed []byte, err error) {
 	original, err = os.ReadFile(srcPath)
 	if err != nil {
@@ -119,8 +121,11 @@ func ApplyFixes(testdata, pkg, srcPath string, a *analysis.Analyzer) (original, 
 	}
 
 	fixed = bytes.Clone(original)
-	slices.SortFunc(edits, func(a, b offsetEdit) int { return cmp.Compare(b.start, a.start) })
-	for _, e := range edits {
+	// Ties are broken by end and text so that identical edits sit together.
+	slices.SortStableFunc(edits, func(a, b offsetEdit) int {
+		return cmp.Or(cmp.Compare(b.start, a.start), cmp.Compare(a.end, b.end), cmp.Compare(a.newText, b.newText))
+	})
+	for _, e := range slices.Compact(edits) {
 		fixed = slices.Replace(fixed, e.start, e.end, []byte(e.newText)...)
 	}
 	return original, fixed, nil

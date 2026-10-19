@@ -90,10 +90,6 @@ func RunSSA(
 	// may be detected from both the parent function and the closure.
 	globalReported := make(map[token.Pos]bool)
 
-	// Share a single suggestedEdits map to avoid duplicate fix edits
-	// across different violations that suggest the same edit.
-	globalSuggestedEdits := make(map[editKey]bool)
-
 	// Every per-function step runs under guard, which reports a panic at the
 	// function instead of dropping its diagnostics silently (#186).
 	guard := &panicGuard{pass: pass, reported: make(map[*ssa.Function]bool)}
@@ -194,7 +190,7 @@ func RunSSA(
 			continue
 		}
 
-		chk := newChecker(pass, ignores, pureFuncs, immutableReturnFuncs, immutableParamFuncs, pureVerdicts, scopesCallbacks, immutableCallbacks, needsImmutableParam, funcVars, globalReported, globalSuggestedEdits, fixGen)
+		chk := newChecker(pass, ignores, pureFuncs, immutableReturnFuncs, immutableParamFuncs, pureVerdicts, scopesCallbacks, immutableCallbacks, needsImmutableParam, funcVars, globalReported, fixGen)
 		guard.run(fn, func() { chk.checkFunction(fn) })
 	}
 
@@ -516,23 +512,14 @@ type checker struct {
 	needsImmutableParam  map[*ssa.Function]bool      // immutable-param fns that branch a param (2b caller check)
 	funcVars             tracer.FuncVars             // Package-level variables that hold one function (#183)
 	reported             map[token.Pos]bool          // Deduplication of reports
-	suggestedEdits       map[editKey]bool            // Global deduplication of suggested fixes
 	fixGen               *fix.Generator              // Cached fix generator for all violations
-}
-
-// editKey uniquely identifies an edit to avoid duplicates across violations.
-type editKey struct {
-	pos  token.Pos
-	end  token.Pos
-	text string
 }
 
 // newChecker creates a new checker for a specific file.
 // The reported map is shared across all functions to deduplicate violations
 // across parent functions and their closures.
-// The suggestedEdits map is shared to avoid duplicate fix edits.
 // The fixGen is shared to avoid recreating the generator for each violation.
-func newChecker(pass *analysis.Pass, ignores *directive.Ignores, pureFuncs, immutableReturnFuncs, immutableParamFuncs *directive.DirectiveFuncSet, pureVerdicts *tracer.PureVerdicts, scopesCallbacks, immutableCallbacks, needsImmutableParam map[*ssa.Function]bool, funcVars tracer.FuncVars, reported map[token.Pos]bool, suggestedEdits map[editKey]bool, fixGen *fix.Generator) *checker {
+func newChecker(pass *analysis.Pass, ignores *directive.Ignores, pureFuncs, immutableReturnFuncs, immutableParamFuncs *directive.DirectiveFuncSet, pureVerdicts *tracer.PureVerdicts, scopesCallbacks, immutableCallbacks, needsImmutableParam map[*ssa.Function]bool, funcVars tracer.FuncVars, reported map[token.Pos]bool, fixGen *fix.Generator) *checker {
 	return &checker{
 		pass:                 pass,
 		ignores:              ignores,
@@ -545,7 +532,6 @@ func newChecker(pass *analysis.Pass, ignores *directive.Ignores, pureFuncs, immu
 		needsImmutableParam:  needsImmutableParam,
 		funcVars:             funcVars,
 		reported:             reported,
-		suggestedEdits:       suggestedEdits,
 		fixGen:               fixGen,
 	}
 }
@@ -616,10 +602,11 @@ func (c *checker) reportViolation(v pollution.Violation, fixFor []pollution.Viol
 		suggestedFixes = append(suggestedFixes, c.fixGen.Generate(fv)...)
 	}
 
-	// Deduplicate suggested fix edits globally
-	// This prevents the same edit from being applied multiple times
-	// when different violations suggest the same fix (e.g., for shared Phi edges)
-	suggestedFixes = mergeFixes(c.deduplicateFixes(suggestedFixes))
+	// Each diagnostic carries every edit its roots need, even one that another
+	// diagnostic carries too, such as a shared Phi edge's Session or the gorm
+	// import. Applying one diagnostic's fix alone must compile (#200). Drivers
+	// that apply several fixes, such as -fix, merge identical edits.
+	suggestedFixes = mergeFixes(suggestedFixes)
 
 	// Report with diagnostic
 	c.pass.Report(analysis.Diagnostic{
@@ -629,38 +616,9 @@ func (c *checker) reportViolation(v pollution.Violation, fixFor []pollution.Viol
 	})
 }
 
-// deduplicateFixes removes edits that have already been suggested by previous violations.
-func (c *checker) deduplicateFixes(fixes []analysis.SuggestedFix) []analysis.SuggestedFix {
-	if len(fixes) == 0 {
-		return fixes
-	}
-
-	var result []analysis.SuggestedFix
-	for _, fix := range fixes {
-		var dedupedEdits []analysis.TextEdit
-		for _, edit := range fix.TextEdits {
-			key := editKey{
-				pos:  edit.Pos,
-				end:  edit.End,
-				text: string(edit.NewText),
-			}
-			if !c.suggestedEdits[key] {
-				c.suggestedEdits[key] = true
-				dedupedEdits = append(dedupedEdits, edit)
-			}
-		}
-		if len(dedupedEdits) > 0 {
-			result = append(result, analysis.SuggestedFix{
-				Message:   fix.Message,
-				TextEdits: dedupedEdits,
-			})
-		}
-	}
-	return result
-}
-
-// mergeFixes combines fixes into one fix. Its edits are sorted by position, and
-// its message joins the distinct messages in order.
+// mergeFixes combines fixes into one fix. Its edits are sorted by position,
+// an edit that two roots both need appears once, and its message joins the
+// distinct messages in order.
 func mergeFixes(fixes []analysis.SuggestedFix) []analysis.SuggestedFix {
 	if len(fixes) <= 1 {
 		return fixes
@@ -671,7 +629,13 @@ func mergeFixes(fixes []analysis.SuggestedFix) []analysis.SuggestedFix {
 		if !slices.Contains(messages, f.Message) {
 			messages = append(messages, f.Message)
 		}
-		edits = append(edits, f.TextEdits...)
+		for _, e := range f.TextEdits {
+			if !slices.ContainsFunc(edits, func(x analysis.TextEdit) bool {
+				return x.Pos == e.Pos && x.End == e.End && string(x.NewText) == string(e.NewText)
+			}) {
+				edits = append(edits, e)
+			}
+		}
 	}
 	slices.SortStableFunc(edits, func(a, b analysis.TextEdit) int { return cmp.Compare(a.Pos, b.Pos) })
 	return []analysis.SuggestedFix{{Message: strings.Join(messages, "; "), TextEdits: edits}}

@@ -46,7 +46,6 @@ import (
 
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/analysis/passes/inspect"
-	"golang.org/x/tools/go/ast/astutil"
 	"golang.org/x/tools/go/ast/edge"
 	"golang.org/x/tools/go/ast/inspector"
 	"golang.org/x/tools/go/ssa"
@@ -147,9 +146,6 @@ func (g *Generator) Generate(v pollution.Violation) []analysis.SuggestedFix {
 	// Generate TextEdits
 	var edits []analysis.TextEdit
 
-	// Track files that need gorm import (files where Session is added)
-	filesNeedingImport := make(map[*ast.File]bool)
-
 	// PHASE 1: Add reassignments for non-finisher uses (Rule 1)
 	for _, pos := range slices.Sorted(maps.Keys(reassigned)) {
 		if edit := g.generateReassignmentEdit(pos, target); edit != nil {
@@ -161,30 +157,21 @@ func (g *Generator) Generate(v pollution.Violation) []analysis.SuggestedFix {
 	// The original root is Phi-aware (Session on each incoming edge); a virtual
 	// root created by a reassignment gets Session appended at its creation site
 	// (e.g. q = q.Where("a").Session(&gorm.Session{})) — #71 defect 2.
+	var sessionPositions []token.Pos
 	for _, vr := range rootsNeedingSession {
-		var sessionEdits []analysis.TextEdit
 		if vr.isOriginal {
-			sessionEdits = g.generateSessionEditsForRoot(vr.pos, root)
+			sessionPositions = append(sessionPositions, g.sessionPositionsForRoot(vr.pos, root)...)
 		} else {
-			sessionEdits = []analysis.TextEdit{g.sessionEditAt(vr.end)}
-		}
-		if len(sessionEdits) > 0 {
-			edits = append(edits, sessionEdits...)
-			if file := g.findFileContaining(vr.pos); file != nil {
-				filesNeedingImport[file] = true
-			}
+			sessionPositions = append(sessionPositions, vr.end)
 		}
 	}
+
+	// PHASE 3: Write the Sessions, with a gorm import when they need one. Each
+	// fix carries its own import edit, so applying it alone compiles (#200).
+	edits = append(edits, g.sessionEdits(sessionPositions)...)
 
 	if len(edits) == 0 {
 		return nil
-	}
-
-	// PHASE 3: Add gorm import if needed
-	for file := range filesNeedingImport {
-		if importEdit := g.generateGormImportEdit(file); importEdit != nil {
-			edits = append(edits, *importEdit)
-		}
 	}
 
 	// Deduplicate edits (same position and new text)
@@ -356,6 +343,16 @@ func isFinisher(methodName string) bool {
 		"Transaction":   true,
 		"FirstOrCreate": true, // terminal (executes); #71 secondary
 		"FirstOrInit":   true, // terminal (executes); #71 secondary
+		// These return *gorm.DB but run SQL or end a transaction, so a
+		// discarded call is not a chain to reassign (#200).
+		"CreateInBatches": true,
+		"FindInBatches":   true,
+		"UpdateColumn":    true,
+		"UpdateColumns":   true,
+		"Commit":          true,
+		"Rollback":        true,
+		"SavePoint":       true,
+		"RollbackTo":      true,
 	}
 	return finishers[methodName]
 }
@@ -452,83 +449,133 @@ func (g *Generator) generateReassignmentEdit(pos token.Pos, target *types.Var) *
 	}
 }
 
-// generateSessionEdit generates a TextEdit for Session.
-// Appends ".Session(&gorm.Session{})" after the call expression.
-func (g *Generator) generateSessionEdit(pos token.Pos) *analysis.TextEdit {
-	endPos := g.getCallExprEndPos(pos)
-	if endPos == token.NoPos {
-		return nil
+// sessionEndAfterCall returns where a Session goes for a value defined at
+// pos: the end of the call whose Lparen is pos, where SSA places a call. It
+// returns token.NoPos when there is no such call or the call does not return
+// *gorm.DB. A closure parameter or the result of a call with several results
+// has no call of its own, and appending a Session to the call that encloses
+// it, such as `run(db, func(tx *gorm.DB) { ... })`, would not compile (#200).
+func (g *Generator) sessionEndAfterCall(pos token.Pos) token.Pos {
+	file := g.findFileContaining(pos)
+	if file == nil {
+		return token.NoPos
 	}
-	edit := g.sessionEditAt(endPos)
-	return &edit
+	call := findCallAtLparen(g.fileCursor(file), pos)
+	if call == nil || !typeutil.IsGormDB(g.pass.TypesInfo.TypeOf(call)) {
+		return token.NoPos
+	}
+	return call.End()
 }
 
-// sessionEditAt inserts ".Session(&gorm.Session{})" at pos, which is in a
-// file of the pass.
-func (g *Generator) sessionEditAt(pos token.Pos) analysis.TextEdit {
-	// Qualify Session with the file's actual local name for gorm.io/gorm so the
-	// fix compiles under an aliased or dot import (issue #71, defect 3).
-	qualifier := gormQualifier(g.findFileContaining(pos))
-	return analysis.TextEdit{
-		Pos:     pos,
-		End:     pos,
-		NewText: []byte(".Session(&" + qualifier + "Session{})"),
+// sessionEdits inserts ".Session(&gorm.Session{})" at each of positions. It
+// qualifies Session with a name that refers to gorm.io/gorm at every one of
+// them, and adds an import of gorm.io/gorm to a file where no such name exists
+// (see gormNameAt).
+func (g *Generator) sessionEdits(positions []token.Pos) []analysis.TextEdit {
+	byFile := make(map[*ast.File][]token.Pos)
+	var files []*ast.File
+	for _, pos := range positions {
+		file := g.findFileContaining(pos)
+		if _, seen := byFile[file]; !seen {
+			files = append(files, file)
+		}
+		byFile[file] = append(byFile[file], pos)
 	}
+	var edits []analysis.TextEdit
+	for _, file := range files {
+		qualifier, importName := g.gormNameAt(file, byFile[file])
+		for _, pos := range byFile[file] {
+			edits = append(edits, analysis.TextEdit{
+				Pos:     pos,
+				End:     pos,
+				NewText: []byte(".Session(&" + qualifier + "Session{})"),
+			})
+		}
+		if importName != "" {
+			edits = append(edits, gormImportEdit(file, importName))
+		}
+	}
+	return edits
 }
 
-// gormQualifier returns the selector prefix for referring to gorm types in file:
-// "gorm." for a normal import, "<alias>." for an aliased import, or "" for a
-// dot-import. It defaults to "gorm." when gorm is not imported (an import edit is
-// added separately by generateGormImportEdit).
-func gormQualifier(file *ast.File) string {
+// gormNameAt returns the selector prefix that refers to gorm.io/gorm at every
+// one of positions in file: "gorm." for a plain import, "<alias>." for an
+// aliased one, or "" for a dot import. Each name is resolved in the scope at
+// the position, so a parameter or local variable named gorm that shadows the
+// import there is seen (#200).
+//
+// When no import of the file can be used there, importName is the name of an
+// import to add: "gorm", or "gormio", "gormio2" and so on when gorm is taken,
+// such as by another package imported as gorm. A blank import has no usable
+// name.
+func (g *Generator) gormNameAt(file *ast.File, positions []token.Pos) (qualifier, importName string) {
+	resolvesAt := func(name string, want func(types.Object) bool) bool {
+		for _, pos := range positions {
+			_, obj := g.pass.Pkg.Scope().Innermost(pos).LookupParent(name, pos)
+			if !want(obj) {
+				return false
+			}
+		}
+		return true
+	}
+	isGorm := func(pkg *types.Package) bool { return pkg != nil && pkg.Path() == gormImportPath }
 	for _, imp := range file.Imports {
-		path, err := strconv.Unquote(imp.Path.Value)
-		if err != nil || path != gormImportPath {
+		pkgName := g.pass.TypesInfo.PkgNameOf(imp)
+		if pkgName == nil || !isGorm(pkgName.Imported()) {
 			continue
 		}
-		if imp.Name == nil {
-			return "gorm." // normal import; gorm.io/gorm's package name is "gorm"
-		}
-		switch imp.Name.Name {
-		case ".":
-			return "" // dot-import: reference Session unqualified
+		switch pkgName.Name() {
 		case "_":
-			return "gorm." // blank import provides no usable name; treat as absent
+		case ".":
+			if resolvesAt("Session", func(obj types.Object) bool { return obj != nil && isGorm(obj.Pkg()) }) {
+				return "", ""
+			}
 		default:
-			return imp.Name.Name + "." // aliased import
+			if resolvesAt(pkgName.Name(), func(obj types.Object) bool { return obj == pkgName }) {
+				return pkgName.Name() + ".", ""
+			}
 		}
 	}
-	return "gorm."
+	isFree := func(obj types.Object) bool { return obj == nil }
+	name := "gorm"
+	for i := 1; !resolvesAt(name, isFree); i++ {
+		name = "gormio"
+		if i > 1 {
+			name += strconv.Itoa(i)
+		}
+	}
+	return name + ".", name
 }
 
-// generateSessionEditsForRoot generates Session edits, handling Phi nodes specially.
-// For Phi nodes, generates edits for each incoming edge.
-// For non-Phi nodes, generates a single edit.
-func (g *Generator) generateSessionEditsForRoot(pos token.Pos, root ssa.Value) []analysis.TextEdit {
+// sessionPositionsForRoot returns where Sessions go to make root immutable.
+// For a Phi node, and for a root that is an edge of one, it returns a
+// position for each incoming edge that can take one. Otherwise it returns at
+// most one, after the call at pos.
+func (g *Generator) sessionPositionsForRoot(pos token.Pos, root ssa.Value) []token.Pos {
 	// Check if root is a Phi node
 	if phi, isPhi := root.(*ssa.Phi); isPhi {
-		// Phi node: generate edit for each edge
-		return g.generatePhiEdgeEdits(phi)
+		return g.phiEdgeSessionPositions(phi)
 	}
 
 	// Check if root is part of a Phi (root is an edge)
 	// Look for Phi nodes that use this root as an edge
 	if phi := g.findPhiUsingValue(root); phi != nil {
 		// This root is part of a Phi - fix all edges
-		return g.generatePhiEdgeEdits(phi)
+		return g.phiEdgeSessionPositions(phi)
 	}
 
-	// Not related to Phi - generate single edit
-	if edit := g.generateSessionEdit(pos); edit != nil {
-		return []analysis.TextEdit{*edit}
+	// Not related to Phi - a single Session
+	if end := g.sessionEndAfterCall(pos); end.IsValid() {
+		return []token.Pos{end}
 	}
 	return nil
 }
 
-// generatePhiEdgeEdits generates Session edits for all edges of a Phi node.
-// Only generates edits for edges that don't already have Session.
+// phiEdgeSessionPositions returns where Sessions go on the edges of a Phi
+// node. Only edges that don't already have Session get one, and only an edge
+// defined by a *gorm.DB call can (see sessionEndAfterCall).
 // OPTIMIZATION: Only add Session if the Phi result is used multiple times.
-func (g *Generator) generatePhiEdgeEdits(phi *ssa.Phi) []analysis.TextEdit {
+func (g *Generator) phiEdgeSessionPositions(phi *ssa.Phi) []token.Pos {
 	// Count how many times the Phi RESULT is used
 	phiUseCount := g.countPhiResultUses(phi)
 
@@ -538,7 +585,7 @@ func (g *Generator) generatePhiEdgeEdits(phi *ssa.Phi) []analysis.TextEdit {
 	}
 
 	// If Phi result is used 2+ times, add Session to all mutable edges
-	var edits []analysis.TextEdit
+	var positions []token.Pos
 	for _, edge := range phi.Edges {
 		// Skip nil constants
 		if c, ok := edge.(*ssa.Const); ok && c.Value == nil {
@@ -556,12 +603,11 @@ func (g *Generator) generatePhiEdgeEdits(phi *ssa.Phi) []analysis.TextEdit {
 			continue
 		}
 
-		// Generate Session edit for this edge
-		if edit := g.generateSessionEdit(edgePos); edit != nil {
-			edits = append(edits, *edit)
+		if end := g.sessionEndAfterCall(edgePos); end.IsValid() {
+			positions = append(positions, end)
 		}
 	}
-	return edits
+	return positions
 }
 
 // countPhiResultUses counts how many times the Phi result is used.
@@ -906,36 +952,6 @@ func (g *Generator) refersTo(expr ast.Expr, v *types.Var) bool {
 	return ok && g.pass.TypesInfo.Uses[id] == v
 }
 
-// getCallExprEndPos gets the end position of the CallExpr at the given position.
-func (g *Generator) getCallExprEndPos(pos token.Pos) token.Pos {
-	file := g.findFileContaining(pos)
-	if file == nil {
-		return token.NoPos
-	}
-
-	if call := g.findInnermostCallExpr(file, pos); call != nil {
-		return call.End()
-	}
-	return token.NoPos
-}
-
-// findInnermostCallExpr finds the innermost (narrowest) CallExpr containing the given position.
-// This is important for nested calls like t.Run(func() { db.Where(...) }) where we want
-// to find db.Where(...), not the outer t.Run(...) call.
-func (g *Generator) findInnermostCallExpr(file *ast.File, pos token.Pos) *ast.CallExpr {
-	var best *ast.CallExpr
-	for c := range g.fileCursor(file).Preorder(callExprNodeTypes...) {
-		call := c.Node().(*ast.CallExpr)
-		if call.Pos() <= pos && pos < call.End() {
-			// Found a CallExpr containing pos; keep the narrowest one
-			if best == nil || nodeWidth(call) < nodeWidth(best) {
-				best = call
-			}
-		}
-	}
-	return best
-}
-
 // nodeWidth returns the width (end - start) of a node's position range.
 func nodeWidth(n ast.Node) token.Pos {
 	return n.End() - n.Pos()
@@ -971,11 +987,12 @@ func (g *Generator) deduplicateEdits(edits []analysis.TextEdit) []analysis.TextE
 
 const gormImportPath = "gorm.io/gorm"
 
-// generateGormImportEdit generates a TextEdit to add gorm import if not already present.
-// Returns nil if gorm is already imported.
-func (g *Generator) generateGormImportEdit(file *ast.File) *analysis.TextEdit {
-	if astutil.UsesImport(file, gormImportPath) {
-		return nil
+// gormImportEdit adds an import of gorm.io/gorm named name to file. A name
+// other than gorm is written as an alias.
+func gormImportEdit(file *ast.File, name string) analysis.TextEdit {
+	spec := strconv.Quote(gormImportPath)
+	if name != "gorm" {
+		spec = name + " " + spec
 	}
 
 	// Find existing import declaration
@@ -989,25 +1006,25 @@ func (g *Generator) generateGormImportEdit(file *ast.File) *analysis.TextEdit {
 		if genDecl.Lparen.IsValid() {
 			// Grouped import - append after last spec
 			lastSpec := genDecl.Specs[len(genDecl.Specs)-1]
-			return &analysis.TextEdit{
+			return analysis.TextEdit{
 				Pos:     lastSpec.End(),
 				End:     lastSpec.End(),
-				NewText: []byte("\n\t\"" + gormImportPath + "\""),
+				NewText: []byte("\n\t" + spec),
 			}
 		}
 
 		// Single import - add new import line after this declaration
-		return &analysis.TextEdit{
+		return analysis.TextEdit{
 			Pos:     genDecl.End(),
 			End:     genDecl.End(),
-			NewText: []byte("\nimport \"" + gormImportPath + "\""),
+			NewText: []byte("\nimport " + spec),
 		}
 	}
 
 	// No import declaration found - insert after package clause
-	return &analysis.TextEdit{
+	return analysis.TextEdit{
 		Pos:     file.Name.End(),
 		End:     file.Name.End(),
-		NewText: []byte("\n\nimport \"" + gormImportPath + "\""),
+		NewText: []byte("\n\nimport " + spec),
 	}
 }
