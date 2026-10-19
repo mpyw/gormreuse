@@ -794,9 +794,8 @@ func (g *Generator) findReassignTarget(root ssa.Value, uses []pollution.UsageInf
 // fix falls back to a Session. The tracer usually resolves a Phi to its
 // edges; a loop variable swap keeps the Phi as the root.
 func (g *Generator) findRootVar(root ssa.Value) *types.Var {
-	// A Phi has no position, and a call inside a synthetic wrapper, such as
-	// the one behind a method value `where := db.Where`, is in no file of the
-	// pass. Any other value matches no call's Lparen below.
+	// A Phi has no position, so it is in no file of the pass. Any other value
+	// matches no call's Lparen below.
 	pos := root.Pos()
 	file := g.findFileContaining(pos)
 	if file == nil {

@@ -1,9 +1,12 @@
 package fix
 
 import (
+	"go/ast"
 	"go/parser"
 	"go/token"
 	"testing"
+
+	"golang.org/x/tools/go/ssa"
 )
 
 // TestGormQualifier covers the alias-aware qualifier used when emitting the
@@ -49,5 +52,23 @@ func TestIsFinisher(t *testing.T) {
 		if isFinisher(m) {
 			t.Errorf("%q should not be a finisher", m)
 		}
+	}
+}
+
+// TestRootWithoutPosition checks that a root with no source position gets no
+// Session edit and no reassignment target, instead of a fix at a wrong place.
+// Calls through a method value now have their own position (#178); a Phi kept
+// as the root of a loop variable swap still has none.
+func TestRootWithoutPosition(t *testing.T) {
+	t.Parallel()
+
+	g := &Generator{fset: token.NewFileSet(), files: map[*token.File]*ast.File{}}
+	root := &ssa.Const{}
+
+	if edits := g.generateSessionEditsForRoot(root.Pos(), root); edits != nil {
+		t.Errorf("generateSessionEditsForRoot() = %v, want nil", edits)
+	}
+	if v := g.findRootVar(root); v != nil {
+		t.Errorf("findRootVar() = %v, want nil", v)
 	}
 }
