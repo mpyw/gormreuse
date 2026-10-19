@@ -64,18 +64,23 @@ type Validator struct {
 	// functions. Passing an argument to one that failed breaks the caller's
 	// contract too, so failure propagates through pure wrappers. The result of
 	// a trusted one is derived when it may be a derived argument. It may be nil.
-	pure         *tracer.PureVerdicts
+	pure *tracer.PureVerdicts
+	// funcVars resolves a call through a package-level variable that holds
+	// one function, so a pure closure stored in one is trusted (#183). It may
+	// be nil.
+	funcVars     tracer.FuncVars
 	paramDerived map[ssa.Value]bool
 	holdsCache   map[types.Type]bool
 }
 
 // NewValidator creates a Validator for a function marked as pure.
-func NewValidator(fn *ssa.Function, pureFuncs, immutableReturnFuncs *directive.DirectiveFuncSet, pure *tracer.PureVerdicts) *Validator {
+func NewValidator(fn *ssa.Function, pureFuncs, immutableReturnFuncs *directive.DirectiveFuncSet, pure *tracer.PureVerdicts, funcVars tracer.FuncVars) *Validator {
 	return &Validator{
 		fn:                   fn,
 		pureFuncs:            pureFuncs,
 		immutableReturnFuncs: immutableReturnFuncs,
 		pure:                 pure,
+		funcVars:             funcVars,
 		paramDerived:         make(map[ssa.Value]bool),
 		holdsCache:           make(map[types.Type]bool),
 	}
@@ -123,7 +128,7 @@ func (v *Validator) ReturnedParams() []int {
 	}
 	var returned []int
 	for _, i := range v.seededParams() {
-		one := NewValidator(v.fn, v.pureFuncs, v.immutableReturnFuncs, v.pure)
+		one := NewValidator(v.fn, v.pureFuncs, v.immutableReturnFuncs, v.pure, v.funcVars)
 		one.paramDerived[v.fn.Params[i]] = true
 		if one.returnsDerived(v.fn) {
 			returned = append(returned, i)
@@ -322,7 +327,7 @@ func (v *Validator) callResultDerived(common *ssa.CallCommon) bool {
 		return v.paramDerived[recv] && !typeutil.IsImmutableReturningBuiltin(method)
 	}
 
-	callee := common.StaticCallee()
+	callee := v.funcVars.Callee(common)
 	if recv, ok := v.gormMethodReceiver(common, callee); ok {
 		return v.paramDerived[recv] && !typeutil.IsImmutableReturningBuiltin(callee.Name())
 	}
@@ -375,7 +380,7 @@ func (v *Validator) checkCallPollution(common *ssa.CallCommon, pos token.Pos) []
 		return nil
 	}
 
-	callee := common.StaticCallee()
+	callee := v.funcVars.Callee(common)
 
 	// gorm chain method on a param-derived receiver pollutes the argument.
 	if recv, ok := v.gormMethodReceiver(common, callee); ok {

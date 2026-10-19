@@ -182,9 +182,9 @@ func isAssignment(call *ssa.Call, root ssa.Value, ctx *Context) bool {
 }
 
 // isLoopFieldRebuild reports whether call, inside a loop, rebuilds a struct
-// field from its own value: its first argument is loaded from the field, and
-// its result, directly or at the end of a gorm chain, is stored back into the
-// same field.
+// field or a package-level variable from its own value: its first argument is
+// loaded from it, and its result, directly or at the end of a gorm chain, is
+// stored back into it.
 //
 //	for _, c := range conds {
 //		r.db = r.db.Where(c)
@@ -194,8 +194,9 @@ func isAssignment(call *ssa.Call, root ssa.Value, ctx *Context) bool {
 // This is the field form of `q = q.Where(c)` in a loop, where the loop-header
 // Phi makes the call an assignment. Without it, the load sees the store of the
 // previous iteration, so the call is a branch of its own result and the use
-// after the loop is reported (#182). Outside a loop the store cannot reach the
-// load, so the call stays a branch of the value it read.
+// after the loop is reported (#182). A global is loaded and stored the same way
+// (#183). Outside a loop the store cannot reach the load, so the call stays a
+// branch of the value it read.
 func isLoopFieldRebuild(call *ssa.Call, ctx *Context) bool {
 	if ctx.LoopInfo == nil || !ctx.LoopInfo.IsInLoop(call.Block()) || len(call.Call.Args) == 0 {
 		return false
@@ -204,34 +205,45 @@ func isLoopFieldRebuild(call *ssa.Call, ctx *Context) bool {
 	if !ok || load.Op != token.MUL {
 		return false
 	}
-	loadFA, ok := load.X.(*ssa.FieldAddr)
-	if !ok {
-		return false
+	switch load.X.(type) {
+	case *ssa.FieldAddr, *ssa.Global:
+		return storesIntoAddr(call, load.X)
 	}
-	return storesIntoField(call, loadFA)
+	return false
 }
 
-// storesIntoField reports whether the result v of a call, directly, through
+// storesIntoAddr reports whether the result v of a call, directly, through
 // the *gorm.DB Extract of a tuple result (#176), or at the end of a gorm chain,
-// is stored into the same field as fa.
-func storesIntoField(v ssa.Value, fa *ssa.FieldAddr) bool {
+// is stored into addr: the same field as a FieldAddr, or the same
+// package-level variable (#183).
+func storesIntoAddr(v ssa.Value, addr ssa.Value) bool {
 	for _, user := range *v.Referrers() {
 		switch u := user.(type) {
 		case *ssa.Store:
-			if storeFA, ok := u.Addr.(*ssa.FieldAddr); ok && u.Val == v && tracer.SameField(storeFA, fa) {
+			if u.Val == v && sameAddr(u.Addr, addr) {
 				return true
 			}
 		case *ssa.Extract:
-			if typeutil.IsGormDB(u.Type()) && storesIntoField(u, fa) {
+			if typeutil.IsGormDB(u.Type()) && storesIntoAddr(u, addr) {
 				return true
 			}
 		case *ssa.Call:
-			if isChainedGormMethodCall(v, u) && storesIntoField(u, fa) {
+			if isChainedGormMethodCall(v, u) && storesIntoAddr(u, addr) {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// sameAddr reports whether a and b address the same field or global.
+func sameAddr(a, b ssa.Value) bool {
+	faA, okA := a.(*ssa.FieldAddr)
+	faB, okB := b.(*ssa.FieldAddr)
+	if okA && okB {
+		return tracer.SameField(faA, faB)
+	}
+	return !okA && !okB && a == b
 }
 
 // isChainedGormMethodCall checks if nextCall is a gorm method call that uses
@@ -427,7 +439,7 @@ func (h *callHandler) processBoundMethodCall(call *ssa.Call, mc *ssa.MakeClosure
 //	pureHelper(q)  // does NOT pollute
 //	q.Count(nil)   // OK (first use)
 func (h *callHandler) checkFunctionCallPollution(call *ssa.Call, ctx *Context) {
-	callee := call.Call.StaticCallee()
+	callee := ctx.RootTracer.Callee(&call.Call)
 
 	// A Session/Debug copy passed to a function may be read there, pure or not.
 	// The receiver of a gorm method is handled in handle.
@@ -706,7 +718,7 @@ func DispatchGo(g *ssa.Go, ctx *Context) {
 // e.g. `defer q.Find(nil); defer q.Count(nil)` — are detected. Branch uses are
 // excluded from position-ordered detection (see pollution.Tracker.branchUses).
 func processGormDBCallCommonWith(callCommon *ssa.CallCommon, pos token.Pos, block *ssa.BasicBlock, ctx *Context, isPolluted pollutionChecker) {
-	callee := callCommon.StaticCallee()
+	callee := ctx.RootTracer.Callee(callCommon)
 	if callee == nil {
 		return
 	}

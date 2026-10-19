@@ -426,6 +426,24 @@ if condition {
 
 A closure called from more than one place, deferred, run with `go`, passed to a function, or stored, may run at any time. A use inside it conflicts with every other use of the same root.
 
+#### Package-level variables
+
+A package-level `*gorm.DB` follows the stores to it in the same function:
+
+```go
+var Global *gorm.DB
+
+func F(db *gorm.DB) {
+    Global = db.Session(&gorm.Session{}).Where("tenant")
+    Global.Where("a").Find(&users) // first branch - OK
+    Global.Where("b").Find(&users) // VIOLATION: second branch from the stored chain
+}
+```
+
+A global that the function only reads is treated as immutable, because it usually holds a `gorm.Open` result. So a mutable chain assigned in another function, or in the variable's initializer (`var q = db.Where("x")`), is not reported when it is reused.
+
+The body of a package-level closure (`var f = func(db *gorm.DB) { ... }`) is checked like any other closure, and the directives on it are validated. A call through `f` honours those directives when `f` is unexported, assigned only in its declaration, and its address is never taken.
+
 | Source | `clone` | Reusable? |
 | --- | --- | --- |
 | [`gorm.Open`](https://pkg.go.dev/gorm.io/gorm#Open), [`Session`](https://pkg.go.dev/gorm.io/gorm#DB.Session), [`WithContext`](https://pkg.go.dev/gorm.io/gorm#DB.WithContext), [`Debug`](https://pkg.go.dev/gorm.io/gorm#DB.Debug) | `> 0` | ✅ forks a fresh Statement (but see [Session and Debug copies](#session-and-debug-copies)) |

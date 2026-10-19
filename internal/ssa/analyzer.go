@@ -84,10 +84,12 @@ type Analyzer struct {
 //   - immutableCallbacks: Transaction callbacks whose tx param is forkable (immutable)
 //   - needsImmutableParam: immutable-param functions that actually branch a param, so a caller
 //     passing a mutable value to them violates the contract (Phase 1b stage 2b)
-func NewAnalyzer(fn *ssa.Function, pureFuncs, immutableReturnFuncs, immutableParamFuncs *directive.DirectiveFuncSet, pure *tracer.PureVerdicts, scopesCallbacks, immutableCallbacks, needsImmutableParam map[*ssa.Function]bool) *Analyzer {
+//   - funcVars: Package-level variables that hold one function, so a call through one
+//     honours that function's directives (#183)
+func NewAnalyzer(fn *ssa.Function, pureFuncs, immutableReturnFuncs, immutableParamFuncs *directive.DirectiveFuncSet, pure *tracer.PureVerdicts, scopesCallbacks, immutableCallbacks, needsImmutableParam map[*ssa.Function]bool, funcVars tracer.FuncVars) *Analyzer {
 	return &Analyzer{
 		fn:                  fn,
-		rootTracer:          tracer.New(pureFuncs, immutableReturnFuncs, immutableParamFuncs, pure, scopesCallbacks, immutableCallbacks),
+		rootTracer:          tracer.New(pureFuncs, immutableReturnFuncs, immutableParamFuncs, pure, scopesCallbacks, immutableCallbacks, funcVars),
 		cfgAnalyzer:         cfg.New(),
 		needsImmutableParam: needsImmutableParam,
 	}
