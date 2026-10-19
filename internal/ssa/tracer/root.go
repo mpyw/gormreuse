@@ -69,6 +69,7 @@ import (
 	"go/types"
 	"maps"
 	"slices"
+	"strings"
 
 	"golang.org/x/tools/go/ssa"
 
@@ -1881,27 +1882,179 @@ func CollectImmutableInputCallbacks(funcs []*ssa.Function, set *directive.Immuta
 		if callee == nil {
 			return
 		}
-		cbs := set.Callbacks(callee)
-		if len(cbs) == 0 {
-			return
-		}
-		// A method call carries its receiver as Args[0]; ParamIdx counts from the
-		// first non-receiver parameter, so shift when the callee has a receiver.
-		shift := 0
-		if callee.Signature != nil && callee.Signature.Recv() != nil {
-			shift = 1
-		}
 		args := call.Call.Args
-		for _, cb := range cbs {
-			idx := cb.ParamIdx + shift
-			if idx < 0 || idx >= len(args) {
-				continue
-			}
+		for _, idx := range immutableInputArgIndices(callee, set, len(args)) {
 			if fn := callbackFuncValue(args[idx]); fn != nil {
 				into[fn] = true
 			}
 		}
 	})
+}
+
+// immutableInputArgIndices returns the argument indices of a call to callee
+// (with nargs arguments) that are its //gormreuse:immutable-input callbacks.
+func immutableInputArgIndices(callee *ssa.Function, set *directive.ImmutableInputSet, nargs int) []int {
+	// A method call carries its receiver as Args[0]; ParamIdx counts from the
+	// first non-receiver parameter, so shift when the callee has a receiver.
+	shift := 0
+	if callee.Signature != nil && callee.Signature.Recv() != nil {
+		shift = 1
+	}
+	var idxs []int
+	for _, cb := range set.Callbacks(callee) {
+		if idx := cb.ParamIdx + shift; idx >= 0 && idx < nargs {
+			idxs = append(idxs, idx)
+		}
+	}
+	return idxs
+}
+
+// DropReachableCallbacks removes from set every callback whose *gorm.DB
+// parameter can receive something other than the fresh value of an immutable
+// callback position (#191). set is keyed by the declared function, so without
+// this a named function passed to Transaction once would be exempt for every
+// caller, including a direct call with a mid-chain value.
+//
+// A function stays in set only when every reference to it in funcs (and in the
+// package initializers) is an argument in an immutable callback position: a
+// Transaction/FindInBatches callback or an immutable-input(name) argument,
+// directly or as a closure or method value. It is dropped when:
+//   - any other reference exists: a direct call (also under go and defer, and
+//     recursion), a method expression, a store, a Phi, a capture, a return
+//   - it is exported, so another package may call it directly (#195)
+//   - it is a method and an interface call, method value or method expression
+//     in the package names a method of the same name, which may dispatch to it
+func DropReachableCallbacks(funcs []*ssa.Function, inputs *directive.ImmutableInputSet, set map[*ssa.Function]bool) {
+	for fn := range set {
+		if obj := fn.Object(); obj != nil && obj.Exported() {
+			delete(set, fn)
+		}
+	}
+	if len(set) == 0 {
+		return
+	}
+	scan := slices.Clone(funcs)
+	seenPkg := make(map[*ssa.Package]bool)
+	for _, fn := range funcs {
+		if fn.Pkg != nil && !seenPkg[fn.Pkg] {
+			seenPkg[fn.Pkg] = true
+			if init := fn.Pkg.Func("init"); init != nil {
+				scan = append(scan, init)
+			}
+		}
+	}
+	var invoked []string
+	walkInstrs(scan, func(instr ssa.Instruction) {
+		if call, ok := instr.(ssa.CallInstruction); ok && call.Common().IsInvoke() {
+			invoked = append(invoked, call.Common().Method.Name())
+		}
+		for _, op := range instr.Operands(nil) {
+			ref, ok := (*op).(*ssa.Function)
+			if !ok {
+				continue
+			}
+			if name, ok := interfaceMethodName(ref); ok {
+				invoked = append(invoked, name)
+			}
+			if fn := referencedFunc(ref); set[fn] && !isImmutableCallbackRef(instr, ref, inputs) {
+				delete(set, fn)
+			}
+		}
+	})
+	for fn := range set {
+		if fn.Signature.Recv() != nil && slices.Contains(invoked, fn.Name()) {
+			delete(set, fn)
+		}
+	}
+}
+
+// interfaceMethodName returns the method name of a wrapper that calls an
+// interface method: a method value (i.m) or method expression (I.m) of an
+// interface. Its dispatch happens inside the wrapper, so no invoke call in the
+// package shows it.
+func interfaceMethodName(fn *ssa.Function) (string, bool) {
+	obj, ok := fn.Object().(*types.Func)
+	if !ok {
+		return "", false
+	}
+	recv := obj.Signature().Recv()
+	if recv == nil || !types.IsInterface(recv.Type()) {
+		return "", false
+	}
+	return obj.Name(), true
+}
+
+// referencedFunc maps a function value to the declared function whose body it
+// runs: a generic instance or bound method wrapper as DeclaredFunc does, and a
+// method expression thunk (T.m) to its method.
+func referencedFunc(fn *ssa.Function) *ssa.Function {
+	if fn.Synthetic != "" && strings.HasSuffix(fn.Name(), "$thunk") {
+		if obj, ok := fn.Object().(*types.Func); ok {
+			if method := fn.Prog.FuncValue(obj.Origin()); method != nil {
+				return method
+			}
+		}
+	}
+	return directive.DeclaredFunc(fn)
+}
+
+// isImmutableCallbackRef reports whether instr uses v only to hand it to an
+// immutable callback position: v is a call argument in such a position, or it
+// is the function of a closure (a capturing literal or a bound method value)
+// that is itself used only that way. Any other use, such as an interface
+// conversion, a store or a Phi, is not: Transaction and immutable-input take a
+// func-typed argument, so such a value never reaches one directly.
+func isImmutableCallbackRef(instr ssa.Instruction, v ssa.Value, inputs *directive.ImmutableInputSet) bool {
+	switch x := instr.(type) {
+	case *ssa.MakeClosure:
+		return x.Fn == v && usedOnlyAsImmutableCallback(x, inputs)
+	case ssa.CallInstruction:
+		common := x.Common()
+		if common.Value == v {
+			return false
+		}
+		positions := immutableCallbackArgIndices(common, inputs)
+		for i, arg := range common.Args {
+			if arg == v && !slices.Contains(positions, i) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+// usedOnlyAsImmutableCallback reports whether every use of the closure c hands
+// it to an immutable callback position.
+func usedOnlyAsImmutableCallback(c *ssa.MakeClosure, inputs *directive.ImmutableInputSet) bool {
+	for _, ref := range *c.Referrers() {
+		if !isImmutableCallbackRef(ref, c, inputs) {
+			return false
+		}
+	}
+	return true
+}
+
+// immutableCallbackArgIndices returns the argument indices of a call whose
+// function argument receives a fresh *gorm.DB: every function argument with a
+// *gorm.DB parameter of Transaction/FindInBatches (as
+// collectImmutableCallbacksFromCall collects them), and the immutable-input
+// callbacks of a user function.
+func immutableCallbackArgIndices(common *ssa.CallCommon, inputs *directive.ImmutableInputSet) []int {
+	callee := common.StaticCallee()
+	if callee == nil {
+		return nil
+	}
+	if !IsImmutableCallbackMethod(callee) {
+		return immutableInputArgIndices(callee, inputs, len(common.Args))
+	}
+	var idxs []int
+	for i, arg := range common.Args {
+		if cb := callbackFuncValue(arg); cb != nil && cb.Signature != nil && directive.HasGormDBParameter(cb.Signature) {
+			idxs = append(idxs, i)
+		}
+	}
+	return idxs
 }
 
 // isNilConst checks if a value is a nil constant.

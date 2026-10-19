@@ -421,6 +421,9 @@ A repository interface whose method returns a fresh handle is reported when its 
 
 Transaction and FindInBatches callbacks (e.g. `tx` in `db.Transaction(func(tx *gorm.DB) error {...})`) are exempt — their `tx` is a fresh forkable handle. A Connection callback is **not** exempt: gorm passes it a `clone == 0` handle, so branching its `tx` twice is reported. Declare your own such helpers with [`//gormreuse:immutable-input(name)`](#gormreuseimmutable-inputname).
 
+> [!NOTE]
+> A **named** function or method is exempt only when every use of it in the package passes it as such a callback. If it is also called directly, stored, returned, passed as an ordinary argument, or exported (another package could call it), its parameter is treated as mutable like any other parameter. To keep it exempt, mark it [`//gormreuse:immutable-param`](#gormreuseimmutable-param): then each direct caller in the package must pass an isolated value.
+
 #### Safe: Variable reassignment
 
 Variable reassignment creates a **new mutable root**, so the variable can be used fresh:

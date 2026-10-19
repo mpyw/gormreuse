@@ -120,6 +120,16 @@ Limitations:
 
 Also: gorm's built-in `Transaction` (via `Begin`) and `FindInBatches` (via `Session(&Session{NewDB: true})`) pass a fresh (`clone>0`) handle to their callbacks, so reuse inside those callbacks is always allowed. `Connection` is deliberately **not** in this set: it calls `fc(db.getInstance())`, which is a `clone==0` handle, so its callback's `tx` is an ordinary mutable parameter and reuse inside it is reported (#173). `e2e/internal` guards all three premises against real gorm.
 
+**Named callbacks (#191).** The callback sets are keyed by the declared function, not by the call that passes it. A function's `*gorm.DB` parameter receives a fresh value only when every caller is a callback position, so `DropReachableCallbacks` runs after both collectors and removes a function from the set when:
+
+| Case | Why |
+| --- | --- |
+| Any reference that is not an argument in a callback position: a direct call (also under `go`/`defer`, and recursion), a method expression `T.m`, a store, a `Phi`, a capture, a return, an ordinary argument | That reference can hand the parameter a mid-chain value |
+| The function or method is exported | Another package can call it, and the analyzer cannot see that call (#195) |
+| A method whose name matches an interface call, interface method value or interface method expression in the package | Dynamic dispatch can reach it |
+
+A reference counts as a callback position when it is the Transaction/FindInBatches callback argument or an `immutable-input(name)` argument. A closure (`MakeClosure`, including a bound method value `r.m`) is followed: it counts only when all its uses are callback positions. Any other wrapper, such as an interface conversion, counts as a non-callback reference, because both callback positions are func-typed. The scan covers the source functions, their nested literals and the package `init` (package-level variable initializers). A function that is dropped falls back to the rules for an ordinary parameter, so it can opt in with `immutable-param`, whose caller-side check then covers the direct calls. A capture of a local variable holding the function (`cb := f; go func() { _ = db.Transaction(cb) }()`) is treated as a non-callback reference, which may report a callback that is only ever passed to Transaction. That direction is the conservative one.
+
 Only `//gormreuse:name[,name...]` (lowercase, no spaces, line comment) is a directive. `readDirective` in `directive.go` reads every comment once, in this order:
 
 1. Cut the comment at the first `//` after the leading `//`. The rest is a reason: `//gormreuse:ignore // reason`, `//gormreuse:ignore //reason` and `//gormreuse:ignore//reason` are all a bare ignore. `//` is the only reason separator; ` - reason` was never accepted.
