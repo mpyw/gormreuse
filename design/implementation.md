@@ -895,7 +895,7 @@ The line test reads the file with `pass.ReadFile`. When it cannot read it, or th
 **Which ignores are deleted.** An unused ignore covers no diagnostic of the pass by definition: `Ignores.Ignore` marks an entry used whenever it suppresses one, and a line entry and the function span of a doc-comment ignore share one entry. Two cases remain:
 
 - A function whose analysis panicked lost its diagnostics, so its ignores can look unused. After any `gormreuse: internal error` report, unused ignores keep their report but get no fix.
-- An ignore can be used in one variant of a package and unused in the other. The test variant sees calls in `_test.go` files: for example, a direct call of a named Transaction callback makes its parameter mutable (#191) in that variant only. The non-test variant then reports the ignore unused, as it did before #248, and `-fix` applies that variant's fix too. A pass sees only its own variant, so it cannot tell. The README tells users to review the deletions with `-diff`.
+- An ignore can be used in one variant of a package and unused in the other. The test variant sees calls in `_test.go` files: for example, a direct call of a named Transaction callback makes its parameter mutable (#191) in that variant only. The non-test variant then reports the ignore unused, as it did before #248, and `-fix` would apply that variant's fix too. A pass sees only its own variant, so it cannot tell. So an unused ignore in a non-test file gets no fix when its directory holds a `_test.go` file (`ignoreRemovable`). The pass's own files are checked first, so the test variant withholds the fix too; otherwise the directory is listed, and one that cannot be listed counts as having tests. An ignore in a `_test.go` file is analyzed only by the test variant, which sees the whole package, so it keeps its fix. `testdata/src/ignoretests` checks both, in both variants.
 
 **Redundant immutable-param.** One comment before `a, b := func..., func...` applies to both closures. The comment is edited only when no closure it covers keeps the directive: one that needs it (`needsImmutableParam`) or is also `pure`. Otherwise the redundant closure's diagnostic has no fix. A function that forwards its parameter once to another immutable-param function is reported redundant (see `computeNeedsImmutableParam`). Deleting its directive then exposes the caller-side diagnostic at the forwarding call, which a second pass fixes.
 
@@ -977,8 +977,9 @@ A fixture of `testdata/src/gormreuse` whose fixes must also converge is listed i
 > loads a package's `*_test.go` files as part of both the normal package and the
 > test variant, so every diagnostic in such a fixture is collected **twice**
 > (this produced 343 duplicated diagnostics in PR #57). Use a plain `.go` name.
-> The one intentional exception is `testdata/src/filefilter/code_test.go`, which
-> exists specifically to test the analyzer's `-test` flag handling.
+> The intentional exceptions are `testdata/src/filefilter/code_test.go`, which
+> exists specifically to test the analyzer's `-test` flag handling, and
+> `testdata/src/ignoretests/code_test.go`, which gives its package test files.
 
 ### Testdata Organization
 
@@ -989,6 +990,7 @@ A fixture of `testdata/src/gormreuse` whose fixes must also converge is listed i
 | `determinism/` | `TestDeterministicDiagnostics` | Several roots reused at one position, and unused directives for the report order |
 | `purelib/`, `externalpure/` | `TestCrossPackageDirectives` | Directives declared in one package and called from another |
 | `filefilter/` | `TestFileFilter` | The `-test` flag and generated files |
+| `ignoretests/` | `TestIgnoreFixWithTestFiles` | Unused ignores in a package with a test file, and which of them get a fix |
 | `linedirective/`, `linedirectivedep/` | `TestLineDirective` | `//line` directives |
 | `cgofile/` | `TestCgoFiles` | A cgo package. Skipped without a C compiler |
 | `noimport/`, `aliasimport/` | `TestSuggestedFixesWithImport`, `TestSuggestedFixesWithAlias` | How a fix names `gorm` |

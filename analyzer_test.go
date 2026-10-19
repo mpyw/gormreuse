@@ -2,6 +2,7 @@ package gormreuse_test
 
 import (
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -21,6 +22,27 @@ func TestFileFilter(t *testing.T) {
 	testdata := analysistest.TestData()
 	// Tests that generated files are skipped
 	analysistest.Run(t, testdata, gormreuse.Analyzer, "filefilter")
+}
+
+// TestIgnoreFixWithTestFiles checks that an unused ignore in a non-test file
+// of a package with test files keeps its diagnostic but gets no fix, in both
+// variants of the package, while one in a test file gets the fix (#248).
+func TestIgnoreFixWithTestFiles(t *testing.T) {
+	t.Parallel()
+	results := analysistest.Run(t, analysistest.TestData(), gormreuse.Analyzer, "ignoretests")
+	seen := map[string]int{}
+	for _, result := range results {
+		for _, diag := range result.Diagnostics {
+			name := filepath.Base(result.Pass.Fset.Position(diag.Pos).Filename)
+			seen[name]++
+			if hasFix, want := len(diag.SuggestedFixes) > 0, name == "code_test.go"; hasFix != want {
+				t.Errorf("%s: %s: has a fix: %v, want %v", name, diag.Message, hasFix, want)
+			}
+		}
+	}
+	if seen["code.go"] == 0 || seen["code_test.go"] == 0 {
+		t.Errorf("diagnostics by file = %v, want some in code.go and code_test.go", seen)
+	}
 }
 
 // TestLineDirective verifies that //line directives do not move ignore and

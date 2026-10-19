@@ -302,10 +302,10 @@ A fix deletes only the name it is about. The comment keeps its other names and i
 | `//gormreuse:ignore` on its own line | The line is deleted |
 | `q.Find(nil) //gormreuse:ignore` | `q.Find(nil)` |
 
-There is no fix when the reason would become a directive itself, as in `//gormreuse:ignore //gormreuse:pure`. An unused ignore gets no fix after a `gormreuse: internal error` report, because the analysis may have lost the diagnostic it covers.
+There is no fix when the reason would become a directive itself, as in `//gormreuse:ignore //gormreuse:pure`. An unused ignore keeps its warning but gets no fix in two cases:
 
-> [!CAUTION]
-> An ignore can be needed only when the package's `_test.go` files are analyzed, for example when a test calls a Transaction callback directly. The package without its tests then reports the ignore unused, and `-fix` deletes it. Review the deletions with `-diff` before you apply them.
+- After a `gormreuse: internal error` report, because the analysis may have lost the diagnostic the ignore covers.
+- In a file other than a `_test.go` file, when the package has `_test.go` files. The package is analyzed twice, with and without its tests, and the ignore may be needed only with them. For example, a test may call a Transaction callback directly. Delete such an ignore by hand.
 
 ## Detection Model: Mutable Branching
 

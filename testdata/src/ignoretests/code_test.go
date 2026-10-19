@@ -1,0 +1,10 @@
+// This fixture is intentionally named *_test.go: an unused ignore in a test
+// file gets a fix, because only the test variant, which sees the whole
+// package, analyzes the file (#248).
+package ignoretests
+
+import "gorm.io/gorm"
+
+func ignoreTestsTest(db *gorm.DB) {
+	db.Find(nil) //gormreuse:ignore // want `unused gormreuse:ignore directive`
+}

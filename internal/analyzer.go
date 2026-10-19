@@ -42,6 +42,7 @@ import (
 	"go/token"
 	"go/types"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 
@@ -130,7 +131,7 @@ func RunSSA(
 	if ssaInfo == nil {
 		reportUnusedImmutableInputs(immutableInputSet, reportRemoval)
 		reportUnusedDirectiveFuncs(pureFuncs, immutableReturnFuncs, immutableParamFuncs, reportRemoval)
-		reportUnusedIgnores(removals, ignores, true)
+		reportUnusedIgnores(removals, ignores, ignoreRemovable(pass, false))
 		removals.Flush()
 		return
 	}
@@ -254,7 +255,7 @@ func RunSSA(
 	// the chance to use one. A function whose analysis panicked lost its
 	// diagnostics, so an ignore that looks unused may cover one of them: no
 	// fix deletes an ignore then.
-	reportUnusedIgnores(removals, ignores, len(guard.reported) == 0)
+	reportUnusedIgnores(removals, ignores, ignoreRemovable(pass, len(guard.reported) > 0))
 	removals.Flush()
 }
 
@@ -299,15 +300,59 @@ func reportUnusedImmutableInputs(set *directive.ImmutableInputSet, report report
 }
 
 // reportUnusedIgnores reports the ignore directives that suppressed nothing.
-// No ignore suppresses these. With fix, the fix deletes the ignore.
-func reportUnusedIgnores(removals *directive.Removals, ignores *directive.Ignores, fix bool) {
+// No ignore suppresses these. The fix deletes an ignore when removable
+// reports that it may.
+func reportUnusedIgnores(removals *directive.Removals, ignores *directive.Ignores, removable func(token.Pos) bool) {
 	for _, pos := range ignores.UnusedIgnores() {
-		if fix {
+		if removable(pos) {
 			removals.Report(pos, "unused gormreuse:ignore directive", directive.RemovalTarget{Comment: pos, Part: "ignore"})
 		} else {
 			removals.Report(pos, "unused gormreuse:ignore directive")
 		}
 	}
+}
+
+// ignoreRemovable returns whether a fix may delete the unused ignore at a
+// position (#248). It may not after an internal error, which may have dropped
+// the diagnostic the ignore covers. Nor may it in a file other than a test
+// file when the package has test files: the test variant of the package also
+// analyzes the file, with the test files' calls, and may need the ignore. A
+// pass sees one variant only, so the pass without the test files cannot tell.
+// A test file is in the test variant alone, which sees the whole package.
+func ignoreRemovable(pass *analysis.Pass, internalError bool) func(token.Pos) bool {
+	hasTests := make(map[string]bool) // By directory
+	return func(pos token.Pos) bool {
+		if internalError {
+			return false
+		}
+		filename := pass.Fset.PositionFor(pos, false).Filename
+		if strings.HasSuffix(filename, "_test.go") {
+			return true
+		}
+		dir := filepath.Dir(filename)
+		has, seen := hasTests[dir]
+		if !seen {
+			has = dirHasTestFiles(pass, dir)
+			hasTests[dir] = has
+		}
+		return !has
+	}
+}
+
+// dirHasTestFiles reports whether dir holds a _test.go file, the test files
+// of the package of pass among them. A directory that cannot be read counts
+// as holding one.
+func dirHasTestFiles(pass *analysis.Pass, dir string) bool {
+	for _, f := range pass.Files {
+		if strings.HasSuffix(pass.Fset.PositionFor(f.Pos(), false).Filename, "_test.go") {
+			return true
+		}
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return true
+	}
+	return slices.ContainsFunc(entries, func(e os.DirEntry) bool { return strings.HasSuffix(e.Name(), "_test.go") })
 }
 
 // analyzedFuncs returns the functions the analysis runs on: the source
