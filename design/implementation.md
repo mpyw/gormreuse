@@ -372,6 +372,8 @@ Code is left out of the analysis in two ways only, and neither is silent (#186).
 | A function's `immutable-param` counterfactual | The function needs the directive, so no fix deletes it |
 | A package-wide stage | Nothing is inferred immutable-return. No callback is exempt as immutable. Every `immutable-return` and `immutable-input` contract is left out of the facts |
 | Collecting the Scopes callbacks | None is collected, so their parameters are not always mutable. This one reports less, and the internal error says so |
+| Collecting the package-level function variables | No call resolves through a variable, so such calls have no known callee (#348) |
+| Reporting unused or redundant directives or unused ignores | The rest of those reports is lost, and the internal error says so (#348) |
 
 <details><summary>Test</summary>
 
@@ -553,7 +555,7 @@ Some functions hand a fresh `*gorm.DB` to a callback. Reuse inside such a callba
 | --- | --- | --- |
 | gorm's `Transaction` | `Begin`'s result, `clone > 0` | Yes |
 | gorm's `FindInBatches` | `Session(&Session{NewDB: true})`'s result, `clone > 0` | Yes |
-| gorm's `Connection` | `fc(db.getInstance())`, a `clone == 0` handle | **No.** Its callback's `tx` is an ordinary mutable parameter, and reuse inside it is reported (#173) |
+| gorm's `Connection` | `fc(db.getInstance())`, a `clone == 0` handle | **No.** Its callback's `tx` is an ordinary mutable parameter, and reuse inside it is reported (#173). Like a Scopes callback's, it stays mutable under `immutable-param` (#348): `CollectConnectionCallbacks` adds the callbacks to the set the tracers read. The fixes read the Scopes set only, so a Connection callback still gets the body Session |
 | A function marked `//gormreuse:immutable-input(name)` | What its body passes; checked ([immutable-input](#immutable-input-body-contract)) | Yes |
 | `Scopes`, `Preload` | The query being built | No. Collected for the parameter rules and the [Scopes warning](#scopes-session-family-warning-temporary) |
 
@@ -1589,9 +1591,9 @@ a, b := func(q *gorm.DB) { _ = q }, func(q *gorm.DB) { _ = q }
 
 </details>
 
-A same-line directive belongs to the innermost function whose `{` is before it on the line (#315). That can be a closure nested in a closure, or a closure in a declaration's body. `func outer(db *gorm.DB) { run(func(q *gorm.DB) { //gormreuse:pure` marks only the closure. The placement index keeps the closures' braces of each line for that check.
+A same-line directive belongs to the innermost function whose `{` is before it on the line (#315). That can be a closure nested in a closure, or a closure in a declaration's body. `func outer(db *gorm.DB) { run(func(q *gorm.DB) { //gormreuse:pure` marks only the closure. The placement index keeps the closures' braces of each line for that check. The comment must also be inside the closure's body: in `a := func() {}; b := func() { //gormreuse:pure` it marks only `b` (#348).
 
-`immutable-input` accepts the same placements as `pure`. `ImmutableInputSet` places it with a `DirectiveFuncSet` that has no signature check. Closure directives are keyed by the `FuncLit` position, and `Callbacks` looks a closure up through `fn.Syntax()`. A comment attached to no function is reported as `not attached to a function or closure`.
+`immutable-input` accepts the same placements as `pure`. `ImmutableInputSet` places it with a `DirectiveFuncSet` that has no signature check. Closure directives are keyed by the `FuncLit` position, and `Callbacks` looks a closure up through `fn.Syntax()`. A method's key names its receiver's type from the type checker, so a method declared through an alias receiver (`type R = repo; func (r *R) With`) gets the key of `repo`'s method, which is what the lookup builds (#348). A comment attached to no function is reported as `not attached to a function or closure`.
 
 <details><summary>History (#315, immutable-input placement)</summary>
 
@@ -1679,6 +1681,8 @@ Decisions and limitations:
 
 - **The receiver is not seeded.** It usually holds the application's root handle, and the directive's signature check also ignores receivers (`OrmWrapper.GetDB` is reported unused). Seeding it would report every `r.db.Where(...)` in a pure method.
 - **Interfaces are not followed.** A `*gorm.DB` boxed in an `interface{}` is caught only when it is passed or stored directly (`pollutionsource.UnwrapGormDB`). Types that hold one only through an interface are not seeded.
+- **Variadic callees.** Packing the argument into the varargs of a call is not a slice-store leak. The call is judged as a call: `logv("x", db)` with `args ...any` is a warning, as `one(db)` with `arg any` is (#348). The array must be used only as the variadic argument, and `pollutionsource.Leak` still leaves out read-only callees such as `fmt.Println`.
+- **Pure and immutable-param.** A `pure` function is left out of `computeNeedsImmutableParam`, since it cannot branch its parameter. One whose `pure` check failed is checked like any other, so its callers keep the caller check and it exports `BranchesImmutableParam` (#348).
 - **Builtins.** `len(dbs)` and `cap(dbs)` cannot pollute and are not reported. `append` and `copy` count every derived argument. Other builtins count only a `*gorm.DB` argument itself.
 - **Captured variables.** Take a closure that assigns a derived value to a variable captured from the pure function: `func() { x = db }()`. It is reported as a store through a pointer. The free variable is not traced back to the enclosing `Alloc`.
 
@@ -1741,7 +1745,7 @@ Decisions and limitations:
 
 - **Globals: check the package, not the benefit of the doubt.** The issue allowed either. An unexported variable can only be assigned in its package, so when every store there is mutable, every read is. One immutable store gives the benefit of the doubt, since a read may run after it. An example is `var db = x.Where(...)`, then `func init() { db = db.Session(...) }`. An exported variable may be assigned by another package, and a variable whose address escapes may be assigned through a pointer, so neither is reported.
 - **Named functions are not followed.** A call into an unmarked named helper stays the benefit of the doubt, as the README says. Only closures, whose body belongs to the function, are followed.
-- **Deferred writes are direct stores only.** A store made by a closure that the deferred closure calls is not seen. Neither is one made by a non-deferred closure (`f := func() { r = r.Where("x") }; f(); return`).
+- **Deferred writes are direct stores only.** A store made by a closure that the deferred closure calls is not seen. Neither is one made by a non-deferred closure (`f := func() { r = r.Where("x") }; f(); return`). A closure deferred through a local variable, `defer fix()`, is read through `FuncVars.LocalValue`, also when another closure captures `fix` (#348).
 - **A captured closure variable** is followed only when it is assigned once and no closure assigns it.
 - Before #315 the check read the raw call value, and missed a closure held by a package-level variable.
 
@@ -2409,9 +2413,11 @@ The line test reads the file with `pass.ReadFile`. When it cannot read it, or th
 | Case | Rule |
 | --- | --- |
 | A function whose analysis panicked lost its diagnostics, so its ignores can look unused | After any `gormreuse: internal error` report, unused ignores keep their report but get no fix |
-| An ignore used in one variant of a package and unused in the other | An unused ignore in a non-test file gets no fix when its directory holds a `_test.go` file (`reportIgnoreRemovable`) |
+| An ignore used in one variant of a package and unused in the other | An unused ignore in a non-test file gets no fix when its directory holds a `_test.go` file (`reportIgnoreRemovable`). The variant without the test files does not report it when the package has test files of its own (`reportIgnoresLeftToTests`, #348) |
 
 The test variant sees calls in `_test.go` files. For example, a direct call of a named Transaction callback makes its parameter mutable (#191) in that variant only. The non-test variant then reports the ignore unused, as it did before #248, and `-fix` would apply that variant's fix too. A pass sees only its own variant, so it cannot tell. The pass's own files are checked first, so the test variant withholds the fix too. Otherwise the directory is listed, and one that cannot be listed counts as having tests. An ignore in a `_test.go` file is analyzed only by the test variant, which sees the whole package, so it keeps its fix. `testdata/src/ignoretests` checks both, in both variants.
+
+Before #348 the variant without the test files still reported such an ignore. When only the test variant needed it, the `gormreuse` command, which runs both variants, could never run clean, while `go vet` and golangci-lint, which run only the test variant, were clean. That variant now leaves the report to the test variant. It decides from `go/build`'s `TestGoFiles` of the directory: external test files (`package x_test`) make no test variant of `x`, so they do not count. The cost: run with `-test=false`, an unused ignore in such a file is never reported.
 
 **Redundant immutable-param.** One comment before `a, b := func..., func...` applies to both closures. The comment is edited only when no closure it covers keeps the directive: one that needs it (`needsImmutableParam`), or one that is also `pure`. Otherwise the redundant closure's diagnostic has no fix. A function that forwards its parameter once to another immutable-param function is reported redundant (see `computeNeedsImmutableParam`). Deleting its directive then exposes the caller-side diagnostic at the forwarding call, which a second pass fixes.
 
@@ -2576,7 +2582,7 @@ The doc tests keep these notes honest:
 </details>
 
 > [!CAUTION]
-> **Never name a fixture `*_test.go` unless you mean to.** `analysistest` loads a package's `*_test.go` files as part of both the normal package and the test variant. Every diagnostic in such a fixture is collected **twice**: this produced 343 duplicated diagnostics in PR #57. Use a plain `.go` name. The intentional exceptions are `testdata/src/filefilter/code_test.go`, which exists to test the analyzer's `-test` flag handling, and `testdata/src/ignoretests/code_test.go`, which gives its package test files.
+> **Never name a fixture `*_test.go` unless you mean to.** `analysistest` loads a package's `*_test.go` files as part of both the normal package and the test variant. Every diagnostic in such a fixture is collected **twice**: this produced 343 duplicated diagnostics in PR #57. Use a plain `.go` name. The intentional exceptions are `testdata/src/filefilter/code_test.go`, which exists to test the analyzer's `-test` flag handling, and `testdata/src/ignoretests/code_test.go` and `needed_test.go`, which give their package test files.
 
 ### Suggested-fix fixtures
 

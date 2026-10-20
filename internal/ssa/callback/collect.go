@@ -40,6 +40,21 @@ func CollectScopesOnlyCallbacks(funcs []*ssa.Function, vars callsite.FuncVars, k
 	return collectCallbacksPassedTo(funcs, vars, keep, "Scopes")
 }
 
+// CollectConnectionCallbacks returns the functions passed as the callback to
+// gorm's Connection, resolved as CollectScopesCallbacks resolves its own. Like
+// a Scopes callback, such a callback receives a mid-chain (clone==0) *gorm.DB
+// (#173), so //gormreuse:immutable-param cannot exempt its parameter (#348).
+func CollectConnectionCallbacks(funcs []*ssa.Function, vars callsite.FuncVars) map[*ssa.Function]bool {
+	var vals []ssa.Value
+	// Go and defer statements count too, as for Scopes (#256).
+	callsite.EachSite(funcs, vars, func(site callsite.Site) {
+		if site.IsGormMethod() && site.Method() == "Connection" && len(site.Args) > 0 {
+			vals = append(vals, site.Args[0])
+		}
+	})
+	return resolveMayFuncValues(funcs, vals)
+}
+
 // CollectImmutableCallbacks returns the set of function literals passed as the
 // callback to gorm's Transaction or FindInBatches across all given functions and
 // their nested closures.

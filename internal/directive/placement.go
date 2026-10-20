@@ -452,6 +452,7 @@ func (p *placement) matchesNextLineDirective(w *placementWalk, lit placementLit,
 //  1. Directive must be on the same line as FuncLit's opening brace
 //  2. Directive must be AFTER the brace (column > brace column)
 //  3. No nested FuncLit brace between this FuncLit's brace and the directive
+//  4. Directive must be inside the FuncLit's body
 //
 // The "innermost" rule (requirement 3) is critical for nested closures:
 //
@@ -478,6 +479,11 @@ func (p *placement) matchesSameLineDirective(w *placementWalk, funcLit *ast.Func
 	// Requirements 1 & 2: Comment must be after brace on same line
 	brace := p.fset.PositionFor(funcLit.Body.Lbrace, false)
 	if g.startLine != brace.Line || g.startColumn <= brace.Column {
+		return false
+	}
+	// A closure whose body ended before the comment does not take it, as `a`
+	// in `a := func() {}; b := func() { //gormreuse:pure` (#348).
+	if g.directives[0].Pos() > funcLit.Body.Rbrace {
 		return false
 	}
 

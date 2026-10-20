@@ -71,6 +71,10 @@ func TestPanicInjection(t *testing.T) {
 		{"immutable callbacks", "", []string{internalError + " in immutable callbacks", reused}, baseFacts},
 		{"Scopes warnings", "", []string{internalError + " in Scopes warnings"}, baseFacts},
 		{"distrusted contracts", "", []string{internalError + " in distrusted contracts"}, with(map[string]string{"Conn": "", "Fresh": "", "Each": ""})},
+		{"function variables", "", []string{internalError + " in function variables"}, baseFacts},
+		{"unused immutable-input", "", []string{internalError + " in unused immutable-input"}, baseFacts},
+		{"directive reports", "", []string{internalError + " in directive reports"}, baseFacts},
+		{"unused ignores", "", []string{internalError + " in unused ignores"}, baseFacts},
 	}
 	for _, tt := range tests {
 		t.Run(fmt.Sprintf("%s/%s", tt.stage, tt.fn), func(t *testing.T) {

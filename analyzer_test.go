@@ -6,12 +6,14 @@ import (
 	"go/token"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"golang.org/x/tools/go/analysis/analysistest"
 
 	"github.com/mpyw/gormreuse"
+	"github.com/mpyw/gormreuse/internal/goldentest"
 )
 
 func TestAnalyzer(t *testing.T) {
@@ -28,23 +30,41 @@ func TestFileFilter(t *testing.T) {
 }
 
 // TestIgnoreFixWithTestFiles checks that an unused ignore in a non-test file
-// of a package with test files keeps its diagnostic but gets no fix, in both
-// variants of the package, while one in a test file gets the fix (#248).
+// of a package with test files is reported only by the test variant, without a
+// fix, while one in a test file gets the fix (#248). The variant without the
+// test files leaves it to the test variant, so the ignore in needed.go, which
+// only the test variant needs, is reported by neither, and both variants run
+// clean once the unused ignores are gone (#348). A want comment cannot say
+// which variant reports, so the test runs without them.
 func TestIgnoreFixWithTestFiles(t *testing.T) {
 	t.Parallel()
-	results := analysistest.Run(t, analysistest.TestData(), gormreuse.Analyzer, "ignoretests")
-	seen := map[string]int{}
+	results := analysistest.Run(goldentest.NoopT{}, analysistest.TestData(), gormreuse.Analyzer, "ignoretests")
+	got := map[string][]string{} // By variant: "test" or "base"
 	for _, result := range results {
-		for _, diag := range result.Diagnostics {
-			name := filepath.Base(result.Pass.Fset.Position(diag.Pos).Filename)
-			seen[name]++
-			if hasFix, want := len(diag.SuggestedFixes) > 0, name == "code_test.go"; hasFix != want {
-				t.Errorf("%s: %s: has a fix: %v, want %v", name, diag.Message, hasFix, want)
+		if result.Err != nil {
+			t.Fatalf("analyze: %v", result.Err)
+		}
+		variant := "base"
+		for _, f := range result.Pass.Files {
+			if strings.HasSuffix(result.Pass.Fset.Position(f.Pos()).Filename, "_test.go") {
+				variant = "test"
 			}
 		}
+		for _, diag := range result.Diagnostics {
+			at := result.Pass.Fset.Position(diag.Pos)
+			got[variant] = append(got[variant], fmt.Sprintf("%s:%d: %s (fix: %v)", filepath.Base(at.Filename), at.Line, diag.Message, len(diag.SuggestedFixes) > 0))
+		}
 	}
-	if seen["code.go"] == 0 || seen["code_test.go"] == 0 {
-		t.Errorf("diagnostics by file = %v, want some in code.go and code_test.go", seen)
+	want := map[string][]string{
+		"test": {
+			"code.go:11: unused gormreuse:ignore directive (fix: false)",
+			"code_test.go:9: unused gormreuse:ignore directive (fix: true)",
+		},
+	}
+	for _, variant := range []string{"base", "test"} {
+		if !slices.Equal(got[variant], want[variant]) {
+			t.Errorf("%s variant: diagnostics = %q, want %q", variant, got[variant], want[variant])
+		}
 	}
 }
 

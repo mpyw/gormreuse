@@ -65,7 +65,7 @@ On gorm's own repository (v1.31.2), 0.23.0 reports fewer problems:
    | A trailing ignore that used to cover the next line | Put the ignore on the line it suppresses |
 
 3. Run `gormreuse -fix -diff ./...` to see the fixes for most of these. Some reports have no fix on purpose. See [Automatic Fixes](README.md#automatic-fixes).
-4. Delete stale ignores. **A `//gormreuse:ignore` written for a removed report is now unused**, and is reported as such. The Scopes warning (#196, #308) and the state-only methods (#307) are the most common cases. `-fix` deletes it. In a non-test file of a package with `_test.go` files there is no fix, because the test variant may still need it. Delete those by hand.
+4. Delete stale ignores. **A `//gormreuse:ignore` written for a removed report is now unused**, and is reported as such. The Scopes warning (#196, #308) and the state-only methods (#307) are the most common cases. `-fix` deletes it. In a non-test file of a package with `_test.go` files there is no fix, because the test variant may still need it. Only the test variant reports such an ignore, so the `gormreuse` command and `go vet` agree (#348). Delete those by hand.
 5. Update exclude rules that match a message. See [Changed messages](#changed-messages).
 6. With golangci-lint, set `issues.uniq-by-line: false` to see every report on a line. See [Integration](#integration).
 
@@ -770,7 +770,11 @@ Directives now work across packages, through method expressions and function var
 | Package-level func vars (#183, #257) | Every directive applies to a call through `var f = func(...)` when `f` is unexported, assigned only in its declaration, and its address is never taken |
 | Local function variables (#304) | Every directive applies to a call through a local variable that is assigned once, also from a closure that captures it: `f := helper; func() { f(q) }()` |
 | `immutable-input` placement (#193) | It works where `pure` does: a doc comment, after `{` on the same line, or the line before a closure |
-| A directive after a closure's `{` (#315) | It marks only that closure. Before, it also marked the function that holds the closure |
+| A directive after a closure's `{` (#315, #348) | It marks only that closure. Before, it also marked the function that holds the closure, or a closure that ended earlier on the line |
+| `immutable-param` on a Connection callback (#348) | It does not exempt the parameter, as on a Scopes callback. gorm passes the callback a `clone == 0` handle |
+| `immutable-input` through an alias receiver (#348) | It applies to `func (r *R) With(cb ...)` when `type R = repo` |
+| `pure` with a variadic callee (#348) | Passing the argument to an unmarked `...any` function is a warning, as with an `any` parameter. It no longer fails the contract |
+| `pure` and `immutable-param` together (#348) | When the `pure` check fails, the callers are still checked |
 | One ignore scope (#190) | A line, function or file ignore covers every kind of diagnostic in the same way. A function-level ignore also covers its closures |
 
 </details>

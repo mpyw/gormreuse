@@ -712,7 +712,7 @@ An unused ignore keeps its warning but gets no fix in two cases:
 | Case | Why |
 | --- | --- |
 | After a `gormreuse: internal error` report | The analysis may have lost the diagnostic the ignore covers |
-| In a file other than a `_test.go` file, when the package has `_test.go` files | The package is analyzed twice, with and without its tests. The ignore may be needed only with them. For example, a test may call a Transaction callback directly. Delete such an ignore by hand |
+| In a file other than a `_test.go` file, when the package has `_test.go` files | The package is analyzed twice, with and without its tests. The ignore may be needed only with them. For example, a test may call a Transaction callback directly. Only the run with the tests reports the ignore unused, so `gormreuse ./...`, `go vet` and golangci-lint agree. Delete such an ignore by hand |
 
 </details>
 
@@ -1929,7 +1929,9 @@ Fix it by passing an isolated value (`root.Session(&gorm.Session{})`). Or make t
 | A function in another package | Yes |
 | A call through an interface or a func-typed parameter | No. The callee is unknown |
 
-**Tip:** combine with `//gormreuse:pure` when a helper both leaves its argument unpolluted and expects an isolated value.
+**Tip:** combine with `//gormreuse:pure` when a helper both leaves its argument unpolluted and expects an isolated value. If the `pure` check fails, the caller check still applies.
+
+`immutable-param` does not exempt the parameter of a function passed to `Scopes`, `Preload` or `Connection`. gorm passes these callbacks a `clone == 0` handle, so their reuse is still reported.
 
 A **redundant** `immutable-param` is reported. See [Unused and redundant directives](#unused-and-redundant-directives).
 

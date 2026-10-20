@@ -38,6 +38,7 @@ package internal
 
 import (
 	"go/token"
+	"maps"
 	"slices"
 
 	"golang.org/x/tools/go/analysis"
@@ -127,7 +128,7 @@ func RunSSA(
 	if ssaInfo == nil {
 		reportUnusedImmutableInputs(immutableInputSet, reportRemoval)
 		reportUnusedDirectiveFuncs(pureFuncs, immutableReturnFuncs, immutableParamFuncs, reportRemoval)
-		reportUnusedIgnores(removals, ignores, reportIgnoreRemovable(pass, false))
+		reportUnusedIgnores(removals, ignores, reportIgnoreRemovable(pass, false), reportIgnoresLeftToTests(pass))
 		removals.Flush()
 		return
 	}
@@ -135,7 +136,12 @@ func RunSSA(
 	// Analyze the closures of package-level `var f = func(...)` initializers
 	// too, and resolve calls through such variables (#183).
 	funcs := runFuncs(ssaInfo)
-	funcVars := callsite.CollectFuncVars(append(slices.Clone(funcs), ssaInfo.Pkg.Func("init")))
+	// After a panic no call resolves through a variable, so such calls have
+	// no known callee and are judged conservatively (#348).
+	var funcVars callsite.FuncVars
+	guard.runPackage("function variables", func() {
+		funcVars = callsite.CollectFuncVars(append(slices.Clone(funcs), ssaInfo.Pkg.Func("init")))
+	})
 
 	// Callees in other packages are decided by the facts their packages
 	// exported (#195). A package without facts leaves its functions unmarked.
@@ -163,9 +169,16 @@ func RunSSA(
 
 	// Collect Scopes/Preload callbacks once: their *gorm.DB parameter receives a
 	// mid-chain (clone==0) value, so reuse inside them must be detected (#60).
-	var scopesCallbacks map[*ssa.Function]bool
+	// A Connection callback receives one too (#173), so the tracers treat its
+	// parameter as they treat a Scopes callback's: as a mutable root that
+	// //gormreuse:immutable-param cannot exempt (#348). The fixes keep the
+	// Scopes set: a Connection callback returns no *gorm.DB, so it may take
+	// the body Session (#313).
+	var scopesCallbacks, mutableCallbacks map[*ssa.Function]bool
 	guard.runPackage("Scopes callbacks", func() {
 		scopesCallbacks = callback.CollectScopesCallbacks(funcs, funcVars)
+		mutableCallbacks = maps.Clone(scopesCallbacks)
+		maps.Copy(mutableCallbacks, callback.CollectConnectionCallbacks(funcs, funcVars))
 	})
 
 	// Collect immutable callbacks once: gorm's Transaction/FindInBatches hand
@@ -189,7 +202,7 @@ func RunSSA(
 	// Enforce the body-side immutable-input contract (#62 cases 2.3/2.4) and
 	// report unused immutable-input directives (U1-U3). Uses a tracer with the
 	// full context so FindMutableRoot classifies immutable sources correctly.
-	inputTracer := tracer.NewRootTracer(pureFuncs, immutableReturnFuncs, immutableParamFuncs, pureVerdicts, scopesCallbacks, immutableCallbacks, funcVars)
+	inputTracer := tracer.NewRootTracer(pureFuncs, immutableReturnFuncs, immutableParamFuncs, pureVerdicts, mutableCallbacks, immutableCallbacks, funcVars)
 	failedInput := make(map[*ssa.Function]bool)
 	for _, fn := range funcs {
 		if skip(fn) {
@@ -206,7 +219,9 @@ func RunSSA(
 			failedInput[fn] = true
 		}
 	}
-	reportUnusedImmutableInputs(immutableInputSet, reportRemoval)
+	guard.runPackage("unused immutable-input", func() {
+		reportUnusedImmutableInputs(immutableInputSet, reportRemoval)
+	})
 
 	// Enforce the body-side immutable-return contract. Reuses inputTracer, which
 	// carries the full pass context so other immutable-return / immutable-param
@@ -241,7 +256,7 @@ func RunSSA(
 	// contract check (stage 2b, passed into the checker below) and, by its
 	// complement, redundant-directive detection (a directive whose function does
 	// NOT reuse a param suppresses nothing).
-	needsImmutableParam := computeNeedsImmutableParam(funcs, immutableParamFuncs, pureFuncs, immutableReturnFuncs, pureVerdicts, scopesCallbacks, immutableCallbacks, funcVars, skip, guard, cfgs)
+	needsImmutableParam := computeNeedsImmutableParam(funcs, immutableParamFuncs, pureFuncs, immutableReturnFuncs, pureVerdicts, mutableCallbacks, immutableCallbacks, funcVars, skip, guard, cfgs)
 
 	// The caller-side check also covers callees in other packages (#195).
 	branchesImmutableParam := func(fn *ssa.Function) bool {
@@ -253,7 +268,7 @@ func RunSSA(
 	// again, so a tracer per function traced a parent's values once per closure
 	// (#325). Its memos depend only on the values asked about, since the sets it
 	// holds are final by now.
-	checkTracer := tracer.NewRootTracer(pureFuncs, immutableReturnFuncs, immutableParamFuncs, pureVerdicts, scopesCallbacks, immutableCallbacks, funcVars)
+	checkTracer := tracer.NewRootTracer(pureFuncs, immutableReturnFuncs, immutableParamFuncs, pureVerdicts, mutableCallbacks, immutableCallbacks, funcVars)
 	for _, fn := range funcs {
 		if skip(fn) {
 			continue
@@ -265,9 +280,10 @@ func RunSSA(
 
 	// Report immutable-param directives that are signature-valid but have no
 	// effect (no *gorm.DB parameter is reused).
-	reportRedundantImmutableParam(funcs, immutableParamFuncs, pureFuncs, needsImmutableParam, skip, reportRemoval)
-
-	reportUnusedDirectiveFuncs(pureFuncs, immutableReturnFuncs, immutableParamFuncs, reportRemoval)
+	guard.runPackage("directive reports", func() {
+		reportRedundantImmutableParam(funcs, immutableParamFuncs, pureFuncs, needsImmutableParam, skip, reportRemoval)
+		reportUnusedDirectiveFuncs(pureFuncs, immutableReturnFuncs, immutableParamFuncs, reportRemoval)
+	})
 
 	// A panic while computing what another package must not trust leaves
 	// every contract distrusted.
@@ -298,7 +314,10 @@ func RunSSA(
 	// the chance to use one. A function whose analysis panicked lost its
 	// diagnostics, so an ignore that looks unused may cover one of them: no
 	// fix deletes an ignore then.
-	reportUnusedIgnores(removals, ignores, reportIgnoreRemovable(pass, guard.panicked()))
+	removable := reportIgnoreRemovable(pass, guard.panicked())
+	guard.runPackage("unused ignores", func() {
+		reportUnusedIgnores(removals, ignores, removable, reportIgnoresLeftToTests(pass))
+	})
 	removals.Flush()
 }
 

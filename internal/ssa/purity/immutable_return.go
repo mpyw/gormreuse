@@ -104,7 +104,7 @@ func (v *ImmutableReturnValidator) returnsMutable(fn *ssa.Function, seen map[ssa
 	}
 	seen[fn] = true
 
-	deferred := immutableReturnDeferredWrites(fn)
+	deferred := immutableReturnDeferredWrites(fn, v.rt.FuncVars())
 	for _, block := range fn.Blocks {
 		for _, instr := range block.Instrs {
 			ret, ok := instr.(*ssa.Return)
@@ -350,8 +350,10 @@ type immutableReturnDeferredWrite struct {
 
 // immutableReturnDeferredWrites finds the stores that closures deferred in fn
 // make to its captured locals, which are its named results when fn returns
-// them. Only direct stores in the deferred closure are seen.
-func immutableReturnDeferredWrites(fn *ssa.Function) map[*ssa.Alloc]*immutableReturnDeferredWrite {
+// them. Only direct stores in the deferred closure are seen. vars resolves a
+// closure deferred through a local variable, such as `defer fix()` where a
+// closure captures fix (#348).
+func immutableReturnDeferredWrites(fn *ssa.Function, vars callsite.FuncVars) map[*ssa.Alloc]*immutableReturnDeferredWrite {
 	var writes map[*ssa.Alloc]*immutableReturnDeferredWrite
 	for _, block := range fn.Blocks {
 		for _, instr := range block.Instrs {
@@ -359,7 +361,7 @@ func immutableReturnDeferredWrites(fn *ssa.Function) map[*ssa.Alloc]*immutableRe
 			if !ok {
 				continue
 			}
-			mc, ok := d.Call.Value.(*ssa.MakeClosure)
+			mc, ok := vars.LocalValue(d.Call.Value).(*ssa.MakeClosure)
 			if !ok {
 				continue
 			}

@@ -1,0 +1,213 @@
+--- directive_gaps.go	1970-01-01 00:00:00
++++ directive_gaps.go.golden	1970-01-01 00:00:00
+@@ -1,206 +1,208 @@
+ package internal
+ 
+ import (
+ 	"fmt"
+ 
+ 	"gorm.io/gorm"
+ )
+ 
+ // =============================================================================
+ // Directive gaps (#348)
+ // =============================================================================
+ 
+ // --- immutable-param on a Connection callback ---
+ 
+ // dgConnectionCallback is handed to Connection, which passes it a mid-chain
+ // (clone==0) handle, so immutable-param cannot exempt its parameter: the
+ // second query also gets the first condition, as for a Scopes callback.
+ //
+ //gormreuse:immutable-param
+ func dgConnectionCallback(tx *gorm.DB) error {
++	tx = tx.Session(&gorm.Session{})
+ 	tx.Where("a = 1").Find(nil)
+ 	tx.Where("b = 2").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ 	return nil
+ }
+ 
+ func dgUseConnectionCallback(db *gorm.DB) {
+ 	_ = db.Connection(dgConnectionCallback)
+ }
+ 
+ // dgConnectionCallbackVar is handed to Connection through a local variable.
+ //
+ //gormreuse:immutable-param
+ func dgConnectionCallbackVar(tx *gorm.DB) error {
++	tx = tx.Session(&gorm.Session{})
+ 	tx.Find(nil)
+ 	tx.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ 	return nil
+ }
+ 
+ func dgUseConnectionCallbackVar(db *gorm.DB, cond bool) {
+ 	cb := dgConnectionCallback
+ 	if cond {
+ 		cb = dgConnectionCallbackVar
+ 	}
+ 	_ = db.Connection(cb)
+ }
+ 
+ // dgImmutableParamOK is not a Connection callback, so immutable-param still
+ // exempts its parameter.
+ //
+ //gormreuse:immutable-param
+ func dgImmutableParamOK(tx *gorm.DB) error {
+ 	tx.Find(nil)
+ 	tx.Count(nil) // OK: the callers pass an immutable value
+ 	return nil
+ }
+ 
+ func dgUseImmutableParamOK(db *gorm.DB) {
+ 	_ = dgImmutableParamOK(db.Session(&gorm.Session{}))
+ }
+ 
+ // --- immutable-input on a method declared through an alias receiver ---
+ 
+ type dgRepo struct{ db *gorm.DB }
+ 
+ type dgRepoAlias = dgRepo
+ 
+ //gormreuse:immutable-input(cb)
+ func (r *dgRepoAlias) With(cb func(*gorm.DB) error) error { // want With:`gormreuse immutable-input\(cb\)`
+ 	return cb(r.db.Session(&gorm.Session{}))
+ }
+ 
+ //gormreuse:immutable-input(cb)
+ func (r *dgRepoAlias) WithBad(cb func(*gorm.DB) error) error {
+ 	return cb(r.db.Where("x")) // want `immutable-input\(cb\) declared but mutable \*gorm\.DB passed to callback`
+ }
+ 
+ func dgUseAliasReceiver(r *dgRepo) {
+ 	_ = r.With(func(tx *gorm.DB) error {
+ 		tx.Find(nil)
+ 		tx.Count(nil) // OK: With declares cb immutable-input
+ 		return nil
+ 	})
+ }
+ 
+ // --- same-line directive after a closure that ended on that line ---
+ 
+ func dgSameLineAfterClosure(db *gorm.DB) {
+ 	a := func(q *gorm.DB) { q.Find(nil) }; b := func(q *gorm.DB) { //gormreuse:pure
+ 		_ = q.Session(&gorm.Session{})
+ 	}
+ 	q := db.Where("x")
+ 	a(q)
+ 	b(q)
+ 	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // --- pure contract through an unmarked variadic callee ---
+ 
+ func dgLogVariadic(msg string, args ...any) { fmt.Println(msg, args) }
+ 
+ func dgLogOne(arg any) { fmt.Println(arg) }
+ 
+ //gormreuse:pure
+ func dgPureLogsVariadic(db *gorm.DB) {
+ 	dgLogVariadic("x", db) // want `pure function passes \*gorm\.DB argument to non-pure function`
+ }
+ 
+ //gormreuse:pure
+ func dgPureLogsOne(db *gorm.DB) {
+ 	dgLogOne(db) // want `pure function passes \*gorm\.DB argument to non-pure function`
+ }
+ 
+ var dgSink []any
+ 
+ func dgTakeSlice([]any) {}
+ 
+ func dgTakeArray(*[1]any) {}
+ 
+ // The slices and arrays below are not only a call's variadic arguments, so
+ // storing db in them is a leak.
+ 
+ //gormreuse:pure
+ func dgPureSliceStored(db *gorm.DB) {
+ 	s := []any{db} // want `pure function leaks \*gorm\.DB argument via slice/array store`
+ 	dgSink = s
+ }
+ 
+ //gormreuse:pure
+ func dgPureSlicePassed(db *gorm.DB) {
+ 	dgTakeSlice([]any{db}) // want `pure function leaks \*gorm\.DB argument via slice/array store`
+ }
+ 
+ //gormreuse:pure
+ func dgPureArrayRead(db *gorm.DB) {
+ 	var a [1]any
+ 	a[0] = db // want `pure function leaks \*gorm\.DB argument via slice/array store`
+ 	dgLogVariadic("x", a[:]...)
+ 	_ = a[0]
+ }
+ 
+ //gormreuse:pure
+ func dgPureArrayPassed(db *gorm.DB) {
+ 	var a [1]any
+ 	a[0] = db // want `pure function leaks \*gorm\.DB argument via slice/array store`
+ 	dgTakeArray(&a)
+ }
+ 
+ //gormreuse:pure
+ func dgPureArrayKept(db *gorm.DB) {
+ 	var a [1]any
+ 	a[0] = db // want `pure function leaks \*gorm\.DB argument via slice/array store`
+ }
+ 
+ // Both are only conservative warnings, so the callers keep trusting them.
+ func dgUsePureLogs(db *gorm.DB) {
+-	q := db.Where("x")
++	q := db.Where("x").Session(&gorm.Session{})
+ 	dgPureLogsVariadic(q)
+ 	dgPureLogsOne(q)
+ 	q.Find(nil)
+ 	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // --- immutable-return with a deferred fix held in a local ---
+ 
+ // dgDeferHeldFix defers the closure through a local that another closure
+ // captures, so SSA reads the closure back from the local.
+ //
+ //gormreuse:immutable-return
+ func dgDeferHeldFix() (r *gorm.DB) {
+ 	r = irbDB.Where("x")
+ 	fix := func() { r = r.Session(&gorm.Session{}) }
+ 	dgKeep(func() { _ = fix })
+ 	defer fix()
+ 	return
+ }
+ 
+ // dgDeferHeldNoFix defers a closure that only reads the result.
+ //
+ //gormreuse:immutable-return
+ func dgDeferHeldNoFix() (r *gorm.DB) { // want `immutable-return declared but function returns mutable \*gorm\.DB`
+ 	r = irbDB.Where("x")
+ 	read := func() { _ = r.Error }
+ 	dgKeep(func() { _ = read })
+ 	defer read()
+ 	return
+ }
+ 
+ func dgKeep(func()) {}
+ 
+ // --- pure and immutable-param, with the pure check failing ---
+ 
+ // dgPureFailsParam breaks its pure contract by branching db, so the pure
+ // directive does not stand in for immutable-param: callers must still pass an
+ // immutable value.
+ //
+ //gormreuse:pure
+ //gormreuse:immutable-param
+ func dgPureFailsParam(db *gorm.DB) {
+ 	db.Where("a").Find(nil) // want `pure function pollutes \*gorm\.DB argument by calling Where` `pure function pollutes \*gorm\.DB argument by calling Find`
+ 	db.Where("b").Find(nil) // want `pure function pollutes \*gorm\.DB argument by calling Where` `pure function pollutes \*gorm\.DB argument by calling Find`
+ }
+ 
+ func dgUsePureFailsParam(db *gorm.DB) {
+ 	q := db.Where("x")
+-	dgPureFailsParam(q) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of dgPureFailsParam`
++	dgPureFailsParam(q.Session(&gorm.Session{})) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of dgPureFailsParam`
+ }

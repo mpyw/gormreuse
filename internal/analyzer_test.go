@@ -68,27 +68,33 @@ func TestPanicGuard(t *testing.T) {
 // TestReportUnusedIgnoresFix verifies that an unused ignore gets a fix that
 // deletes it, except after an internal error, which may have dropped the
 // diagnostic the ignore covers, and in a file other than a test file of a
-// package with test files, whose test variant may need the ignore (#248).
+// package with test files, whose test variant may need the ignore (#248). The
+// variant without the package's own test files leaves the report to the test
+// variant (#348).
 func TestReportUnusedIgnoresFix(t *testing.T) {
 	const src = "package p\n\nfunc F() {\n\t_ = 1 //gormreuse:ignore\n}\n"
 	tests := []struct {
 		name          string
 		filename      string // In a fresh directory
 		sibling       string // Another file of the directory, or ""
+		siblingPkg    string // The package of sibling
 		internalError bool
+		wantReport    bool
 		wantFix       bool
 	}{
-		{"no test files", "p.go", "", false, true},
-		{"internal error", "p.go", "", true, false},
-		{"test file beside it", "p.go", "p_test.go", false, false},
-		{"in a test file", "p_test.go", "", false, true},
-		{"unreadable directory", "missing/p.go", "", false, false},
+		{"no test files", "p.go", "", "", false, true, true},
+		{"internal error", "p.go", "", "", true, true, false},
+		// The test variant reports it (#348).
+		{"test file beside it", "p.go", "p_test.go", "p", false, false, false},
+		{"external test file beside it", "p.go", "p_test.go", "p_test", false, true, false},
+		{"in a test file", "p_test.go", "", "", false, true, true},
+		{"unreadable directory", "missing/p.go", "", "", false, true, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
 			if tc.sibling != "" {
-				if err := os.WriteFile(filepath.Join(dir, tc.sibling), []byte("package p\n"), 0o644); err != nil {
+				if err := os.WriteFile(filepath.Join(dir, tc.sibling), []byte("package "+tc.siblingPkg+"\n"), 0o644); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -109,8 +115,14 @@ func TestReportUnusedIgnoresFix(t *testing.T) {
 				ReadFile: func(string) ([]byte, error) { return []byte(src), nil },
 			}
 			removals := directive.NewRemovals(pass)
-			reportUnusedIgnores(removals, ignores, reportIgnoreRemovable(pass, tc.internalError))
+			reportUnusedIgnores(removals, ignores, reportIgnoreRemovable(pass, tc.internalError), reportIgnoresLeftToTests(pass))
 			removals.Flush()
+			if !tc.wantReport {
+				if len(got) != 0 {
+					t.Fatalf("got %+v, want no diagnostic", got)
+				}
+				return
+			}
 			if len(got) != 1 || got[0].Message != "unused gormreuse:ignore directive" {
 				t.Fatalf("got %+v, want one unused-ignore diagnostic", got)
 			}

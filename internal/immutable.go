@@ -106,7 +106,8 @@ func immutableReturnCandidate(fn *ssa.Function) bool {
 // handled by the existing unused-directive path. Functions also marked
 // //gormreuse:pure are excluded because a valid pure function cannot branch its
 // parameter (branching is pollution the pure contract forbids), so they can never
-// need — nor, for redundancy purposes, be flagged for — immutability.
+// need — nor, for redundancy purposes, be flagged for — immutability. One whose
+// pure check failed is not excluded: it may branch its parameter (#348).
 //
 // Known limitation: a function that ONLY forwards its parameter once to another
 // immutable-param function (never using it a second time) is not detected as
@@ -140,7 +141,9 @@ func computeNeedsImmutableParam(
 		if fn.Signature == nil || !typeutil.HasGormDBParameter(fn.Signature) {
 			continue
 		}
-		if pureFuncs != nil && pureFuncs.Contains(fn) {
+		// A pure function that broke its contract may branch its parameter,
+		// so it is checked as any other (#348).
+		if pureFuncs != nil && pureFuncs.Contains(fn) && !pureVerdicts.HasFailed(fn) {
 			continue
 		}
 		// A function whose analysis panicked keeps its directive: reporting

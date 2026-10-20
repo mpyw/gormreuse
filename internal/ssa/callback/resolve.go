@@ -42,6 +42,20 @@ func resolveMayFuncs(funcs []*ssa.Function, vals []ssa.Value) map[*ssa.Function]
 	return set
 }
 
+// resolveMayFuncValues is resolveMayFuncs for func values instead of slices of
+// them, as the callback handed to Connection (#348).
+//
+//declscope:shared // collect.go resolves the Connection callbacks with it
+func resolveMayFuncValues(funcs []*ssa.Function, vals []ssa.Value) map[*ssa.Function]bool {
+	set := make(map[*ssa.Function]bool)
+	r := &funcResolver{may: true, funcs: funcs, seen: make(map[ssa.Value]bool)}
+	r.found = func(fn *ssa.Function) { set[fn] = true }
+	for _, v := range vals {
+		r.addFunc(v)
+	}
+	return set
+}
+
 // resolveExactFunc returns the function that the value v passed as a callback
 // is: a MakeClosure (capturing closure), a bare *ssa.Function (named function
 // reference), either boxed in an interface, or a read of a holder that holds
