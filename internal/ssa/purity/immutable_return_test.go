@@ -60,51 +60,33 @@ func TestInferImmutableReturns(t *testing.T) {
 	}
 }
 
-// TestInferImmutableReturnsGrowth checks that inference does not grow
-// exponentially with the depth of a call chain that callers block on at every
-// level (#298). It counts allocations at k and k+4: before the fix the ratio
-// was 9.0 and 2.1, and after it 1.2 and 1.5. It stands in for the allocation-growth gate of #302 until that
-// lands. It does not run in parallel, as testing.AllocsPerRun requires.
+// TestInferImmutableReturnsGrowth checks that inference alone does not grow
+// exponentially on a dense chain, where each ci switches over every later cj
+// (#298). It counts allocations at k and k+4: before the fix the ratio was
+// 2.1, and after it 1.5. The analyzer's count over the whole package hides
+// this (1.6 before and after), so TestAllocationGrowth in the root package
+// cannot check it. That gate checks the chain a single caller switches over.
+// This test does not run in parallel, as testing.AllocsPerRun requires.
 func TestInferImmutableReturnsGrowth(t *testing.T) {
 	const k = 12
-	tests := map[string]func(k int) string{
-		// f switches over c0..ck, and each ci returns c(i+1).
-		"switch over a chain": func(k int) string {
-			var b strings.Builder
-			b.WriteString("func f(db *gorm.DB, i int) *gorm.DB {\n\tswitch i {\n")
-			for i := range k {
-				fmt.Fprintf(&b, "\tcase %d:\n\t\treturn c%d(db)\n", i, i)
+	// Each ci switches over every later cj.
+	dense := func(k int) string {
+		var b strings.Builder
+		for i := range k {
+			fmt.Fprintf(&b, "func c%d(db *gorm.DB, x int) *gorm.DB {\n\tswitch x {\n", i)
+			for j := i + 1; j <= k; j++ {
+				fmt.Fprintf(&b, "\tcase %d:\n\t\treturn c%d(db, x)\n", j, j)
 			}
-			fmt.Fprintf(&b, "\t}\n\treturn c%d(db)\n}\n\n", k)
-			for i := range k {
-				fmt.Fprintf(&b, "func c%d(db *gorm.DB) *gorm.DB { return c%d(db) }\n\n", i, i+1)
-			}
-			fmt.Fprintf(&b, "func c%d(db *gorm.DB) *gorm.DB { return db.Session(&gorm.Session{}) }\n", k)
-			return b.String()
-		},
-		// Each ci switches over every later cj.
-		"dense chain": func(k int) string {
-			var b strings.Builder
-			for i := range k {
-				fmt.Fprintf(&b, "func c%d(db *gorm.DB, x int) *gorm.DB {\n\tswitch x {\n", i)
-				for j := i + 1; j <= k; j++ {
-					fmt.Fprintf(&b, "\tcase %d:\n\t\treturn c%d(db, x)\n", j, j)
-				}
-				fmt.Fprintf(&b, "\t}\n\treturn c%d(db, x)\n}\n\n", k)
-			}
-			fmt.Fprintf(&b, "func c%d(db *gorm.DB, x int) *gorm.DB { return db.Session(&gorm.Session{}) }\n", k)
-			return b.String()
-		},
+			fmt.Fprintf(&b, "\t}\n\treturn c%d(db, x)\n}\n\n", k)
+		}
+		fmt.Fprintf(&b, "func c%d(db *gorm.DB, x int) *gorm.DB { return db.Session(&gorm.Session{}) }\n", k)
+		return b.String()
 	}
-	for name, gen := range tests {
-		t.Run(name, func(t *testing.T) {
-			small := immutableReturnInferenceAllocs(t, gen(k))
-			large := immutableReturnInferenceAllocs(t, gen(k+4))
-			t.Logf("allocations: %.0f at k=%d, %.0f at k=%d", small, k, large, k+4)
-			if ratio := large / small; ratio > 2 {
-				t.Errorf("allocations grew %.1fx from k=%d to k=%d (%.0f to %.0f), want at most 2x", ratio, k, k+4, small, large)
-			}
-		})
+	small := immutableReturnInferenceAllocs(t, dense(k))
+	large := immutableReturnInferenceAllocs(t, dense(k+4))
+	t.Logf("allocations: %.0f at k=%d, %.0f at k=%d", small, k, large, k+4)
+	if ratio := large / small; ratio > 2 {
+		t.Errorf("allocations grew %.1fx from k=%d to k=%d (%.0f to %.0f), want at most 2x", ratio, k, k+4, small, large)
 	}
 }
 

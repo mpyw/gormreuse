@@ -664,7 +664,7 @@ var growthCases = []growthCase{
 		return []string{b.String()}
 	}},
 	// Phi edges [p(phi), phi]: pure call on then-branch, else branch present.
-	{name: "purephi", n: 16, plus: 4, limit: growthExponential, after: "#297", shape: func(n int) []string {
+	{name: "purephi", n: 16, plus: 4, limit: growthExponential, shape: func(n int) []string {
 		var b strings.Builder
 		b.WriteString("//gormreuse:pure\nfunc p(db *gorm.DB) *gorm.DB { return db }\n\nfunc side() {}\n\nfunc f(db *gorm.DB, c []bool) {\n\tq := db.Where(\"x\")\n")
 		for i := range n {
@@ -674,7 +674,7 @@ var growthCases = []growthCase{
 		return []string{b.String()}
 	}},
 	// purephi with an immutable base.
-	{name: "purephiimm", n: 16, plus: 4, limit: growthExponential, after: "#297", shape: func(n int) []string {
+	{name: "purephiimm", n: 16, plus: 4, limit: growthExponential, shape: func(n int) []string {
 		var b strings.Builder
 		b.WriteString("//gormreuse:pure\nfunc p(db *gorm.DB) *gorm.DB { return db }\n\nfunc side() {}\n\nfunc f(db *gorm.DB, c []bool) {\n\tq := db.Session(&gorm.Session{})\n")
 		for i := range n {
@@ -683,8 +683,9 @@ var growthCases = []growthCase{
 		b.WriteString("\tq.Find(nil)\n\tq.Find(nil)\n}\n")
 		return []string{b.String()}
 	}},
-	// purephi without the else branch: edge order [phi, call].
-	{name: "purephisafe", limit: growthLinear, after: "#297", shape: func(n int) []string {
+	// purephi without the else branch: edge order [phi, call]. Since #297
+	// it grows like filters.
+	{name: "purephisafe", limit: growthQuadratic, shape: func(n int) []string {
 		var b strings.Builder
 		b.WriteString("//gormreuse:pure\nfunc p(db *gorm.DB) *gorm.DB { return db }\n\nfunc f(db *gorm.DB, c []bool) {\n\tq := db.Where(\"x\")\n")
 		for i := range n {
@@ -740,7 +741,8 @@ var growthCases = []growthCase{
 		b.WriteString("}\n")
 		return []string{b.String()}
 	}},
-	// InferImmutableReturns worklist without dedup: f switches over c0..ck, ci calls c(i+1).
+	// f switches over c0..ck, and each ci returns c(i+1): immutable-return
+	// inference was exponential in k (#298).
 	{name: "inferexp", n: 16, plus: 4, limit: growthExponential, shape: func(n int) []string {
 		var b strings.Builder
 		k := n
@@ -755,7 +757,9 @@ var growthCases = []growthCase{
 		fmt.Fprintf(&b, "func c%d(db *gorm.DB) *gorm.DB { return db.Session(&gorm.Session{}) }\n", k)
 		return []string{b.String()}
 	}},
-	// Each ci calls all later cj (dense DAG).
+	// Each ci switches over every later cj. The analyzer's count does not show
+	// #298 on this shape; TestInferImmutableReturnsGrowth checks inference
+	// alone on it.
 	{name: "inferexp2", n: 16, limit: growthQuadratic, shape: func(n int) []string {
 		var b strings.Builder
 		k := n
@@ -874,7 +878,8 @@ var growthCases = []growthCase{
 		return []string{b.String()}
 	}},
 	// Pure function with n sequential loops reassigning via a pure callee.
-	{name: "pureloops", limit: growthLinear, after: "#297", shape: func(n int) []string {
+	// Since #297 it grows like filters.
+	{name: "pureloops", limit: growthQuadratic, shape: func(n int) []string {
 		var b strings.Builder
 		b.WriteString("//gormreuse:pure\nfunc id(db *gorm.DB) *gorm.DB { return db }\n\n//gormreuse:pure\nfunc p(db *gorm.DB, xs []int) *gorm.DB {\n")
 		for range n {
