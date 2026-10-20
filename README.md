@@ -1615,15 +1615,15 @@ Each `*gorm.DB` result, in a `(*gorm.DB, error)` result too, must be one of thes
 
 So a getter is treated like the field it returns, **at each call**. The call reads the field of its own receiver. With `d := r.DB()`, then `d.Find(&a)` and `d.Count(&n)`, and `r` a parameter, nothing is reported, as for `r.db.Find(&a)` and `r.db.Count(&n)`.
 
-A getter promoted from an embedded struct reads the field the same way: `d := o.DB()` with `type outer struct{ repo }` reads `o.db`. So do `o.inner.DB()`, `get(&o.repo)`, and a getter reached through a pointer field that holds `&repo{db: q}`. A store through another read of a pointer field is not seen: `o.p.db = q; o.p.DB()` is not reported, and neither is `o.p.db` written in place.
+A getter promoted from an embedded struct reads the field the same way: `d := o.DB()` with `type outer struct{ repo }` reads `o.db`. So do `o.inner.DB()`, `get(&o.repo)`, and a getter reached through a pointer field that holds `&repo{db: q}`. A store through another read of a pointer field is not seen: `o.p.db = q; o.p.DB()` is not reported, and neither is `o.p.db` written in place. This holds while the getter is inferred, such as when `q` is the result of a helper. A store of a chain like `db.Where("x")` turns inference off, as below.
 
-A getter of a field or a package-level variable is not inferred at all when code in its package assigns the variable a chain. A caller may call the getter after that. Then every call of the getter in the package returns a mutable root, and the report names the `d := r.DB()` line as the root:
+A getter of a field or a package-level variable is not inferred at all when code in its package assigns the variable a chain that gormreuse can prove. A caller may call the getter after that. Then every call of the getter in the package returns a mutable root, and the report names the `d := r.DB()` line as the root:
 
 | Code in the package | Getter inferred? |
 | --- | --- |
 | No function stores a chain in `db` | Yes |
 | `r.db = r.db.Where("x")` | No |
-| `r := &repo{db: q}`, with `q` a mutable value | No. This holds in every function of the package, also where `r` is a parameter |
+| `r := &repo{db: q}`, with `q := db.Where("x")` | No. This holds in every function of the package, also where `r` is a parameter |
 
 A helper that returns a struct is inferred the same way when it builds the struct. Every `*gorm.DB` field it fills in must hold one of these values. Then `env := newTestEnv()`, followed by `env.DB.Create(&u)` and `env.DB.Find(&us)`, is not reported. A struct the helper passes to another function, or did not build, turns inference off.
 
