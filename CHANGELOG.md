@@ -2,7 +2,34 @@
 
 These notes say what changes for users in each release, and what to do about it. The full commit list of each release is on [GitHub Releases](https://github.com/mpyw/gormreuse/releases). Releases up to 0.22.0 have their notes there only.
 
-## Unreleased
+## 0.24.0 (2026-10-21)
+
+gormreuse now follows a `*gorm.DB` read from a map, a slice, an array or a channel. It also follows a method value handed to other code. Inferred `immutable-param` and `immutable-input` now need a proof that the value is immutable. Loops with exclusive branches, exclusive `defer` statements, `Commit` and `Rollback` give no false reports. `-fix` no longer offers a fix that swallows an error or drops a condition.
+
+> [!IMPORTANT]
+> **Expect a few new reports on code that passed with 0.23.0.**
+>
+> Most of them are a helper whose `*gorm.DB` parameter gets a struct field. Examples are `register(db.DB)` and `go stream(rows, r.db)`. 0.22.0 reported these too. When the field always holds a fresh handle, mark the helper `//gormreuse:immutable-param`.
+
+<details>
+<summary>Results on real projects</summary>
+
+Each project was analyzed with `-test ./...`. The wall time and the memory did not change. The analysis itself is 1% to 9% of the CPU time. Loading the packages takes the rest.
+
+| Project | 0.23.0 | 0.24.0 | Change |
+| --- | --- | --- | --- |
+| gorm v1.31.2 (root module) | 65 | 65 | None |
+| 1Panel `agent` | 144 | 144 | None |
+| 1Panel `core` | 123 | 123 | None |
+| nightingale | 30 | 30 | None |
+| alist | 11 | 11 | None |
+| headscale | 56 | 56 | None |
+| HashiCorp boundary | 0 | 0 | None |
+| dragonfly | 19 | 30 | 11 helpers that get a struct field, all reported by 0.22.0 (#371) |
+| wakapi | 177 | 179 | 2 helpers that get a struct field, both reported by 0.22.0 (#371) |
+| nezha | 8 | 7 | A root built in a loop body and used on exclusive branches (#375) |
+
+</details>
 
 ### New diagnostics
 
@@ -41,8 +68,8 @@ A call through a receiver of a type parameter's type, and a closure that a call 
 | No fix that swallows an earlier query's error (#372) | On a mutable root, a failed query leaves its error on the root, and gorm skips the later queries. `q.Update("name", "new"); return q.Update("id", id).Error` returns the first error. A Session made the second `Update` run and return `nil`, which in a `Transaction` callback commits instead of rolling back. Such a root now gets no fix. Check the first query's error, as in `if err := q.Update(...).Error; err != nil { return err }`, to get the fix back. Pagination that ignores `Count`'s error is such a case too |
 | No fix that drops a condition through a parameter merged by a Phi (#373) | In `for … { if c { q = q.Where("a") } else { q.Find(&us) }; q.Where("b") }` with `q` a parameter, the fix gave `q` its body Session and made `Where("b")` change a copy. In `if admin { q = q.Where("admin") }` followed by a discarded `q.Where("tenant_id = ?", t)`, the fix moved the tenant filter out of the caller's value. Both now get no fix, as a discarded statement on the parameter itself does |
 | `-fix` suggests `immutable-param` only where inference would infer it (#387) | The directive fix used the old caller check and looked only at the function's own statements. In `func list(tx *gorm.DB) { applyTenant(tx); tx.Find(&us); tx.Count(&n) }` it added `//gormreuse:immutable-param`, which promises an immutable `tx` on which `applyTenant`'s filter changes a copy. It also added the directive when a caller passed a value gormreuse cannot follow, such as `ctx.Value(k).(*gorm.DB)`. The fix now uses the inference's rules: no change in place through a helper, a closure, a func value, a store or a `Statement` write, and every caller passes a value proved immutable. Such a function gets the body Session, or no fix |
-| The reuse message no longer advises a Session that the fix withholds (#372) | When a Session would let a later query run past an earlier query's unchecked error, the message ends with `a Session would let a later query run past an earlier query's unchecked error, so check that error first` instead of `make the root immutable with .Session(&gorm.Session{})`. An exclude rule that matches only `*gorm.DB reused` keeps working |
-| One pass for more merges (#373) | A discarded statement on a Phi, a Phi read again by a later loop, a reassignment that takes the root's place on a Phi, and a use that reads the root through a loop's back edge now get every Session in the first pass. 60 random programs from the review's generator now all converge in one pass. 0.23.0 needed a second pass for 30 of them |
+| The reuse message no longer advises a Session that the fix withholds (#372) | A Session would sometimes let a later query run past an earlier query's unchecked error. Then the message ends with `a Session would let a later query run past an earlier query's unchecked error, so check that error first`. Before, it ended with `make the root immutable with .Session(&gorm.Session{})`. An exclude rule that matches only `*gorm.DB reused` keeps working |
+| One pass for more merges (#373) | These now get every Session in the first pass: a discarded statement on a Phi, a Phi read again by a later loop, a reassignment that takes the root's place on a Phi, and a use that reads the root through a loop's back edge. 60 random programs from the review's generator now all converge in one pass. 0.23.0 needed a second pass for 30 of them |
 
 ### Faster `-fix`
 
