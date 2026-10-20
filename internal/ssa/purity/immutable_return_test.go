@@ -25,8 +25,8 @@ import (
 // depend on the order of the candidates (#261).
 func TestInferImmutableReturns(t *testing.T) {
 	t.Parallel()
-	funcs := loadFixtureFuncs(t)
-	declared := directive.NewImmutableReturnFuncSet(nil, nil)
+	funcs, sets := loadFixtureSets(t, directive.NewImmutableReturnFuncSet)
+	declared := sets[0]
 
 	var candidates []*ssa.Function
 	for name, fn := range funcs {

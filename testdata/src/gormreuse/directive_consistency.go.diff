@@ -1,0 +1,115 @@
+--- directive_consistency.go	1970-01-01 00:00:00
++++ directive_consistency.go.golden	1970-01-01 00:00:00
+@@ -1,108 +1,110 @@
+ package internal
+ 
+ import "gorm.io/gorm"
+ 
+ // =============================================================================
+ // Directive consistency (#315)
+ // =============================================================================
+ 
+ // --- A directive in a generated file is not trusted in the package ---
+ //
+ // generated.go is generated, so its functions are not analyzed and
+ // their directives are never validated. Each one is treated as unmarked, for
+ // every directive kind and placement, as another package already treats it
+ // (#259).
+ 
+ func dcCallsGeneratedDocPure(db *gorm.DB) {
+ 	q := db.Where("x")
+ 	genDocPure(q)
+ 	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ func dcCallsGeneratedSameLinePure(db *gorm.DB) {
+ 	q := db.Where("x")
+ 	genSameLinePure(q)
+ 	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ func dcCallsGeneratedVarPure(db *gorm.DB) {
+ 	q := db.Where("x")
+ 	genVarPure(q)
+ 	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ func dcCallsGeneratedDocImmutableReturn(db *gorm.DB) {
+-	q := genDocImmutableReturn(db)
++	q := genDocImmutableReturn(db).Session(&gorm.Session{})
+ 	q.Where("a").Find(nil)
+ 	q.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ func dcCallsGeneratedSameLineImmutableReturn(db *gorm.DB) {
+-	q := genSameLineImmutableReturn(db)
++	q := genSameLineImmutableReturn(db).Session(&gorm.Session{})
+ 	q.Where("a").Find(nil)
+ 	q.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ func dcCallsGeneratedDocImmutableInput(db *gorm.DB) {
+ 	genDocImmutableInput(db, func(tx *gorm.DB) {
++		tx = tx.Session(&gorm.Session{})
+ 		tx.Where("a").Find(nil)
+ 		tx.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ 	})
+ }
+ 
+ // --- The immutable-return body check sees through function variables ---
+ //
+ // A call through a package-level variable that always holds one closure is
+ // the call of that closure, as for a local closure.
+ 
+ var dcMutableVar = func(db *gorm.DB) *gorm.DB { return db.Where("x") }
+ 
+ var dcImmutableVar = func(db *gorm.DB) *gorm.DB { return db.Session(&gorm.Session{}) }
+ 
+ //gormreuse:immutable-return
+ func dcReturnsThroughMutableVar(db *gorm.DB) *gorm.DB { // want `immutable-return declared but function returns mutable \*gorm\.DB`
+ 	return dcMutableVar(db)
+ }
+ 
+ //gormreuse:immutable-return
+ func dcReturnsThroughLocalClosure(db *gorm.DB) *gorm.DB { // want `immutable-return declared but function returns mutable \*gorm\.DB`
+ 	get := func() *gorm.DB { return db.Where("x") }
+ 	return get()
+ }
+ 
+ //gormreuse:immutable-return
+ func dcReturnsThroughCapturedLocal(db *gorm.DB) *gorm.DB { // want `immutable-return declared but function returns mutable \*gorm\.DB`
+ 	get := func() *gorm.DB { return db.Where("x") }
+ 	return func() *gorm.DB { return get() }()
+ }
+ 
+ //gormreuse:immutable-return
+ func dcReturnsThroughImmutableVar(db *gorm.DB) *gorm.DB {
+ 	return dcImmutableVar(db)
+ }
+ 
+ // --- A directive after a closure's brace is the closure's only ---
+ 
+ func dcRun(f func(*gorm.DB)) { f(nil) }
+ 
+ func dcRunInput(f func(cb func(*gorm.DB))) {}
+ 
+ // The directive is on the line of both opening braces, after the closure's.
+ func dcClosureBracePure(db *gorm.DB) { dcRun(func(q *gorm.DB) { //gormreuse:pure
+ 	q.Where("x") // want `pure function pollutes \*gorm\.DB argument by calling Where`
+ })
+ 	db.Where("y") // OK: dcClosureBracePure is not pure
+ }
+ 
+ func dcClosureBraceImmutableInput(db *gorm.DB, cb func(*gorm.DB)) { dcRunInput(func(cb func(*gorm.DB)) { //gormreuse:immutable-input(cb)
+ 	cb(db.Session(&gorm.Session{}))
+ })
+ 	cb(db.Session(&gorm.Session{}))
+ }
+ 
+ func dcCallsClosureBraceImmutableInput(db *gorm.DB) {
+ 	dcClosureBraceImmutableInput(db, func(tx *gorm.DB) {
++		tx = tx.Session(&gorm.Session{})
+ 		tx.Where("a").Find(nil)
+ 		tx.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ 	})
+ }

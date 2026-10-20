@@ -92,6 +92,9 @@ func RunSSA(
 
 	// Every per-function step runs under guard, which reports a panic at the
 	// function instead of dropping its diagnostics silently (#186).
+	// The work that reads the whole package runs under it too, and a panic
+	// there leaves the conservative result: nothing inferred or exempted, and
+	// no contract trusted by another package (#315).
 	guard := &panicGuard{pass: pass, reported: make(map[*ssa.Function]bool)}
 
 	// skip reports whether a function is in an excluded file. Ignore directives
@@ -146,7 +149,9 @@ func RunSSA(
 
 	// Treat a function as immutable-return when its body proves it (#261),
 	// before any pass reads the set.
-	inferImmutableReturns(funcs, immutableReturnFuncs, funcVars, skip)
+	guard.runPackage("immutable-return inference", func() {
+		inferImmutableReturns(funcs, immutableReturnFuncs, funcVars, skip)
+	})
 
 	// PASS 1: validate pure function contracts and collect the functions that
 	// definitively broke them, and the parameters each trusted one may return.
@@ -158,19 +163,28 @@ func RunSSA(
 
 	// Collect Scopes/Preload callbacks once: their *gorm.DB parameter receives a
 	// mid-chain (clone==0) value, so reuse inside them must be detected (#60).
-	scopesCallbacks := callback.CollectScopesCallbacks(funcs, funcVars)
+	var scopesCallbacks map[*ssa.Function]bool
+	guard.runPackage("Scopes callbacks", func() {
+		scopesCallbacks = callback.CollectScopesCallbacks(funcs, funcVars)
+	})
 
 	// Collect immutable callbacks once: gorm's Transaction/FindInBatches hand
 	// their callback a fresh forkable (clone>0) handle, and a user function
 	// declared //gormreuse:immutable-input(cb) promises the same for cb. Their
 	// callback's tx parameter is therefore exempt from the Phase 1b
 	// mutable-by-default treatment (#60 SC103, #61, #62 case 2.2).
-	immutableCallbacks := callback.CollectImmutableCallbacks(funcs, funcVars)
-	callback.CollectImmutableInputCallbacks(funcs, funcVars, immutableInputSet, immutableCallbacks)
 	// The sets are keyed by function, so keep only the functions that nothing
 	// else can call: a named callback that is also called directly, or that is
-	// exported, keeps a mutable parameter (#191).
-	callback.DropReachableCallbacks(funcs, funcVars, immutableInputSet, immutableCallbacks)
+	// exported, keeps a mutable parameter (#191). After a panic no callback is
+	// exempt.
+	var immutableCallbacks map[*ssa.Function]bool
+	if !guard.runPackage("immutable callbacks", func() {
+		immutableCallbacks = callback.CollectImmutableCallbacks(funcs, funcVars)
+		callback.CollectImmutableInputCallbacks(funcs, funcVars, immutableInputSet, immutableCallbacks)
+		callback.DropReachableCallbacks(funcs, funcVars, immutableInputSet, immutableCallbacks)
+	}) {
+		immutableCallbacks = nil
+	}
 
 	// Enforce the body-side immutable-input contract (#62 cases 2.3/2.4) and
 	// report unused immutable-input directives (U1-U3). Uses a tracer with the
@@ -181,12 +195,16 @@ func RunSSA(
 		if skip(fn) {
 			continue
 		}
-		guard.run(fn, func() {
+		// A check that panicked proves nothing, so the function is not
+		// trusted (#315).
+		if !guard.run("immutable-input", fn, func() {
 			for _, v := range purity.ValidateImmutableInputs(fn, immutableInputSet, inputTracer, nil) {
 				failedInput[fn] = true
 				report(v.Pos, v.Message)
 			}
-		})
+		}) {
+			failedInput[fn] = true
+		}
 	}
 	reportUnusedImmutableInputs(immutableInputSet, reportRemoval)
 
@@ -198,10 +216,12 @@ func RunSSA(
 	// TEMPORARY (GORM bug go-gorm/gorm#7592): warn on Session/WithContext/Debug
 	// results returned from Scopes callbacks. Deletable by removing the scopeswarn
 	// package and this block once the upstream fix ships in a supported release — see that package.
-	scopesOnly := callback.CollectScopesOnlyCallbacks(funcs, funcVars)
-	for _, w := range scopeswarn.Validate(scopesOnly, funcVars, skip) {
-		report(w.Pos, w.Message)
-	}
+	guard.runPackage("Scopes warnings", func() {
+		scopesOnly := callback.CollectScopesOnlyCallbacks(funcs, funcVars)
+		for _, w := range scopeswarn.Validate(scopesOnly, funcVars, skip) {
+			report(w.Pos, w.Message)
+		}
+	})
 
 	// Share a single fix generator across all violations (it caches AST
 	// inspectors). It needs scopesCallbacks to withhold the immutable-param fix on
@@ -238,7 +258,7 @@ func RunSSA(
 		}
 
 		chk := newChecker(pass, ignores, checkTracer, branchesImmutableParam, globalReported, fixGen, cfgs)
-		guard.run(fn, func() { chk.checkFunction(fn) })
+		guard.run("reuse", fn, func() { chk.checkFunction(fn) })
 	}
 
 	// Report immutable-param directives that are signature-valid but have no
@@ -247,12 +267,11 @@ func RunSSA(
 
 	reportUnusedDirectiveFuncs(pureFuncs, immutableReturnFuncs, immutableParamFuncs, reportRemoval)
 
-	exportFacts(pass, ssaInfo, factSources{
-		pureFuncs:            pureFuncs,
-		immutableReturnFuncs: immutableReturnFuncs,
-		immutableInputSet:    immutableInputSet,
-		pureVerdicts:         pureVerdicts,
-		distrusted: distrustContracts(distrustSources{
+	// A panic while computing what another package must not trust leaves
+	// every contract distrusted.
+	distrusted := distrustedContracts{all: true}
+	guard.runPackage("distrusted contracts", func() {
+		distrusted = distrustContracts(distrustSources{
 			funcs:                funcs,
 			immutableReturnFuncs: immutableReturnFuncs,
 			immutableInputSet:    immutableInputSet,
@@ -261,16 +280,23 @@ func RunSSA(
 			tracer:               inputTracer,
 			funcVars:             funcVars,
 			skip:                 skip,
-		}, guard),
-		needsImmutableParam: needsImmutableParam,
-		tracer:              inputTracer,
+		}, guard)
+	})
+	exportFacts(pass, ssaInfo, factSources{
+		pureFuncs:            pureFuncs,
+		immutableReturnFuncs: immutableReturnFuncs,
+		immutableInputSet:    immutableInputSet,
+		pureVerdicts:         pureVerdicts,
+		distrusted:           distrusted,
+		needsImmutableParam:  needsImmutableParam,
+		tracer:               inputTracer,
 	}, skip, guard)
 
 	// Report unused ignore directives last, once every other diagnostic has had
 	// the chance to use one. A function whose analysis panicked lost its
 	// diagnostics, so an ignore that looks unused may cover one of them: no
 	// fix deletes an ignore then.
-	reportUnusedIgnores(removals, ignores, reportIgnoreRemovable(pass, len(guard.reported) > 0))
+	reportUnusedIgnores(removals, ignores, reportIgnoreRemovable(pass, guard.panicked()))
 	removals.Flush()
 }
 

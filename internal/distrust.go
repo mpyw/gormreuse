@@ -18,7 +18,27 @@ import (
 //
 //declscope:shared // fact.go leaves them out of the facts
 type distrustedContracts struct {
+	//declscope:private
 	returns, inputs map[*ssa.Function]bool
+	// all is set when computing them panicked, so that every contract is
+	// distrusted (#315).
+	all bool
+}
+
+// distrustsReturn reports whether another package must not trust the
+// immutable-return contract of fn.
+//
+//declscope:shared // fact.go leaves it out of the facts
+func (d distrustedContracts) distrustsReturn(fn *ssa.Function) bool {
+	return d.all || d.returns[fn]
+}
+
+// distrustsInput reports whether another package must not trust the
+// immutable-input contract of fn.
+//
+//declscope:shared // fact.go leaves it out of the facts
+func (d distrustedContracts) distrustsInput(fn *ssa.Function) bool {
+	return d.all || d.inputs[fn]
 }
 
 // distrustSources is what distrustContracts reads: the sets, the functions
@@ -106,7 +126,7 @@ func distrustContracts(src distrustSources, guard *panicGuard) distrustedContrac
 			return false
 		}
 		failedReturn, failedInput := checkReturn, checkInput
-		guard.run(fn, func() {
+		guard.run("distrust", fn, func() {
 			rt := src.tracer.Distrusting(returnDistrusted, callbackDistrusted)
 			if checkReturn {
 				if set.Inferred(fn) {

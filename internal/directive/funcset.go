@@ -103,6 +103,9 @@ func (s *DirectiveFuncSet) Import(imported func(fn *ssa.Function) bool) {
 // because the analysis proved that its body keeps the directive's contract
 // (#261). Contains reports it, and nothing reports it unused.
 func (s *DirectiveFuncSet) Infer(fn *ssa.Function) {
+	if s == nil {
+		return
+	}
 	if s.inferred == nil {
 		s.inferred = make(map[*ssa.Function]bool)
 	}
@@ -197,6 +200,9 @@ func (s *DirectiveFuncSet) forgetContains() {
 // one after its opening brace, or the one a closure takes. A fix that deletes
 // the directive edits these comments.
 func (s *DirectiveFuncSet) CommentsOf(fn *ssa.Function) []token.Pos {
+	if s == nil || fn == nil {
+		return nil
+	}
 	var positions []token.Pos
 	switch syntax := origin.Declared(fn).Syntax().(type) {
 	case *ast.FuncDecl:
@@ -331,13 +337,22 @@ func (s *DirectiveFuncSet) validateFuncLitSignature(fl *ast.FuncLit) bool {
 }
 
 // hasDirective checks if an SSA function has the directive.
+//
+// A function of the package has it only when its file was added with
+// AddFile. A file that was not, such as a generated one, is not analyzed, so
+// its directives are never validated and are not trusted, whatever their
+// kind and placement (#315). Another package does not trust them either,
+// since no fact is exported for them (#259).
 func (s *DirectiveFuncSet) hasDirective(fn *ssa.Function) bool {
-	if fn == nil {
+	if s == nil || fn == nil {
 		return false
 	}
 
 	switch syntax := fn.Syntax().(type) {
 	case *ast.FuncDecl:
+		if !s.fileAdded(syntax) {
+			return false
+		}
 		// Check Doc comments (next-line pattern)
 		if syntax.Doc != nil && slices.ContainsFunc(syntax.Doc.List, func(c *ast.Comment) bool { return s.isDirective(c.Text) }) {
 			return true
@@ -357,7 +372,7 @@ func (s *DirectiveFuncSet) hasDirective(fn *ssa.Function) bool {
 		// from the fact its package exported, never from its source on disk:
 		// that source may be missing, and only the fact says whether the
 		// body keeps the contract (#195).
-		return s != nil && s.imported != nil && s.imported(fn)
+		return s.imported != nil && s.imported(fn)
 	}
 	return false
 }

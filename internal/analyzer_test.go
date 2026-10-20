@@ -42,9 +42,9 @@ func TestPanicGuard(t *testing.T) {
 
 	// Default: the panic is reported, and execution continues.
 	ran := false
-	guard.run(fn, func() { panic("boom") })
-	guard.run(fn, func() { panic("boom again") })
-	guard.run(fn, func() { ran = true })
+	guard.run("test", fn, func() { panic("boom") })
+	guard.run("test", fn, func() { panic("boom again") })
+	guard.run("test", fn, func() { ran = true })
 	if !ran {
 		t.Fatal("panicGuard did not run work after a prior panic")
 	}
@@ -61,7 +61,7 @@ func TestPanicGuard(t *testing.T) {
 				t.Error("expected re-panic under GORMREUSE_DEBUG_PANIC, got none")
 			}
 		}()
-		guard.run(fn, func() { panic("boom") })
+		guard.run("test", fn, func() { panic("boom") })
 	}()
 }
 

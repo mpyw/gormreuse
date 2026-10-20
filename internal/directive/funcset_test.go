@@ -1,8 +1,10 @@
 package directive
 
 import (
+	"go/token"
 	"testing"
 
+	"golang.org/x/tools/go/ast/inspector"
 	"golang.org/x/tools/go/ssa"
 )
 
@@ -42,5 +44,31 @@ func TestDirectiveFuncSet_ContainsAfterAdd(t *testing.T) {
 	set.Add(funcKeyOf(fn))
 	if !set.Contains(fn) {
 		t.Error("Contains = false after Add, want true")
+	}
+}
+
+// TestDirectiveFuncSet_Nil checks that every method of a nil set, which the
+// tracers that resolve builtins only are given, has no directive and does
+// not panic (#315).
+func TestDirectiveFuncSet_Nil(t *testing.T) {
+	t.Parallel()
+
+	fn := &ssa.Function{}
+	var set *DirectiveFuncSet
+	set.AddFile(inspector.Cursor{})
+	set.Import(func(*ssa.Function) bool { return true })
+	set.Infer(fn)
+	set.Add(funcKeyOf(fn))
+	if set.Contains(fn) || set.Inferred(fn) {
+		t.Error("nil set has the directive, want none")
+	}
+	if got := set.CommentsOf(fn); got != nil {
+		t.Errorf("nil set CommentsOf = %v, want nil", got)
+	}
+	if got := set.GetUnusedDirectives(); got != nil {
+		t.Errorf("nil set GetUnusedDirectives = %v, want nil", got)
+	}
+	if set.IsUsed(token.NoPos) {
+		t.Error("nil set IsUsed = true, want false")
 	}
 }
