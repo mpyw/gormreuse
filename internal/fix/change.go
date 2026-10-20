@@ -130,19 +130,29 @@ func (g *Generator) SessionChangesErrors(root ssa.Value) bool {
 func (g *Generator) computeFinisherErrorChanges(v pollution.Violation) bool {
 	def := tracer.RootBlock(v.Root)
 	var unread, passed []changePoint
+	// The uses share the values they walk: only the union of their points
+	// is read, so a value one use walked adds nothing for another. Without
+	// it, n uses that each reach the n loads of one variable walk n² values
+	// (#389). The hidden uses only say whether any point exists, so they
+	// share theirs apart.
+	seen := make(map[changeSeen]bool)
 	for _, use := range v.AllUses {
-		errs := g.changeErrorsOfUse(v.Root, use)
+		errs := g.changeErrorsOfUse(v.Root, use, seen)
 		unread = append(unread, errs.unread...)
 		passed = append(passed, errs.passed...)
 	}
+	hiddenSeen := make(map[changeSeen]bool)
+	var hiddenUnread, hiddenPassed bool
 	for _, use := range v.Hidden {
-		errs := g.changeErrorsOfUse(v.Root, use)
-		if len(errs.unread) > 0 {
-			unread = append(unread, changePoint{})
-		}
-		if len(errs.passed) > 0 {
-			passed = append(passed, changePoint{})
-		}
+		errs := g.changeErrorsOfUse(v.Root, use, hiddenSeen)
+		hiddenUnread = hiddenUnread || len(errs.unread) > 0
+		hiddenPassed = hiddenPassed || len(errs.passed) > 0
+	}
+	if hiddenUnread {
+		unread = append(unread, changePoint{})
+	}
+	if hiddenPassed {
+		passed = append(passed, changePoint{})
 	}
 	for _, first := range unread {
 		repeats := first.block == nil || def == nil || useRepeatsAfter(g.cfg, first.block, def)
@@ -342,8 +352,9 @@ type changePoint struct {
 // on the result of the one before, as in q.Where("a").Find(&x).Error (see
 // changeErrorsOfValue). A use moved to the call site of its closure (#68) is
 // read at its own call. A use that is an argument passes the error on only
-// when the call it is passed to may (see changeRefPassesError).
-func (g *Generator) changeErrorsOfUse(root ssa.Value, use pollution.UsageInfo) changeUseErrors {
+// when the call it is passed to may (see changeRefPassesError). seen holds
+// the values walked so far, shared by the uses of one root.
+func (g *Generator) changeErrorsOfUse(root ssa.Value, use pollution.UsageInfo, seen map[changeSeen]bool) changeUseErrors {
 	pos := use.Pos
 	if use.Method != "" {
 		pos = use.Call
@@ -363,7 +374,7 @@ func (g *Generator) changeErrorsOfUse(root ssa.Value, use pollution.UsageInfo) c
 		// A go or defer statement has no result.
 		return changeUseErrors{}
 	}
-	return g.changeErrorsOfValue(call, changeWalk{seen: make(map[ssa.Value]bool)})
+	return g.changeErrorsOfValue(call, changeWalk{seen: seen})
 }
 
 // changeCallAt returns the call instruction at pos: in block, or in a
@@ -418,10 +429,11 @@ func (g *Generator) changeErrorsOfValue(v ssa.Value, walk changeWalk) changeUseE
 	if walk.depth >= changeErrorsDepth {
 		return changeUseErrors{passed: []changePoint{{}}}
 	}
-	if walk.seen[v] {
+	key := changeSeen{value: v, query: walk.query, far: walk.far}
+	if walk.seen[key] {
 		return changeUseErrors{}
 	}
-	walk.seen[v] = true
+	walk.seen[key] = true
 	if call, ok := v.(*ssa.Call); ok {
 		if site := g.tracer.Site(call); site.IsGormMethod() && typeutil.IsFinisher(site.Method()) {
 			walk.query = true
@@ -453,7 +465,16 @@ type changeWalk struct {
 	query bool
 	depth int
 	far   bool
-	seen  map[ssa.Value]bool
+	seen  map[changeSeen]bool
+}
+
+// changeSeen is a value changeErrorsOfValue walked, with the state it was
+// walked in: a value walked after a query, or as code that runs anywhere,
+// adds points that a walk without them does not.
+type changeSeen struct {
+	value ssa.Value
+	query bool
+	far   bool
 }
 
 // changeRefErrors is what one referrer of a value does with its error (see
