@@ -112,11 +112,21 @@ func TestGormStubFuncsMatchGorm(t *testing.T) {
 	}
 }
 
+// gormStubSessionOmitted are the fields of the real gorm.Session that the
+// stub's Session leaves out, with the reason. None of them makes Session
+// clone the Statement, so the analyzer does not read them.
+var gormStubSessionOmitted = map[string]string{
+	"Logger":  "sets Config.Logger; its type is in gorm's logger package, which the stub does not have",
+	"NowFunc": "sets Config.NowFunc",
+}
+
 // TestGormStubSessionMatchesGorm checks the fields of the stub's Session
-// against the real gorm.Session: each must exist with the same type. Each
-// field that the analyzer reads from a Session literal
-// (internal/ssa/callsite/session.go) must be in the stub, so the tests cover
-// it.
+// against the real gorm.Session: each must exist with the same type, and each
+// field of gorm's must be in the stub or in gormStubSessionOmitted (#351). So
+// a field that gorm adds, which may make Session clone the Statement, fails
+// the test until it is classified. Each field that the analyzer reads from a
+// Session literal (internal/ssa/callsite/session.go) must be in the stub, so
+// the tests cover it.
 func TestGormStubSessionMatchesGorm(t *testing.T) {
 	stub := gormStubStructFields(t, "Session")
 	real := reflect.TypeFor[gorm.Session]()
@@ -127,6 +137,21 @@ func TestGormStubSessionMatchesGorm(t *testing.T) {
 			t.Errorf("the stub's Session has %s, but gorm's does not", name)
 		case f.Type.String() != stub[name]:
 			t.Errorf("Session.%s is %s in gorm but %s in the stub", name, f.Type, stub[name])
+		}
+	}
+	for f := range real.Fields() {
+		_, inStub := stub[f.Name]
+		_, omitted := gormStubSessionOmitted[f.Name]
+		switch {
+		case inStub && omitted:
+			t.Errorf("Session.%s is in the stub and in gormStubSessionOmitted; remove it from gormStubSessionOmitted", f.Name)
+		case !inStub && !omitted:
+			t.Errorf("gorm's Session has %s %s, but the stub's does not; check whether Session clones the Statement for it, then add it to the stub or to gormStubSessionOmitted", f.Name, f.Type)
+		}
+	}
+	for _, name := range slices.Sorted(maps.Keys(gormStubSessionOmitted)) {
+		if _, ok := real.FieldByName(name); !ok {
+			t.Errorf("gormStubSessionOmitted lists %s, but gorm's Session has no such field; remove it", name)
 		}
 	}
 	read := gormSessionFieldsRead(t)

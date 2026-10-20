@@ -39,8 +39,8 @@ func nestedArg(db, base *gorm.DB) {
 func multiBranchReassign(db *gorm.DB) {
 	q := db.Where("base")
 	q.Where("a")
-	q.Where("b").Find(&User{})
-	q.Where("c")
+	q.Where("b").Find(&User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+	q.Where("c")               // want `\*gorm\.DB reused: second branch from mutable root`
 	q.Where("d").Find(&User{}) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 

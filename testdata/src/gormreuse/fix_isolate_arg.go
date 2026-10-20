@@ -16,20 +16,20 @@ func isolateBranchBoth(a, b *gorm.DB) {
 // isolateTwoArgs: one diagnostic stands for both arguments, so its fix
 // isolates both.
 func isolateTwoArgs(a, b *gorm.DB) {
-	isolateBranchBoth(a.Where("a"), b.Where("b")) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of isolateBranchBoth`
+	isolateBranchBoth(a.Where("a"), b.Where("b")) // want `mutable \*gorm\.DB passed to isolateBranchBoth, which has a gormreuse:immutable-param directive`
 }
 
 // isolateDeref: Session binds tighter than *, so the argument is wrapped.
 func isolateDeref(db *gorm.DB) {
 	p := &db
-	isolateBranchBoth(*p, nil) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of isolateBranchBoth`
+	isolateBranchBoth(*p, nil) // want `mutable \*gorm\.DB passed to isolateBranchBoth, which has a gormreuse:immutable-param directive`
 }
 
 // isolateShadowed: the local gorm shadows the import at the argument, so the
 // fix imports gorm.io/gorm under another name (#237).
 func isolateShadowed(db *gorm.DB) {
 	gorm := db.Where("x")
-	isolateBranchBoth(gorm, nil) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of isolateBranchBoth`
+	isolateBranchBoth(gorm, nil) // want `mutable \*gorm\.DB passed to isolateBranchBoth, which has a gormreuse:immutable-param directive`
 }
 
 type isolateRepo struct{}
@@ -42,5 +42,5 @@ func (isolateRepo) apply(db *gorm.DB) {
 
 // isolateMethod: the receiver is not an argument of the call expression.
 func isolateMethod(db *gorm.DB) {
-	isolateRepo{}.apply(db) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of apply`
+	isolateRepo{}.apply(db) // want `mutable \*gorm\.DB passed to apply, which has a gormreuse:immutable-param directive`
 }

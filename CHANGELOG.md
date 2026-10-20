@@ -762,6 +762,7 @@ An exclude rule that matches a message must match the new text. A rule that matc
 | Scopes warning for `WithContext` and `Debug` | `WithContext() in Scopes callback causes ...` | `WithContext() result returned from Scopes callback causes ...` |
 | A variadic `immutable-input` callback (#259) | `unused gormreuse:immutable-input directive: parameter "cbs" is not a function type` | `... parameter "cbs" is variadic; variadic callbacks are not supported` |
 | Reuse | Sometimes `(root at …)` or `(first branch at …)` alone | Always `(root at …, first branch at …)` |
+| A mutable argument to an `immutable-param` function (#351) | `mutable *gorm.DB passed to //gormreuse:immutable-param parameter of apply; ...` | `mutable *gorm.DB passed to apply, which has a gormreuse:immutable-param directive; ...` |
 | Reuse, or an `immutable-param` argument, that may carry `Attrs`, `Assign` or `InstanceSet` (#344) | `...; make the root immutable with .Session(&gorm.Session{})` | `...; a Session would drop its Attrs, Assign or InstanceSet, so ...` |
 
 </details>
@@ -858,5 +859,6 @@ The Go API declares new analyzer dependencies and facts. golangci-lint needs one
 | `Analyzer.Requires` | It lists `ctrlflow.Analyzer` and `inspect.Analyzer`. In 0.22.0 it listed `buildssa.Analyzer` and `inspect.Analyzer`. gormreuse now builds SSA itself, only for a package that reaches `gorm.io/gorm` |
 | `Analyzer.FactTypes` | New. The analyzer exports facts, so a driver that runs it must support facts. The `gormreuse` command, `go vet` and golangci-lint do |
 | golangci-lint | It shows only the first issue on each line by default. gormreuse can report more than one on a line. Set `issues.uniq-by-line: false` to see them all. See the [golangci-lint setup](README.md#golangci-lint) |
+| `-V=full` (#351) | It prints the gormreuse version, as in `gormreuse version devel v0.23.0 buildID=...`. 0.22.0 printed `version devel comments-go-here` |
 
 </details>

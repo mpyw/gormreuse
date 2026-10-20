@@ -9,7 +9,7 @@ import (
 )
 
 // TestIsGeneratedFile checks the generated-file decision on the shapes cmd/cgo
-// writes (#186). TestCgoFiles covers the same through a real cgo build, but it
+// writes (#186). TestAnalyzer covers the same through a real cgo build, but it
 // is skipped without a C compiler.
 func TestIsGeneratedFile(t *testing.T) {
 	t.Parallel()

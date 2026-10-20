@@ -2728,22 +2728,24 @@ Limitations:
 
 <details><summary>The fixture packages</summary>
 
+`TestAnalyzer` checks the `// want` comments of every package directory under `testdata/src` but those in its `wantSkipped` list, which gives the reason for each. So a new fixture package is checked without a change to the tests. The table lists the tests that check more than that.
+
 | Directory under `testdata/src` | Test | Content |
 | --- | --- | --- |
-| `gormreuse/` | `TestAnalyzer`, the golden tests | The main fixtures, one file per topic, named after it (`basic.go`, `evil.go`, `session_alias.go`, `subquery.go`, `fix_*.go`, ...). Each has a `.golden` and a `.diff` |
+| `gormreuse/` | The golden tests | The main fixtures, one file per topic, named after it (`basic.go`, `evil.go`, `session_alias.go`, `subquery.go`, `fix_*.go`, ...). Each has a `.golden` and a `.diff` |
 | `converge/` | `TestFixesConverge` | Code whose fixes must resolve every diagnostic in one pass |
 | `determinism/` | `TestDeterministicDiagnostics` | Several roots reused at one position, and unused directives for the report order |
-| `purelib/`, `externalpure/` | `TestCrossPackageDirectives` | Directives declared in one package and called from another |
-| `filefilter/` | `TestFileFilter` | The `-test` flag and generated files |
-| `ignoretests/` | `TestIgnoreFixWithTestFiles` | Unused ignores in a package with a test file, and which of them get a fix |
+| `purelib/`, `externalpure/` | `TestAnalyzer` | Directives declared in one package and called from another |
+| `filefilter/` | `TestAnalyzer` | The `-test` flag and generated files |
+| `ignoretests/` | `TestIgnoreFixWithTestFiles`. `TestAnalyzer` skips it: a want comment cannot say which variant reports | Unused ignores in a package with a test file, and which of them get a fix |
 | `paramtests/` | `TestParamFixWithTestFiles` | A parameter root in a package with a test file, and which fix it gets |
 | `linedirective/`, `linedirectivedep/` | `TestLineDirective` | `//line` directives |
-| `cgofile/` | `TestCgoFiles` | A cgo package. Skipped without a C compiler |
+| `cgofile/` | `TestAnalyzer` | A cgo package. Skipped without a C compiler |
 | `noimport/`, `aliasimport/` | `TestSuggestedFixesWithImport`, `TestSuggestedFixesWithAlias` | How a fix names `gorm` |
 | `fakegorm/` | | A package that `gormreuse/fix_import_other.go` imports as `gorm` |
 | `gorm.io/gorm/`, `github.com/stretchr/testify/` | | Stubs of the real packages |
 
-Directives across packages are tested by `TestCrossPackageDirectives`. `testdata/src/purelib` declares them, and `testdata/src/externalpure` calls them. Both packages' diagnostics and purelib's facts are checked. `TestCrossPackageFactsE2E` in `cmd/gormreuse` runs the same kind of pair through the built command and through `go vet -vettool`.
+Directives across packages are tested by `TestAnalyzer`. `testdata/src/purelib` declares them, and `testdata/src/externalpure` calls them. Both packages' diagnostics and purelib's facts are checked. `TestCrossPackageFactsE2E` in `cmd/gormreuse` runs the same kind of pair through the built command and through `go vet -vettool`.
 
 </details>
 
@@ -2824,7 +2826,10 @@ Each fixture function marked `[LIMITATION]` under `testdata/src` pins one of the
 - a marked function is not named in this section;
 - a fixture named here (in a Fixtures column, or after "Fixtures:") is not a marked function;
 - a marker comes after the last function of its file, so it marks none;
-- the README's section lacks one of the four kinds below, or one of its tables has a different number of rows.
+- the README's section lacks one of the four kinds below, or a kind has a table in one file only;
+- a table has no rows, or a Markdown row has a different number of cells than its header (escape a `|` in a cell as `\|`);
+- the rows of a table differ from the README's, or are in another order. Each README row starts with a `<!-- fixtures: a, b -->` comment that names the fixtures of this section's row;
+- the README's summary table gives a kind another case count than its table has, or a count for a kind without a table (write `—`).
 
 </details>
 

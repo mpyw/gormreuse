@@ -12,6 +12,12 @@ func Conn(db *gorm.DB) *gorm.DB {
 	return db.Session(&gorm.Session{})
 }
 
+// ConnVia is inferred immutable-return from Conn's contract, so it is
+// distrusted when Conn is.
+func ConnVia(db *gorm.DB) *gorm.DB {
+	return Conn(db)
+}
+
 // Fresh is inferred immutable-return.
 func Fresh(db *gorm.DB) *gorm.DB {
 	return db.Session(&gorm.Session{})

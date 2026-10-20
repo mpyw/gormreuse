@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"go/ast"
 	"go/token"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
@@ -16,17 +17,49 @@ import (
 	"github.com/mpyw/gormreuse/internal/goldentest"
 )
 
+// wantSkipped are the package directories of testdata/src whose `// want`
+// comments TestAnalyzer does not check, with the reason.
+var wantSkipped = map[string]string{
+	"gorm.io":          "the gorm stub",
+	"github.com":       "stubs of other modules",
+	"fakegorm":         "a dependency of the gormreuse fixtures, with no diagnostics of its own",
+	"linedirectivedep": "a dependency of the linedirective fixtures, with no diagnostics of its own",
+	"panicguard":       "TestPanicInjection checks the diagnostics of each injected panic",
+	"ignoretests":      "a want comment cannot say which variant reports; TestIgnoreFixWithTestFiles checks each variant",
+}
+
+// TestAnalyzer checks the `// want` comments of every package directory of
+// testdata/src but those in wantSkipped, so a new fixture package is checked
+// without a change here (#351). The tests of a package's other behaviour,
+// such as its suggested fixes, run it again. cgofile is skipped when cgo is
+// not available (see cgoUnavailable).
 func TestAnalyzer(t *testing.T) {
 	t.Parallel()
 	testdata := analysistest.TestData()
-	analysistest.Run(t, testdata, gormreuse.Analyzer, "gormreuse")
-}
-
-func TestFileFilter(t *testing.T) {
-	t.Parallel()
-	testdata := analysistest.TestData()
-	// Tests that generated files are skipped
-	analysistest.Run(t, testdata, gormreuse.Analyzer, "filefilter")
+	entries, err := os.ReadDir(filepath.Join(testdata, "src"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pkgs []string
+	for _, e := range entries {
+		if e.IsDir() && wantSkipped[e.Name()] == "" {
+			pkgs = append(pkgs, e.Name())
+		}
+	}
+	if !slices.Contains(pkgs, "gormreuse") {
+		t.Fatalf("packages = %v, want gormreuse among them", pkgs)
+	}
+	for _, pkg := range pkgs {
+		t.Run(pkg, func(t *testing.T) {
+			t.Parallel()
+			if pkg == "cgofile" {
+				if reason := cgoUnavailable(); reason != "" {
+					t.Skip(reason)
+				}
+			}
+			analysistest.Run(t, testdata, gormreuse.Analyzer, pkg)
+		})
+	}
 }
 
 // TestIgnoreFixWithTestFiles checks that an unused ignore in a non-test file
@@ -131,27 +164,6 @@ func TestLineDirective(t *testing.T) {
 	t.Parallel()
 	testdata := analysistest.TestData()
 	analysistest.RunWithSuggestedFixes(t, testdata, gormreuse.Analyzer, "linedirective")
-}
-
-// TestCrossPackageDirectives checks directives declared in one package
-// (purelib) and used from another (externalpure) through the facts that
-// purelib's analysis exports (#195, #197).
-func TestCrossPackageDirectives(t *testing.T) {
-	t.Parallel()
-	testdata := analysistest.TestData()
-	analysistest.Run(t, testdata, gormreuse.Analyzer, "purelib", "externalpure")
-}
-
-// TestCgoFiles verifies that the files of a package that imports "C" are
-// analyzed, and that a file marked generated is still skipped (#186). It needs
-// cgo and a C compiler, and is skipped without them.
-func TestCgoFiles(t *testing.T) {
-	t.Parallel()
-	if reason := cgoUnavailable(); reason != "" {
-		t.Skip(reason)
-	}
-	testdata := analysistest.TestData()
-	analysistest.Run(t, testdata, gormreuse.Analyzer, "cgofile")
 }
 
 // cgoUnavailable returns why the cgofile fixtures cannot be loaded, or "" when

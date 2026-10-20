@@ -116,7 +116,7 @@ func TestCrossPackageFactsE2E(t *testing.T) {
 	// q after the same-line and generic pure calls, are not reported.
 	want := []string{
 		"use.go:26:8: *gorm.DB reused: second branch from mutable root",
-		"use.go:30:18: mutable *gorm.DB passed to //gormreuse:immutable-param parameter of ApplyFilters",
+		"use.go:30:18: mutable *gorm.DB passed to ApplyFilters, which has a gormreuse:immutable-param directive",
 	}
 	for _, tc := range []struct {
 		name string

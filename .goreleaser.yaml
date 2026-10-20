@@ -22,7 +22,8 @@ builds:
       - amd64
       - arm64
     ldflags:
-      - -s -w
+      # main.version is what -V=full prints.
+      - -s -w -X main.version=v{{ .Version }}
 
 archives:
   - id: default

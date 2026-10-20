@@ -3,7 +3,9 @@ package internal_test
 import (
 	"fmt"
 	"maps"
+	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -22,6 +24,10 @@ import (
 // reported redundant, and a panic in the work that reads the whole package
 // infers, exempts and exports nothing it could not prove.
 //
+// Every stage that the source runs under the guard has a case (#351). The
+// distrust stage runs only for a function that depends on a distrusted one,
+// so its case also makes the check of that one panic.
+//
 // It does not run in parallel: InjectGuardPanic sets what every analysis in
 // the test binary runs.
 func TestPanicInjection(t *testing.T) {
@@ -38,11 +44,12 @@ func TestPanicInjection(t *testing.T) {
 		internalError = "gormreuse: internal error"
 	)
 	baseFacts := map[string]string{
-		"Peek":   pureFact,
-		"Conn":   inferredFact,
-		"Fresh":  inferredFact,
-		"Each":   inputFact,
-		"Branch": branchFact,
+		"Peek":    pureFact,
+		"Conn":    inferredFact,
+		"ConnVia": inferredFact,
+		"Fresh":   inferredFact,
+		"Each":    inputFact,
+		"Branch":  branchFact,
 	}
 	with := func(changes map[string]string) map[string]string {
 		facts := maps.Clone(baseFacts)
@@ -57,28 +64,48 @@ func TestPanicInjection(t *testing.T) {
 	}
 	tests := []struct {
 		stage, fn string
+		// seed, when set, is a function whose immutable-return check panics
+		// too, so that the functions that depend on it are checked again in
+		// the distrust stage.
+		seed string
 		// wantDiags are the substrings of the diagnostics, one each.
 		wantDiags []string
 		wantFacts map[string]string
 	}{
-		{"", "", nil, baseFacts},
-		{"pure", "Peek", []string{internalError + " analyzing Peek", reused}, with(map[string]string{"Peek": "gormreuse pure pure-failed"})},
-		{"immutable-return", "Conn", []string{internalError + " analyzing Conn"}, with(map[string]string{"Conn": ""})},
-		{"immutable-input", "Each", []string{internalError + " analyzing Each"}, with(map[string]string{"Each": ""})},
-		{"immutable-param", "Branch", []string{internalError + " analyzing Branch"}, baseFacts},
-		{"immutable-return inference", "", []string{internalError + " in immutable-return inference"}, with(map[string]string{"Fresh": ""})},
-		{"Scopes callbacks", "", []string{internalError + " in Scopes callbacks"}, baseFacts},
-		{"immutable callbacks", "", []string{internalError + " in immutable callbacks", reused}, baseFacts},
-		{"Scopes warnings", "", []string{internalError + " in Scopes warnings"}, baseFacts},
-		{"distrusted contracts", "", []string{internalError + " in distrusted contracts"}, with(map[string]string{"Conn": "", "Fresh": "", "Each": ""})},
-		{"function variables", "", []string{internalError + " in function variables"}, baseFacts},
-		{"unused immutable-input", "", []string{internalError + " in unused immutable-input"}, baseFacts},
-		{"directive reports", "", []string{internalError + " in directive reports"}, baseFacts},
-		{"unused ignores", "", []string{internalError + " in unused ignores"}, baseFacts},
+		{"", "", "", nil, baseFacts},
+		{"pure", "Peek", "", []string{internalError + " analyzing Peek", reused}, with(map[string]string{"Peek": "gormreuse pure pure-failed"})},
+		{"immutable-return", "Conn", "", []string{internalError + " analyzing Conn"}, with(map[string]string{"Conn": "", "ConnVia": ""})},
+		{"immutable-input", "Each", "", []string{internalError + " analyzing Each"}, with(map[string]string{"Each": ""})},
+		{"immutable-param", "Branch", "", []string{internalError + " analyzing Branch"}, baseFacts},
+		{"reuse", "usePeek", "", []string{internalError + " analyzing usePeek"}, baseFacts},
+		{"facts", "Conn", "", []string{internalError + " analyzing Conn"}, with(map[string]string{"Conn": ""})},
+		{"distrust", "ConnVia", "Conn", []string{internalError + " analyzing Conn", internalError + " analyzing ConnVia"}, with(map[string]string{"Conn": "", "ConnVia": ""})},
+		{"immutable-return inference", "", "", []string{internalError + " in immutable-return inference"}, with(map[string]string{"Fresh": "", "ConnVia": ""})},
+		{"Scopes callbacks", "", "", []string{internalError + " in Scopes callbacks"}, baseFacts},
+		{"immutable callbacks", "", "", []string{internalError + " in immutable callbacks", reused}, baseFacts},
+		{"Scopes warnings", "", "", []string{internalError + " in Scopes warnings"}, baseFacts},
+		{"distrusted contracts", "", "", []string{internalError + " in distrusted contracts"}, with(map[string]string{"Conn": "", "ConnVia": "", "Fresh": "", "Each": ""})},
+		{"function variables", "", "", []string{internalError + " in function variables"}, baseFacts},
+		{"unused immutable-input", "", "", []string{internalError + " in unused immutable-input"}, baseFacts},
+		{"directive reports", "", "", []string{internalError + " in directive reports"}, baseFacts},
+		{"unused ignores", "", "", []string{internalError + " in unused ignores"}, baseFacts},
+	}
+	tested := make(map[string]bool)
+	for _, tt := range tests {
+		tested[tt.stage] = true
+	}
+	for _, stage := range guardedStages(t) {
+		if !tested[stage] {
+			t.Errorf("stage %q has no case", stage)
+		}
 	}
 	for _, tt := range tests {
 		t.Run(fmt.Sprintf("%s/%s", tt.stage, tt.fn), func(t *testing.T) {
-			restore := internal.InjectGuardPanic(tt.stage, tt.fn)
+			panics := map[string]string{tt.stage: tt.fn}
+			if tt.seed != "" {
+				panics["immutable-return"] = tt.seed
+			}
+			restore := internal.InjectGuardPanic(panics)
 			defer restore()
 
 			// The fixture has no expectations, so analysistest would report
@@ -116,4 +143,34 @@ func TestPanicInjection(t *testing.T) {
 			}
 		})
 	}
+}
+
+// guardedStage matches the stage of a call of panicGuard.run or runPackage.
+var guardedStage = regexp.MustCompile(`\.run(?:Package)?\("([^"]+)"`)
+
+// guardedStages returns the stages that the files of this package run under
+// the guard.
+func guardedStages(t *testing.T) []string {
+	t.Helper()
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stages []string
+	for _, file := range files {
+		if strings.HasSuffix(file, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, m := range guardedStage.FindAllStringSubmatch(string(src), -1) {
+			stages = append(stages, m[1])
+		}
+	}
+	if len(stages) == 0 {
+		t.Fatal("found no guarded stage")
+	}
+	return stages
 }
