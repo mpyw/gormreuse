@@ -12,9 +12,11 @@ import (
 // A function without //gormreuse:immutable-return is treated as if it had the
 // directive when every *gorm.DB it returns is provably immutable: the nil
 // constant, a Session, WithContext, Debug, Begin or gorm.Open result, or the
-// result of another immutable-return function, declared or inferred. Anything
-// the analyzer cannot prove leaves the function unmarked, so its result stays
-// a mutable root.
+// result of another immutable-return function, declared or inferred. So is a
+// value that reuse detection reads as immutable: a field read through a
+// parameter, a package-level variable, or a local variable assigned once
+// (#308). Anything the analyzer cannot prove leaves the function unmarked, so
+// its result stays a mutable root.
 // =============================================================================
 
 type inferredRepo struct {
@@ -29,6 +31,18 @@ func inferredWithContext(r *inferredRepo) {
 	q := r.conn(context.Background())
 	q.Where("a").Find(nil)
 	q.Where("b").Find(nil) // OK: conn is inferred
+}
+
+// inferredField returns a field read through its parameter, which reuse
+// detection treats as immutable where it is read (#308).
+func inferredField(r *inferredRepo) *gorm.DB {
+	return r.db
+}
+
+func inferredFieldUse(r *inferredRepo) {
+	q := inferredField(r)
+	q.Find(nil)
+	q.Find(nil) // OK: inferredField is inferred
 }
 
 func inferredMethodValue(r *inferredRepo) {
@@ -201,10 +215,6 @@ func notInferredParam(db *gorm.DB) *gorm.DB {
 	return db
 }
 
-func notInferredField(r *inferredRepo) *gorm.DB {
-	return r.db
-}
-
 func notInferredOneEdge(db *gorm.DB, c bool) *gorm.DB {
 	if c {
 		return db.Session(&gorm.Session{})
@@ -249,12 +259,6 @@ func notInferredConfigUse(db *gorm.DB, cfg *gorm.Session) {
 
 func notInferredParamUse() {
 	q := notInferredParam(DB)
-	q.Find(nil)
-	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
-}
-
-func notInferredFieldUse(r *inferredRepo) {
-	q := notInferredField(r)
 	q.Find(nil)
 	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }

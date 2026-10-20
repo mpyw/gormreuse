@@ -15,7 +15,7 @@ gormreuse now follows a `*gorm.DB` through far more code. It also reads directiv
 | --- | --- |
 | More code is followed | Loops, closures that run more than once, `go`/`defer`, method values, method expressions, struct fields, package-level variables and helper results |
 | Directives across packages | A directive on an exported function applies in the packages that call it. It travels as an analysis fact, so a broken contract is not trusted there |
-| Inferred `immutable-return` | A helper whose body returns only `Session`, `WithContext`, `Debug`, `Begin`, `gorm.Open` or `nil` needs no directive |
+| Inferred `immutable-return` | A helper whose body returns only `Session`, `WithContext`, `Debug`, `Begin`, `gorm.Open` or `nil` needs no directive. So does a getter of a field or a package-level variable |
 | Safer `-fix` | Every fix compiles, alone or with the others. A fix never drops a condition. When it cannot keep every condition, there is no fix |
 
 On gorm's own repository (v1.31.2), the totals barely move. Some reports go and others come:
@@ -23,9 +23,9 @@ On gorm's own repository (v1.31.2), the totals barely move. Some reports go and 
 | Module | 0.22.0 | 0.23.0 | Removed | Added |
 | --- | --- | --- | --- | --- |
 | Root | 151 | 150 | 6 | 5 |
-| `tests` | 15 | 15 | 1 | 1 |
+| `tests` | 15 | 14 | 2 | 1 |
 
-Most added reports in the root module are a `*gorm.DB` parameter branched in a loop. In `tests`, the added report is a `Connection` callback, and the removed one is a Scopes warning on a `WithContext` that the callback does not return.
+Most added reports in the root module are a `*gorm.DB` parameter branched in a loop. In `tests`, the added report is a `Connection` callback. The removed ones are two Scopes warnings: a `WithContext` that the callback does not return, and a `Session` whose chain ends in `Find`.
 
 ### New diagnostics
 
@@ -44,7 +44,7 @@ Most added reports in the root module are a `*gorm.DB` parameter branched in a l
 | A package-level variable stored and reused in one function (#183) | `G = db.Where("t"); G.Find(&a); G.Find(&b)` | Store an isolated value |
 | Reuse through a method value or a method expression (#178, #258) | `find := q.Find; find(&a); find(&b)` | As for the direct call |
 | A named callback that is also called directly or exported (#191) | `db.Transaction(txBody)` and `txBody(q)` | Its parameter is mutable again. Mark the function `//gormreuse:immutable-param`, or stop calling it directly |
-| A `pure` function that pollutes its argument in more ways (#187) | `go db.Find(nil)`, `same(db).Find(nil)`, `h.db = db` | Fix the function, or remove `pure` |
+| A `pure` function that pollutes its argument in more ways (#187, #308) | `go db.Find(nil)`, `same(db).Find(nil)`, `h.db = db`, `get := func() *gorm.DB { return db }; func() { get().Where("x") }()` | Fix the function, or remove `pure` |
 | An `immutable-input` callback that escapes (#193) | `forward(cb, db)` | The message is `callback cb escapes (...)`. Pass the callback only to another `immutable-input` function or to `Transaction` |
 | A variadic `immutable-input` callback (#259) | `//gormreuse:immutable-input(cbs)` on `cbs ...func(*gorm.DB)` | Reported unused. Delete the directive |
 | `immutable-param` caller contract in more calls (#192, #195, #258) | `go apply(q)`, `defer apply(q)`, `pkg.Apply(q)`, `Repo.apply(r, q)` | `-fix` appends `.Session(&gorm.Session{})` to the argument |
@@ -62,6 +62,9 @@ Most added reports in the root module are a `*gorm.DB` parameter branched in a l
 | --- | --- |
 | A subquery passed to several queries (#185) | `db.Where("id IN (?)", sub).Find(&a); db.Where("id NOT IN (?)", sub).Find(&b)` |
 | A Scopes callback that uses `Session`, `WithContext` or `Debug` without returning it (#196) | `db.Scopes(func(q *gorm.DB) *gorm.DB { q.Session(s).Find(&x); return q })` |
+| A Scopes callback that returns a `Session` result, when every chain from the `Scopes` call ends in a read such as `Find` or `Count` (#308) | `db.Scopes(func(q *gorm.DB) *gorm.DB { return q.Session(s) }).Find(&x)` |
+| The result of a getter of a field or a package-level variable, branched twice (#308) | `d := r.DB(); d.Find(&a); d.Count(&n)` |
+| The result of a closure that returns an immutable captured value (#308) | `get := func() *gorm.DB { return conn }; d := get(); d.Find(&a); d.Count(&n)` |
 | Uses on paths that cannot both run, through a closure (#179) | `if c { f() } else { q.Count(&n) }` |
 | A captured parameter rebound before the closure runs (#251) | `db = db.WithContext(ctx); func() { db.Find(&x) }()` |
 | A closure that builds a new chain on each call (#251) | `base := func() *gorm.DB { return db.Model(&User{}) }`, called twice |

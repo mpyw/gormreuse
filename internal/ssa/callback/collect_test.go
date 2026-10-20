@@ -111,7 +111,7 @@ func TestCollectScopesOnlyCallbacks(t *testing.T) {
 			srcFuncs = append(srcFuncs, fn)
 		}
 	}
-	set := CollectScopesOnlyCallbacks(srcFuncs, callsite.FuncVars{})
+	set := CollectScopesOnlyCallbacks(srcFuncs, callsite.FuncVars{}, nil)
 	names := make(map[string]bool)
 	for fn := range set {
 		names[fn.String()] = true

@@ -722,6 +722,28 @@ var growthCases = []growthCase{
 		}
 		return []string{b.String()}
 	}},
+	// n getters of a field, each result reused (#308: inferred from the
+	// field read).
+	{name: "getters", limit: growthLinear, shape: func(n int) []string {
+		var b strings.Builder
+		b.WriteString("type repo struct{ db *gorm.DB }\n\n")
+		for i := range n {
+			fmt.Fprintf(&b, "func (r *repo) g%d() *gorm.DB { return r.db }\n\nfunc u%d(r *repo) { q := r.g%d(); q.Find(nil); q.Find(nil) }\n\n", i, i, i)
+		}
+		return []string{b.String()}
+	}},
+	// A chain of n closures, each returning the call of the one before it,
+	// the first one a captured immutable value, the last one's result
+	// reused (#308: closureReturnsImmutable and inference).
+	{name: "closuregetters", limit: growthLinear, shape: func(n int) []string {
+		var b strings.Builder
+		b.WriteString("func f(db *gorm.DB) {\n\tconn := db.Session(&gorm.Session{})\n\tg0 := func() *gorm.DB { return conn }\n")
+		for i := 1; i < n; i++ {
+			fmt.Fprintf(&b, "\tg%d := func() *gorm.DB { return g%d() }\n", i, i-1)
+		}
+		fmt.Fprintf(&b, "\td := g%d()\n\td.Find(nil)\n\td.Find(nil)\n}\n", n-1)
+		return []string{b.String()}
+	}},
 	// One package, n files.
 	{name: "files", limit: growthLinear, shape: func(n int) []string {
 		var files []string

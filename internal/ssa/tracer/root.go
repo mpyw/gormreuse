@@ -130,6 +130,8 @@ type RootTracer struct {
 	stores *storeMemo // Memo of the stores that reads see (#325)
 	//declscope:shared // closure.go's closureRunsRepeatedly asks it
 	cfgs *cfg.Analyzer // CFG cache for the Repeats of closures
+	//declscope:shared // closure.go's closureReturnsImmutable fills it
+	immutableClosures map[*ssa.Function]bool // Memo of closureReturnsImmutable (#308)
 }
 
 // NewRootTracer creates a new RootTracer.
@@ -167,6 +169,7 @@ func NewRootTracer(pureFuncs, immutableReturnFuncs, immutableParamFuncs *directi
 		aliases:              make(map[aliasedRootsKey]bool),
 		stores:               newStoreMemo(),
 		cfgs:                 cfg.NewAnalyzer(),
+		immutableClosures:    make(map[*ssa.Function]bool),
 	}
 }
 
@@ -462,6 +465,11 @@ func (t *RootTracer) traceCall(call *ssa.Call, visited map[ssa.Value]bool, loopI
 				return call
 			}
 			return root
+		}
+		// No return of the closure has a root, so neither has the call
+		// (#308). A nil root alone may also mean several roots.
+		if t.closureReturnsImmutable(site.Callee) {
+			return nil
 		}
 	}
 
@@ -814,6 +822,12 @@ func (t *RootTracer) traceAllUnvisited(v ssa.Value, search *allRootsSearch, loop
 					return []ssa.Value{val}
 				}
 				return roots
+			}
+			// Values this search visited before trace to nothing here,
+			// whatever their roots, so only a search of its own tells
+			// that the closure returns no mutable value (#308).
+			if t.closureReturnsImmutable(site.Callee) {
+				return nil
 			}
 		}
 		// Non-closure call - treat as potential root

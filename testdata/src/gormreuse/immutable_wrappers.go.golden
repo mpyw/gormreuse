@@ -1,0 +1,338 @@
+package internal
+
+import (
+	"gorm.io/gorm"
+)
+
+// =============================================================================
+// Wrappers of values the analyzer treats as immutable (#308)
+//
+// A field read through a receiver or a parameter, a package-level variable the
+// function only reads, and a captured variable bound to an immutable value are
+// immutable where they are read. A getter or a closure that only returns such
+// a value is immutable too, so its result can be reused like the value itself.
+// =============================================================================
+
+type iwRepo struct {
+	db    *gorm.DB
+	inner iwInner
+	ptr   *iwInner
+}
+
+type iwInner struct{ db *gorm.DB }
+
+// --- 1. getters of a field ---
+
+func (r *iwRepo) DB() *gorm.DB { return r.db } // want DB:"gormreuse immutable-return"
+
+func (r iwRepo) ValueDB() *gorm.DB { return r.db } // want ValueDB:"gormreuse immutable-return"
+
+func (r *iwRepo) InnerDB() *gorm.DB { return r.inner.db } // want InnerDB:"gormreuse immutable-return"
+
+func (r *iwRepo) PtrDB() *gorm.DB { return r.ptr.db } // want PtrDB:"gormreuse immutable-return"
+
+func iwFieldOf(r *iwRepo) *gorm.DB { return r.db }
+
+func iwFieldDirect(r *iwRepo) {
+	r.db.Find(nil)
+	r.db.Count(nil) // OK: a field read through a parameter is immutable
+}
+
+func iwGetter(r *iwRepo) {
+	d := r.DB()
+	d.Find(nil)
+	d.Count(nil) // OK: DB returns the field, as iwFieldDirect reads it
+}
+
+func iwGetterValueReceiver(r iwRepo) {
+	d := r.ValueDB()
+	d.Find(nil)
+	d.Count(nil) // OK: the same through a value receiver
+}
+
+func iwGetterNested(r *iwRepo) {
+	d := r.InnerDB()
+	d.Find(nil)
+	d.Count(nil) // OK: a nested field
+	p := r.PtrDB()
+	p.Find(nil)
+	p.Count(nil) // OK: a field behind a pointer field
+}
+
+func iwGetterFunc(r *iwRepo) {
+	d := iwFieldOf(r)
+	d.Find(nil)
+	d.Count(nil) // OK: a plain function reading a parameter's field
+}
+
+// iwGetterChained returns a chain on the field, which is mutable.
+func (r *iwRepo) iwGetterChained() *gorm.DB { return r.db.Where("x") }
+
+func iwGetterChainedReused(r *iwRepo) {
+	d := r.iwGetterChained().Session(&gorm.Session{})
+	d.Find(nil)
+	d.Count(nil) // want `second branch from mutable root`
+}
+
+// iwStoredRepo's field is assigned a chain in the package, so no getter of it
+// is inferred: a caller may call the getter after the assignment.
+type iwStoredRepo struct{ db *gorm.DB }
+
+func (r *iwStoredRepo) iwFilter() { r.db = r.db.Where("x") }
+
+func (r *iwStoredRepo) iwGet() *gorm.DB { return r.db }
+
+func iwStoredGetterReused(r *iwStoredRepo) {
+	r.iwFilter()
+	d := r.iwGet().Session(&gorm.Session{})
+	d.Find(nil)
+	d.Count(nil) // want `second branch from mutable root`
+}
+
+// iwGetterAfterStore returns the field after storing a chain into it, which
+// the function's own store decides.
+func (r *iwStoredRepo) iwGetterAfterStore() *gorm.DB {
+	r.db = r.db.Session(&gorm.Session{}).Where("x")
+	return r.db
+}
+
+func iwGetterAfterStoreReused(r *iwStoredRepo) {
+	d := r.iwGetterAfterStore().Session(&gorm.Session{})
+	d.Find(nil)
+	d.Count(nil) // want `second branch from mutable root`
+}
+
+type iwLocal struct{ db *gorm.DB }
+
+// iwLocalStruct returns the field of a struct it built from a chain.
+func iwLocalStruct(db *gorm.DB) *gorm.DB {
+	s := &iwLocal{db: db.Where("x")}
+	return s.db
+}
+
+func iwLocalStructReused(db *gorm.DB) {
+	d := iwLocalStruct(db).Session(&gorm.Session{})
+	d.Find(nil)
+	d.Count(nil) // want `second branch from mutable root`
+}
+
+// iwConn's getters store into the field before they read it, and the store
+// decides.
+type iwConn struct{ db *gorm.DB }
+
+func iwOpen() *gorm.DB { return iwGlobal }
+
+func (c *iwConn) iwConnReset() *gorm.DB {
+	c.db = iwOpen()
+	return c.db
+}
+
+func iwConnResetReused(c *iwConn) {
+	d := c.iwConnReset()
+	d.Find(nil)
+	d.Count(nil) // OK: the stored value is iwOpen's, which is inferred
+}
+
+func (c *iwConn) iwConnSet(db *gorm.DB) *gorm.DB {
+	c.db = db
+	return c.db
+}
+
+func iwConnSetReused(c *iwConn, db *gorm.DB) {
+	d := c.iwConnSet(db.Session(&gorm.Session{})).Session(&gorm.Session{})
+	d.Find(nil)
+	d.Count(nil) // want `second branch from mutable root`
+}
+
+// iwSwap reads the field of a copy that it assigns twice.
+func (r iwRepo) iwSwap(o iwRepo) *gorm.DB {
+	r = o
+	return r.db
+}
+
+func iwSwapReused(r, o iwRepo) {
+	d := r.iwSwap(o).Session(&gorm.Session{})
+	d.Find(nil)
+	d.Count(nil) // want `second branch from mutable root`
+}
+
+func iwMkLocal(db *gorm.DB) *iwLocal { return &iwLocal{db: db} }
+
+// iwCallField reads the field of a struct a call returned.
+func iwCallField(db *gorm.DB) *gorm.DB { return iwMkLocal(db).db }
+
+func iwCallFieldReused(db *gorm.DB) {
+	d := iwCallField(db.Session(&gorm.Session{})).Session(&gorm.Session{})
+	d.Find(nil)
+	d.Count(nil) // want `second branch from mutable root`
+}
+
+// iwRecv returns what a channel receive gives.
+func iwRecv(ch chan *gorm.DB) *gorm.DB { return <-ch }
+
+func iwRecvReused(ch chan *gorm.DB) {
+	d := iwRecv(ch).Session(&gorm.Session{})
+	d.Find(nil)
+	d.Count(nil) // want `second branch from mutable root`
+}
+
+// iwRecvField reads a field of a struct a channel receive gives.
+func iwRecvField(ch chan *iwLocal) *gorm.DB { return (<-ch).db }
+
+func iwRecvFieldReused(ch chan *iwLocal) {
+	d := iwRecvField(ch).Session(&gorm.Session{})
+	d.Find(nil)
+	d.Count(nil) // want `second branch from mutable root`
+}
+
+func iwClosureCapturedRepo(r *iwRepo) {
+	get := func() *gorm.DB { return r.db }
+	d := get()
+	d.Find(nil)
+	d.Count(nil) // OK: get reads a field through the captured parameter
+}
+
+// iwParamReturned returns its parameter, which a caller may pass mutable.
+func iwParamReturned(db *gorm.DB) *gorm.DB { return db }
+
+func iwParamReturnedReused(db *gorm.DB) {
+	d := iwParamReturned(db).Session(&gorm.Session{})
+	d.Find(nil)
+	d.Count(nil) // want `second branch from mutable root`
+}
+
+// --- 1b. getters of a package-level variable ---
+
+var iwGlobal *gorm.DB
+
+func iwGlobalGetter() *gorm.DB { return iwGlobal }
+
+func iwGlobalDirect() {
+	iwGlobal.Find(nil)
+	iwGlobal.Count(nil) // OK: a global the function only reads
+}
+
+func iwGlobalGetterReused() {
+	d := iwGlobalGetter()
+	d.Find(nil)
+	d.Count(nil) // OK: the getter only reads the global
+}
+
+// iwGlobalChained is only ever assigned a chain, so the immutable-return body
+// check would reject a getter of it, and inference does not accept it.
+var iwGlobalChained *gorm.DB
+
+func iwSetGlobalChained(db *gorm.DB) { iwGlobalChained = db.Where("x") }
+
+func iwGlobalChainedGetter() *gorm.DB { return iwGlobalChained }
+
+func iwGlobalChainedGetterReused() {
+	d := iwGlobalChainedGetter().Session(&gorm.Session{})
+	d.Find(nil)
+	d.Count(nil) // want `second branch from mutable root`
+}
+
+// iwEscaped's address escapes, so a store through it may assign anything.
+var iwEscaped *gorm.DB
+
+func iwEscapedAddr() **gorm.DB { return &iwEscaped }
+
+func iwEscapedGetter() *gorm.DB { return iwEscaped }
+
+func iwEscapedGetterReused() {
+	d := iwEscapedGetter().Session(&gorm.Session{})
+	d.Find(nil)
+	d.Count(nil) // want `second branch from mutable root`
+}
+
+// --- 2. closures returning a captured immutable binding ---
+
+func iwClosureCaptured(db *gorm.DB) {
+	conn := db.Session(&gorm.Session{})
+	get := func() *gorm.DB { return conn }
+	d := get()
+	d.Find(nil)
+	d.Count(nil) // OK: get returns conn, which is immutable
+}
+
+func iwClosureCapturedField(r *iwRepo) {
+	conn := r.db
+	get := func() *gorm.DB { return conn }
+	get().Find(nil)
+	get().Count(nil) // OK
+	d := get()
+	d.Find(nil)
+	d.Count(nil) // OK
+}
+
+func iwClosureIIFECaptured(db *gorm.DB) {
+	conn := db.Session(&gorm.Session{})
+	q := func() *gorm.DB { return conn }()
+	q.Find(nil)
+	q.Count(nil) // OK: the IIFE returns conn
+}
+
+// iwClosureCapturedTxParam: tx is immutable in a Transaction callback, but no
+// body proves a parameter immutable, so get is not inferred. The tracer finds
+// no root in any of get's returns, and that makes its calls immutable.
+func iwClosureCapturedTxParam(db *gorm.DB) {
+	_ = db.Transaction(func(tx *gorm.DB) error {
+		get := func() *gorm.DB { return tx }
+		d := get()
+		d.Find(nil)
+		d.Count(nil) // OK
+		q := func() *gorm.DB { return tx }()
+		q.Find(nil)
+		q.Count(nil) // OK
+		return nil
+	})
+}
+
+//gormreuse:immutable-param
+func iwClosureCapturedParam(db *gorm.DB) {
+	get := func() *gorm.DB { return db }
+	d := get()
+	d.Find(nil)
+	d.Count(nil) // want `second branch from mutable root`
+}
+
+func iwClosureCapturedChain(db *gorm.DB) {
+	conn := db.Where("x").Session(&gorm.Session{})
+	get := func() *gorm.DB { return conn }
+	d := get()
+	d.Find(nil)
+	d.Count(nil) // want `second branch from mutable root`
+}
+
+func iwClosureCapturedReassigned(db *gorm.DB, c bool) {
+	conn := db.Session(&gorm.Session{})
+	if c {
+		conn = conn.Where("x")
+	}
+	get := func() *gorm.DB { return conn }
+	d := get().Session(&gorm.Session{})
+	d.Find(nil)
+	d.Count(nil) // want `second branch from mutable root`
+}
+
+func iwClosureSeveralRoots(db *gorm.DB, c bool) {
+	s := db.Session(&gorm.Session{})
+	a := s.Where("a")
+	b := s.Where("b")
+	q := func() *gorm.DB {
+		if c {
+			return a
+		}
+		return b
+	}().Session(&gorm.Session{})
+	q.Find(nil)
+	q.Count(nil) // want `second branch from mutable root`
+}
+
+// --- 2b. a pure function calling a closure that returns its parameter ---
+
+//gormreuse:pure
+func iwPureClosureReturnsParam(db *gorm.DB) {
+	get := func() *gorm.DB { return db }
+	func() { get().Where("x") }() // want `pure function pollutes \*gorm\.DB argument by calling Where`
+}

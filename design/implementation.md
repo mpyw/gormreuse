@@ -793,7 +793,7 @@ A root defined in another function, such as an enclosing function's root used in
 Decisions and limitations:
 
 - No fix is suggested for a `FieldRoot`. `Session()` cannot be appended to a call that returns a struct. It belongs where the function builds the struct.
-- A field read through a parameter or a receiver is still not a mutable root, whether the struct is passed by value or by pointer. That trade-off is unchanged.
+- A field read through a parameter or a receiver is still not a mutable root, whether the struct is passed by value or by pointer. That trade-off is unchanged. Since #308 a getter that returns such a field is inferred `immutable-return`, so `d := r.DB()` is read like `r.db` ([Inferred immutable-return](#inferred-immutable-return-261)).
 - A write to a returned struct inside another function (`p.Reset()`, `reset(&s)`) is not seen. A later read still sees the call's field, so it can be reported though the field was replaced. A closure capturing such a parameter sees only the stores in the enclosing function, as the function itself does.
 - A captured pointer variable is resolved by its stores in program order: the single-root trace takes the first pointer stored into it. After `h = &T{q: b}`, a use of `h.q` can still be matched to the first value, and a store through `h` is not matched to either pointer. A captured `*gorm.DB` variable is now read by the stores that reach the read instead ([Reassigned captured variables](#closure-uses-68-179)). With one pointer ever stored, the fields are read the same way (#303).
 - A struct value that a Phi merges (`e := E{a}; if c { e = E{b} }`) yields the field of every edge. The single-root trace takes the first edge, so the suggested fix makes only that edge immutable. A struct from a channel receive, or a map or slice element, is not followed.
@@ -848,6 +848,27 @@ Limitations:
 - A variable that a branch assigns (`if c { f = g }`) or that a closure assigns stays dynamic, as before.
 - A closure that is stored in a variable read every store of a captured, reassigned variable until #303. It now reads the stores that reach its `MakeClosure` or run after it, so after `db = db.Session(&gorm.Session{})`, a factory `base := func() *gorm.DB { return db.Model(nil) }` that an IIFE also calls is a factory again (`cfvFactoryReassigned`).
 
+### Closures that return an immutable value (#308)
+
+A call of a function literal is traced into its returns (`traceClosureReturns`). It gave a nil root both when no return had a root and when the returns had several roots, and `traceCall` then made the call a mutable root in both cases. So `get := func() *gorm.DB { return conn }`, with `conn` immutable, made `d := get(); d.Find(nil); d.Count(nil)` a report.
+
+`closureReturnsImmutable` now tells the two apart. It searches each return of the closure with `FindAllMutableRoots`, and the closure returns no mutable value when it has a `*gorm.DB` return and none of them has a root. Then `traceCall` and `traceAll` give the call no root.
+
+| Closure | Call |
+| --- | --- |
+| Returns a captured value with no root, such as a `Transaction` callback's `tx` | No root |
+| Returns a captured value with roots, or a parameter | Its own root, or the returned root for an IIFE chain, as before |
+| Returns one of several roots | Its own root, as before |
+| Has no return, or only panics | Its own root, as before |
+
+Decisions:
+
+- **A search of its own.** The single-root trace follows only the first store into a variable, so a nil from it does not prove that there is no root (`iwClosureCapturedReassigned`). `traceAll` shares its `visited` set with the rest of the search, and a value it has visited traces to nothing there, whatever its roots. So each return is searched afresh, and the answer is kept per closure.
+- **Recursion.** A closure being checked counts as returning a mutable value, so a recursive closure ends and its calls stay roots, as before.
+- **Inference does the rest.** Most such closures are also [inferred](#inferred-immutable-return-261) `immutable-return` since #308, which covers calls the tracer reads through `returnsImmutable`. The search here also covers values that no body proves immutable, such as an exempt callback parameter.
+
+`TestAllocationGrowth` (`closuregetters`) holds a chain of `n` closures, each returning the call of the one before it, to linear growth.
+
 ## Pure Contract Validation
 
 `purity.Validator` checks the body of every `//gormreuse:pure` function. It follows "parameter-derived" values and reports when one is polluted or escapes.
@@ -857,7 +878,7 @@ Limitations:
 | Seed | Every parameter whose type holds a `*gorm.DB` without going through an interface: `*gorm.DB`, `**gorm.DB`, `[]*gorm.DB` (variadic too), maps, channels, arrays, and structs with such a field. A method's receiver is not seeded. |
 | Propagate | Through Phi, Extract, call results, loads (`*p`), channel receives, `FieldAddr`/`Field`/`IndexAddr`/`Index`/`Lookup`/`Slice`, conversions, range iteration, and stores into a local `Alloc` (`p := &db`, `h := holder{db: db}`). It repeats until nothing changes, so loop Phis and later stores are seen. |
 | Call results | The result of a gorm chain method on a derived receiver, or of a call that is not trusted as pure with a derived argument, is derived. So is the result of a closure that returns a derived value it captures (`func() *gorm.DB { return db }()`), and of a trusted pure function when one of the parameters it may return (`ReturnedParams`) gets a derived argument. Session, WithContext, Debug and `immutable-return` functions return a fresh handle, so their results are not derived. |
-| Closures | A `MakeClosure` whose bindings are derived seeds the closure's free variables and validates the closure body as part of the pure function (IIFE, `go func(){...}()`, stored closures). |
+| Closures | A `MakeClosure` whose bindings are derived seeds the closure's free variables and validates the closure body as part of the pure function (IIFE, `go func(){...}()`, stored closures). The `MakeClosure` is derived itself (#308). Stored in a variable that another closure captures, it makes that variable derived, so a call of it there is seen: `get := func() *gorm.DB { return db }; func() { get().Where("x") }()` is reported. A call through the variable is read as the call of the closure it holds (`FuncVars.LocalValue`, [Local function variables](#local-function-variables-304)). |
 | Check | `Call`, `Go` and `Defer` share one check. `*gorm.DB` method values (`Find$bound`) are checked where they are created. Stores outside local variables and `pollutionsource.Leak` cover escapes. |
 
 A violation is **definitive** (`Violation.Definitive`) when the argument is polluted by a gorm chain method, escapes, or is passed to a pure function that already failed. Only definitive violations put the function in `PureVerdicts.Failed`, which makes the tracer stop trusting it at call sites. Passing the argument to a function that is not marked pure stays conservative and does not revoke trust (`nestedClosureOuterPureViolation`, PV117).
@@ -957,7 +978,9 @@ After #227 a helper's result is a mutable root, so on gorm's own `tests` module 
 | --- | --- |
 | A `Call`, or an `Extract` of a tuple `Call` such as `gorm.Open`'s | `RootTracer.IsImmutableCall` accepts it with a tracer that has no immutable-return set: its last call is `Session` (with a config literal whose `Initialized` is known false), `WithContext`, `Debug`, `Begin` or `gorm.Open`. Or the declared callee is trusted (declared, or imported from a fact) or already inferred |
 | The nil constant | Always |
-| Anything else: a parameter, a load of a field, a global or a captured local (a named result a deferred closure writes is one), a dynamic or interface call | Never |
+| A load of a local variable assigned once, such as one a closure captures (#308) | Its stored value is proved (`FuncVars.LocalValue`) |
+| A read of a field through a parameter or a receiver, at any depth of fields and pointer fields, also when a closure captures the parameter, or a read of a package-level variable (#308) | Every store in the function that reaches the read is proved, through the roots `FindAllMutableRoots` finds, and no store in the package assigns the variable a provably mutable value (`ImmutableReturnValidator.AssignedMutable`). With no store, the value is immutable, as reuse detection reads it |
+| Anything else: a parameter, a field of a local struct, a variable assigned more than once (a named result a deferred closure writes is one), a dynamic or interface call | Never |
 
 A function needs at least one such result, so a function that only panics is not inferred. Candidates are the analyzed functions and closures with a body and a `*gorm.DB` result, not in a skipped file, and without the directive.
 
@@ -969,6 +992,9 @@ Decisions:
 - **A declared directive stays used.** An inferable function with the directive is not a candidate, keeps its body check, and its directive is not reported unused or redundant. It documents the intent, and a later change to the body is reported at the declaration instead of turning into reports at the call sites.
 - **`Validate` skips inferred functions.** Their bodies were proved, and a report would say "declared" about a function without the directive.
 - **No `-fix` to insert the directive.** The issue suggested it as an alternative to implicit inference. Inference is the same check the analyzer would make when validating an inserted directive, so inserting it adds a comment and no information.
+- **What detection reads as immutable, inference accepts (#308).** Reuse detection treats a field read through a parameter or a receiver, and a global that the function only reads, as immutable ([Struct roots](#struct-roots-181), [Package-level variables](#package-level-variables-183)). Before #308, inference refused both, so `func (r *Repo) DB() *gorm.DB { return r.db }` made `d := r.DB(); d.Find(nil); d.Count(nil)` a report while `r.db.Find(nil); r.db.Count(nil)` was not one. A wrapper should not change the answer, so inference now accepts the reads that detection accepts. The rule is still a positive proof for everything else: a parameter, a chain and an unknown call stay unproved.
+- **A getter of a variable the package assigns a chain to is not inferred.** A caller may run `r.db = r.db.Where("x")` before `r.DB()`. Detection sees such a store when it is in the reading function, but a getter is trusted at every call site. So inference refuses a read of a field or global that any function of the package, its initializer included, assigns a provably mutable value (`AssignedMutable`). That is the body check's rule for a global, made strict: the body check needs every assignment to be mutable to report, inference refuses on one. A global whose address escapes is refused too. A store in another package, or through a field address passed to a function, is not seen, as for reads in detection.
+- **A captured variable assigned once.** `conn := db.Session(&gorm.Session{}); get := func() *gorm.DB { return conn }` lives in an `Alloc` that the closure reads through a `FreeVar`. `LocalValue` resolves it to the stored value, with the conditions of [Local function variables](#local-function-variables-304). A variable assigned twice, or in a closure, stays unproved even when the tracer finds no root, since the tracer's single-root trace reads only the first store.
 
 Measured with the command on gorm's repository (v1.31.2):
 
@@ -978,6 +1004,17 @@ Measured with the command on gorm's repository (v1.31.2):
 | `tests` | 34 | 15 | 19, all on the result of `OpenTestConnection`, which returns `gorm.Open`'s result or nil |
 
 Each removed report branched a `clone > 0` handle, so none was a real reuse. No report was added.
+
+#308 measured the same repository, and two real services (new-api and gin-vue-admin), before and after:
+
+| Module | Before | After | Removed reports |
+| --- | --- | --- | --- |
+| gorm root | 66 | 66 | none |
+| gorm `tests` | 15 | 14 | the Scopes warning at `scopes_test.go:60`, whose chain ends in `Find` ([Scopes Session-family warning](#scopes-session-family-warning-temporary-196)) |
+| new-api | 34 | 31 | 3 test setup helpers that return `gorm.Open`'s result through a variable that a `t.Cleanup` closure captures |
+| gin-vue-admin | 32 | 32 | none |
+
+Each removed report branched a `clone > 0` handle. No report was added. The counts are diagnostic lines of `gormreuse ./...`, so they differ from the table above.
 
 ## Distrusted contracts (#314)
 
@@ -1400,6 +1437,7 @@ Each fixture function marked `[LIMITATION]` under `testdata/src` pins one of the
 Other limitations have no fixture marker. They are described with their design:
 
 - A call through an exported, reassigned or address-taken `var f = func(...)` does not honour the closure's directives ([Package-level variables](#package-level-variables-183)).
+- A getter of a field or a global is inferred `immutable-return` though another package, or code given the field's address, assigns it a chain ([Inferred immutable-return](#inferred-immutable-return-261)). A direct read of the field misses the same reuse.
 - The limits of `-fix` are in the fix sections, from [Reassignment Fix Target](#reassignment-fix-target) to [Fixes That Compile](#fixes-that-compile-200).
 
 ## Scopes Session-family warning (temporary, #196)
@@ -1414,6 +1452,16 @@ Why only the returned value (checked in `e2e/internal/scopes_session_test.go`):
 
 So `return q.Session(...).Where("x")` is safe, and `return other.Session(...)` leaks even though `other` is not the callback parameter. The issue's suggestion to restrict the warning to values derived from the parameter was wrong; the rule keys off the return value instead.
 
+Only some finishers leak (#308, checked in `e2e/internal/scopes_finisher_test.go`). gorm registers `BeginTransaction` and `CommitOrRollbackTransaction` only for create, update and delete. The query, row and raw callbacks begin no transaction, so a callback that returns a Session result is harmless for `Find`, `Count`, `Pluck`, `Scan` or `Exec`. Before #308 the rule ignored the finisher and reported gorm's own `tests/scopes_test.go:60`, whose chain ends in `Find`.
+
+So a Scopes call is skipped when its chain provably only reads (`scopeswarn.ReadsOnly`): every use of its result, and of each chain method after it, is the receiver of a chain method (the chainable API, `Session`, `WithContext`, `Debug`) or of a finisher that only reads (`Find`, `First`, `Take`, `Last`, `FirstOrInit`, `Count`, `Pluck`, `Scan`, `Row`, `Rows`, `Exec`). `CollectScopesOnlyCallbacks` reads only the other Scopes calls. A callback passed to one Scopes call that may write is still reported.
+
+| Chain from `db.Scopes(cb)` | Reported |
+| --- | --- |
+| `.Where("x").Find(&x)`, `.Count(&n)`, `q := db.Scopes(cb); q.First(&u)` | No |
+| `.Delete(&u)`, `.Update(...)`, `.Create(...)`, `.FirstOrCreate(...)`, `.Save(...)` | Yes |
+| Returned, stored in a field, passed to a function or another method, or discarded | Yes: it may reach a write elsewhere |
+
 How the rule finds its input:
 
 - **Callbacks**: `callback.CollectScopesOnlyCallbacks`, the Scopes half of the collector that reuse detection uses (`resolveMayFuncs`). It follows the varargs array, slice literals, `append`, Phi edges, local, captured and package-level variables, struct fields, and method values (both the `$bound` wrapper and the method). Package-level initializers live in the synthetic `init`, which is not in `SrcFuncs`, so the resolver scans it for stores to globals.
@@ -1424,6 +1472,8 @@ Limitations:
 - A dynamic callee (a func-typed parameter, an interface method) ends the trace, so a Session result returned through one is not reported.
 - A callback that returns a root `*gorm.DB` (also `clone>0`, for example a package-level `DB`) leaks the same way. It is not reported, since the warning is about the three Session-family methods.
 - The rule does not model the order of several scopes; each callback that returns a Session-family result is reported, even when a later scope returns a `clone==0` value.
+- The rule does not read `SkipDefaultTransaction`. With it, a write begins no transaction and does not leak, but the setting is in a config the analyzer does not see.
+- A chain that leaves the function is taken to write, even when every caller only reads.
 - A package-level closure is a known Scopes callback, and reuse detection analyzes its body like any closure ([Package-level variables](#package-level-variables-183)).
 
 ## Related Projects

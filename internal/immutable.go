@@ -70,7 +70,8 @@ func inferImmutableReturns(funcs []*ssa.Function, set *directive.DirectiveFuncSe
 		}
 	}
 	builtins := tracer.NewRootTracer(nil, nil, nil, nil, nil, nil, funcVars)
-	inferred := purity.InferImmutableReturns(candidates, set.Contains, builtins)
+	assigned := purity.NewImmutableReturnValidator(funcs, set, builtins)
+	inferred := purity.InferImmutableReturns(candidates, set.Contains, builtins, assigned.AssignedMutable)
 	for _, fn := range candidates {
 		if inferred[fn] {
 			set.Infer(fn)

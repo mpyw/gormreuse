@@ -252,6 +252,14 @@ func (v *Validator) trackDerivation(instr ssa.Instruction) bool {
 			return v.markDerived(i)
 		}
 
+	case *ssa.MakeClosure:
+		// A closure holds what it captures. Stored in a variable that
+		// another closure captures, it carries the derived bindings there,
+		// so a call of it in that closure is seen (#308).
+		if slices.ContainsFunc(i.Bindings, func(b ssa.Value) bool { return v.paramDerived[b] }) {
+			return v.markDerived(i)
+		}
+
 	case ssa.Value:
 		if x := v.derivationOperand(i); x != nil && v.paramDerived[x] {
 			return v.markHolding(i)
@@ -331,8 +339,9 @@ func (v *Validator) callResultDerived(call *ssa.Call) bool {
 		return false
 	}
 
-	// A closure may return what it captures: func() *gorm.DB { return db }().
-	if mc, ok := common.Value.(*ssa.MakeClosure); ok && v.seedClosure(mc) && v.returnsDerived(callee) {
+	// A closure may return what it captures: func() *gorm.DB { return db }(),
+	// also when called through a captured variable that holds it (#308).
+	if mc, ok := v.funcVars.LocalValue(common.Value).(*ssa.MakeClosure); ok && v.seedClosure(mc) && v.returnsDerived(callee) {
 		return true
 	}
 

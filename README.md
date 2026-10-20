@@ -359,7 +359,7 @@ A struct field is followed in these forms:
 - A field of a struct that a function returned, by value or by pointer: `s := mk(db); s.DB.Where("a")`. Each field of each call is its own mutable root, like a function that returns `*gorm.DB`. A call inside a loop makes a new root on each iteration. A store to the field through the returned pointer replaces it, as for a local struct. No fix is suggested for it, because the `Session` belongs inside the function. Mark a helper that returns a struct of safe handles, such as a test setup function, with `//gormreuse:immutable-return`.
 - A struct captured by a closure, also through a pointer.
 
-A field read through a parameter or a receiver, by value or by pointer, is not a mutable root. Only the stores to it in the same function are followed.
+A field read through a parameter or a receiver, by value or by pointer, is not a mutable root. Only the stores to it in the same function are followed. A getter that returns such a field is read the same way (see [Inferred immutable-return](#inferred-immutable-return)).
 
 Note: Simple struct literal storage (`_ = &S{db: q}`) without actual field usage does NOT pollute.
 
@@ -969,10 +969,14 @@ Each `*gorm.DB` result, in a `(*gorm.DB, error)` result too, must be one of thes
 | A [`Begin`](https://pkg.go.dev/gorm.io/gorm#DB.Begin) or [`gorm.Open`](https://pkg.go.dev/gorm.io/gorm#Open) result | `db.Begin()` |
 | `nil` | `return nil, err` |
 | The result of another `immutable-return` function, declared or inferred, in this package or another | `return r.conn(ctx)` |
+| A field read through a parameter or the receiver, or a package-level variable, as reuse detection reads them where they are used | `return r.db` |
+| A local variable assigned once, such as one a closure captures, that holds one of these values | `get := func() *gorm.DB { return conn }` |
+
+So a getter is treated like the field it returns: `d := r.DB(); d.Find(&a); d.Count(&n)` is not reported, as `r.db.Find(&a); r.db.Count(&n)` is not. A getter of a field or package-level variable is not inferred when code in its package assigns the variable a chain, such as `r.db = r.db.Where("x")`, since a caller may call the getter after that.
 
 Anything else turns inference off for the function:
 
-- a parameter, a field, or a captured or deferred-to variable
+- a parameter, a field of a struct built in the function, or a variable assigned more than once or written by a deferred closure
 - a func-typed value, or a call to an unmarked helper
 - a chain after `Session` (`Session(...).Where(...)`)
 - a `Session` config that is not a `&gorm.Session{...}` literal with `Initialized` unset or false
@@ -1127,6 +1131,16 @@ GORM runs the query on the value the callback returns. These three methods retur
 
 `e2e/internal/scopes_session_test.go` checks each row against real GORM.
 
+Only a create, update or delete begins the transaction that leaks. A `Scopes` call whose chain ends in a finisher that only reads is not reported:
+
+| Chain | Leaks | Reported |
+| --- | --- | --- |
+| `db.Scopes(cb).Where("x").Find(&x)`, and the same with `First`, `Take`, `Last`, `FirstOrInit`, `Count`, `Pluck`, `Scan`, `Row`, `Rows` or `Exec` | No | No |
+| `db.Scopes(cb).Delete(&u)`, `Create`, `Save`, `Update`, `Updates`, `FirstOrCreate`, … | Yes | Yes |
+| A chain that is returned, stored, passed on or discarded | It may reach a write | Yes |
+
+A callback is reported when one `Scopes` call that passes it may write. `e2e/internal/scopes_finisher_test.go` checks the finishers against real GORM. With `SkipDefaultTransaction`, GORM begins no transaction at all, but the rule does not read the config.
+
 The rule finds the callback the same way reuse detection does. The callback may be a function literal, a named function, or a method value. It may also be a closure in a variable or a package-level variable, or in a slice built with `append`. The rule follows the returned value through variables, branches, and the returns of helpers and closures the callback calls. It reports the `Session`/`WithContext`/`Debug` call itself.
 
 [`Preload`](https://pkg.go.dev/gorm.io/gorm#DB.Preload) callbacks are **unaffected** (Preload builds a fresh DB), so the same code inside a Preload callback is not flagged.
@@ -1152,7 +1166,7 @@ gormreuse reports a reuse only when it can follow the value. These cases are kno
 | A field rebuilt in a loop after it was copied: `p.db = q; for … { p.db = p.db.Where(c) }; q.Find(nil)` | In a loop, the rebuild is an assignment, so its first read of `q` is not a branch |
 | A pure function that returns `db.Session(...)` of its argument | The copy is not the argument, so the shared `Statement` is hidden from the caller |
 | A package-level `*gorm.DB` that another function, a closure or the initializer assigned | Only the stores in the same function are followed. A global that the function only reads is immutable |
-| A struct field read through a parameter or a receiver (`s.db`, `r.db`) | The field is not a mutable root. Only the stores to it in the same function are followed |
+| A struct field read through a parameter or a receiver (`s.db`, `r.db`), or a getter of it (`r.DB()`) | The field is not a mutable root. Only the stores to it in the same function are followed, and for a getter, the stores in its package |
 | `immutable-param` called through an interface or a func-typed parameter | The callee is unknown, so the caller contract is not checked |
 | A method expression of a method promoted through an embedded `*gorm.DB`: `W.Find(w, nil)` | The receiver `w` is not followed to its embedded field |
 

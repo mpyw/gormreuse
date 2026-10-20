@@ -28,15 +28,16 @@ import (
 // vars resolves calls through package-level function variables; it may be
 // nil. So do the other collectors.
 func CollectScopesCallbacks(funcs []*ssa.Function, vars callsite.FuncVars) map[*ssa.Function]bool {
-	return collectCallbacksPassedTo(funcs, vars, "Scopes", "Preload")
+	return collectCallbacksPassedTo(funcs, vars, nil, "Scopes", "Preload")
 }
 
 // CollectScopesOnlyCallbacks is CollectScopesCallbacks without Preload: the
 // functions passed to gorm's Scopes, resolved the same way. The temporary
 // Session-in-Scopes warning (go-gorm/gorm#7592) uses it, so it covers the same
-// callbacks as reuse detection (#196).
-func CollectScopesOnlyCallbacks(funcs []*ssa.Function, vars callsite.FuncVars) map[*ssa.Function]bool {
-	return collectCallbacksPassedTo(funcs, vars, "Scopes")
+// callbacks as reuse detection (#196). Only the Scopes calls that keep
+// reports are read; a nil keep reads every one.
+func CollectScopesOnlyCallbacks(funcs []*ssa.Function, vars callsite.FuncVars, keep func(callsite.Site) bool) map[*ssa.Function]bool {
+	return collectCallbacksPassedTo(funcs, vars, keep, "Scopes")
 }
 
 // CollectImmutableCallbacks returns the set of function literals passed as the
@@ -157,12 +158,12 @@ func addCollectedCallbacks(funcs []*ssa.Function, vars callsite.FuncVars, inputs
 
 // collectCallbacksPassedTo returns every function passed as a variadic
 // callback to a call of one of the gorm methods, resolved by resolveMayFuncs.
-func collectCallbacksPassedTo(funcs []*ssa.Function, vars callsite.FuncVars, methods ...string) map[*ssa.Function]bool {
+func collectCallbacksPassedTo(funcs []*ssa.Function, vars callsite.FuncVars, keep func(callsite.Site) bool, methods ...string) map[*ssa.Function]bool {
 	var vals []ssa.Value
 	// Go and defer statements count too: the callee hands the callback the
 	// same value however the callee itself is invoked (#256).
 	callsite.EachSite(funcs, vars, func(site callsite.Site) {
-		if !site.IsGormMethod() || !slices.Contains(methods, site.Method()) {
+		if !site.IsGormMethod() || !slices.Contains(methods, site.Method()) || keep != nil && !keep(site) {
 			return
 		}
 		// The variadic callbacks arrive as a slice in the last argument.
