@@ -50,6 +50,7 @@ import (
 	"github.com/mpyw/gormreuse/internal/scopeswarn"
 	"github.com/mpyw/gormreuse/internal/ssa/callback"
 	"github.com/mpyw/gormreuse/internal/ssa/callsite"
+	"github.com/mpyw/gormreuse/internal/ssa/cfg"
 	"github.com/mpyw/gormreuse/internal/ssa/purity"
 	"github.com/mpyw/gormreuse/internal/ssa/tracer"
 )
@@ -208,7 +209,9 @@ func RunSSA(
 	// inputTracer gives it the analysis' own mutability rule, and the analysed
 	// functions let it check every caller, in package-level closures too,
 	// before it suggests immutable-param (#201, #245).
-	fixGen := fix.NewGenerator(pass, scopesCallbacks, inputTracer, funcs, reportSeesWholePackage(pass))
+	// The checker and the fixes ask one CFG cache about the functions (#299).
+	cfgs := cfg.NewAnalyzer()
+	fixGen := fix.NewGenerator(pass, scopesCallbacks, inputTracer, funcs, reportSeesWholePackage(pass), cfgs)
 
 	// Determine which //gormreuse:immutable-param functions actually rely on
 	// immutability — they would reuse a *gorm.DB parameter if it were treated as
@@ -216,7 +219,7 @@ func RunSSA(
 	// contract check (stage 2b, passed into the checker below) and, by its
 	// complement, redundant-directive detection (a directive whose function does
 	// NOT reuse a param suppresses nothing).
-	needsImmutableParam := computeNeedsImmutableParam(funcs, immutableParamFuncs, pureFuncs, immutableReturnFuncs, pureVerdicts, scopesCallbacks, immutableCallbacks, funcVars, skip, guard)
+	needsImmutableParam := computeNeedsImmutableParam(funcs, immutableParamFuncs, pureFuncs, immutableReturnFuncs, pureVerdicts, scopesCallbacks, immutableCallbacks, funcVars, skip, guard, cfgs)
 
 	// The caller-side check also covers callees in other packages (#195).
 	branchesImmutableParam := func(fn *ssa.Function) bool {
@@ -229,7 +232,7 @@ func RunSSA(
 			continue
 		}
 
-		chk := newChecker(pass, ignores, pureFuncs, immutableReturnFuncs, immutableParamFuncs, pureVerdicts, scopesCallbacks, immutableCallbacks, branchesImmutableParam, funcVars, globalReported, fixGen)
+		chk := newChecker(pass, ignores, pureFuncs, immutableReturnFuncs, immutableParamFuncs, pureVerdicts, scopesCallbacks, immutableCallbacks, branchesImmutableParam, funcVars, globalReported, fixGen, cfgs)
 		guard.run(fn, func() { chk.checkFunction(fn) })
 	}
 

@@ -49,6 +49,7 @@ import (
 	"golang.org/x/tools/go/ssa"
 
 	"github.com/mpyw/gormreuse/internal/ssa/callsite"
+	"github.com/mpyw/gormreuse/internal/ssa/cfg"
 	"github.com/mpyw/gormreuse/internal/ssa/pollution"
 	"github.com/mpyw/gormreuse/internal/ssa/tracer"
 	"github.com/mpyw/gormreuse/internal/typeutil"
@@ -68,6 +69,8 @@ type Generator struct {
 	funcs []*ssa.Function // the analysed functions, to find callers
 	//declscope:shared // param.go's paramCallersIsolate asks it
 	seesAllCallers func(token.Pos) bool // whether this variant sees every caller of code at a position
+	//declscope:shared // the fixes ask it about loops, reachability and repeats
+	cfg *cfg.Analyzer // the CFG cache of the pass, shared with the checker (#299)
 
 	files   map[*token.File]*ast.File      // token.File -> ast.File mapping
 	cursors map[*ast.File]inspector.Cursor // file cursors in the pass inspector
@@ -82,8 +85,9 @@ type Generator struct {
 // seesAllCallers reports whether the pass sees every file that may call a
 // function declared at a position: not so for a file other than a test file
 // in a package with test files, which the pass without them cannot see
-// (#245).
-func NewGenerator(pass *analysis.Pass, scopesCallbacks map[*ssa.Function]bool, rt *tracer.RootTracer, funcs []*ssa.Function, seesAllCallers func(token.Pos) bool) *Generator {
+// (#245). cfgs is the CFG cache that the checker asks too, so a fix and its
+// diagnostic share the answers (#299).
+func NewGenerator(pass *analysis.Pass, scopesCallbacks map[*ssa.Function]bool, rt *tracer.RootTracer, funcs []*ssa.Function, seesAllCallers func(token.Pos) bool, cfgs *cfg.Analyzer) *Generator {
 	// Build token.File -> ast.File mapping
 	files := make(map[*token.File]*ast.File)
 	for _, f := range pass.Files {
@@ -108,6 +112,7 @@ func NewGenerator(pass *analysis.Pass, scopesCallbacks map[*ssa.Function]bool, r
 		tracer:          rt,
 		funcs:           funcs,
 		seesAllCallers:  seesAllCallers,
+		cfg:             cfgs,
 	}
 }
 

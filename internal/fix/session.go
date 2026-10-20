@@ -9,7 +9,6 @@ import (
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/ssa"
 
-	"github.com/mpyw/gormreuse/internal/ssa/cfg"
 	"github.com/mpyw/gormreuse/internal/ssa/pollution"
 	"github.com/mpyw/gormreuse/internal/typeutil"
 )
@@ -90,7 +89,6 @@ func (g *Generator) sessionEdits(sites []sessionSite) []analysis.TextEdit {
 //declscope:shared // generator.go's Generate asks it which roots get a Session
 func (g *Generator) findRootsNeedingSession(virtualUses map[virtualRootKey][]pollution.UsageInfo, reassigned map[token.Pos]token.Pos, ordered bool) []virtualRootKey {
 	var roots []virtualRootKey
-	cfgAnalyzer := cfg.NewAnalyzer()
 	var def *ssa.BasicBlock
 	for root := range virtualUses {
 		if root.isOriginal {
@@ -100,14 +98,14 @@ func (g *Generator) findRootsNeedingSession(virtualUses map[virtualRootKey][]pol
 	for root, uses := range virtualUses {
 		var needs bool
 		switch {
-		case !root.isOriginal && useRepeatsAfter(root.block, def):
+		case !root.isOriginal && useRepeatsAfter(g.cfg, root.block, def):
 			needs = true
 		case !ordered:
 			needs = len(uses) >= 2 || len(uses) == 1 && (!root.isOriginal || !reassigned[uses[0].Pos].IsValid())
-		case root.isOriginal && usedAgainInLoop(root.block, uses, reassigned):
+		case root.isOriginal && usedAgainInLoop(g.cfg, root.block, uses, reassigned):
 			needs = true
 		default:
-			needs = usesConflict(cfgAnalyzer, uses, reassigned)
+			needs = usesConflict(g.cfg, uses, reassigned)
 		}
 		if needs {
 			roots = append(roots, root)
@@ -141,7 +139,7 @@ func (g *Generator) sessionPositionsForRoot(pos token.Pos, root ssa.Value, uses 
 	if end := g.sessionEndAfterCall(pos); end.IsValid() {
 		positions = append(positions, end)
 	}
-	return append(positions, g.edgeSessionPositions(mergedEdges(root, uses))...)
+	return append(positions, g.edgeSessionPositions(mergedEdges(g.cfg, root, uses))...)
 }
 
 // edgeSessionPositions returns where Sessions go on edges, the values that

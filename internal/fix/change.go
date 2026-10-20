@@ -31,15 +31,14 @@ import (
 //
 //declscope:shared // generator.go's Generate withholds the fix with it
 func (g *Generator) changedElsewhere(v pollution.Violation) bool {
-	loops := cfg.NewAnalyzer()
 	ordered := usesOrdered(v)
 	for _, use := range v.AllUses {
-		if use.Escapes && changeSeenAfterEscape(tracer.RootBlock(v.Root), use, v.AllUses, ordered, g.tracer.FuncVars()) {
+		if use.Escapes && changeSeenAfterEscape(g.cfg, tracer.RootBlock(v.Root), use, v.AllUses, ordered, g.tracer.FuncVars()) {
 			return true
 		}
 	}
 	for _, f := range withClosures(v.Root.Parent()) {
-		loopInfo := loops.DetectLoops(f)
+		loopInfo := g.cfg.DetectLoops(f)
 		for _, block := range f.Blocks {
 			for _, instr := range block.Instrs {
 				switch instr := instr.(type) {
@@ -70,11 +69,10 @@ func (g *Generator) changedElsewhere(v pollution.Violation) bool {
 // use, as in `q.Find(&a); render(q)`, keeps its fix. def is the block that
 // defines the root: an escape runs again when the checker's cfg.Repeats says
 // so. vars resolves calls through package-level function variables.
-func changeSeenAfterEscape(def *ssa.BasicBlock, escape pollution.UsageInfo, uses []pollution.UsageInfo, ordered bool, vars callsite.FuncVars) bool {
-	if !ordered || useRepeatsAfter(escape.Block, def) || changeSeenThroughResult(escape, vars) {
+func changeSeenAfterEscape(a *cfg.Analyzer, def *ssa.BasicBlock, escape pollution.UsageInfo, uses []pollution.UsageInfo, ordered bool, vars callsite.FuncVars) bool {
+	if !ordered || useRepeatsAfter(a, escape.Block, def) || changeSeenThroughResult(escape, vars) {
 		return true
 	}
-	a := cfg.NewAnalyzer()
 	return slices.ContainsFunc(uses, func(use pollution.UsageInfo) bool {
 		if use.Block == escape.Block {
 			return use.Pos > escape.Pos

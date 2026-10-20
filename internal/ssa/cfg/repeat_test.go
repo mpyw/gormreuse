@@ -10,8 +10,9 @@ func TestRepeatsAfter(t *testing.T) {
 	t.Parallel()
 	fn := buildFunc(t, "package p\nfunc f(n int) int { s := 0; for i := 0; i < n; i++ { s += i }; return s }", "f")
 	other := buildFunc(t, "package p\nfunc g(n int) int { for n > 0 { n-- }; return n }", "g")
-	info := NewAnalyzer().DetectLoops(fn)
-	r := NewRepeats(fn, info)
+	a := NewAnalyzer()
+	info := a.DetectLoops(fn)
+	r := a.Repeats(fn)
 
 	entry := fn.Blocks[0]
 	body := repeatTestLoopBlock(t, fn, info)
@@ -80,13 +81,13 @@ func f(n int) int {
 }`, "f")
 	a := NewAnalyzer()
 	info := a.DetectLoops(fn)
-	r := NewRepeats(fn, info)
+	r := a.Repeats(fn)
 	entry := fn.Blocks[0]
 	body := repeatTestLoopBlock(t, fn, info)
 
 	closure := func(i int) (*Repeats, *ssa.BasicBlock) {
 		c := fn.AnonFuncs[i]
-		return r.Closure(c, a.DetectLoops(c)), c.Blocks[0]
+		return r.Closure(c), c.Blocks[0]
 	}
 	tests := []struct {
 		name    string
@@ -121,9 +122,9 @@ func f(n int) int {
 
 	// A closure in a closure called twice runs twice.
 	nested := fn.AnonFuncs[6]
-	nr := r.Closure(nested, a.DetectLoops(nested))
+	nr := r.Closure(nested)
 	inner := nested.AnonFuncs[0]
-	if !nr.Closure(inner, a.DetectLoops(inner)).RepeatsAfter(inner.Blocks[0], entry) {
+	if !nr.Closure(inner).RepeatsAfter(inner.Blocks[0], entry) {
 		t.Error("IIFE in a closure called twice: RepeatsAfter = false, want true")
 	}
 
@@ -141,8 +142,9 @@ func f(n int) int {
 func TestRunsAgain(t *testing.T) {
 	t.Parallel()
 	fn := buildFunc(t, "package p\nfunc f(n int) int { s := 0; for i := 0; i < n; i++ { s += i }; return s }", "f")
-	info := NewAnalyzer().DetectLoops(fn)
-	r := NewRepeats(fn, info)
+	a := NewAnalyzer()
+	info := a.DetectLoops(fn)
+	r := a.Repeats(fn)
 	if r.RunsAgain(fn.Blocks[0]) {
 		t.Error("entry: RunsAgain = true, want false")
 	}

@@ -122,8 +122,8 @@ type RootTracer struct {
 	onlyParams map[*ssa.Function]bool // Memo of pureReturnsOnlyParams
 	//declscope:shared // alias.go's mayAlias fills it
 	aliases map[aliasedRootsKey]bool // Memo of mayAlias
-	//declscope:shared // closure.go's closureRunsRepeatedly fills it
-	closureRepeats map[*ssa.Function]*cfg.Repeats // Memo of cfg.RepeatsOf for a closure
+	//declscope:shared // closure.go's closureRunsRepeatedly asks it
+	cfgs *cfg.Analyzer // CFG cache for the Repeats of closures
 }
 
 // NewRootTracer creates a new RootTracer.
@@ -158,7 +158,7 @@ func NewRootTracer(pureFuncs, immutableReturnFuncs, immutableParamFuncs *directi
 		fieldRoots:           make(map[fieldRootKey]*FieldRoot),
 		allRoots:             make(map[allRootsKey][]ssa.Value),
 		aliases:              make(map[aliasedRootsKey]bool),
-		closureRepeats:       make(map[*ssa.Function]*cfg.Repeats),
+		cfgs:                 cfg.NewAnalyzer(),
 	}
 }
 

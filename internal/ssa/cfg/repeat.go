@@ -28,52 +28,71 @@ import (
 // may run there.
 type Repeats struct {
 	fn     *ssa.Function
+	cfg    *Analyzer // the cache it was made from, which asks the CFG
 	loops  *LoopInfo
 	parent *Repeats // the declaring function's, nil when no function declares fn
 
 	// sites are the blocks of parent.fn where the closure fn may run: a
 	// call, a go or defer statement, or an instruction that hands the closure
-	// to other code, such as an argument or a store.
+	// to other code, such as an argument or a store. They are not kept once
+	// multi is set, which answers every question.
 	sites []*ssa.BasicBlock
 
 	// multi is set when two of the sites may both run on one path, so the
 	// closure may run twice for one run of the parent.
 	multi bool
+
+	// sitesRepeat memoizes sitesRepeatAfter by def.
+	sitesRepeat map[*ssa.BasicBlock]bool
 }
 
-// NewRepeats returns the Repeats of fn, whose loops are loops, analysed on
-// its own: a closure's sites in the function that declares it are not asked
-// (see Closure).
-func NewRepeats(fn *ssa.Function, loops *LoopInfo) *Repeats {
-	return &Repeats{fn: fn, loops: loops}
+// Repeats returns the Repeats of fn analysed on its own: a closure's sites in
+// the function that declares it are not asked (see Closure). It is cached.
+func (a *Analyzer) Repeats(fn *ssa.Function) *Repeats {
+	g := a.graphOf(fn)
+	if g.repeats == nil {
+		g.repeats = &Repeats{fn: fn, cfg: a, loops: a.DetectLoops(fn)}
+	}
+	return g.repeats
 }
 
-// Closure returns the Repeats of fn, a closure that r's function declares,
-// whose loops are loops. It also asks r, at the sites where fn runs.
-func (r *Repeats) Closure(fn *ssa.Function, loops *LoopInfo) *Repeats {
-	c := &Repeats{fn: fn, loops: loops, parent: r}
-	a := NewAnalyzer()
-	_, runs := repeatClosureSites(fn)
+// Closure returns the Repeats of fn, a closure that r's function declares. It
+// also asks r, at the sites where fn runs. It is cached for each r.
+func (r *Repeats) Closure(fn *ssa.Function) *Repeats {
+	g := r.cfg.graphOf(fn)
+	if c, ok := g.closures[r]; ok {
+		return c
+	}
+	c := &Repeats{fn: fn, cfg: r.cfg, loops: r.cfg.DetectLoops(fn), parent: r}
+	runs := r.cfg.repeatSitesOf(fn).runs
 	for i, site := range runs {
-		c.sites = append(c.sites, site.Block())
 		for _, other := range runs[:i] {
-			if site.Block() == other.Block() || a.CanReach(site.Block(), other.Block()) || a.CanReach(other.Block(), site.Block()) {
+			if r.cfg.CanReach(site.Block(), other.Block()) || r.cfg.CanReach(other.Block(), site.Block()) {
 				c.multi = true
+				break
 			}
 		}
+		if c.multi {
+			c.sites = nil
+			break
+		}
+		c.sites = append(c.sites, site.Block())
 	}
+	if g.closures == nil {
+		g.closures = make(map[*Repeats]*Repeats)
+	}
+	g.closures[r] = c
 	return c
 }
 
 // RepeatsOf returns the Repeats of fn that asks every function that declares
 // it, as the analysis of the outermost one does. The suggested fixes ask it,
 // so that they agree with the checker.
-func RepeatsOf(fn *ssa.Function) *Repeats {
-	loops := NewAnalyzer().DetectLoops(fn)
+func (a *Analyzer) RepeatsOf(fn *ssa.Function) *Repeats {
 	if fn.Parent() == nil {
-		return NewRepeats(fn, loops)
+		return a.Repeats(fn)
 	}
-	return RepeatsOf(fn.Parent()).Closure(fn, loops)
+	return a.RepeatsOf(fn.Parent()).Closure(fn)
 }
 
 // RepeatsAfter reports whether a use in block use, of r's function, may run
@@ -113,9 +132,29 @@ func (r *Repeats) repeatsAfter(use, def *ssa.BasicBlock) bool {
 	if def != nil && def.Parent() == r.fn || r.parent == nil {
 		return false
 	}
-	return r.multi || slices.ContainsFunc(r.sites, func(site *ssa.BasicBlock) bool {
+	return r.sitesRepeatAfter(def)
+}
+
+// sitesRepeatAfter reports whether the closure of r, which a function
+// declares, may run more than once for one run of def, a block outside it:
+// it runs at two sites that may both run, or a site repeats after def in the
+// declaring function. It is memoized by def, so asking it of closures nested
+// d deep, each run at k sites, takes k*d steps, not k^d (#299).
+func (r *Repeats) sitesRepeatAfter(def *ssa.BasicBlock) bool {
+	if r.multi {
+		return true
+	}
+	if got, ok := r.sitesRepeat[def]; ok {
+		return got
+	}
+	got := slices.ContainsFunc(r.sites, func(site *ssa.BasicBlock) bool {
 		return r.parent.repeatsAfter(site, def)
 	})
+	if r.sitesRepeat == nil {
+		r.sitesRepeat = make(map[*ssa.BasicBlock]bool)
+	}
+	r.sitesRepeat[def] = got
+	return got
 }
 
 // liftRepeatDef moves def, the block of a definition, to the function of r
@@ -133,41 +172,61 @@ func (r *Repeats) liftRepeatDef(def *ssa.BasicBlock) *ssa.BasicBlock {
 		if fn.Parent() == nil {
 			return nil
 		}
-		declared, runs := repeatClosureSites(fn)
-		def = declared
-		if len(runs) == 1 {
-			def = runs[0].Block()
+		sites := r.cfg.repeatSitesOf(fn)
+		def = sites.declared
+		if len(sites.runs) == 1 {
+			def = sites.runs[0].Block()
 		}
 	}
 	return nil
 }
 
-// repeatClosureSites returns the block that declares fn, a closure, in the
+// repeatSites are the block that declares a closure, in the function that
+// declares it, and the instructions there where it may run (see
+// repeatSitesOf).
+//
+//declscope:shared // analyzer.go's cache holds them
+type repeatSites struct {
+	//declscope:private
+	declared *ssa.BasicBlock
+	//declscope:private
+	runs []ssa.Instruction
+}
+
+// repeatSitesOf returns the block that declares fn, a closure, in the
 // function that declares it, and the instructions there where it may run: a
 // call of it, a go or defer statement, or any other use of the closure
 // value, such as an argument or a store into a slice. A closure stored in a
 // local variable runs where the variable is read. The block is nil when fn
-// is not found there.
-func repeatClosureSites(fn *ssa.Function) (*ssa.BasicBlock, []ssa.Instruction) {
-	var declared *ssa.BasicBlock
-	var runs []ssa.Instruction
+// is not found there. It is cached.
+func (a *Analyzer) repeatSitesOf(fn *ssa.Function) *repeatSites {
+	g := a.graphOf(fn)
+	if g.sites == nil {
+		g.sites = findRepeatSites(fn)
+	}
+	return g.sites
+}
+
+// findRepeatSites is repeatSitesOf without the cache.
+func findRepeatSites(fn *ssa.Function) *repeatSites {
+	sites := &repeatSites{}
 	for _, block := range fn.Parent().Blocks {
 		for _, instr := range block.Instrs {
 			if mc, ok := instr.(*ssa.MakeClosure); ok && mc.Fn == fn {
-				declared = block
-				runs = append(runs, repeatValueSites(mc)...)
+				sites.declared = block
+				sites.runs = append(sites.runs, repeatValueSites(mc)...)
 				continue
 			}
 			// A closure with no free variables is a plain function value.
 			if slices.ContainsFunc(instr.Operands(nil), func(op *ssa.Value) bool { return *op == fn }) {
-				if declared == nil {
-					declared = block
+				if sites.declared == nil {
+					sites.declared = block
 				}
-				runs = append(runs, instr)
+				sites.runs = append(sites.runs, instr)
 			}
 		}
 	}
-	return declared, runs
+	return sites
 }
 
 // repeatValueSites returns the instructions that use v, a closure value. A

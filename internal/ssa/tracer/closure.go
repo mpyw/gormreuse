@@ -278,12 +278,7 @@ func (t *RootTracer) closureRunsRepeatedly(mc *ssa.MakeClosure) bool {
 	if !ok || len(fn.Blocks) == 0 {
 		return false
 	}
-	repeats, ok := t.closureRepeats[fn]
-	if !ok {
-		repeats = cfg.RepeatsOf(fn)
-		t.closureRepeats[fn] = repeats
-	}
-	return repeats.RepeatsAfter(fn.Blocks[0], mc.Block())
+	return t.cfgs.RepeatsOf(fn).RepeatsAfter(fn.Blocks[0], mc.Block())
 }
 
 // closureResultOnlyReturned reports whether every use of c's result is a

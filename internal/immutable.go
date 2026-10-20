@@ -10,6 +10,7 @@ import (
 	"github.com/mpyw/gormreuse/internal/directive"
 	ssautil "github.com/mpyw/gormreuse/internal/ssa"
 	"github.com/mpyw/gormreuse/internal/ssa/callsite"
+	"github.com/mpyw/gormreuse/internal/ssa/cfg"
 	"github.com/mpyw/gormreuse/internal/ssa/pollution"
 	"github.com/mpyw/gormreuse/internal/ssa/purity"
 	"github.com/mpyw/gormreuse/internal/ssa/tracer"
@@ -146,6 +147,7 @@ func computeNeedsImmutableParam(
 	funcVars callsite.FuncVars,
 	skip func(*ssa.Function) bool,
 	guard *panicGuard,
+	cfgs *cfg.Analyzer,
 ) map[*ssa.Function]bool {
 	needs := make(map[*ssa.Function]bool)
 	if immutableParamFuncs == nil {
@@ -163,7 +165,7 @@ func computeNeedsImmutableParam(
 		}
 		guard.run(fn, func() {
 			// Counterfactual: analyze fn with its parameters treated as mutable.
-			cf := ssautil.NewAnalyzer(fn, pureFuncs, immutableReturnFuncs, nil, pureVerdicts, scopesCallbacks, immutableCallbacks, nil, funcVars)
+			cf := ssautil.NewAnalyzer(fn, pureFuncs, immutableReturnFuncs, nil, pureVerdicts, scopesCallbacks, immutableCallbacks, nil, funcVars, cfgs)
 			if slices.ContainsFunc(cf.Analyze(), func(v pollution.Violation) bool {
 				p, ok := v.Root.(*ssa.Parameter)
 				return ok && p.Parent() == fn

@@ -310,7 +310,7 @@ gormreuse/
 │       ├── pollution/tracker.go # Tracker: records uses, DetectViolations
 │       ├── pollutionsource/     # Which uses leak a *gorm.DB; read-only query arguments
 │       ├── cfg/                 # Control flow of one function
-│       │   ├── analyzer.go      # Analyzer, NewAnalyzer, CanReach: block reachability
+│       │   ├── analyzer.go      # Analyzer: the CFG cache of a pass (#299); CanReach: block reachability
 │       │   ├── loop.go          # LoopInfo, DetectLoops: natural loops, range-over-func bodies (#177)
 │       │   └── repeat.go        # Repeats.RepeatsAfter: may a use run again for one run of its root's definition (#249)
 │       ├── handler/call.go      # handleSite for calls, go and defer; Send, Store, MapUpdate, MakeInterface
@@ -651,6 +651,17 @@ Decisions:
 - **A closure passed to another function runs once** unless the site is in a loop or there are two sites. `slices.SortFunc(s, func(a, b T) int { q.Find(nil); … })` is missed. Counting every argument as a repeat would report each `db.Transaction(func(tx *gorm.DB) error { … })`.
 - Where a reuse is reported follows the closure's position rules ([Closure uses](#closure-uses-68-179)): at the body, or at the one later call site. `f := func() { q.Find(nil) }; for … { f() }` is reported at `f()`.
 
+**One CFG cache per pass (#299).** `run.go` makes one `cfg.Analyzer` and hands it to the checker (the pollution tracker and the handler context of every function) and to `fix.Generator`. For each function it keeps:
+
+| Cached | Filled | Before #299 |
+| --- | --- | --- |
+| The blocks each block reaches, as a bitset indexed by `b.Index` | On the first `CanReach` from that block | A breadth-first search on every `CanReach` |
+| `LoopInfo` (`DetectLoops`) | Once | Once per function analysed, and once per use in the fixes |
+| `Repeats` on its own (`Repeats`), as a closure of each parent `Repeats` (`Closure`), and the closure's sites | Once | `RepeatsOf` rebuilt the chain, with `DetectLoops`, on every use the fixes asked about |
+| Whether a closure's sites repeat after a definition (`sitesRepeatAfter`) | Once per definition block | Asked again at every depth, so `k` sites per level of `d` nested closures took `k^d` steps |
+
+`Closure` stops comparing sites once two may both run (`multi` answers every question then), and `mergedStoreReadTwice` stops at the second use after a store. The results do not change: the goldens, and `-json` and `-fix -diff` over `e2e/internal`, the testdata and gorm's source, are byte-identical. A block that is not `fn.Blocks[b.Index]`, such as one built by hand, is still searched. The tracer keeps its own `cfg.Analyzer` for `closureRunsRepeatedly`, since a tracer is made per function. An Analyzer is not safe for concurrent use, and a pass runs on one goroutine.
+
 In gorm's own source (the root module), the loop fixes add six reports (154 to 160). Each is a `*gorm.DB` parameter branched in a loop: in `Scan` (three), `CreateInBatches` (the parameter of its batch closure), `SaveAfterAssociations` and `SetupUpdateReflectValue`. Before, the parameter counted as defined in a loop, because a `for cond` loop in the function marked the entry block, or the use's block was left out of an outer loop. None comes from the closure rules. The `tests` module is unchanged (34).
 
 ### Range-over-func Loops
@@ -679,7 +690,7 @@ The single-root trace takes the first store it sees, in block order. A store mad
 
 **Closure factories (#251).** A closure that returns a chain, such as `base := func() *gorm.DB { return db.Model(&User{}) }`, is traced through its returns like an IIFE, so every call of it shared the root inside its body. Calling it twice, or once in a loop, reported the second query, though each call builds a new `Statement`. `closureCallOwnsRoots` makes the call its own root when both hold:
 
-- The closure may run more than once for one run of its `MakeClosure`, as `cfg.Repeats` counts it (#249): at two sites that may both run, or at a site in a loop that does not create it (`closureRunsRepeatedly`, which asks `cfg.RepeatsOf` once per closure). A closure called once in a loop is already safe without this rule, since `RepeatsAfter` places a root inside it at its one call site; two calls are not.
+- The closure may run more than once for one run of its `MakeClosure`, as `cfg.Repeats` counts it (#249): at two sites that may both run, or at a site in a loop that does not create it (`closureRunsRepeatedly`, which asks `RepeatsOf` of the tracer's own `cfg.Analyzer`). A closure called once in a loop is already safe without this rule, since `RepeatsAfter` places a root inside it at its one call site; two calls are not.
 - Each root is a gorm method call in the closure whose result is only returned, and every `*gorm.DB` operand of the chain it ends is immutable or another such call in the closure. A chain from a captured mutable root, a closure parameter or a call of another function is shared by every run, so it keeps its root and stays reported (`cfFactoryCapturedRoot`, `cfFactoryParam`, `cfFactoryHelper`). So does a returned value that the body also uses (`cfFactoryBodyUse`).
 
 The rule does not count the runs itself, so the checker, the fixes and the tracer agree on when a closure runs again.

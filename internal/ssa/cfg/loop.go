@@ -62,7 +62,19 @@ func (l *LoopInfo) IsInLoopWithout(block, def *ssa.BasicBlock) bool {
 // per element. Every block of that closure is therefore in a loop (#177). It
 // has no header, because values from earlier iterations reach it through
 // captured variables, not Phi nodes.
+//
+// The result is cached: each call for fn returns the same LoopInfo, which
+// must not be changed.
 func (a *Analyzer) DetectLoops(fn *ssa.Function) *LoopInfo {
+	g := a.graphOf(fn)
+	if g.loops == nil {
+		g.loops = a.findLoops(fn)
+	}
+	return g.loops
+}
+
+// findLoops is DetectLoops without the cache.
+func (a *Analyzer) findLoops(fn *ssa.Function) *LoopInfo {
 	info := &LoopInfo{
 		loopBlocks:  make(map[*ssa.BasicBlock]bool),
 		loopHeaders: make(map[*ssa.BasicBlock]bool),
@@ -147,34 +159,16 @@ func (a *Analyzer) markLoopBlocks(_ *ssa.Function, loopHead, loopTail *ssa.Basic
 	if loopTail == loopHead {
 		return
 	}
-	inLoop := loopReachable(loopHead)
 	loopBlocks[loopTail] = true
 	stack := []*ssa.BasicBlock{loopTail}
 	for len(stack) > 0 {
 		b := stack[len(stack)-1]
 		stack = stack[:len(stack)-1]
 		for _, p := range b.Preds {
-			if !loopBlocks[p] && inLoop[p] {
+			if !loopBlocks[p] && a.CanReach(loopHead, p) {
 				loopBlocks[p] = true
 				stack = append(stack, p)
 			}
 		}
 	}
-}
-
-// loopReachable returns the blocks that head reaches, itself included.
-func loopReachable(head *ssa.BasicBlock) map[*ssa.BasicBlock]bool {
-	seen := map[*ssa.BasicBlock]bool{head: true}
-	stack := []*ssa.BasicBlock{head}
-	for len(stack) > 0 {
-		b := stack[len(stack)-1]
-		stack = stack[:len(stack)-1]
-		for _, succ := range b.Succs {
-			if !seen[succ] {
-				seen[succ] = true
-				stack = append(stack, succ)
-			}
-		}
-	}
-	return seen
 }

@@ -106,10 +106,10 @@ func usesConflict(a *cfg.Analyzer, uses []pollution.UsageInfo, reassigned map[to
 // in def's function.
 //
 //declscope:shared // session.go's findRootsNeedingSession asks it
-func usedAgainInLoop(def *ssa.BasicBlock, uses []pollution.UsageInfo, reassigned map[token.Pos]token.Pos) bool {
+func usedAgainInLoop(a *cfg.Analyzer, def *ssa.BasicBlock, uses []pollution.UsageInfo, reassigned map[token.Pos]token.Pos) bool {
 	return slices.ContainsFunc(uses, func(use pollution.UsageInfo) bool {
 		_, isReassignment := reassigned[use.Pos]
-		return !isReassignment && useRepeatsAfter(use.Block, def)
+		return !isReassignment && useRepeatsAfter(a, use.Block, def)
 	})
 }
 
@@ -118,6 +118,6 @@ func usedAgainInLoop(def *ssa.BasicBlock, uses []pollution.UsageInfo, reassigned
 // diagnostic it fixes agree on which uses run again.
 //
 //declscope:shared // change.go and session.go ask the checker's rule with it
-func useRepeatsAfter(use, def *ssa.BasicBlock) bool {
-	return cfg.RepeatsOf(use.Parent()).RepeatsAfter(use, def)
+func useRepeatsAfter(a *cfg.Analyzer, use, def *ssa.BasicBlock) bool {
+	return a.RepeatsOf(use.Parent()).RepeatsAfter(use, def)
 }
