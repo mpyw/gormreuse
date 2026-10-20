@@ -26,10 +26,11 @@ func paramCallsMutable(db *gorm.DB) {
 	paramMutableCaller(db.Where("scoped"))
 }
 
-// paramIsolatedCaller has only callers that pass an isolated value.
+// paramIsolatedCaller has only callers that pass an isolated value, so it is
+// inferred immutable-param, and the reuse is not reported (#349).
 func paramIsolatedCaller(tx *gorm.DB) {
 	tx.Where("a").Find(nil)
-	tx.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	tx.Where("b").Find(nil)
 }
 
 func paramCallsIsolated(db *gorm.DB) {

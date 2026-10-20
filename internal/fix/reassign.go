@@ -183,6 +183,8 @@ func (g *Generator) refersToReassignTarget(expr ast.Expr, v *types.Var) bool {
 // top-level call is not a gorm method, such as
 // require.NoError(t, tx.Create(...).Error), is not a chain. Nor is one whose
 // first call is a Session-family call: it never changes the receiver.
+//
+//declscope:shared // param.go withholds immutable-param from a parameter with such a chain
 func (g *Generator) discardedChainToReassign(use pollution.UsageInfo) (*ast.ExprStmt, ast.Expr, bool) {
 	if use.Method == "" || typeutil.IsFinisher(use.Method) || typeutil.IsImmutableReturningBuiltin(use.Method) {
 		return nil, nil, false

@@ -162,13 +162,18 @@ func (g *Generator) Generate(v pollution.Violation) []analysis.SuggestedFix {
 	// value gets its own Session, as for a local root (#311). With the
 	// directive, the rest of the fix proceeds for those Sessions, and the
 	// directive alone is the fallback when it offers none.
+	//
+	// A discarded chain on the parameter, as in tx.Where("a"), changes the
+	// caller's value in place. Under the directive the value is isolated, so
+	// the chain would do nothing, and the body check of immutable-param
+	// reports it (#346). Such a function never gets the directive.
 	p, isParam := root.(*ssa.Parameter)
 	var fallback []analysis.SuggestedFix
 	if isParam {
 		if !g.canFixParam(p) {
 			return nil
 		}
-		if g.paramCallersIsolate(p) {
+		if g.paramCallersIsolate(p) && !g.paramDiscardsChain(v.AllUses) {
 			fallback = g.generateImmutableParamFix(p)
 			if len(g.mergedSessionPositions(p, v.AllUses)) == 0 {
 				return fallback

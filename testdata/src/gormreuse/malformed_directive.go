@@ -88,13 +88,16 @@ func callsUnknownPartOfPureList(db *gorm.DB) {
 	db.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
+// UnknownImmutableInput and UnclosedImmutableInput are exported, so their
+// immutable-input(cb) is not inferred (#349).
+//
 //gormreuse:imutable-input(cb) // want `^unknown directive gormreuse:imutable-input\(cb\) `
-func unknownImmutableInput(cb func(*gorm.DB), db *gorm.DB) {
+func UnknownImmutableInput(cb func(*gorm.DB), db *gorm.DB) { // want UnknownImmutableInput:`gormreuse finisher-only\[1\]`
 	cb(db.Session(&gorm.Session{}))
 }
 
 func callsUnknownImmutableInput(db *gorm.DB) {
-	unknownImmutableInput(func(q *gorm.DB) {
+	UnknownImmutableInput(func(q *gorm.DB) {
 		q.Find(nil)
 		q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 	}, db)
@@ -105,12 +108,12 @@ func callsUnknownImmutableInput(db *gorm.DB) {
 // =============================================================================
 
 //gormreuse:immutable-input(cb // want `^malformed gormreuse:immutable-input\(cb directive: write it as immutable-input\(name\)$`
-func unclosedImmutableInput(cb func(*gorm.DB), db *gorm.DB) {
+func UnclosedImmutableInput(cb func(*gorm.DB), db *gorm.DB) { // want UnclosedImmutableInput:`gormreuse finisher-only\[1\]`
 	cb(db.Session(&gorm.Session{}))
 }
 
 func callsUnclosedImmutableInput(db *gorm.DB) {
-	unclosedImmutableInput(func(q *gorm.DB) {
+	UnclosedImmutableInput(func(q *gorm.DB) {
 		q.Find(nil)
 		q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 	}, db)

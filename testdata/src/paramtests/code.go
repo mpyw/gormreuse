@@ -5,15 +5,16 @@ package paramtests
 
 import "gorm.io/gorm"
 
-// paramTestsHelper gets an isolated value here and a mid-chain one in the
-// test file.
+// paramTestsHelper gets a mid-chain value here and in the test file, so
+// neither variant infers immutable-param for it (#349). A helper whose only
+// mid-chain caller is in a test file is in paramvariants.
 func paramTestsHelper(tx *gorm.DB) {
 	tx.Where("a").Find(nil)
 	tx.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 func paramTestsCode(db *gorm.DB) {
-	paramTestsHelper(db.Session(&gorm.Session{}))
+	paramTestsHelper(db.Where("y"))
 }
 
 // paramTestsTenant changes tx in place and returns it. The caller here reads

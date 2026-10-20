@@ -137,7 +137,9 @@ func computeNeedsImmutableParam(
 	// of its own, shared by the functions it checks.
 	counterfactual := tracer.NewRootTracer(pureFuncs, immutableReturnFuncs, nil, pureVerdicts, scopesCallbacks, immutableCallbacks, funcVars)
 	for _, fn := range funcs {
-		if skip(fn) || !immutableParamFuncs.Contains(fn) {
+		// Every caller of an inferred function passes immutable values, so
+		// its callers need no check (#349).
+		if skip(fn) || !immutableParamFuncs.Contains(fn) || immutableParamFuncs.Inferred(fn) {
 			continue
 		}
 		if fn.Signature == nil || !typeutil.HasGormDBParameter(fn.Signature) {
@@ -200,7 +202,8 @@ func reportRedundantImmutableParam(
 	var redundant []*ssa.Function
 	kept := make(map[token.Pos]bool) // Comments that a function not reported keeps
 	for _, fn := range funcs {
-		if skip(fn) || !immutableParamFuncs.Contains(fn) {
+		// An inferred function has no directive to report (#349).
+		if skip(fn) || !immutableParamFuncs.Contains(fn) || immutableParamFuncs.Inferred(fn) {
 			continue
 		}
 		if fn.Signature == nil || !typeutil.HasGormDBParameter(fn.Signature) {
@@ -296,6 +299,8 @@ func reportImmutableParamDiscards(
 // chain is a *gorm.DB method that returns a *gorm.DB and is neither a
 // finisher nor a Session-family or state-only method (see
 // typeutil.IsImmutableReturningBuiltin).
+//
+//declscope:shared // infer.go refuses to infer immutable-param for a function with such a chain
 func immutableParamDiscardedChain(call *ssa.Call, v ssa.Value) (*ssa.Call, bool) {
 	for recv := v; ; {
 		if !immutableParamChainCall(call, recv) {

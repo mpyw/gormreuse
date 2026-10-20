@@ -192,14 +192,40 @@ func RunSSA(
 	// else can call: a named callback that is also called directly, or that is
 	// exported, keeps a mutable parameter (#191). After a panic no callback is
 	// exempt.
+	collectImmutableCallbacks := func() map[*ssa.Function]bool {
+		callbacks := callback.CollectImmutableCallbacks(funcs, funcVars)
+		callback.CollectImmutableInputCallbacks(funcs, funcVars, immutableInputSet, callbacks)
+		callback.DropReachableCallbacks(funcs, funcVars, immutableInputSet, callbacks)
+		return callbacks
+	}
+	// A function is then treated as immutable-input(cb) when its body hands
+	// cb only immutable values (#349), and its callbacks join the set. After
+	// a panic there the functions inferred so far are kept, each proved, and
+	// the callbacks are collected again.
 	var immutableCallbacks map[*ssa.Function]bool
 	if !guard.runPackage("immutable callbacks", func() {
-		immutableCallbacks = callback.CollectImmutableCallbacks(funcs, funcVars)
-		callback.CollectImmutableInputCallbacks(funcs, funcVars, immutableInputSet, immutableCallbacks)
-		callback.DropReachableCallbacks(funcs, funcVars, immutableInputSet, immutableCallbacks)
+		immutableCallbacks = collectImmutableCallbacks()
+	}) {
+		immutableCallbacks = nil
+	} else if !guard.runPackage("immutable-input inference", func() {
+		immutableCallbacks = inferImmutableInputs(funcs, funcVars, immutableInputSet, immutableCallbacks, collectImmutableCallbacks, func(callbacks map[*ssa.Function]bool) *tracer.RootTracer {
+			return tracer.NewRootTracer(pureFuncs, immutableReturnFuncs, immutableParamFuncs, pureVerdicts, mutableCallbacks, callbacks, funcVars)
+		}, skip)
+	}) && !guard.runPackage("immutable callbacks", func() {
+		immutableCallbacks = collectImmutableCallbacks()
 	}) {
 		immutableCallbacks = nil
 	}
+
+	// Treat a function as immutable-param when every caller passes it
+	// immutable values (#349), before any pass reads the parameters. A
+	// panic keeps the functions inferred so far, each proved.
+	cfgs := cfg.NewAnalyzer()
+	guard.runPackage("immutable-param inference", func() {
+		inferImmutableParams(funcs, ssaInfo.Pkg.Func("init"), immutableParamFuncs, func() *tracer.RootTracer {
+			return tracer.NewRootTracer(pureFuncs, immutableReturnFuncs, immutableParamFuncs, pureVerdicts, mutableCallbacks, immutableCallbacks, funcVars)
+		}, cfgs, skip)
+	})
 
 	// Enforce the body-side immutable-input contract (#62 cases 2.3/2.4) and
 	// report unused immutable-input directives (U1-U3). Uses a tracer with the
@@ -207,7 +233,9 @@ func RunSSA(
 	inputTracer := tracer.NewRootTracer(pureFuncs, immutableReturnFuncs, immutableParamFuncs, pureVerdicts, mutableCallbacks, immutableCallbacks, funcVars)
 	failedInput := make(map[*ssa.Function]bool)
 	for _, fn := range funcs {
-		if skip(fn) {
+		// An inferred function was proved, and a report would say
+		// "declared" about a function without the directive.
+		if skip(fn) || immutableInputSet.Inferred(fn) {
 			continue
 		}
 		// A check that panicked proves nothing, so the function is not
@@ -250,7 +278,6 @@ func RunSSA(
 	// functions let it check every caller, in package-level closures too,
 	// before it suggests immutable-param (#201, #245).
 	// The checker and the fixes ask one CFG cache about the functions (#299).
-	cfgs := cfg.NewAnalyzer()
 	// The package initializer is a caller too (#346).
 	callers := funcs
 	if init := ssaInfo.Pkg.Func("init"); init != nil {

@@ -16,10 +16,11 @@ import (
 // ===== IMMUTABLE-PARAM: every caller is checked =====
 
 // fixParamOnlyIsolatedCallers is unexported, only called directly, and every
-// caller passes an isolated value, so the directive is safe.
+// caller passes an isolated value. So it is inferred immutable-param (#349),
+// and the reuse is not reported.
 func fixParamOnlyIsolatedCallers(tx *gorm.DB) {
 	tx.Where("a").Find(nil)
-	tx.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	tx.Where("b").Find(nil)
 }
 
 func fixParamCallsIsolated(db *gorm.DB) {
@@ -27,10 +28,10 @@ func fixParamCallsIsolated(db *gorm.DB) {
 }
 
 // fixParamGeneric is called through an instance and in parentheses. Both are
-// direct calls.
+// direct calls, so it is inferred immutable-param too (#349).
 func fixParamGeneric[T any](tx *gorm.DB) {
 	tx.Where("a").Find(nil)
-	tx.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	tx.Where("b").Find(nil)
 }
 
 func fixParamCallsGeneric(db *gorm.DB) {

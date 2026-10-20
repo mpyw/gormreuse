@@ -600,7 +600,7 @@ The ignore says that reuse is meant. See [Strategy 2](#strategy-2-session-making
 
 ### Parameter Roots
 
-A reused `*gorm.DB` parameter has no definition to append a Session to. Most functions get `tx = tx.Session(&gorm.Session{})` at the top of the body. An unexported helper whose every caller gormreuse can check gets [`//gormreuse:immutable-param`](#gormreuseimmutable-param) instead.
+A reused `*gorm.DB` parameter has no definition to append a Session to. Most functions get `tx = tx.Session(&gorm.Session{})` at the top of the body. An unexported helper whose every caller passes an isolated value is [inferred `immutable-param`](#inferred-immutable-param), so its reuse is not reported at all.
 
 <details>
 <summary>Which function gets which fix, and why</summary>
@@ -619,6 +619,8 @@ Every one of these holds:
 </td><td>
 
 Add [`//gormreuse:immutable-param`](#gormreuseimmutable-param). The caller-side check keeps the callers isolated.
+
+Such a function is usually [inferred `immutable-param`](#inferred-immutable-param) and not reported. One with a discarded statement on the parameter (`tx.Where("a")`) is not inferred, and does not get the directive either: under it the statement would do nothing, which the [body check](#gormreuseimmutable-param) reports. See the last row.
 
 </td></tr>
 <tr><td>
@@ -1382,7 +1384,7 @@ func helper(tx *gorm.DB) *gorm.DB {
 }
 ```
 
-To opt a helper out, annotate it with [`//gormreuse:immutable-param`](#gormreuseimmutable-param). The caller is then responsible for passing an isolated value. The callbacks of `Transaction` and `FindInBatches` get a fresh `tx`, so they are exempt. A `Connection` callback is not.
+To opt a helper out, annotate it with [`//gormreuse:immutable-param`](#gormreuseimmutable-param). The caller is then responsible for passing an isolated value. An unexported helper whose every caller already passes one needs no directive: it is [inferred](#inferred-immutable-param). The callbacks of `Transaction` and `FindInBatches` get a fresh `tx`, so they are exempt. A `Connection` callback is not.
 
 <details>
 <summary>Which values are safe to reuse (GORM's <code>clone</code> field)</summary>
@@ -1963,6 +1965,59 @@ A **redundant** `immutable-param` is reported. See [Unused and redundant directi
 
 </details>
 
+#### Inferred immutable-param
+
+An unexported function without the directive is treated as `immutable-param` when every call passes it immutable values. So a helper that only ever gets fresh handles needs no directive:
+
+```go
+func (s *Service) importBySQL(tx *gorm.DB, sql string) error {
+    if err := tx.Exec(sql).Error; err != nil {
+        return err
+    }
+
+    // OK: the only caller passes a Transaction callback's tx
+    return tx.Exec(sql).Error
+}
+
+func (s *Service) Import(db *gorm.DB, sql string) error {
+    return db.Transaction(func(tx *gorm.DB) error {
+        return s.importBySQL(tx, sql)
+    })
+}
+```
+
+<details>
+<summary>What can be inferred, and what turns inference off</summary>
+
+Every `*gorm.DB` argument of every call must be one of these:
+
+| Argument | Example |
+| --- | --- |
+| A value with no mutable root, as reuse detection reads it: a `Session`-family, `Begin` or `gorm.Open` result, the result of an `immutable-return` function, a field read through a parameter, a package-level variable | `helper(db.Session(&gorm.Session{}))` |
+| The `tx` of a `Transaction` or `FindInBatches` callback, or of a callback that an `immutable-input` function calls, declared or [inferred](#inferred-immutable-input) | `db.Transaction(func(tx *gorm.DB) error { return helper(tx) })` |
+| The parameter of another inferred function | `func outer(tx *gorm.DB) { helper(tx) }` |
+
+The function must be one of these:
+
+- a function or method with an unexported name, so no other package calls it
+- only called directly: not used as a function value, a method value or a method expression. Calls under `go` and `defer`, and calls in package-level initializers, count
+- for a method, not called through an interface: no interface call in the package has its name
+
+Anything else turns inference off:
+
+- no call at all, or one caller that passes a mid-chain value
+- a call to itself with its own parameter. Recursion is not inferred
+- a discarded chain statement on the parameter, such as `tx.Where("a")`. On a mid-chain value it changes the caller's value in place, and on an immutable one it does nothing
+- a declared `immutable-param`. Its caller check and redundancy report stay as they are
+
+| Also note | Detail |
+| --- | --- |
+| Test files | A package with test files is analyzed twice. The run without them cannot see a caller in a test file, so it may infer the function. The run with them sees that caller, and reports the reuse when the caller passes a mid-chain value |
+| No caller check | Every caller passes an immutable value, so an inferred function adds no caller-side report and exports no fact |
+| Generated files | A function in a generated file is never inferred |
+
+</details>
+
 ### `//gormreuse:immutable-input(name)`
 
 Declare that the function passes an **immutable** [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) to its callback parameter `name`. It is a user-defined equivalent of gorm's [`Transaction`](https://pkg.go.dev/gorm.io/gorm#DB.Transaction)/[`FindInBatches`](https://pkg.go.dev/gorm.io/gorm#DB.FindInBatches). The named callback's `*gorm.DB` parameter is then treated as immutable, so reuse inside the callback is allowed.
@@ -2044,6 +2099,42 @@ The directive is reported **unused** in these cases:
 | A variadic callback parameter (`cbs ...func(*gorm.DB)`) | Not supported. The message says `variadic callbacks are not supported`. The callbacks are checked like ordinary ones |
 
 gorm's built-in `Transaction` and `FindInBatches` already pass a fresh handle to their callbacks. So they need no directive (see [Parameters are mutable](#parameters-are-mutable)). [`Connection`](https://pkg.go.dev/gorm.io/gorm#DB.Connection) does not: its callback gets a `clone == 0` handle. Do not put `//gormreuse:immutable-input` on a wrapper that forwards a Connection `tx` unchanged. Its body contract would be false.
+
+</details>
+
+#### Inferred immutable-input
+
+An unexported function or a closure without the directive is treated as `immutable-input(name)` for each callback parameter whose body check passes. So a `Transaction` wrapper needs no directive:
+
+```go
+func withTx(db *gorm.DB, fn func(tx *gorm.DB) error) error {
+    return db.Transaction(fn)
+}
+
+func useIt(db *gorm.DB) error {
+    return withTx(db, func(tx *gorm.DB) error {
+        tx.Create(&user)
+
+        // OK: withTx is inferred immutable-input(fn)
+        return tx.First(&user).Error
+    })
+}
+```
+
+<details>
+<summary>What can be inferred, and what turns inference off</summary>
+
+The check is the [body check](#gormreuseimmutable-inputname) of the directive. So the function may hand the callback to `Transaction`, `FindInBatches` or another `immutable-input` function, declared or inferred, and call it with immutable values, such as the `tx` of such a callback. A closure in a local variable counts: `transaction := func(db *gorm.DB, cb func(*gorm.DB) error) error { ... }`.
+
+Anything else turns inference off:
+
+- a function or method with an exported name
+- a callback the body never uses, or a variadic one
+- a mid-chain value handed to the callback, or a flow the body check cannot follow
+- a call to itself with its own callback. Recursion is not inferred
+- a declared `immutable-input` on any parameter of the function
+
+A function inferred this way is checked like a declared one at its calls. Its callbacks' `tx` parameters are immutable, unless something else also calls them.
 
 </details>
 

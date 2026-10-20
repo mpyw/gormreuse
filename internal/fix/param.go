@@ -2,6 +2,7 @@ package fix
 
 import (
 	"go/ast"
+	"slices"
 	"strings"
 
 	"golang.org/x/tools/go/analysis"
@@ -10,6 +11,7 @@ import (
 	"github.com/mpyw/gormreuse/internal/ssa/cfg"
 	"github.com/mpyw/gormreuse/internal/ssa/handler"
 	"github.com/mpyw/gormreuse/internal/ssa/origin"
+	"github.com/mpyw/gormreuse/internal/ssa/pollution"
 	"github.com/mpyw/gormreuse/internal/typeutil"
 )
 
@@ -91,6 +93,19 @@ func (g *Generator) paramCallersIsolate(p *ssa.Parameter) bool {
 		}
 	}
 	return true
+}
+
+// paramDiscardsChain reports whether a use among uses, the uses of a
+// parameter root, is a discarded chain statement (see
+// discardedChainToReassign), such as tx.Where("a"). The statement changes the
+// caller's value in place, which //gormreuse:immutable-param would undo.
+//
+//declscope:shared // generator.go's Generate withholds immutable-param with it
+func (g *Generator) paramDiscardsChain(uses []pollution.UsageInfo) bool {
+	return slices.ContainsFunc(uses, func(use pollution.UsageInfo) bool {
+		_, _, ok := g.discardedChainToReassign(use)
+		return ok
+	})
 }
 
 // generateImmutableParamFix suggests annotating the enclosing function with

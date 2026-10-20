@@ -55,6 +55,9 @@ type ImmutableInputSet struct {
 	// imported returns the callbacks of a function of another package, from
 	// the fact its package exported (#195). It may be nil.
 	imported func(fn *ssa.Function) []ImmutableInputCallback
+	// inferred holds the callbacks of the functions the analysis proved to
+	// keep the contract without the directive (#349).
+	inferred map[*ssa.Function][]ImmutableInputCallback
 
 	fset      *token.FileSet
 	typesInfo *types.Info
@@ -172,6 +175,9 @@ func (s *ImmutableInputSet) Callbacks(fn *ssa.Function) []ImmutableInputCallback
 		return nil
 	}
 	fn = origin.Declared(fn)
+	if cbs, ok := s.inferred[fn]; ok {
+		return slices.Clone(cbs)
+	}
 	switch syntax := fn.Syntax().(type) {
 	case *ast.FuncLit:
 		return slices.Clone(s.closures[syntax.Pos()])
@@ -182,6 +188,30 @@ func (s *ImmutableInputSet) Callbacks(fn *ssa.Function) []ImmutableInputCallback
 		return slices.Clone(s.imported(fn))
 	}
 	return slices.Clone(s.known[funcKeyOf(fn)])
+}
+
+// Infer adds cb to the callbacks of fn, a declared function of the package
+// without the directive, because the analysis proved that its body hands cb
+// only immutable values (#349). Callbacks reports it, and nothing reports it
+// unused.
+func (s *ImmutableInputSet) Infer(fn *ssa.Function, cb ImmutableInputCallback) {
+	if s == nil {
+		return
+	}
+	if s.inferred == nil {
+		s.inferred = make(map[*ssa.Function][]ImmutableInputCallback)
+	}
+	s.inferred[fn] = append(s.inferred[fn], cb)
+}
+
+// Inferred reports whether Callbacks reports the callbacks of fn only because
+// Infer added them.
+func (s *ImmutableInputSet) Inferred(fn *ssa.Function) bool {
+	if s == nil || fn == nil {
+		return false
+	}
+	_, ok := s.inferred[origin.Declared(fn)]
+	return ok
 }
 
 // GetUnused returns the diagnostics for directives that don't apply to any usable
