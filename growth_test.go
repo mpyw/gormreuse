@@ -1406,4 +1406,42 @@ var growthCases = []growthCase{
 		}
 		return files
 	}},
+	// n loops whose closure uses one query, each followed by an optional
+	// filter (#389). The diagnostics share the root's hidden uses, and the
+	// error check walks each value once for all uses. The hidden uses cost
+	// bytes more than allocations, so this gate is looser than the 28 GB
+	// they once took at n=800.
+	{name: "loopclosurefilters", limit: growthQuadratic, shape: func(n int) []string {
+		var b strings.Builder
+		b.WriteString("func f(db *gorm.DB, xs []int, c []bool) {\n\tq := db.Model(nil)\n")
+		for i := range n {
+			fmt.Fprintf(&b, "\tfor range xs {\n\t\tfunc() { q.Where(\"c%d\").Find(nil) }()\n\t}\n\tif c[%d] {\n\t\tq = q.Where(\"z\")\n\t}\n", i, i)
+		}
+		b.WriteString("}\n")
+		return []string{b.String()}
+	}},
+	// n closures called in place, each reassigning one captured query, then
+	// two uses (#389). Each use's error check reaches the n loads of q.
+	{name: "closurereassigns", limit: growthLinear, shape: func(n int) []string {
+		var b strings.Builder
+		b.WriteString("func f(db *gorm.DB) {\n\tq := db.Model(nil)\n")
+		for i := range n {
+			fmt.Fprintf(&b, "\tfunc() { q = q.Where(\"c%d\") }()\n", i)
+		}
+		b.WriteString("\tq.Count(nil)\n\tq.Find(nil)\n}\n")
+		return []string{b.String()}
+	}},
+	// The same with stored closures, each called later (#389).
+	{name: "storedreassigns", limit: growthLinear, shape: func(n int) []string {
+		var b strings.Builder
+		b.WriteString("func f(db *gorm.DB) {\n\tq := db.Model(nil)\n")
+		for i := range n {
+			fmt.Fprintf(&b, "\tw%d := func() { q = q.Where(\"c%d\") }\n", i, i)
+		}
+		for i := range n {
+			fmt.Fprintf(&b, "\tw%d()\n\tq.Find(nil)\n", i)
+		}
+		b.WriteString("}\n")
+		return []string{b.String()}
+	}},
 }

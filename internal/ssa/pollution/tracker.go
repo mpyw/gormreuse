@@ -553,9 +553,10 @@ func funcName(v ssa.Value) string {
 // before the uses after it in the loop body are recorded. A fix built from
 // that snapshot never sees them (#199). The violations of one root share its
 // uses, which nothing changes, so a root reused n times costs one list, not
-// n (#350).
+// n (#350). They share its hidden uses the same way (#389).
 func (t *Tracker) CollectViolations() []Violation {
 	shared := make(map[ssa.Value][]UsageInfo)
+	hidden := make(map[ssa.Value][]UsageInfo)
 	for i := range t.violations {
 		if root := t.violations[i].Root; root != nil {
 			uses, ok := shared[root]
@@ -563,10 +564,11 @@ func (t *Tracker) CollectViolations() []Violation {
 				uses = t.getAllUses(root)
 				uses = slices.Clip(uses)
 				shared[root] = uses
+				hidden[root] = slices.Clip(t.hiddenUses(root))
 			}
 			t.violations[i].AllUses = t.violationUses(t.violations[i], uses)
 			t.violations[i].HiddenUses = len(t.branchUses[root]) > 0 || len(t.aliasUses[root]) > 0 || len(t.loopCarriedUses[root]) > 0 || len(t.mayUses[root]) > 0
-			t.violations[i].Hidden = t.hiddenUses(root)
+			t.violations[i].Hidden = hidden[root]
 		}
 	}
 	return t.violations
