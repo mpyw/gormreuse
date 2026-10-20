@@ -1100,4 +1100,31 @@ var growthCases = []growthCase{
 		b.WriteString("}\n")
 		return []string{b.String()}
 	}},
+	// n variables whose address a helper takes, and n that a helper may
+	// rebind (#345).
+	{name: "pointerescape", limit: growthLinear, shape: func(n int) []string {
+		var b strings.Builder
+		b.WriteString("func apply(p **gorm.DB) {}\n\nfunc scan(p **gorm.DB, db *gorm.DB) {}\n\nfunc f(db *gorm.DB) {\n")
+		for i := range n {
+			fmt.Fprintf(&b, "\tq%d := db.Where(\"c%d\")\n\tapply(&q%d)\n\tq%d.Find(nil)\n\tq%d.Find(nil)\n", i, i, i, i, i)
+			fmt.Fprintf(&b, "\tvar r%d *gorm.DB\n\tscan(&r%d, db)\n\tr%d.Find(nil)\n\tr%d.Find(nil)\n", i, i, i, i)
+		}
+		b.WriteString("}\n")
+		return []string{b.String()}
+	}},
+	// n roots stored into the fields of a package-level struct, each followed
+	// by a call that takes a function, which may reach the struct (#345).
+	{name: "callbackescape", limit: growthLinear, shape: func(n int) []string {
+		var b strings.Builder
+		b.WriteString("func each(f func()) {}\n\ntype G struct {\n")
+		for i := range n {
+			fmt.Fprintf(&b, "\tf%d *gorm.DB\n", i)
+		}
+		b.WriteString("}\n\nvar g G\n\nfunc f(db *gorm.DB) {\n")
+		for i := range n {
+			fmt.Fprintf(&b, "\ts%d := db.Where(\"d%d\")\n\tg.f%d = s%d\n\teach(func() {})\n\ts%d.Find(nil)\n\ts%d.Find(nil)\n", i, i, i, i, i, i)
+		}
+		b.WriteString("}\n")
+		return []string{b.String()}
+	}},
 }

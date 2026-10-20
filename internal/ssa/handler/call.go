@@ -513,6 +513,12 @@ func (u siteUse) handleArgs() {
 		if p < 0 || hasReadOnly && p >= readStart {
 			continue // the receiver, or read above
 		}
+		// The address of a variable holding a *gorm.DB hands its value on:
+		// applyP(&q) may change it in place, as applyTenant(q) may (#345).
+		if roots := ctx.RootTracer.PointeeRoots(arg, site.Instr, ctx.LoopInfo); roots != nil {
+			u.branch(roots, pollution.UsageInfo{Block: u.block, Pos: u.pos, Escapes: true}, func(ssa.Value) bool { return false })
+			continue
+		}
 		// Check if arg is *gorm.DB (directly or wrapped in MakeInterface).
 		// Note: We don't skip gorm methods here because we need to pollute
 		// *gorm.DB arguments passed through interface{} (e.g., base.Model(q)).

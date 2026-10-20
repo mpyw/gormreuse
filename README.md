@@ -535,7 +535,7 @@ A discarded statement cannot be reassigned
 
 </td><td>
 
-- An argument of a function that is not `//gormreuse:pure`: `applyTenant(q)`, `apply := func(d *gorm.DB) { ... }; apply(q)`, `_ = withTenant(q)`, `base.Model(q)`.
+- An argument of a function that is not `//gormreuse:pure`: `applyTenant(q)`, `apply := func(d *gorm.DB) { ... }; apply(q)`, `_ = withTenant(q)`, `base.Model(q)`. So is the address of `q` (`applyP(&q)`), also when it is stored first (`applyAll([]**gorm.DB{&q})`) (#345).
 - A store into a slice, map or channel.
 - A function other than a `*gorm.DB` method that returns a `*gorm.DB` may return `q` itself. So its argument counts even as the last use (`q = withTenant(q)`).
 - An argument of a `go` statement, and the receiver of a chain method it runs (`go q.Where("a")`).
@@ -554,7 +554,10 @@ These do not count:
 </td><td>
 
 - A local struct is reached where it is handed on: `s := &Svc{db: q}; s.apply()`, `applyP(params{db: q})`, or a closure that does so.
-- A package-level variable, or a struct that a parameter points to, is reached by any call after the store, other than a `*gorm.DB` method.
+- A package-level variable, or a struct that a parameter points to, is reached by any call after the store that may run other code (#345):
+  - A `*gorm.DB` method counts only when it takes a function, which it may run before it returns: `Connection`, `Transaction`, `FindInBatches`, `ToSQL`, and the scopes of `Scopes`.
+  - A call into a package that does not import gorm counts only when an argument can run code of one that does: a function, an interface, or a value whose type has methods in such a package. `sort.Sort(byTenant(xs))` counts, and so does `json.Marshal(v)` when the type of `v` has methods. `fmt.Sprint(n)` and `strings.ToUpper(s)` do not.
+  - A channel operation, `close`, and a call into `sync` or `sync/atomic` count. They let a goroutine that is already running go on.
 
 Reading the field in the same function (`s.db.Find(&x)`) is a use of `q`, and does not count.
 
@@ -755,6 +758,7 @@ gormreuse cannot follow a `*gorm.DB` everywhere. These count as a branch: an int
 | Slice/Map storage | `[]*gorm.DB{db}` | It may be accessed elsewhere |
 | Interface conversion | `interface{}(db)` | It may be extracted via a type assertion |
 | Non-pure function call | `helper(db)` | Unless the function is marked `//gormreuse:pure` |
+| The address of the variable, passed to a non-pure function | `applyP(&q)` | The function may change `*p` in place, or store another chain in it. A later read of `q` sees both (#345) |
 | Struct field access | `h.db.Find(nil)` | It traces back to the stored value |
 
 A struct field is followed in these forms:
@@ -2148,7 +2152,7 @@ gormreuse reports a reuse only when it can follow the value. These cases are kno
 
 | Kind | Cases | Meaning |
 | --- | --- | --- |
-| Missed reuse (false negatives) | 14 | Reuse that is not reported |
+| Missed reuse (false negatives) | 15 | Reuse that is not reported |
 | Extra reports (false positives) | 5 | Safe code that is reported |
 | Wrong position | — | A report on the wrong line |
 | No fix | — | A report without a suggested fix |
@@ -2277,6 +2281,11 @@ A struct field read through a parameter or a receiver (`s.db`, `r.db`), or a get
 A method expression of a method promoted through an embedded `*gorm.DB`: `W.Find(w, nil)`
 
 </td><td>The receiver <code>w</code> is not followed to its embedded field</td></tr>
+<tr><td><!-- fixtures: fixEscapePointerFieldAddr -->
+
+The address of a struct field handed to a helper that changes it: `applyP(&s.db); s.db.Find(nil)`
+
+</td><td>Only the address of a variable, as in <code>applyP(&amp;q)</code>, counts as a branch</td></tr>
 </table>
 
 </details>
