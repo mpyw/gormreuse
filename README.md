@@ -39,7 +39,7 @@ q.Find(&admins) // OK: a fresh chain from q
 | Report | Example | Details |
 | --- | --- | --- |
 | A second branch from a mutable `*gorm.DB` | `q := db.Where("x"); q.Find(&a); q.Count(&n)` | [Detection Model](#detection-model-mutable-branching) |
-| One use that runs more than once | `for _, id := range ids { q.Where("id = ?", id).Find(&u) }` | [Examples](#loops-and-closures) |
+| One use that runs more than once | `for _, id := range ids { q.Where("id = ?", id).Find(&u) }` | [Examples](#examples) |
 | A `Session`/`Debug` copy used after its root changed | `c := q.Session(&gorm.Session{}); q.Where("a").Find(&x); c.Count(&n)` | [Session and Debug copies](#session-and-debug-copies) |
 | A subquery changed before the outer query runs | `x := db.Where("id IN (?)", sub); sub.Where("a").Find(&y); x.Find(&z)` | [Subqueries](#subqueries-and-condition-arguments) |
 | A directive whose contract the code breaks | `//gormreuse:pure` on a function that calls `db.Where` | [Directives](#directives) |
@@ -51,6 +51,7 @@ q.Find(&admins) // OK: a fresh chain from q
 gormreuse ./...             # report
 gormreuse -fix -diff ./...  # preview the fixes
 gormreuse -fix ./...        # apply them
+gormreuse -test=false ./... # skip *_test.go files
 ```
 
 Some reports have no fix on purpose. See [Automatic Fixes](#automatic-fixes).
@@ -234,25 +235,10 @@ gormreuse has no flags of its own. These come from the analysis driver:
 | `-V=full` | | Print the version and exit (`go vet` uses this) |
 | `-flags` | | Print the flags as JSON and exit |
 
-| Exit status | When |
-| --- | --- |
-| `3` | At least one diagnostic is reported |
-| `0` | No diagnostic is reported, or `-json` is set |
+The command exits with status `3` when it reports a diagnostic. It exits with `0` when it reports none, or when `-json` is set.
 
-### Examples
-
-```bash
-# Exclude test files from analysis
-gormreuse -test=false ./...
-
-# Preview the fixes without writing them
-gormreuse -fix -diff ./...
-
-# Apply automatic fixes
-gormreuse -fix ./...
-```
-
-### Which files are analyzed
+<details>
+<summary>Which files are analyzed, and internal errors</summary>
 
 | Files | Analyzed | Directives | `-fix` edits them |
 | --- | --- | --- | --- |
@@ -260,14 +246,14 @@ gormreuse -fix ./...
 | Generated (contains `// Code generated ... DO NOT EDIT.`) | Never. They cannot be opted in | Not checked, so not trusted. At any call, in the same package or another, a function in a generated file counts as unmarked, whatever directive it carries | No |
 | Files that import `"C"` | Yes. The header that cgo adds to its output does not count | Checked | No. The driver treats cgo's output as generated |
 
-### Internal errors
-
 | Where gormreuse fails | Report |
 | --- | --- |
 | Inside a function | `gormreuse: internal error analyzing <func>: ...` at that function. gormreuse does not trust the directives that the function's failed check was proving |
 | In work that reads the whole package | `gormreuse: internal error in <stage> of package <path>: ...` at the package clause |
 
 Please [open an issue](https://github.com/mpyw/gormreuse/issues) with the code. Set `GORMREUSE_DEBUG_PANIC=1` to get the stack trace instead.
+
+</details>
 
 ## Automatic Fixes
 
@@ -285,7 +271,7 @@ Please [open an issue](https://github.com/mpyw/gormreuse/issues) with the code. 
 
 ### Strategy 1: Reassignment (Creating New Roots)
 
-Adds a reassignment for a non-finisher method call. That creates a new mutable root at each step:
+A discarded chain statement on the local variable that holds the root becomes a reassignment. That creates a new mutable root at each step:
 
 <table>
 <tr><th>Before</th><th>After <code>-fix</code></th></tr>
@@ -308,6 +294,9 @@ q.Where("b").Find(nil) // OK: first branch from new root
 </td></tr>
 </table>
 
+<details>
+<summary>When a reassignment is applied</summary>
+
 | Applied when | Detail |
 | --- | --- |
 | The method is a non-finisher | A chain builder such as `Where`, `Order` or `Limit` whose result is a `*gorm.DB`. Calls that return something else are not reassigned: `AddError`, `DB()`, `Association`, `Migrator`, `AutoMigrate`. Neither are calls that run SQL or end a transaction: `FindInBatches`, `CreateInBatches`, `UpdateColumn(s)`, `Commit`, `Rollback`, `SavePoint`, `RollbackTo` |
@@ -315,9 +304,11 @@ q.Where("b").Find(nil) // OK: first branch from new root
 | The receiver is the local variable that holds the reused root | These are not rewritten: aliases (`r := q`), calls that take the root as an argument (`base.Model(q)`), and package-level variables. Neither are variables captured by a closure that is not called inline (`go func() { ... }()`, `defer func() { ... }()`). The fix relies on a Session at the root instead, unless that would drop a discarded statement or another in-place change (see [When there is no fix](#when-there-is-no-fix)) |
 | Inside a loop | The reassignment gets a Session when the next iteration uses it again, that is, when the loop does not define the root again |
 
+</details>
+
 ### Strategy 2: Session (Making Roots Immutable)
 
-Adds `.Session(&gorm.Session{})` to make branch roots immutable when reassignment alone isn't enough:
+A root that still has two or more branches on one path gets `.Session(&gorm.Session{})` at the end of its chain:
 
 <table>
 <tr><th>Before</th><th>After <code>-fix</code></th></tr>
@@ -340,6 +331,9 @@ q.Where("b").Find(nil) // OK: independent chain from immutable root
 </td></tr>
 </table>
 
+<details>
+<summary>Where a Session goes</summary>
+
 | Applied to | Detail |
 | --- | --- |
 | A root or a reassigned value with 2+ branches on one path | This holds after the reassignments. A use in a loop that does not create the value again counts too. So `q.Where("t"); for _, id := range ids { q.Where("id = ?", id).Find(nil) }` becomes `q = q.Where("t").Session(&gorm.Session{})`. The paths come from the control flow. So in `if c { q.Where("a") }; q.Where("b").Find(nil); q.Where("c").Find(nil)`, both the root and `q = q.Where("a")` get a Session. A reassigned value used once gets none. Neither does a chain that already ends in a Session |
@@ -347,7 +341,10 @@ q.Where("b").Find(nil) // OK: independent chain from immutable root
 | Each incoming edge of a Phi node (a conditional merge) that is still mutable | An edge counts as immutable by the same rule as detection: its **last** call must return an immutable value. `db.Session(&gorm.Session{}).Where("y")` and `db.WithContext(ctx).Where("y")` are mutable, so they get a Session too |
 | Only a call that returns `*gorm.DB` | An edge that has no such call gets none. Examples are a closure parameter (`if c { q = tx }`) and one result of `q, err := open()` |
 
-#### How the fix writes `Session`
+</details>
+
+<details>
+<summary>How the fix writes <code>Session</code> and its import</summary>
 
 `Session` is written with a name that refers to `gorm.io/gorm` where it is inserted:
 
@@ -362,9 +359,51 @@ q.Where("b").Find(nil) // OK: independent chain from immutable root
 - Every diagnostic of a root carries the same fix.
 - A root with a diagnostic that `//gormreuse:ignore` suppresses gets **no fix**. The ignore says that reuse is meant. The fix would change it too, so the next run would report the ignore as unused.
 
+</details>
+
+<details>
+<summary>Combined example: both strategies on one root</summary>
+
+<table>
+<tr><th>Before</th><th>After <code>-fix</code> (both strategies applied)</th></tr>
+<tr><td>
+
+```go
+q := db.Where("base")
+q.Where("a")           // first branch
+q.Where("b").Find(nil) // VIOLATION
+q.Where("c")           // VIOLATION
+q.Where("d").Find(nil) // VIOLATION
+```
+
+</td><td>
+
+```go
+q := db.Where("base")
+q = q.Where("a").Session(&gorm.Session{})  // Reassignment + Session: used by b and c
+q.Where("b").Find(nil)
+q = q.Where("c")                            // Reassignment: used once, by d
+q.Where("d").Find(nil)
+```
+
+</td></tr>
+</table>
+
+When several roots are reused at the same place, such as `use(q, r)`:
+
+- That place gets one diagnostic. Its message names the root that appears first in the source.
+- Its fix covers every root reused there.
+- A different problem at the same place gets its own diagnostic, such as a [condition argument](#subqueries-and-condition-arguments) read after it changed.
+- The output is the same on every run.
+
+</details>
+
 ### When there is no fix
 
-A discarded statement such as `q.Where("a")` changes `q` in place, and later queries see `"a"`. A Session at the root alone would make it change a copy. Then the fixed code would silently drop `"a"`. Other code can change `q` in place too, and a Session at the root would drop that change as well. So the diagnostic has **no fix** in these cases. Fix them by hand.
+A discarded statement such as `q.Where("a")` changes `q` in place, and later queries see `"a"`. A Session at the root alone would make it change a copy, and silently drop `"a"`. So when the fix cannot keep such a change, the diagnostic has **no fix**. Fix it by hand.
+
+<details>
+<summary>Every case without a fix</summary>
 
 <table>
 <tr><th>No fix when</th><th>Examples</th></tr>
@@ -437,14 +476,19 @@ A root with a diagnostic that an ignore suppresses
 
 </td><td>
 
-See [How the fix writes `Session`](#how-the-fix-writes-session).
+The ignore says that reuse is meant. See [Strategy 2](#strategy-2-session-making-roots-immutable).
 
 </td></tr>
 </table>
 
+</details>
+
 ### Parameter Roots
 
-A reused `*gorm.DB` parameter has no definition to append a Session to. The fix depends on whether gormreuse can check every caller:
+A reused `*gorm.DB` parameter has no definition to append a Session to. Most functions get `tx = tx.Session(&gorm.Session{})` at the top of the body. An unexported helper whose every caller gormreuse can check gets [`//gormreuse:immutable-param`](#gormreuseimmutable-param) instead.
+
+<details>
+<summary>Which function gets which fix, and why</summary>
 
 <table>
 <tr><th>Function</th><th>Fix</th></tr>
@@ -503,64 +547,27 @@ A `*gorm.DB` result carries it back only to a caller that reads it. So every cal
 </td></tr>
 </table>
 
-<details>
-<summary>Why the rules are this strict</summary>
+Why the rules are this strict:
 
 - `immutable-param` on an exported function would hide the reuse: callers in other packages are never checked.
 - On a function with a mid-chain caller, it would move the report to that caller.
 - A closure never gets the directive. Write it yourself where it fits.
 - A package with test files is analyzed twice: without the test files and with them. The run without them cannot see the callers in the test files. So both runs use the body Session for a function outside the test files, and their fixes agree.
 
-</details>
-
 Neither the directive nor the body Session covers a value that the parameter merges with. In pagination code, `if f.Name != "" { db = db.Where("name = ?", f.Name) }` is followed by `db.Count(&total)` and `db.Offset(10).Limit(10).Find(&users)`. That `Where` also gets a Session, as an incoming edge of a local root does, so the fix takes one pass.
 
-### Combined Example
-
-Both strategies work together for complex cases:
-
-<table>
-<tr><th>Before</th><th>After <code>-fix</code> (both strategies applied)</th></tr>
-<tr><td>
-
-```go
-q := db.Where("base")
-q.Where("a")           // first branch
-q.Where("b").Find(nil) // VIOLATION
-q.Where("c")           // VIOLATION
-q.Where("d").Find(nil) // VIOLATION
-```
-
-</td><td>
-
-```go
-q := db.Where("base")
-q = q.Where("a").Session(&gorm.Session{})  // Reassignment + Session: used by b and c
-q.Where("b").Find(nil)
-q = q.Where("c")                            // Reassignment: used once, by d
-q.Where("d").Find(nil)
-```
-
-</td></tr>
-</table>
-
-> [!TIP]
-> Run `gormreuse -fix -diff ./...` to review the fixes, then `gormreuse -fix ./...` to apply them. Some diagnostics have no fix (see [When there is no fix](#when-there-is-no-fix) and [Parameter Roots](#parameter-roots)). Fix those by hand.
-
-When several roots are reused at the same place, such as `use(q, r)`:
-
-- That place gets one diagnostic. Its message names the root that appears first in the source.
-- Its fix covers every root reused there.
-- A different problem at the same place gets its own diagnostic, such as a [condition argument](#subqueries-and-condition-arguments) read after it changed.
-- The output is the same on every run.
+</details>
 
 ### Contract and Directive Fixes
 
-Some other diagnostics have a fix too:
+A mutable argument to an [`immutable-param`](#gormreuseimmutable-param) parameter gets `.Session(&gorm.Session{})`: `apply(q)` becomes `apply(q.Session(&gorm.Session{}))`. An unused or redundant directive name, or an unused ignore, is deleted from its comment.
+
+<details>
+<summary>Details of these fixes</summary>
 
 | Diagnostic | Fix |
 | --- | --- |
-| Mutable `*gorm.DB` passed to an [`immutable-param`](#gormreuseimmutable-param) parameter | Append `.Session(&gorm.Session{})` to the argument: `apply(q)` becomes `apply(q.Session(&gorm.Session{}))`. An argument such as `*p` is wrapped first: `(*p).Session(...)`. When a call passes several mutable arguments, the fix isolates all of them. `Session` is named and imported [as above](#how-the-fix-writes-session) |
+| Mutable `*gorm.DB` passed to an `immutable-param` parameter | Append `.Session(&gorm.Session{})` to the argument. An argument such as `*p` is wrapped first: `(*p).Session(...)`. When a call passes several mutable arguments, the fix isolates all of them. `Session` is named and imported as in [Strategy 2](#strategy-2-session-making-roots-immutable) |
 | Unused `pure`, `immutable-return`, `immutable-param` or `immutable-input(name)` | Delete that name from the comment |
 | Redundant `immutable-param` | Delete `immutable-param` from the function's comment. A comment before `a, b := func..., func...` covers both closures. So it gets no fix while another closure still needs it |
 | Unused `ignore` | Delete `ignore` from the comment |
@@ -584,6 +591,8 @@ An unused ignore keeps its warning but gets no fix in two cases:
 | After a `gormreuse: internal error` report | The analysis may have lost the diagnostic the ignore covers |
 | In a file other than a `_test.go` file, when the package has `_test.go` files | The package is analyzed twice, with and without its tests. The ignore may be needed only with them. For example, a test may call a Transaction callback directly. Delete such an ignore by hand |
 
+</details>
+
 ## Detection Model: Mutable Branching
 
 gormreuse reports when a **mutable [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) branches into multiple code paths**:
@@ -602,15 +611,18 @@ gormreuse reports when a **mutable [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#
 
 | Category | Methods | Effect on the receiver |
 | --- | --- | --- |
-| Immutable-returning | [`Session`](https://pkg.go.dev/gorm.io/gorm#DB.Session), [`WithContext`](https://pkg.go.dev/gorm.io/gorm#DB.WithContext), [`Debug`](https://pkg.go.dev/gorm.io/gorm#DB.Debug), [`Open`](https://pkg.go.dev/gorm.io/gorm#Open), [`Begin`](https://pkg.go.dev/gorm.io/gorm#DB.Begin) | Return a new immutable instance (`clone > 0`). They read the receiver but do not branch it. `Session` and `Debug` have exceptions: see [Session and Debug copies](#session-and-debug-copies) |
+| Immutable-returning | `Session`, `WithContext`, `Debug`, [`Open`](https://pkg.go.dev/gorm.io/gorm#Open), [`Begin`](https://pkg.go.dev/gorm.io/gorm#DB.Begin) | Return a new immutable instance (`clone > 0`). They read the receiver but do not branch it. `Session` and `Debug` have exceptions: see [Session and Debug copies](#session-and-debug-copies) |
 | Transaction | [`Transaction`](https://pkg.go.dev/gorm.io/gorm#DB.Transaction) | Returns an `error`. Like `Begin`, it reads the receiver but does not branch it. Its callback gets a fresh `tx` (see [Parameters are mutable](#parameters-are-mutable)) |
 | ToSQL | [`ToSQL`](https://pkg.go.dev/gorm.io/gorm#DB.ToSQL) | Returns a `string`. It builds SQL from a copy of the receiver's Statement, so it reads the receiver but does not branch it. A branch before it is reported |
-| State-only | [`AddError`](https://pkg.go.dev/gorm.io/gorm#DB.AddError), [`DB`](https://pkg.go.dev/gorm.io/gorm#DB.DB), [`Get`](https://pkg.go.dev/gorm.io/gorm#DB.Get), [`InstanceGet`](https://pkg.go.dev/gorm.io/gorm#DB.InstanceGet), [`Callback`](https://pkg.go.dev/gorm.io/gorm#DB.Callback) | Touch no clause, so they neither read nor branch the receiver. `AddError` sets `db.Error`, which a later chain of the same value inherits and stops at. That is what `AddError` is for, so it is not reported |
+| State-only | `AddError`, `DB`, `Get`, `InstanceGet`, `Callback` | Touch no clause, so they neither read nor branch the receiver. `AddError` sets `db.Error`, which a later chain of the same value inherits and stops at. That is what `AddError` is for, so it is not reported |
 | All others | [`Where`](https://pkg.go.dev/gorm.io/gorm#DB.Where), [`Find`](https://pkg.go.dev/gorm.io/gorm#DB.Find), [`Count`](https://pkg.go.dev/gorm.io/gorm#DB.Count), [`Order`](https://pkg.go.dev/gorm.io/gorm#DB.Order), etc. | Create a branch from the receiver |
 
 ### Automatic Pollution Sources
 
-gormreuse conservatively marks a [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) as polluted in these cases:
+gormreuse cannot follow a `*gorm.DB` everywhere. These count as a branch: an interface method call (`repo.Query(db)`), a channel send, a slice or map store, and an interface conversion. So does a call to a function that is not `//gormreuse:pure`. A subquery or condition argument is a [read](#subqueries-and-condition-arguments), not a branch.
+
+<details>
+<summary>Every pollution source, and how struct fields are followed</summary>
 
 | Operation | Example | Why |
 | --- | --- | --- |
@@ -620,11 +632,6 @@ gormreuse conservatively marks a [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB
 | Interface conversion | `interface{}(db)` | It may be extracted via a type assertion |
 | Non-pure function call | `helper(db)` | Unless the function is marked `//gormreuse:pure` |
 | Struct field access | `h.db.Find(nil)` | It traces back to the stored value |
-
-A `*gorm.DB` passed as a subquery or condition argument of a query method is a read, not one of these. See [Subqueries and condition arguments](#subqueries-and-condition-arguments).
-
-<details>
-<summary>Struct fields in detail</summary>
 
 A struct field is followed in these forms:
 
@@ -643,10 +650,39 @@ A struct field is followed in these forms:
 
 ### Examples
 
-> [!NOTE]
-> In these examples, `db` is the value that `gorm.Open` returned, which is immutable. A `*gorm.DB` parameter is mutable (see [Parameters are mutable](#parameters-are-mutable)). So some of the safe examples are reported when `db` is a parameter.
+In these examples, `db` is the value that `gorm.Open` returned, which is immutable. A `*gorm.DB` parameter is mutable (see [Parameters are mutable](#parameters-are-mutable)). So some of the safe examples are reported when `db` is a parameter.
 
-#### Branching
+| Pattern | Reported? |
+| --- | --- |
+| Two branches from a mutable value, finisher or not | Yes |
+| Branches from a value whose chain **ends** in `Session` | No |
+| A `Session` in the middle of the chain | Yes |
+| One use in a loop, or in a closure that runs more than once | Yes |
+| A variable reassigned before its next use | No |
+| A chain kept in a different variable, then the original used again | Yes |
+
+> [!IMPORTANT]
+> **Chaining without reassignment is a violation!** Each statement using the same variable creates a separate branch:
+> ```go
+> q := db.Where("base")
+> q.Where("a")           // first branch - OK
+> q.Where("b")           // VIOLATION: second branch
+> q.Find(&users)         // VIOLATION: third branch
+> ```
+> **Solution**: Reassign the result or use method chaining in a single expression:
+> ```go
+> // Option 1: Reassign each step
+> q := db.Where("base")
+> q = q.Where("a")
+> q = q.Where("b")
+> q.Find(&users)         // OK - first branch from final q
+>
+> // Option 2: Single chained expression
+> db.Where("base").Where("a").Where("b").Find(&users)  // OK - single chain
+> ```
+
+<details>
+<summary>Examples: branching</summary>
 
 <table>
 <tr><th>Code</th><th>Reported?</th><th>Why</th></tr>
@@ -788,7 +824,10 @@ An immutable-returning method on a polluted value is a branch too.
 </td></tr>
 </table>
 
-#### Loops and closures
+</details>
+
+<details>
+<summary>Examples: loops and closures</summary>
 
 <table>
 <tr><th>Code</th><th>Reported?</th><th>Why</th></tr>
@@ -870,27 +909,10 @@ A use in a loop reuses every root that the variable may hold.
 </td></tr>
 </table>
 
-> [!IMPORTANT]
-> **Chaining without reassignment is a violation!** Each statement using the same variable creates a separate branch:
-> ```go
-> q := db.Where("base")
-> q.Where("a")           // first branch - OK
-> q.Where("b")           // VIOLATION: second branch
-> q.Find(&users)         // VIOLATION: third branch
-> ```
-> **Solution**: Reassign the result or use method chaining in a single expression:
-> ```go
-> // Option 1: Reassign each step
-> q := db.Where("base")
-> q = q.Where("a")
-> q = q.Where("b")
-> q.Find(&users)         // OK - first branch from final q
->
-> // Option 2: Single chained expression
-> db.Where("base").Where("a").Where("b").Find(&users)  // OK - single chain
-> ```
+</details>
 
-#### Reassignment
+<details>
+<summary>Examples: reassignment</summary>
 
 A variable reassignment creates a **new mutable root**. So the variable can be used fresh. gormreuse uses [SSA (Static Single Assignment)](https://pkg.go.dev/golang.org/x/tools/go/ssa) form, where each assignment creates a distinct value. So the new value has no relationship to the previous one.
 
@@ -981,9 +1003,11 @@ A chain assigned to a **different** variable is a branch. This holds under a con
 
 Each safe example above branches `db` more than once. That is safe only because `db` is immutable. If `db` were a `*gorm.DB` parameter, the second branch of `db` would be reported. A reassignment that extends the same variable, as in `if condition { q = q.Where("alt") }`, is not a second branch of `q`.
 
+</details>
+
 ### Session and Debug copies
 
-On a mutable value, [`Session(&gorm.Session{})`](https://pkg.go.dev/gorm.io/gorm#DB.Session) and [`Debug()`](https://pkg.go.dev/gorm.io/gorm#DB.Debug) return a copy that **points at the same `Statement`**. Using the copy does not change the original. But a change to the original after the copy was taken shows up in every later use of the copy:
+On a mutable value, [`Session(&gorm.Session{})`](https://pkg.go.dev/gorm.io/gorm#DB.Session) and [`Debug()`](https://pkg.go.dev/gorm.io/gorm#DB.Debug) return a copy that **points at the same `Statement`**. Using the copy does not change the original. But a change to the original after the copy was taken shows up in every later use of the copy. A change by reassignment (`q = q.Where(...)`) counts too, since it changes a mutable `Statement` in place:
 
 ```go
 q := db.Model(&User{}).Where("tenant = 1") // q is mutable
@@ -993,10 +1017,10 @@ q.Where("active = 1").Find(&users)         // first branch - changes q in place
 countQ.Count(&n)                           // VIOLATION: runs WHERE tenant = 1 AND active = 1
 ```
 
-A change by reassignment (`q = q.Where(...)`) counts too, since it changes a mutable `Statement` in place.
+To fix it, end the root's chain with `.Session(&gorm.Session{})` before you copy it. Or take the copy with an option that clones the `Statement`.
 
-> [!TIP]
-> To fix it, end the root's chain with `.Session(&gorm.Session{})` before you copy it. Or take the copy with an option that clones the `Statement`.
+<details>
+<summary>Which calls share the Statement</summary>
 
 | Call on a mutable value | Shares the `Statement`? | Result |
 | --- | --- | --- |
@@ -1011,9 +1035,23 @@ gormreuse reads the `&gorm.Session{...}` literal at the call:
 - An option set to a non-constant value, or set in only some branches, is unknown. gormreuse assumes the worst case.
 - A `Context` set to anything other than `nil` counts as set, as for `WithContext(ctx)`.
 
+</details>
+
 ### Subqueries and condition arguments
 
-GORM builds a subquery from a copy of the argument's `Statement`. So passing a `*gorm.DB` as an argument never changes it. gormreuse treats such an argument as a **read** of its root. GORM reads the argument when the **outer query runs**, not when you pass it. So a change to the argument before that, by a branch or by reassignment, shows up in the outer query:
+GORM builds a subquery from a copy of the argument's `Statement`. So passing a `*gorm.DB` as an argument never changes it. gormreuse treats such an argument as a **read** of its root. You can pass one subquery to several queries. But GORM reads it when the **outer query runs**, here at `x.Find`. A change to the argument before that, by a branch or by reassignment, is reported:
+
+```go
+sub := db.Model(&User{}).Select("id")
+x := db.Where("id IN (?)", sub)
+sub.Where("age > 18").Find(&adults)    // changes sub in place
+x.Find(&users)                          // VIOLATION: the subquery has age > 18
+```
+
+To fix it, end the argument's chain with `.Session(&gorm.Session{})` before you pass it.
+
+<details>
+<summary>More examples, the read-only parameters, and wrappers</summary>
 
 <table>
 <tr><th>Code</th><th>Reported?</th><th>Why</th></tr>
@@ -1044,23 +1082,9 @@ db.Where("id IN (?)", sub).Find(&users) // VIOLATION: the subquery has age > 18
 `sub` changed before the outer query ran.
 
 </td></tr>
-<tr><td>
-
-```go
-sub := db.Model(&User{}).Select("id")
-x := db.Where("id IN (?)", sub)
-sub.Where("age > 18").Find(&adults)    // changes sub in place
-x.Find(&users)                          // VIOLATION: the subquery has age > 18
-```
-
-</td><td><b>Yes</b></td><td>
-
-The outer query runs at `x.Find`, after the change.
-
-</td></tr>
 </table>
 
-To fix it, end the argument's chain with `.Session(&gorm.Session{})` before you pass it. The second kind of violation:
+The second kind of violation:
 
 - is reported once per call that takes the argument
 - is reported at the first use of the outer chain after the change
@@ -1085,6 +1109,8 @@ A subquery inside one of these wrappers, passed to a read-only parameter, is a r
 
 The wrapper may be kept in a variable, and wrappers may nest. But each use of the wrapper must be such an argument. A wrapper may also be used another way, such as `keep(e)`, `m["s"]` or `e.Vars`. Then it may hand the subquery to other code, so the subquery is a branch again.
 
+</details>
+
 ### Scopes / Preload callbacks
 
 The [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) passed to a [`Scopes`](https://pkg.go.dev/gorm.io/gorm#DB.Scopes) / [`Preload`](https://pkg.go.dev/gorm.io/gorm#DB.Preload) callback is a **mid-chain (mutable) value**. So reusing it inside the callback is a violation, as for any other mutable value:
@@ -1107,7 +1133,10 @@ func helper(tx *gorm.DB) *gorm.DB {
 }
 ```
 
-To opt a helper out, annotate it with [`//gormreuse:immutable-param`](#gormreuseimmutable-param). The caller is then responsible for passing an isolated value.
+To opt a helper out, annotate it with [`//gormreuse:immutable-param`](#gormreuseimmutable-param). The caller is then responsible for passing an isolated value. The callbacks of `Transaction` and `FindInBatches` get a fresh `tx`, so they are exempt. A `Connection` callback is not.
+
+<details>
+<summary>Which values are safe to reuse (GORM's <code>clone</code> field)</summary>
 
 GORM's internal `clone` field decides whether reuse is safe:
 
@@ -1117,21 +1146,23 @@ GORM's internal `clone` field decides whether reuse is safe:
 
 | Source | `clone` | Reusable? |
 | --- | --- | --- |
-| [`gorm.Open`](https://pkg.go.dev/gorm.io/gorm#Open), [`Session`](https://pkg.go.dev/gorm.io/gorm#DB.Session), [`WithContext`](https://pkg.go.dev/gorm.io/gorm#DB.WithContext), [`Debug`](https://pkg.go.dev/gorm.io/gorm#DB.Debug) | `> 0` | ✅ forks a fresh Statement (but see [Session and Debug copies](#session-and-debug-copies)) |
+| [`gorm.Open`](https://pkg.go.dev/gorm.io/gorm#Open), `Session`, `WithContext`, `Debug` | `> 0` | ✅ forks a fresh Statement (but see [Session and Debug copies](#session-and-debug-copies)) |
 | `Session(&gorm.Session{Initialized: true})` | `== 0` | ❌ shares Statement |
-| [`Begin`](https://pkg.go.dev/gorm.io/gorm#DB.Begin) result, [`Transaction`](https://pkg.go.dev/gorm.io/gorm#DB.Transaction) callback `tx` | `> 0` | ✅ fresh transaction handle |
+| `Begin` result, `Transaction` callback `tx` | `> 0` | ✅ fresh transaction handle |
 | [`FindInBatches`](https://pkg.go.dev/gorm.io/gorm#DB.FindInBatches) callback `tx` | `> 0` | ✅ fresh handle per batch |
-| Mid-chain ([`Where`](https://pkg.go.dev/gorm.io/gorm#DB.Where), [`Order`](https://pkg.go.dev/gorm.io/gorm#DB.Order), …) | `== 0` | ❌ shares Statement |
+| Mid-chain (`Where`, `Order`, …) | `== 0` | ❌ shares Statement |
 | [`Connection`](https://pkg.go.dev/gorm.io/gorm#DB.Connection) callback `tx` | `== 0` | ❌ shares Statement |
-| A [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) **parameter** | unknown | ❌ treated as mutable |
+| A `*gorm.DB` **parameter** | unknown | ❌ treated as mutable |
 | The result of a helper, a func-typed value (`f(db)`) or an interface method (`repo.DB()`), alone or in a tuple such as `(*gorm.DB, error)` | unknown | ❌ treated as mutable, unless the helper is [`//gormreuse:immutable-return`](#gormreuseimmutable-return), declared or [inferred](#inferred-immutable-return) |
 
 A repository interface whose method returns a fresh handle is reported when its result is branched twice. No directive applies to an interface method. Isolate the result with `repo.DB().Session(&gorm.Session{})`.
 
-Callbacks of `Transaction` and `FindInBatches` are exempt, also when the call runs under `go` or `defer`. An example is `tx` in `db.Transaction(func(tx *gorm.DB) error {...})`. Their `tx` is a fresh handle. A `Connection` callback is **not** exempt. gorm passes it a `clone == 0` handle, so branching its `tx` twice is reported. Declare your own such helpers with [`//gormreuse:immutable-input(name)`](#gormreuseimmutable-inputname).
+</details>
 
 <details>
-<summary>Named callbacks, and callbacks held in a variable or field</summary>
+<summary>Transaction, FindInBatches and Connection callbacks in detail</summary>
+
+Callbacks of `Transaction` and `FindInBatches` are exempt, also when the call runs under `go` or `defer`. An example is `tx` in `db.Transaction(func(tx *gorm.DB) error {...})`. Their `tx` is a fresh handle. A `Connection` callback is **not** exempt. gorm passes it a `clone == 0` handle, so branching its `tx` twice is reported. Declare your own such helpers with [`//gormreuse:immutable-input(name)`](#gormreuseimmutable-inputname).
 
 A **named** function or method is exempt only when every use of it in the package passes it as such a callback. Otherwise its parameter is treated as mutable like any other parameter. That is the case when it is also called directly, stored, returned, passed as an ordinary argument, or exported (another package could call it). The packages that import an exported function are analyzed after its own package, so its own package cannot see their calls. To keep it exempt, mark it [`//gormreuse:immutable-param`](#gormreuseimmutable-param). Then each direct caller, in its package or in another one, must pass an isolated value.
 
@@ -1157,6 +1188,9 @@ A use inside a closure counts where the closure is called.
 | --- | --- |
 | One plain call site, or called in place (`func() { ... }()`) | Uses on paths that cannot both run are not reported |
 | Called from more than one place, deferred, run with `go`, passed to a function, or stored | It may run at any time. A use inside it conflicts with every other use of the same root |
+
+<details>
+<summary>Examples: captured variables and factories</summary>
 
 <table>
 <tr><th>Code</th><th>Reported?</th><th>Why</th></tr>
@@ -1234,9 +1268,14 @@ The chain starts from a captured mutable root `q`. So every call branches `q`, a
 </td></tr>
 </table>
 
+</details>
+
 ### Package-level variables
 
-A package-level `*gorm.DB` follows the stores to it in the same function:
+A package-level `*gorm.DB` follows the stores to it in the same function. A global that the function only reads is treated as immutable, because it usually holds a `gorm.Open` result.
+
+<details>
+<summary>Examples, package-level closures, and local function variables</summary>
 
 ```go
 var Global *gorm.DB
@@ -1250,7 +1289,7 @@ func F(db *gorm.DB) {
 
 | Case | Rule |
 | --- | --- |
-| A global that the function only reads | Treated as immutable, because it usually holds a `gorm.Open` result. So a mutable chain assigned in another function, or in the variable's initializer (`var q = db.Where("x")`), is not reported when it is reused |
+| A global that the function only reads | Immutable. So a mutable chain assigned in another function, or in the variable's initializer (`var q = db.Where("x")`), is not reported when it is reused |
 | The body of a package-level closure (`var f = func(db *gorm.DB) { ... }`) | Checked like any other closure. The directives on it are validated |
 | A call through such an `f` | Honours those directives when `f` is unexported, assigned only in its declaration, and its address is never taken |
 | A local variable that holds a function | Read the same way, also inside a closure that captures it, such as a closure that calls it or a recursive closure. A call through it honours the directives of the function it holds. The variable must be assigned exactly once, outside any closure, and its address must never be taken |
@@ -1264,6 +1303,8 @@ q.Find(&users)          // OK - peek is pure
 func() { peek(nil) }()  // the capture does not change that
 ```
 
+</details>
+
 ## Directives
 
 A directive tells gormreuse what a function guarantees. gormreuse checks each guarantee:
@@ -1276,17 +1317,16 @@ A directive tells gormreuse what a function guarantees. gormreuse checks each gu
 | [`immutable-param`](#gormreuseimmutable-param) | A function or closure | Its `*gorm.DB` parameters are immutable | Every caller passes an isolated value |
 | [`immutable-input(name)`](#gormreuseimmutable-inputname) | A function or closure | It passes an immutable `*gorm.DB` to callback `name` | The body |
 
-### Syntax
+Write `//gormreuse:name[,name...]` as a line comment: lowercase names, and no space anywhere in it. A reason may follow after `//`, as in `//gormreuse:ignore // reason here`.
 
-- Only `//gormreuse:name[,name...]` is a directive. It is a line comment with lowercase names, and no space anywhere in it, including after a comma.
-- A reason may follow after `//`, as in `//gormreuse:ignore // reason here`. `//` is the only reason separator.
+<details>
+<summary>Syntax rules, and directives across packages</summary>
+
+- Only `//gormreuse:name[,name...]` is a directive. There is no space anywhere in it, including after a comma.
+- `//` is the only reason separator.
 - A directive on a generic function or method applies to every instance of it (`helper[int](q)`).
 - A directive on a method also applies when the method is called through a method value (`f := r.helper; f(q)`) or a method expression (`Repo.helper(r, q)`).
-
-> [!WARNING]
-> Any other comment that starts with `gormreuse:` has no effect, and is reported with how to write it. One unknown name in a list drops the whole comment: `//gormreuse:pure,bogus` does not mark the function pure.
-
-### Across packages
+- **Warning:** any other comment that starts with `gormreuse:` has no effect, and is reported with how to write it. One unknown name in a list drops the whole comment: `//gormreuse:pure,bogus` does not mark the function pure.
 
 A directive on an exported function or method also applies in the packages that call it. The analysis of the declaring package checks the function's body. It passes the result on as an [analysis fact](https://pkg.go.dev/golang.org/x/tools/go/analysis#hdr-Modular_analysis_with_Facts), so the packages that call it do not read its source. This works with the `gormreuse` command, `go vet` and golangci-lint, which all analyze the dependencies first.
 
@@ -1301,9 +1341,11 @@ A directive on an exported function or method also applies in the packages that 
 - A caller in another package does not trust it, since the author of that package may never see the report.
 - Another package also does not trust an `immutable-return` or `immutable-input(name)` function that keeps its contract only by relying on a broken one. That is one that returns its result, hands it to the callback, or hands the callback to it. This holds through any number of such functions.
 
+</details>
+
 ### `//gormreuse:ignore`
 
-Suppress warnings for a specific line:
+Suppress warnings on a line, in a function, or in a file. It covers every kind of diagnostic: reuse violations, `pure` / `immutable-*` contract violations, redundant or unused directives, and the Scopes `Session()` warning.
 
 ```go
 q := db.Where("active = ?", true)
@@ -1311,6 +1353,9 @@ q.Find(&users)
 //gormreuse:ignore // intentional reuse for pagination
 q.Count(&count)  // Suppressed
 ```
+
+<details>
+<summary>What each ignore covers, with examples</summary>
 
 | Ignore | Write it | Covers |
 | --- | --- | --- |
@@ -1321,10 +1366,8 @@ q.Count(&count)  // Suppressed
 
 - For `if`, `for`, `switch` and `select`, a line ignore covers only the header up to `{`.
 - An ignore inside a closure covers the closure's statement only.
-- The same scope applies to every diagnostic gormreuse reports: reuse violations, `pure` / `immutable-*` contract violations, redundant or unused directives, and the Scopes `Session()` warning.
-
-<details>
-<summary>Examples of each scope</summary>
+- An ignore only hides reports. gormreuse still checks the function. A `//gormreuse:pure` function that leaks its argument is still not trusted at its call sites, even when the leak report is ignored.
+- An unused ignore is reported. See [Unused and redundant directives](#unused-and-redundant-directives).
 
 A comment after code covers that line only:
 
@@ -1363,23 +1406,26 @@ q.
 
 </details>
 
-> [!NOTE]
-> An ignore only hides reports. gormreuse still checks the function. A `//gormreuse:pure` function that leaks its argument is still not trusted at its call sites, even when the leak report is ignored.
-
-> [!WARNING]
-> Unused line-level and function-level `//gormreuse:ignore` directives are reported as warnings. A function-level ignore is unused when the function has nothing to suppress. This finds stale ignore comments. File-level ignores do not trigger unused warnings. No ignore suppresses an unused-ignore warning or a `gormreuse: internal error` report. The fix deletes the ignore (see [Contract and Directive Fixes](#contract-and-directive-fixes)).
-
 ### `//gormreuse:pure`
 
-Mark a function or closure as not polluting its [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) argument:
+Mark a function or closure as not polluting its [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) argument. Passing an argument to it is then not a branch. Without the directive, `helper(q)` branches `q`.
 
 ```go
 //gormreuse:pure
 func withTenant(db *gorm.DB, tenantID int) *gorm.DB {
     return db.Session(&gorm.Session{}).Where("tenant_id = ?", tenantID)
 }
+```
 
-// Also works on closures (next-line or same-line pattern):
+> [!WARNING]
+> gormreuse checks the body. A pure function must not call a chain method on an argument (`db.Where("x")`), let it escape, or pass it to a function that is not pure. It may return a mutable value: `q := withTenant(db, 1)` is still mutable.
+
+<details>
+<summary>Placement, calls without the directive, and the full contract</summary>
+
+The directive also works on closures, on the next line or the same line:
+
+```go
 //gormreuse:pure
 helper := func(q *gorm.DB) { _ = q }
 
@@ -1390,26 +1436,22 @@ helper2 := func(q *gorm.DB) { //gormreuse:pure
 
 A same-line directive belongs to the innermost function whose `{` comes before it on the line. In `func outer(db *gorm.DB) { run(func(q *gorm.DB) { //gormreuse:pure`, only the closure is pure.
 
-> [!TIP]
-> Without a directive, a call to your own function is treated like this:
->
-> | Call | Effect on the `*gorm.DB` argument `q` | Result |
-> | --- | --- | --- |
-> | `helper(q)`, result discarded or not a `*gorm.DB` | A branch of `q` | |
-> | `q = helper(q)`, result assigned back to `q` | Like `q = q.Where(...)`, also under a condition or in a loop | A new mutable root |
-> | `r := helper(q)` | A branch of `q` | A new mutable root, unless `helper` is [inferred immutable-return](#inferred-immutable-return) |
->
-> Add `//gormreuse:pure` to a helper that does not change its argument, so that passing it does not branch it.
+Without a directive, a call to your own function is treated like this:
 
-> [!WARNING]
-> gormreuse validates that functions marked `//gormreuse:pure` actually satisfy the pure contract:
->
-> ```go
-> //gormreuse:pure
-> func badPure(db *gorm.DB) {
->     db.Where("x")  // ERROR: pure function pollutes *gorm.DB argument by calling Where
-> }
-> ```
+| Call | Effect on the `*gorm.DB` argument `q` | Result |
+| --- | --- | --- |
+| `helper(q)`, result discarded or not a `*gorm.DB` | A branch of `q` | |
+| `q = helper(q)`, result assigned back to `q` | Like `q = q.Where(...)`, also under a condition or in a loop | A new mutable root |
+| `r := helper(q)` | A branch of `q` | A new mutable root, unless `helper` is [inferred immutable-return](#inferred-immutable-return) |
+
+gormreuse validates that functions marked `//gormreuse:pure` actually satisfy the pure contract:
+
+```go
+//gormreuse:pure
+func badPure(db *gorm.DB) {
+    db.Where("x")  // ERROR: pure function pollutes *gorm.DB argument by calling Where
+}
+```
 
 | A pure function | Rule | Includes |
 | --- | --- | --- |
@@ -1427,28 +1469,45 @@ Some pure functions are not trusted as pure at their call sites, so reuse after 
 
 Passing the argument to a function that is not marked pure is reported inside the pure function only.
 
-> [!IMPORTANT]
-> A pure function MAY return a mutable [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB). Callers must treat the return value as potentially mutable:
-> ```go
-> q := withTenant(db, 1)  // q is mutable!
-> q.Find(&users)          // first branch - OK
-> q.Count(&count)         // VIOLATION - second branch from mutable q
-> ```
->
-> A pure function MAY also return its argument. Its result is then the same value as the argument, so a branch from the result is a branch from the argument:
-> ```go
-> //gormreuse:pure
-> func same(db *gorm.DB) *gorm.DB { return db }
->
-> q := db.Where("x")
-> same(q).Find(&users)    // first branch from q - OK
-> q.Count(&count)         // VIOLATION - second branch from q
-> ```
-> A result that comes only from immutable values, like `withTenant`'s `db.Session(...).Where(...)`, is a new chain and does not share the argument. This holds for a pure function in another package too.
+A pure function MAY return a mutable [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB). Callers must treat the return value as potentially mutable:
+
+```go
+q := withTenant(db, 1)  // q is mutable!
+q.Find(&users)          // first branch - OK
+q.Count(&count)         // VIOLATION - second branch from mutable q
+```
+
+A pure function MAY also return its argument. Its result is then the same value as the argument, so a branch from the result is a branch from the argument:
+
+```go
+//gormreuse:pure
+func same(db *gorm.DB) *gorm.DB { return db }
+
+q := db.Where("x")
+same(q).Find(&users)    // first branch from q - OK
+q.Count(&count)         // VIOLATION - second branch from q
+```
+
+A result that comes only from immutable values, like `withTenant`'s `db.Session(...).Where(...)`, is a new chain and does not share the argument. This holds for a pure function in another package too.
+
+</details>
 
 ### `//gormreuse:immutable-return`
 
-Mark a function as returning an **immutable** [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) (like builtin [`Session`](https://pkg.go.dev/gorm.io/gorm#DB.Session), [`WithContext`](https://pkg.go.dev/gorm.io/gorm#DB.WithContext)):
+Mark a function as returning an **immutable** [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) (like builtin [`Session`](https://pkg.go.dev/gorm.io/gorm#DB.Session), [`WithContext`](https://pkg.go.dev/gorm.io/gorm#DB.WithContext)). Callers can then reuse its result freely. It also covers a `*gorm.DB` in a multi-value result, such as `func Open() (*gorm.DB, error)`. The body contract applies to that result. Most helpers need no directive: see [Inferred immutable-return](#inferred-immutable-return).
+
+```go
+//gormreuse:immutable-return
+func GetDB() *gorm.DB {
+    return globalDB.Session(&gorm.Session{})
+}
+```
+
+> [!WARNING]
+> **Body contract.** A function that returns a provably *mutable* value is reported at the declaration. Put `Session` at the **end** of the chain (`globalDB.Where("x").Session(&gorm.Session{})`), not before a `Where`.
+
+<details>
+<summary>A full example, and what the body check reports</summary>
 
 ```go
 //gormreuse:immutable-return
@@ -1463,18 +1522,14 @@ func useIt() {
 }
 ```
 
-> [!TIP]
-> Use this directive for DB connection helpers that return a fresh, immutable [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) instance. Callers can then reuse the returned value freely. It also covers a `*gorm.DB` in a multi-value result, such as `func Open() (*gorm.DB, error)`. The body contract applies to that result. Most helpers need no directive: see [Inferred immutable-return](#inferred-immutable-return).
+Without the check, gormreuse would trust a false directive, and silently allow unsafe reuse of the return value at every call site:
 
-> [!WARNING]
-> **Body contract.** If the function actually returns a *mutable* value, the directive is reported at the declaration. Otherwise gormreuse would trust it, and silently allow unsafe reuse of the return value at every call site:
-> ```go
-> //gormreuse:immutable-return // VIOLATION: returns mutable *gorm.DB
-> func GetDB() *gorm.DB {
->     return globalDB.Session(&gorm.Session{}).Where("x") // trailing Where re-forks a fresh clone==0 Statement
-> }
-> ```
-> Put [`Session`](https://pkg.go.dev/gorm.io/gorm#DB.Session) at the **end** of the chain (`globalDB.Where("x").Session(&gorm.Session{})`) so the returned value is isolated.
+```go
+//gormreuse:immutable-return // VIOLATION: returns mutable *gorm.DB
+func GetDB() *gorm.DB {
+    return globalDB.Session(&gorm.Session{}).Where("x") // trailing Where re-forks a fresh clone==0 Statement
+}
+```
 
 Only provably mutable returns are reported:
 
@@ -1486,9 +1541,20 @@ Only provably mutable returns are reported:
 | A bare parameter, a value from an unmarked named helper, or a `Session` config gormreuse can't read | No (benefit of the doubt) |
 | An exported or address-taken package-level variable | No (benefit of the doubt) |
 
+</details>
+
 #### Inferred immutable-return
 
 A function or closure without the directive is treated as `immutable-return` when its body proves that every [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) it returns is immutable. So most connection helpers need no directive:
+
+```go
+func (r *repo) conn(ctx context.Context) *gorm.DB {
+    return r.db.WithContext(ctx) // inferred: callers may branch the result twice
+}
+```
+
+<details>
+<summary>What can be inferred, and what turns inference off</summary>
 
 ```go
 func (r *repo) conn(ctx context.Context) *gorm.DB {
@@ -1538,6 +1604,8 @@ Anything else turns inference off for the function:
 | Relying on a broken contract | A declared `immutable-return` function may break its contract. A function inferred only because it returns that function's result is trusted in its own package, like that function. Another package does not trust it |
 | A declared directive on an inferred function | It is not reported as unused. It also documents the intent, and keeps the guarantee checked if the body changes |
 
+</details>
+
 ### `//gormreuse:immutable-param`
 
 Opt a function's [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) **parameters** out of the default mutable treatment. They are treated as immutable inside the function. The caller becomes responsible for passing an isolated value:
@@ -1551,14 +1619,21 @@ func applyFilters(tx *gorm.DB) {
 ```
 
 > [!WARNING]
-> **Caller-side contract.** When the function actually branches such a parameter, passing a *mutable* [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) at a call site is reported. The callee's internal branching would interfere, because the value is not isolated:
-> ```go
-> func caller(root *gorm.DB) {
->     q := root.Session(&gorm.Session{}).Where("x") // mutable
->     applyFilters(q) // VIOLATION: mutable *gorm.DB passed to immutable-param parameter
-> }
-> ```
-> Fix it by passing an isolated value (`root.Session(&gorm.Session{})`). Or make the caller `//gormreuse:immutable-param` too, so the contract propagates. The suggested fix appends `.Session(&gorm.Session{})` to the argument (see [Contract and Directive Fixes](#contract-and-directive-fixes)).
+> **Caller-side contract.** When the function actually branches such a parameter, passing a *mutable* `*gorm.DB` at a call site is reported. The suggested fix appends `.Session(&gorm.Session{})` to the argument.
+
+<details>
+<summary>The caller check in detail</summary>
+
+The callee's internal branching would interfere, because the value is not isolated:
+
+```go
+func caller(root *gorm.DB) {
+    q := root.Session(&gorm.Session{}).Where("x") // mutable
+    applyFilters(q) // VIOLATION: mutable *gorm.DB passed to immutable-param parameter
+}
+```
+
+Fix it by passing an isolated value (`root.Session(&gorm.Session{})`). Or make the caller `//gormreuse:immutable-param` too, so the contract propagates. See [Contract and Directive Fixes](#contract-and-directive-fixes) for the fix.
 
 | Call | Caller contract checked? |
 | --- | --- |
@@ -1567,10 +1642,11 @@ func applyFilters(tx *gorm.DB) {
 | A function in another package | Yes |
 | A call through an interface or a func-typed parameter | No. The callee is unknown |
 
-> [!TIP]
-> Combine with `//gormreuse:pure` when a helper both leaves its argument unpolluted and expects an isolated value.
+**Tip:** combine with `//gormreuse:pure` when a helper both leaves its argument unpolluted and expects an isolated value.
 
-A **redundant** `//gormreuse:immutable-param` is reported so you can drop it. That is one whose parameter is never reused, so it suppresses nothing. Its fix deletes it.
+A **redundant** `immutable-param` is reported. See [Unused and redundant directives](#unused-and-redundant-directives).
+
+</details>
 
 ### `//gormreuse:immutable-input(name)`
 
@@ -1581,7 +1657,15 @@ Declare that the function passes an **immutable** [`*gorm.DB`](https://pkg.go.de
 func withFreshDB(cb func(*gorm.DB) error, db *gorm.DB) error {
     return cb(db.Session(&gorm.Session{})) // hands the callback an isolated value
 }
+```
 
+> [!WARNING]
+> **Body contract.** A function that hands the callback a mutable value is reported. So is a callback that escapes where gormreuse cannot follow it.
+
+<details>
+<summary>A caller, placement, the body check, and unused cases</summary>
+
+```go
 func useIt(db *gorm.DB) {
     _ = withFreshDB(func(q *gorm.DB) error {
         q.Find(&users)
@@ -1602,15 +1686,15 @@ func withFresh(cb func(*gorm.DB) error, db *gorm.DB) error { //gormreuse:immutab
 withTx := func(cb func(*gorm.DB) error) error { return cb(fresh) }
 ```
 
-> [!WARNING]
-> **Body contract.** If the function actually hands the callback a mutable value, it is reported:
-> ```go
-> //gormreuse:immutable-input(cb)
-> func bad(cb func(*gorm.DB) error, db *gorm.DB) error {
->     q := db.Where("x")
->     return cb(q) // VIOLATION: immutable-input(cb) declared but mutable *gorm.DB passed to callback
-> }
-> ```
+A mutable value handed to the callback is reported:
+
+```go
+//gormreuse:immutable-input(cb)
+func bad(cb func(*gorm.DB) error, db *gorm.DB) error {
+    q := db.Where("x")
+    return cb(q) // VIOLATION: immutable-input(cb) declared but mutable *gorm.DB passed to callback
+}
+```
 
 The check follows the callback wherever the function keeps it:
 
@@ -1639,8 +1723,9 @@ The directive is reported **unused** in these cases:
 | The directive is attached to no function or closure | |
 | A variadic callback parameter (`cbs ...func(*gorm.DB)`) | Not supported. The message says `variadic callbacks are not supported`. The callbacks are checked like ordinary ones |
 
-> [!NOTE]
-> gorm's built-in [`Transaction`](https://pkg.go.dev/gorm.io/gorm#DB.Transaction) and [`FindInBatches`](https://pkg.go.dev/gorm.io/gorm#DB.FindInBatches) already pass a fresh handle to their callbacks. So reuse inside those callbacks needs no directive. [`Connection`](https://pkg.go.dev/gorm.io/gorm#DB.Connection) does not: its callback gets a `clone == 0` handle, so reuse inside it is reported. Do not put `//gormreuse:immutable-input` on a wrapper that forwards a Connection `tx` unchanged. Its body contract would be false.
+gorm's built-in `Transaction` and `FindInBatches` already pass a fresh handle to their callbacks. So they need no directive (see [Parameters are mutable](#parameters-are-mutable)). [`Connection`](https://pkg.go.dev/gorm.io/gorm#DB.Connection) does not: its callback gets a `clone == 0` handle. Do not put `//gormreuse:immutable-input` on a wrapper that forwards a Connection `tx` unchanged. Its body contract would be false.
+
+</details>
 
 ### `//gormreuse:pure,immutable-return`
 
@@ -1653,7 +1738,12 @@ func GetTenantDB(db *gorm.DB, tenantID int) *gorm.DB {
         Where("tenant_id = ?", tenantID).
         Session(&gorm.Session{})              // immutable-return: the result is isolated
 }
+```
 
+<details>
+<summary>A caller</summary>
+
+```go
 func useIt(db *gorm.DB) {
     tenant1 := GetTenantDB(db, 1)
     tenant2 := GetTenantDB(db, 2)
@@ -1664,18 +1754,27 @@ func useIt(db *gorm.DB) {
 }
 ```
 
+</details>
+
 ### Unused and redundant directives
 
-> [!WARNING]
-> Unused `//gormreuse:pure`, `//gormreuse:immutable-return`, and `//gormreuse:immutable-param` directives are reported as warnings. The fix of each warning deletes the unused name (see [Contract and Directive Fixes](#contract-and-directive-fixes)).
+A directive that does nothing is reported as a warning. Its fix deletes the unused name (see [Contract and Directive Fixes](#contract-and-directive-fixes)).
+
+<details>
+<summary>When each directive counts as unused</summary>
 
 | Directive | Reported when |
 | --- | --- |
 | `pure`, `immutable-return`, `immutable-param` | Unused: the signature doesn't fit, e.g. `immutable-param` on a function with no [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) parameter |
-| `immutable-param` | Redundant: the signature is valid, but its parameter is never reused |
+| `immutable-param` | Redundant: the signature is valid, but its parameter is never reused, so it suppresses nothing |
 | A combination such as `pure,immutable-return` | Never, while either part is used |
 | `immutable-input(name)` | See [its unused cases](#gormreuseimmutable-inputname) |
-| `ignore` | See [`//gormreuse:ignore`](#gormreuseignore) |
+| Line-level and function-level `ignore` | It suppresses nothing. A function-level ignore is unused when the function has nothing to suppress. This finds stale ignore comments |
+| File-level `ignore` | Never |
+
+No ignore suppresses an unused-ignore warning or a `gormreuse: internal error` report.
+
+</details>
 
 ## Temporary rule: `Session`/`WithContext`/`Debug` returned from `Scopes` callbacks
 
@@ -1689,6 +1788,11 @@ db.Scopes(func(q *gorm.DB) *gorm.DB {
     return q.Session(&gorm.Session{}) // WARNING: Session() result returned from Scopes callback causes transaction leak
 })
 ```
+
+Only the returned value matters, and only a `Scopes` call whose chain may write is reported.
+
+<details>
+<summary>Why, and which callbacks and chains are reported</summary>
 
 GORM runs the query on the value the callback returns. These three methods return a value that makes GORM store its "transaction started" flag on a copy of the statement. So the commit step never finds it. Every other chain method returns a value without this problem. So only the returned value matters:
 
@@ -1712,9 +1816,6 @@ Only a create, update or delete begins the transaction that leaks. A `Scopes` ca
 
 A callback is reported when one `Scopes` call that passes it may write. `e2e/internal/scopes_finisher_test.go` checks the finishers against real GORM. With `SkipDefaultTransaction`, GORM begins no transaction at all, but the rule does not read the config.
 
-<details>
-<summary>How the rule finds the callback</summary>
-
 The rule finds the callback the same way reuse detection does:
 
 - The callback may be a function literal, a named function, or a method value.
@@ -1722,15 +1823,25 @@ The rule finds the callback the same way reuse detection does:
 - The rule follows the returned value through variables, branches, and the returns of helpers and closures the callback calls.
 - It reports the `Session`/`WithContext`/`Debug` call itself.
 
-</details>
-
 [`Preload`](https://pkg.go.dev/gorm.io/gorm#DB.Preload) callbacks are **unaffected** (Preload builds a fresh DB). So the same code inside a Preload callback is not flagged.
+
+</details>
 
 **Removal condition**: once the upstream fix ships in a supported GORM release, this rule is deleted. Removing the `internal/scopeswarn` package and the `Scopes warnings` block of `RunSSA` deletes it, as the package documents. Re-check go-gorm/gorm#7592 on each GORM version bump.
 
 ## Known Limitations
 
-gormreuse reports a reuse only when it can follow the value. These cases are known. Each one has a test fixture.
+gormreuse reports a reuse only when it can follow the value. These cases are known. Each one has a test fixture, and [the implementation notes](./design/implementation.md#known-limitations) give the reasons.
+
+| Kind | Cases | Meaning |
+| --- | --- | --- |
+| Missed reuse (false negatives) | 14 | Reuse that is not reported |
+| Extra reports (false positives) | 5 | Safe code that is reported |
+| Wrong position | — | A report on the wrong line |
+| No fix | — | A report without a suggested fix |
+
+<details>
+<summary>Missed reuse (false negatives)</summary>
 
 **Missed reuse (false negatives):**
 
@@ -1855,6 +1966,11 @@ A method expression of a method promoted through an embedded `*gorm.DB`: `W.Find
 </td><td>The receiver <code>w</code> is not followed to its embedded field</td></tr>
 </table>
 
+</details>
+
+<details>
+<summary>Extra reports (false positives)</summary>
+
 **Extra reports (false positives):**
 
 <table>
@@ -1913,11 +2029,16 @@ if c { f() } else { run() }
 </td><td>Calls in two functions are taken to both run</td></tr>
 </table>
 
+</details>
+
+<details>
+<summary>Wrong position, and no fix</summary>
+
 **Wrong position:** a use inside a deferred closure runs at function exit. gormreuse orders it by its source position. So `defer func() { q.Count(nil) }(); q.Find(nil)` is reported at `q.Find`, which runs first.
 
 **No fix:** a `go` or `defer` statement that changes the root in place, where another use may see the change, gets no suggested fix. That is `go q.Where("a")` or `go applyTenant(q)`, and `defer q.Where("a")` or `defer applyTenant(q)` with another `defer` that uses `q`, or in a loop. A Session at the root would make the call change a copy. Isolate the root by hand where the change is not needed.
 
-See [Known Limitations](./design/implementation.md#known-limitations) in the implementation notes for the fixtures and the reasons.
+</details>
 
 ## Documentation
 

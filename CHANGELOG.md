@@ -7,11 +7,12 @@ These notes say what changes for users in each release, and what to do about it.
 gormreuse now follows a `*gorm.DB` through far more code. It also reads directives across packages, and infers `immutable-return` for most connection helpers. It no longer counts methods such as `AddError` as a branch. `-fix` offers fewer fixes, but each one compiles and keeps every condition.
 
 > [!IMPORTANT]
-> **Expect new reports on code that passed with 0.22.0.** Most of them are real reuse. Run `gormreuse ./...` before you bump the version in CI. Then use the tables below to resolve each kind. Also check your exclude rules: [some messages changed](#changed-messages).
+> **Expect new reports on code that passed with 0.22.0.** Most of them are real reuse. Follow [Upgrading from 0.22.0](#upgrading-from-0220) before you bump the version in CI. Also check your exclude rules: [some messages changed](#changed-messages).
 
 | Section | What is in it |
 | --- | --- |
 | [Highlights](#highlights) | The main changes in one table |
+| [Upgrading from 0.22.0](#upgrading-from-0220) | What to check, and the remedy for each kind of new report |
 | [New diagnostics](#new-diagnostics) | Reports that 0.22.0 did not give, and what to do about each |
 | [Removed diagnostics](#removed-diagnostics) | Reports that 0.22.0 gave and 0.23.0 does not |
 | [Changed messages](#changed-messages) | Messages that an exclude rule may match |
@@ -47,12 +48,35 @@ On gorm's own repository (v1.31.2), 0.23.0 reports fewer problems:
 
 </details>
 
+### Upgrading from 0.22.0
+
+1. Run `gormreuse ./...` with 0.23.0 before you bump the version in CI.
+2. Resolve each new report. Most of them are real reuse:
+
+   | New report | Remedy |
+   | --- | --- |
+   | Reuse in a loop, in a closure that runs more than once, or under `go`/`defer` | Define the root inside the loop or closure, or end its chain with `.Session(&gorm.Session{})` |
+   | A helper result, a field of a struct a helper returns, or an interface method result, branched twice | Most helpers are now [inferred](README.md#inferred-immutable-return) safe. Otherwise mark the helper `//gormreuse:immutable-return`. For an interface method, write `repo.DB().Session(&gorm.Session{})` |
+   | A `Session`/`Debug` copy or a subquery used after its root changed | End the root's chain with `.Session(&gorm.Session{})` before you copy or pass it |
+   | A `Connection` callback's `tx` branched twice | Start the callback with `tx = tx.Session(&gorm.Session{})` |
+   | A named callback that is also called directly or exported | Mark it `//gormreuse:immutable-param`, or stop calling it directly |
+   | A broken `pure`, `immutable-return` or `immutable-input` contract | Fix the function, or remove the directive |
+   | A mutable argument to an `immutable-param` function | `-fix` appends `.Session(&gorm.Session{})` to the argument |
+   | A trailing ignore that used to cover the next line | Put the ignore on the line it suppresses |
+
+3. Run `gormreuse -fix -diff ./...` to see the fixes for most of these. Some reports have no fix on purpose. See [Automatic Fixes](README.md#automatic-fixes).
+4. Delete stale ignores. **A `//gormreuse:ignore` written for a removed report is now unused**, and is reported as such. The Scopes warning (#196, #308) and the state-only methods (#307) are the most common cases. `-fix` deletes it. In a non-test file of a package with `_test.go` files there is no fix, because the test variant may still need it. Delete those by hand.
+5. Update exclude rules that match a message. See [Changed messages](#changed-messages).
+6. With golangci-lint, set `issues.uniq-by-line: false` to see every report on a line. See [Integration](#integration).
+
+The sections below list every change.
+
 ### New diagnostics
 
 Each row is a report that 0.22.0 did not give.
 
-> [!TIP]
-> Run `gormreuse -fix -diff ./...` to see the fixes for most of these. Some reports have no fix on purpose. See [Automatic Fixes](README.md#automatic-fixes).
+<details>
+<summary>Every new diagnostic, with an example and what to do</summary>
 
 #### Reuse
 
@@ -482,9 +506,14 @@ The message is `unused gormreuse:immutable-input directive: not attached to a fu
 | Files that import `"C"` (#186) | Any reuse in a cgo file | They are analyzed now. `-fix` does not edit them |
 | A panic inside the analyzer (#186, #315) | `gormreuse: internal error analyzing <func>: ...`, or `gormreuse: internal error in <stage> of package <path>: ...` at the package clause | Please [open an issue](https://github.com/mpyw/gormreuse/issues) with the code. A function whose directive check panicked is not trusted |
 
+</details>
+
 ### Removed diagnostics
 
-Each row is a report that 0.22.0 gave and 0.23.0 does not.
+Each row is a report that 0.22.0 gave and 0.23.0 does not. The largest groups are subqueries, Scopes callbacks, getters, closures, and state-only methods such as `AddError`.
+
+<details>
+<summary>Every removed diagnostic, with an example</summary>
 
 <table>
 <tr><th>No longer reported</th><th>Example</th></tr>
@@ -703,12 +732,16 @@ q.AddError(err)
 </td></tr>
 </table>
 
-> [!WARNING]
-> **A `//gormreuse:ignore` written for a removed report is now unused**, and is reported as such. The Scopes warning (#196, #308) and the state-only methods (#307) are the most common cases. `-fix` deletes it. In a non-test file of a package with `_test.go` files there is no fix, because the test variant may still need it. Delete those by hand.
+</details>
+
+A `//gormreuse:ignore` written for one of these reports is now unused. See [Upgrading from 0.22.0](#upgrading-from-0220).
 
 ### Changed messages
 
 An exclude rule that matches a message must match the new text. A rule that matches only `*gorm.DB reused` keeps working.
+
+<details>
+<summary>The changed messages</summary>
 
 | Diagnostic | 0.22.0 | 0.23.0 |
 | --- | --- | --- |
@@ -717,7 +750,14 @@ An exclude rule that matches a message must match the new text. A rule that matc
 | A variadic `immutable-input` callback (#259) | `unused gormreuse:immutable-input directive: parameter "cbs" is not a function type` | `... parameter "cbs" is variadic; variadic callbacks are not supported` |
 | Reuse | Sometimes `(root at …)` or `(first branch at …)` alone | Always `(root at …, first branch at …)` |
 
+</details>
+
 ### Directives
+
+Directives now work across packages, through method expressions and function variables, and `immutable-return` is inferred.
+
+<details>
+<summary>Every directive change</summary>
 
 | Change | Detail |
 | --- | --- |
@@ -732,9 +772,14 @@ An exclude rule that matches a message must match the new text. A rule that matc
 | A directive after a closure's `{` (#315) | It marks only that closure. Before, it also marked the function that holds the closure |
 | One ignore scope (#190) | A line, function or file ignore covers every kind of diagnostic in the same way. A function-level ignore also covers its closures |
 
+</details>
+
 ### `-fix`
 
 `-fix` now offers fewer fixes. Each one is safe to apply.
+
+<details>
+<summary>Every <code>-fix</code> change</summary>
 
 | Change | Detail |
 | --- | --- |
@@ -759,9 +804,16 @@ An exclude rule that matches a message must match the new text. A rule that matc
 
 </details>
 
+</details>
+
 ### Performance
 
-The analysis does much more, but takes about as long as 0.22.0. These are wall times with the command, the median of five runs on one machine:
+The analysis does much more, but takes about as long as 0.22.0.
+
+<details>
+<summary>Wall times</summary>
+
+These are wall times with the command, the median of five runs on one machine:
 
 | Code | 0.22.0 | 0.23.0 |
 | --- | --- | --- |
@@ -773,10 +825,19 @@ The analysis does much more, but takes about as long as 0.22.0. These are wall t
 
 With facts, the drivers also run gormreuse on every dependency. gormreuse builds SSA only for the packages that reach `gorm.io/gorm`, so this adds little. A test fails when the analyzer's allocations on a generated shape, such as the worst cases above, grow faster than the shape allows (#260, #302).
 
+</details>
+
 ### Integration
+
+The Go API declares new analyzer dependencies and facts. golangci-lint needs one setting to show every report.
+
+<details>
+<summary>The integration changes</summary>
 
 | Change | Detail |
 | --- | --- |
 | `Analyzer.Requires` | It lists `ctrlflow.Analyzer` and `inspect.Analyzer`. In 0.22.0 it listed `buildssa.Analyzer` and `inspect.Analyzer`. gormreuse now builds SSA itself, only for a package that reaches `gorm.io/gorm` |
 | `Analyzer.FactTypes` | New. The analyzer exports facts, so a driver that runs it must support facts. The `gormreuse` command, `go vet` and golangci-lint do |
 | golangci-lint | It shows only the first issue on each line by default. gormreuse can report more than one on a line. Set `issues.uniq-by-line: false` to see them all. See the [golangci-lint setup](README.md#golangci-lint) |
+
+</details>

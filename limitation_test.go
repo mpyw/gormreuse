@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -34,7 +35,9 @@ var limitationKinds = []string{
 //   - The README's Known Limitations section has the same kinds of
 //     limitation, and each table has as many rows as the notes' table. The
 //     rows are in the same order. Either file may write a table in Markdown
-//     or in HTML.
+//     or in HTML, folded in <details> or not.
+//   - The README's summary table gives each table kind's case count, and the
+//     count matches that kind's table.
 func TestKnownLimitationsListed(t *testing.T) {
 	section := limitationSection(t, "design/implementation.md")
 	marked := markedLimitationFuncs(t, filepath.Join("testdata", "src"))
@@ -61,6 +64,16 @@ func TestKnownLimitationsListed(t *testing.T) {
 			t.Errorf("Known Limitations: %s is in design/implementation.md: %t, in README.md: %t; want both", kind, inNotes, inReadme)
 		case notesRows != readmeRows:
 			t.Errorf("Known Limitations: %s has %d rows in design/implementation.md and %d in README.md; list each case in both", kind, notesRows, readmeRows)
+		}
+		if readmeRows > 0 {
+			name := strings.TrimPrefix(kind, "**")
+			m := regexp.MustCompile(`(?m)^\| ` + regexp.QuoteMeta(name) + ` \| (\d+) \|`).FindStringSubmatch(readme)
+			switch {
+			case m == nil:
+				t.Errorf("README.md: Known Limitations: the summary table has no %s row with a case count", name)
+			case m[1] != strconv.Itoa(readmeRows):
+				t.Errorf("README.md: Known Limitations: the summary table says %s has %s cases, but its table has %d rows", name, m[1], readmeRows)
+			}
 		}
 	}
 }
