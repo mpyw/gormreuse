@@ -126,6 +126,8 @@ type RootTracer struct {
 	onlyParams map[*ssa.Function]bool // Memo of pureReturnsOnlyParams
 	//declscope:shared // alias.go's mayAlias fills it
 	aliases map[aliasedRootsKey]bool // Memo of mayAlias
+	//declscope:shared // store.go and field.go resolve loads through it
+	stores *storeMemo // Memo of the stores that reads see (#325)
 	//declscope:shared // closure.go's closureRunsRepeatedly asks it
 	cfgs *cfg.Analyzer // CFG cache for the Repeats of closures
 }
@@ -163,6 +165,7 @@ func NewRootTracer(pureFuncs, immutableReturnFuncs, immutableParamFuncs *directi
 		allRoots:             make(map[allRootsKey][]ssa.Value),
 		rootSets:             make(map[allRootsKey]map[ssa.Value]bool),
 		aliases:              make(map[aliasedRootsKey]bool),
+		stores:               newStoreMemo(),
 		cfgs:                 cfg.NewAnalyzer(),
 	}
 }
@@ -528,7 +531,7 @@ func (t *RootTracer) traceNonCall(v ssa.Value, visited map[ssa.Value]bool, loopI
 	case *ssa.Field:
 		// Field: a field of a struct held in a register, as promoted methods
 		// of an embedded *gorm.DB read it (#181)
-		if vals := fieldValueStoredValues(val); len(vals) > 0 {
+		if vals := t.stores.fieldValueStoredValues(val); len(vals) > 0 {
 			return t.trace(vals[0], visited, loopInfo)
 		}
 		return nil
@@ -561,7 +564,7 @@ func (t *RootTracer) tracePointerLoad(load *ssa.UnOp, visited map[ssa.Value]bool
 	case *ssa.Global:
 		// Single-root: trace the first value stored into the global that
 		// reaches the load.
-		if vals := globalStoredValues(p, load); len(vals) > 0 {
+		if vals := t.stores.globalStoredValues(p, load); len(vals) > 0 {
 			return t.trace(vals[0], visited, loopInfo)
 		}
 		return nil
@@ -770,7 +773,7 @@ func (t *RootTracer) traceAllUnvisited(v ssa.Value, search *allRootsSearch, loop
 
 	case *ssa.Field:
 		var roots []ssa.Value
-		for _, stored := range fieldValueStoredValues(val) {
+		for _, stored := range t.stores.fieldValueStoredValues(val) {
 			roots = append(roots, t.traceAll(stored, search, loopInfo)...)
 		}
 		return roots
@@ -842,7 +845,7 @@ func (t *RootTracer) traceAllPointerLoads(load *ssa.UnOp, search *allRootsSearch
 		return t.traceAllFieldStores(p, load, search, loopInfo)
 	case *ssa.Global:
 		var roots []ssa.Value
-		for _, v := range globalStoredValues(p, load) {
+		for _, v := range t.stores.globalStoredValues(p, load) {
 			roots = append(roots, t.traceAll(v, search, loopInfo)...)
 		}
 		return roots

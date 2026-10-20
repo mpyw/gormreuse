@@ -31,7 +31,7 @@ import (
 //declscope:shared // root.go's tracePointerLoad sends field loads here
 func (t *RootTracer) traceFieldStore(fa *ssa.FieldAddr, load *ssa.UnOp, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) ssa.Value {
 	// Single-root: trace the first value stored into the same field.
-	if vals := FieldStoredValues(fa, load); len(vals) > 0 {
+	if vals := t.stores.fieldAddrStoredValues(fa, load); len(vals) > 0 {
 		return t.trace(vals[0], visited, loopInfo)
 	}
 	return nil
@@ -199,7 +199,7 @@ func SameField(a, b *ssa.FieldAddr) bool {
 //declscope:shared // root.go's traceAllPointerLoads sends field loads here
 func (t *RootTracer) traceAllFieldStores(fa *ssa.FieldAddr, load *ssa.UnOp, search *allRootsSearch, loopInfo *cfg.LoopInfo) []ssa.Value {
 	var roots []ssa.Value
-	for _, v := range FieldStoredValues(fa, load) {
+	for _, v := range t.stores.fieldAddrStoredValues(fa, load) {
 		roots = append(roots, t.traceAll(v, search, loopInfo)...)
 	}
 	return roots

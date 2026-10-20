@@ -115,9 +115,14 @@ func TestObservedFieldStoresUnrelatedLoad(t *testing.T) {
 	if alloc == nil {
 		t.Fatal("no Alloc for db in cosErrgroupTwo")
 	}
-	got, open := observedFieldStores(fn, storeTarget{root: alloc}, nil, other.Blocks[0].Instrs[0])
-	if len(got) != 2 || !open {
-		t.Errorf("an unrelated load should see both stores of db, got %v (open %v)", got, open)
+	// Without a memo, and with one asked twice: the second answer is the kept
+	// one (#325).
+	memo := newStoreMemo()
+	for _, m := range []*storeMemo{nil, memo, memo} {
+		got, open := m.observedFieldStores(fn, storeTarget{root: alloc}, nil, other.Blocks[0].Instrs[0])
+		if len(got) != 2 || !open {
+			t.Errorf("an unrelated load should see both stores of db, got %v (open %v)", got, open)
+		}
 	}
 }
 

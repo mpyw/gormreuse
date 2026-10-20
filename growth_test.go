@@ -337,8 +337,9 @@ var growthCases = []growthCase{
 		b.WriteString("}\n")
 		return []string{b.String()}
 	}},
-	// Closure called at n sites, closure has n/10 uses.
-	{name: "closurecallsuses", limit: growthQuadratic, shape: func(n int) []string {
+	// Closure called at n sites, closure has n/10 uses. What the loads of one
+	// closure see, and what reaches each block, are kept once (#325).
+	{name: "closurecallsuses", limit: growthLinear, shape: func(n int) []string {
 		var b strings.Builder
 		b.WriteString("func f(db *gorm.DB, c []bool) {\n\tq := db.Where(\"x\")\n\tg := func() {\n")
 		for i := range n/10 + 1 {
@@ -496,7 +497,7 @@ var growthCases = []growthCase{
 	// n optional filters on a captured query, each followed by a goroutine
 	// that reads it: every read sees the stores before and after it (#303), so
 	// it has up to n roots, as in capturedre.
-	{name: "spawnedre", limit: growthQuadratic, after: "#325", shape: func(n int) []string {
+	{name: "spawnedre", limit: growthQuadratic, shape: func(n int) []string {
 		var b strings.Builder
 		b.WriteString("func f(db *gorm.DB, c []bool) {\n\tq := db.Model(nil)\n")
 		for i := range n {
@@ -506,7 +507,7 @@ var growthCases = []growthCase{
 		return []string{b.String()}
 	}},
 	// The same through a field of a captured pointer (#303).
-	{name: "spawnedfields", limit: growthQuadratic, after: "#325", shape: func(n int) []string {
+	{name: "spawnedfields", limit: growthQuadratic, shape: func(n int) []string {
 		var b strings.Builder
 		b.WriteString("type S struct{ db *gorm.DB }\n\nfunc f(db *gorm.DB, c []bool) {\n\ts := &S{db: db.Model(nil)}\n")
 		for i := range n {
