@@ -198,6 +198,11 @@ func (g *Generator) Generate(v pollution.Violation) []analysis.SuggestedFix {
 	if _, ok := root.(*tracer.PointeeRoot); ok {
 		return fallback
 	}
+	// Nor has a read from a container (#374): the call that made the value
+	// it holds is not known.
+	if _, ok := root.(*tracer.ElemRoot); ok {
+		return fallback
+	}
 
 	allUses := v.AllUses
 	if len(allUses) == 0 {

@@ -396,9 +396,10 @@ gormreuse cannot follow a `*gorm.DB` everywhere. These count as a branch: an int
 
 | Operation | Example | Why |
 | --- | --- | --- |
-| Interface method call | `repo.Query(db)` | It can't be analyzed statically |
+| Interface method call | `repo.Query(db)` | It can't be analyzed statically. A call through an interface that holds `db` itself, as in `var qi Querier = db; qi.Where("a")`, is `db`'s own method call |
 | Channel send | `ch <- db` | It may be received and used elsewhere |
-| Slice/Map storage | `[]*gorm.DB{db}` | It may be accessed elsewhere |
+| Slice/Map storage, `append` | `[]*gorm.DB{db}`, `qs = append(qs, db)` | It may be accessed elsewhere |
+| A method value handed on | `firstPage(db.Find)`, `job{find: db.Find}` | It may be called elsewhere |
 | Interface conversion | `interface{}(db)` | It may be extracted via a type assertion |
 | Non-pure function call | `helper(db)` | Unless the function is marked `//gormreuse:pure` |
 | The address of the variable, passed to a non-pure function | `applyP(&q)` | The function may change `*p` in place, or store another chain in it. A later read of `q` sees both |
@@ -414,6 +415,7 @@ A struct field is followed in these forms:
 | A field of a struct that a function returned, by value or by pointer | `s := mk(db); s.DB.Where("a")`. Each field of each call is its own mutable root, like a function that returns `*gorm.DB`. A call inside a loop makes a new root on each iteration. A store to the field through the returned pointer replaces it, as for a local struct. No fix is suggested for it, because the `Session` belongs inside the function. A helper that builds the struct from safe handles, such as a test setup function, is [inferred](#inferred-immutable-return) `immutable-return`. Mark one the analyzer cannot prove with `//gormreuse:immutable-return` |
 | A struct captured by a closure | Also through a pointer |
 
+- A send, a store and `append` are branches like a call that takes the value. One in a loop is reported, as `for … { helper(q) }` is. One that may hand on any of several values branches each of them.
 - A field read through a parameter or a receiver, by value or by pointer, is not a mutable root. Only the stores to it in the same function are followed. A getter that returns such a field is read the same way, as the field of the receiver at each call (see [Inferred immutable-return](#inferred-immutable-return)).
 - Simple struct literal storage (`_ = &S{db: q}`) without actual field usage does NOT pollute.
 - A struct handed to a call is followed when the call gets the struct, its address or a copy. That includes a struct in an interface, and one used as a method receiver. A struct sent on a channel, stored in a slice or a map, or packed into a variadic argument is not.
@@ -1079,6 +1081,7 @@ GORM's internal `clone` field decides whether reuse is safe:
 | Mid-chain (`Where`, `Order`, …) | `== 0` | ❌ shares Statement |
 | [`Connection`](https://pkg.go.dev/gorm.io/gorm#DB.Connection) callback `tx` | `== 0` | ❌ shares Statement |
 | A `*gorm.DB` **parameter** | unknown | ❌ treated as mutable |
+| A value read from a slice, an array, a map or a channel (`m["k"]`, `qs[0]`, `range qs`, `<-ch`), or through a `**gorm.DB` parameter (`*pq`) | unknown | ❌ treated as mutable when the container may hold a mutable value: one is stored, sent or appended, or the container is a parameter, a call result, or handed to a function that may reach gorm. Two reads of one element (`qs[0]` twice) share a root. A container in a struct field or a package-level variable is not followed |
 | The result of a helper, a func-typed value (`f(db)`) or an interface method (`repo.DB()`), alone or in a tuple such as `(*gorm.DB, error)` | unknown | ❌ treated as mutable, unless the helper is [`//gormreuse:immutable-return`](#gormreuseimmutable-return), declared or [inferred](#inferred-immutable-return) |
 
 A repository interface whose method returns a fresh handle is reported when its result is branched twice. No directive applies to an interface method. Isolate the result with `repo.DB().Session(&gorm.Session{})`.
@@ -2346,7 +2349,7 @@ gormreuse reports a reuse only when it can follow the value. These cases are kno
 
 | Kind | Cases | Meaning |
 | --- | --- | --- |
-| Missed reuse (false negatives) | 15 | Reuse that is not reported |
+| Missed reuse (false negatives) | 17 | Reuse that is not reported |
 | Extra reports (false positives) | 5 | Safe code that is reported |
 | Wrong position | — | A report on the wrong line |
 | No fix | — | A report without a suggested fix |
@@ -2460,9 +2463,9 @@ A pure function that returns `db.Session(...)` of its argument
 A package-level `*gorm.DB` that another function, a closure or the initializer assigned
 
 </td><td>Only the stores in the same function are followed. A global that the function only reads is immutable</td></tr>
-<tr><td><!-- fixtures: fieldOfStructParam -->
+<tr><td><!-- fixtures: fieldOfStructParam, crFieldContainer -->
 
-A struct field read through a parameter or a receiver (`s.db`, `r.db`), or a getter of it (`r.DB()`)
+A struct field read through a parameter or a receiver (`s.db`, `r.db`), or a getter of it (`r.DB()`). Also an element of a slice or a map in such a field (`r.dbs[0]`)
 
 </td><td>The field is not a mutable root. Only the stores to it in the same function are followed, and for a getter, also the stores in its package</td></tr>
 <tr><td><!-- fixtures: contractInterface -->
@@ -2480,6 +2483,29 @@ A method expression of a method promoted through an embedded `*gorm.DB`: `W.Find
 The address of a struct field handed to a helper that changes it: `applyP(&s.db); s.db.Find(nil)`
 
 </td><td>Only the address of a variable, as in <code>applyP(&amp;q)</code>, counts as a branch</td></tr>
+<tr><td><!-- fixtures: irGenericReceiver -->
+
+A call through a receiver of a type parameter's type:
+
+```go
+func twice[T interface{ Find(any, ...any) *gorm.DB }](q T) {
+    q.Find(nil)
+    q.Find(nil)
+}
+```
+
+</td><td>In the generic body <code>q</code> is a <code>T</code>, not a <code>*gorm.DB</code></td></tr>
+<tr><td><!-- fixtures: cfReturnedClosureOfParam, cfReturnedClosureOfCapture -->
+
+A closure that a call returns, called twice:
+
+```go
+load := loader(q) // returns func(name string) { q.Where(...).Find(nil) }
+load("a")
+load("b")
+```
+
+</td><td>A call through the returned func value has no known callee</td></tr>
 </table>
 
 </details>

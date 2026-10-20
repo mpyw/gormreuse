@@ -12,6 +12,7 @@
 package callsite
 
 import (
+	"go/types"
 	"strings"
 
 	"golang.org/x/tools/go/ssa"
@@ -36,7 +37,8 @@ const (
 	SiteThunk
 	// SiteClosure calls a function literal, possibly capturing: func() {...}().
 	SiteClosure
-	// SiteInvoke calls an interface method: i.m(x).
+	// SiteInvoke calls an interface method: i.m(x). When i boxes a *gorm.DB
+	// right before the call, Declared is the method of *gorm.DB it runs.
 	SiteInvoke
 	// SiteDynamic calls any other func-typed value, whose callee is unknown.
 	SiteDynamic
@@ -68,9 +70,10 @@ type Site struct {
 	Kind SiteKind
 	// Callee is the function the instruction calls: its static callee
 	// (the "m$bound" wrapper for a method value, the "m$thunk" wrapper for a
-	// method expression, the literal for a closure), or the function a
-	// package-level variable holds. It is nil for an invoke, a builtin or any
-	// other dynamic call.
+	// method expression, the literal for a closure), the function a
+	// package-level variable holds, or the method of a *gorm.DB that an
+	// invoke boxes right before the call. It is nil for any other invoke, a
+	// builtin or any other dynamic call.
 	Callee *ssa.Function
 	// Declared is the function the call stands for. For a method value or a
 	// method expression it is the declared method (origin.Declared);
@@ -78,8 +81,9 @@ type Site struct {
 	// of an interface method has no declared method, so it stays too.
 	Declared *ssa.Function
 	// Recv is the receiver of a method call: the closure binding of a method
-	// value, or the first argument of a static method call or a method
-	// expression. It is nil when Declared has no receiver parameter.
+	// value, the first argument of a static method call or a method
+	// expression, or the *gorm.DB an invoke boxes. It is nil when Declared
+	// has no receiver parameter.
 	Recv ssa.Value
 	// Args are the arguments passed to Declared, the receiver excluded.
 	Args []ssa.Value
@@ -96,6 +100,13 @@ func SiteOf(instr ssa.CallInstruction, vars FuncVars) Site {
 	s := Site{Instr: instr, Mode: siteModeOf(instr), Args: common.Args}
 	if common.IsInvoke() {
 		s.Kind = SiteInvoke
+		// A *gorm.DB boxed in the interface right before the call runs its
+		// own method (#374): var qi Querier = q; qi.Where("a").
+		if mi, ok := common.Value.(*ssa.MakeInterface); ok && typeutil.IsGormDB(mi.X.Type()) {
+			if fn := siteBoxedMethod(mi, common.Method); fn != nil {
+				s.Callee, s.Declared, s.Recv = fn, fn, mi.X
+			}
+		}
 		return s
 	}
 	// A call through a local variable assigned once is the call of the value
@@ -131,6 +142,17 @@ func SiteOf(instr ssa.CallInstruction, vars FuncVars) Site {
 		s.Recv, s.Args = s.Args[0], s.Args[1:]
 	}
 	return s
+}
+
+// siteBoxedMethod returns the method of the value boxed by mi that an interface
+// call of method runs, or nil when its method set has none.
+func siteBoxedMethod(mi *ssa.MakeInterface, method *types.Func) *ssa.Function {
+	prog := mi.Parent().Prog
+	sel := prog.MethodSets.MethodSet(mi.X.Type()).Lookup(method.Pkg(), method.Name())
+	if sel == nil {
+		return nil
+	}
+	return prog.MethodValue(sel)
 }
 
 // SiteOfWithoutFuncVars reads instr as a Site without resolving calls through

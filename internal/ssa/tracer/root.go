@@ -138,6 +138,8 @@ type RootTracer struct {
 	immutableClosures map[*ssa.Function]bool // Memo of closureReturnsImmutable (#308)
 	//declscope:shared // pointee.go keeps its PointeeRoots and searches in it
 	pointees pointeeMemo // What calls may store through a variable's address (#345)
+	//declscope:shared // elem.go keeps its ElemRoots and containers in it
+	elems elemMemo // The roots of reads from containers (#374)
 }
 
 // NewRootTracer creates a new RootTracer.
@@ -550,6 +552,11 @@ func (t *RootTracer) traceCall(call *ssa.Call, visited map[ssa.Value]bool, loopI
 // traceNonCall handles non-call SSA values during tracing.
 // Routes to specialized handlers based on the value type.
 func (t *RootTracer) traceNonCall(v ssa.Value, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) ssa.Value {
+	// A read from a container: a slice or array element, a map value, a
+	// receive, or a load through a pointer parameter (#374)
+	if root, ok := t.elemRoot(v); ok {
+		return root
+	}
 	switch val := v.(type) {
 	case *ssa.Phi:
 		// Phi: merge point from conditional branches (if/switch)
@@ -603,6 +610,10 @@ func (t *RootTracer) traceNonCall(v ssa.Value, visited map[ssa.Value]bool, loopI
 		// (#345)
 		return val
 
+	case *ElemRoot:
+		// ElemRoot: a read from a container (#374)
+		return val
+
 	default:
 		return nil
 	}
@@ -652,6 +663,8 @@ func RootBlock(v ssa.Value) *ssa.BasicBlock {
 	case *FieldRoot:
 		return r.Block()
 	case *PointeeRoot:
+		return r.Block()
+	case *ElemRoot:
 		return r.Block()
 	case *ssa.Parameter:
 		if fn := r.Parent(); fn != nil && len(fn.Blocks) > 0 {
@@ -745,6 +758,12 @@ func (t *RootTracer) traceAllUnvisited(v ssa.Value, search *allRootsSearch, loop
 	// Phi-based pollution checks see it too.
 	if p, ok := v.(*ssa.Parameter); ok && t.isMutableParam(p) {
 		return []ssa.Value{p}
+	}
+	if root, ok := t.elemRoot(v); ok {
+		if root == nil {
+			return nil
+		}
+		return []ssa.Value{root}
 	}
 
 	switch val := v.(type) {

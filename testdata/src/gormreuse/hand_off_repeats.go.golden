@@ -1,0 +1,102 @@
+package internal
+
+import "gorm.io/gorm"
+
+// =============================================================================
+// Hand-offs that run more than once, or hand on a merge (#374)
+//
+// A send, a store into a slice element or a map, and append hand a *gorm.DB
+// to other code, so each is a branch. It is reported when it runs again for
+// one run of the root, as a call that takes the value is, and it branches
+// every root that a merged value may hold.
+// =============================================================================
+
+// ===== SHOULD REPORT =====
+
+// hoSendInLoop: each iteration sends the same q.
+func hoSendInLoop(db *gorm.DB, ch chan *gorm.DB, items []string) {
+	q := db.Where("x")
+	for range items {
+		ch <- q // want `\*gorm\.DB reused: second branch from mutable root`
+	}
+}
+
+// hoAppendInLoop: each iteration appends the same q.
+func hoAppendInLoop(db *gorm.DB, items []string) []*gorm.DB {
+	q := db.Where("x")
+	var qs []*gorm.DB
+	for range items {
+		qs = append(qs, q) // want `\*gorm\.DB reused: second branch from mutable root`
+	}
+	return qs
+}
+
+// hoSliceStoreInLoop: each iteration stores the same q into an element.
+func hoSliceStoreInLoop(db *gorm.DB, qs []*gorm.DB) {
+	q := db.Where("x")
+	for i := range qs {
+		qs[i] = q // want `\*gorm\.DB reused: second branch from mutable root`
+	}
+}
+
+// hoMapStoreInLoop: each iteration stores the same q into the map.
+func hoMapStoreInLoop(db *gorm.DB, m map[string]*gorm.DB, keys []string) {
+	q := db.Where("x")
+	for _, k := range keys {
+		m[k] = q // want `\*gorm\.DB reused: second branch from mutable root`
+	}
+}
+
+// hoSendMerged: the send may hand on either root, so the later use of b is a
+// second branch of b.
+func hoSendMerged(db *gorm.DB, ch chan *gorm.DB, c bool) {
+	base := db.Session(&gorm.Session{})
+	a := base.Where("a")
+	b := base.Where("b").Session(&gorm.Session{})
+	q := a
+	if c {
+		q = b
+	}
+	ch <- q
+	b.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// hoAppendMerged: the same for append.
+func hoAppendMerged(db *gorm.DB, c bool) []*gorm.DB {
+	base := db.Session(&gorm.Session{})
+	a := base.Where("a")
+	b := base.Where("b").Session(&gorm.Session{})
+	q := a
+	if c {
+		q = b
+	}
+	qs := append([]*gorm.DB(nil), q)
+	b.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	return qs
+}
+
+// ===== SHOULD NOT REPORT =====
+
+// hoSendFreshInLoop: each iteration sends a new root.
+func hoSendFreshInLoop(db *gorm.DB, ch chan *gorm.DB, items []string) {
+	base := db.Session(&gorm.Session{})
+	for _, item := range items {
+		ch <- base.Where("name = ?", item)
+	}
+}
+
+// hoAppendImmutableInLoop: an immutable q may be handed on any number of
+// times.
+func hoAppendImmutableInLoop(db *gorm.DB, items []string) []*gorm.DB {
+	q := db.Session(&gorm.Session{})
+	var qs []*gorm.DB
+	for range items {
+		qs = append(qs, q)
+	}
+	return qs
+}
+
+// hoSendOnce: one send is one branch.
+func hoSendOnce(db *gorm.DB, ch chan *gorm.DB) {
+	ch <- db.Where("x")
+}

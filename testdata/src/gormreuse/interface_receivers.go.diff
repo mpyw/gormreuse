@@ -1,0 +1,65 @@
+--- interface_receivers.go	1970-01-01 00:00:00
++++ interface_receivers.go.golden	1970-01-01 00:00:00
+@@ -1,60 +1,60 @@
+ package internal
+ 
+ import "gorm.io/gorm"
+ 
+ // =============================================================================
+ // A *gorm.DB as the receiver of an interface method call (#374)
+ //
+ // A call through an interface that holds a *gorm.DB boxed right before it runs
+ // the *gorm.DB method, and is read as that call.
+ // =============================================================================
+ 
+ type irQuerier interface {
+ 	Where(query any, args ...any) *gorm.DB
+ 	Session(config *gorm.Session) *gorm.DB
+ }
+ 
+ // ===== SHOULD REPORT =====
+ 
+ // irBranchThenDirect: the interface call branches q, and so does q.Find.
+ func irBranchThenDirect(db *gorm.DB) {
+-	q := db.Where("x")
++	q := db.Where("x").Session(&gorm.Session{})
+ 	var qi irQuerier = q
+ 	qi.Where("a").Find(nil)
+ 	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // irBranchTwice: two calls through the interface.
+ func irBranchTwice(db *gorm.DB) {
+-	var qi irQuerier = db.Session(&gorm.Session{}).Where("x")
++	var qi irQuerier = db.Session(&gorm.Session{}).Where("x").Session(&gorm.Session{})
+ 	qi.Where("a").Find(nil)
+ 	qi.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // ===== SHOULD NOT REPORT =====
+ 
+ // irImmutable: the boxed value is immutable.
+ func irImmutable(db *gorm.DB) {
+ 	var qi irQuerier = db.Session(&gorm.Session{})
+ 	qi.Where("a").Find(nil)
+ 	qi.Where("b").Find(nil)
+ }
+ 
+ // irSessionRead: a Session call through the interface reads q, as q.Session
+ // does.
+ func irSessionRead(db *gorm.DB) {
+ 	q := db.Where("x")
+ 	var qi irQuerier = q
+ 	qi.Session(&gorm.Session{}).Find(nil)
+ 	q.Find(nil)
+ }
+ 
+ // irGenericReceiver is missed: the receiver has a type parameter's type, so
+ // the call has no *gorm.DB method until the function is instantiated.
+ // [LIMITATION]
+ func irGenericReceiver[T interface{ Find(any, ...any) *gorm.DB }](q T) {
+ 	q.Find(nil)
+ 	q.Find(nil)
+ }
+ 
+ func irCallGeneric(db *gorm.DB) { irGenericReceiver(db.Session(&gorm.Session{})) }

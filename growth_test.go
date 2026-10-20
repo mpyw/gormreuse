@@ -1277,6 +1277,35 @@ var growthCases = []growthCase{
 		files[n] = hub.String()
 		return files
 	}},
+	// One map literal of n mutable entries, each read twice: the referrers of
+	// the map are read once for all its keys (#374).
+	{name: "mapreads", limit: growthNearLinear, shape: func(n int) []string {
+		var b strings.Builder
+		b.WriteString("func f(db *gorm.DB) {\n\tbase := db.Session(&gorm.Session{})\n\tm := map[string]*gorm.DB{\n")
+		for i := range n {
+			fmt.Fprintf(&b, "\t\t\"k%d\": base.Where(\"c%d\"),\n", i, i)
+		}
+		b.WriteString("\t}\n")
+		for i := range n {
+			fmt.Fprintf(&b, "\tm[\"k%d\"].Find(nil)\n\tm[\"k%d\"].Count(nil)\n", i, i)
+		}
+		b.WriteString("}\n")
+		return []string{b.String()}
+	}},
+	// n loops that each append a query of their own to a slice, then a loop
+	// that reads it: each append runs again, and the values the slice may
+	// hold are found once (#374). Its steps are quadratic, but no more than
+	// with q%d.Find(nil) in place of each append, which counts the same
+	// steps within 1%: they come from the n loops.
+	{name: "appendloops", limit: growthNearLinear, steps: growthQuadratic, shape: func(n int) []string {
+		var b strings.Builder
+		b.WriteString("func f(db *gorm.DB, xs []int) {\n\tbase := db.Session(&gorm.Session{})\n\tvar qs []*gorm.DB\n")
+		for i := range n {
+			fmt.Fprintf(&b, "\tq%d := base.Where(\"c%d\")\n\tfor range xs {\n\t\tqs = append(qs, q%d)\n\t}\n", i, i, i)
+		}
+		b.WriteString("\tfor _, e := range qs {\n\t\te.Find(nil)\n\t\te.Count(nil)\n\t}\n}\n")
+		return []string{b.String()}
+	}},
 	// n getters of one field, which n methods assign: whether the package
 	// assigns the field a mutable value is decided once (#350).
 	{name: "getterfield", limit: growthLinear, shape: func(n int) []string {
