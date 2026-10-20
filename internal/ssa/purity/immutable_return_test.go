@@ -1,11 +1,18 @@
 package purity_test
 
 import (
+	"cmp"
+	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
 
+	"golang.org/x/tools/go/packages"
 	"golang.org/x/tools/go/ssa"
+	"golang.org/x/tools/go/ssa/ssautil"
 
 	"github.com/mpyw/gormreuse/internal/directive"
 	"github.com/mpyw/gormreuse/internal/ssa/purity"
@@ -51,4 +58,104 @@ func TestInferImmutableReturns(t *testing.T) {
 			}
 		}
 	}
+}
+
+// TestInferImmutableReturnsGrowth checks that inference does not grow
+// exponentially with the depth of a call chain that callers block on at every
+// level (#298). It counts allocations at k and k+4: before the fix the ratio
+// was 9.0 and 2.1, and after it 1.2 and 1.5. It stands in for the allocation-growth gate of #302 until that
+// lands. It does not run in parallel, as testing.AllocsPerRun requires.
+func TestInferImmutableReturnsGrowth(t *testing.T) {
+	const k = 12
+	tests := map[string]func(k int) string{
+		// f switches over c0..ck, and each ci returns c(i+1).
+		"switch over a chain": func(k int) string {
+			var b strings.Builder
+			b.WriteString("func f(db *gorm.DB, i int) *gorm.DB {\n\tswitch i {\n")
+			for i := range k {
+				fmt.Fprintf(&b, "\tcase %d:\n\t\treturn c%d(db)\n", i, i)
+			}
+			fmt.Fprintf(&b, "\t}\n\treturn c%d(db)\n}\n\n", k)
+			for i := range k {
+				fmt.Fprintf(&b, "func c%d(db *gorm.DB) *gorm.DB { return c%d(db) }\n\n", i, i+1)
+			}
+			fmt.Fprintf(&b, "func c%d(db *gorm.DB) *gorm.DB { return db.Session(&gorm.Session{}) }\n", k)
+			return b.String()
+		},
+		// Each ci switches over every later cj.
+		"dense chain": func(k int) string {
+			var b strings.Builder
+			for i := range k {
+				fmt.Fprintf(&b, "func c%d(db *gorm.DB, x int) *gorm.DB {\n\tswitch x {\n", i)
+				for j := i + 1; j <= k; j++ {
+					fmt.Fprintf(&b, "\tcase %d:\n\t\treturn c%d(db, x)\n", j, j)
+				}
+				fmt.Fprintf(&b, "\t}\n\treturn c%d(db, x)\n}\n\n", k)
+			}
+			fmt.Fprintf(&b, "func c%d(db *gorm.DB, x int) *gorm.DB { return db.Session(&gorm.Session{}) }\n", k)
+			return b.String()
+		},
+	}
+	for name, gen := range tests {
+		t.Run(name, func(t *testing.T) {
+			small := immutableReturnInferenceAllocs(t, gen(k))
+			large := immutableReturnInferenceAllocs(t, gen(k+4))
+			t.Logf("allocations: %.0f at k=%d, %.0f at k=%d", small, k, large, k+4)
+			if ratio := large / small; ratio > 2 {
+				t.Errorf("allocations grew %.1fx from k=%d to k=%d (%.0f to %.0f), want at most 2x", ratio, k, k+4, small, large)
+			}
+		})
+	}
+}
+
+// immutableReturnInferenceAllocs loads src as a package beside the gorm stub,
+// checks that inference accepts all of its functions, and returns the
+// allocations of one inference run.
+func immutableReturnInferenceAllocs(t *testing.T, src string) float64 {
+	t.Helper()
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	td := filepath.Join(filepath.Dir(file), "..", "..", "..", "testdata")
+	gopath := t.TempDir()
+	dir := filepath.Join(gopath, "src", "growth")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	src = "package growth\n\nimport \"gorm.io/gorm\"\n\n" + src
+	if err := os.WriteFile(filepath.Join(dir, "growth.go"), []byte(src), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &packages.Config{
+		Mode: packages.LoadAllSyntax,
+		Dir:  dir,
+		Env:  append(os.Environ(), "GOPATH="+gopath+string(filepath.ListSeparator)+td, "GO111MODULE=off", "GOFLAGS="),
+	}
+	pkgs, err := packages.Load(cfg, "growth")
+	if err != nil {
+		t.Fatalf("packages.Load: %v", err)
+	}
+	if packages.PrintErrors(pkgs) > 0 {
+		t.Fatal("packages had errors")
+	}
+	prog, ssaPkgs := ssautil.Packages(pkgs, ssa.BuilderMode(0))
+	prog.Build()
+
+	var candidates []*ssa.Function
+	for _, m := range ssaPkgs[0].Members {
+		if fn, ok := m.(*ssa.Function); ok && fn.Name() != "init" {
+			candidates = append(candidates, fn)
+		}
+	}
+	// Callers first, as in the shape that grew exponentially.
+	slices.SortFunc(candidates, func(a, b *ssa.Function) int { return cmp.Compare(a.Pos(), b.Pos()) })
+	declared := directive.NewImmutableReturnFuncSet(nil, nil)
+	builtins := tracer.NewRootTracer(nil, nil, nil, nil, nil, nil, nil)
+	if got, want := len(purity.InferImmutableReturns(candidates, declared.Contains, builtins)), len(candidates); got != want {
+		t.Fatalf("inferred %d functions, want %d", got, want)
+	}
+	return testing.AllocsPerRun(1, func() {
+		purity.InferImmutableReturns(candidates, declared.Contains, builtins)
+	})
 }

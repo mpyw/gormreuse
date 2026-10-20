@@ -424,30 +424,52 @@ func immutableReturnStoreAlwaysRuns(store *ssa.Store) bool {
 func InferImmutableReturns(candidates []*ssa.Function, trusted func(*ssa.Function) bool, rt *tracer.RootTracer) map[*ssa.Function]bool {
 	inferred := make(map[*ssa.Function]bool)
 	accept := func(fn *ssa.Function) bool { return inferred[fn] || trusted(fn) }
+	// queue holds each candidate once, as candidates may repeat.
 	isCandidate := make(map[*ssa.Function]bool, len(candidates))
+	var queue []*ssa.Function
 	for _, fn := range candidates {
-		isCandidate[fn] = true
+		if !isCandidate[fn] {
+			isCandidate[fn] = true
+			queue = append(queue, fn)
+		}
 	}
 
-	// A function that waits on a candidate is proved again once that
-	// candidate is added, so each function is proved at most once per callee.
+	// A function that candidates block waits for all of them, and is proved
+	// again only once the last of them is added, so each function is proved
+	// at most twice (#298). Its blockers only shrink as functions are added,
+	// so that proof holds. A function that a non-candidate blocks can never
+	// be proved and does not wait.
 	waiting := make(map[*ssa.Function][]*ssa.Function)
-	queue := slices.Clone(candidates)
+	pending := make(map[*ssa.Function]int)
 	for len(queue) > 0 {
 		fn := queue[0]
 		queue = queue[1:]
-		if inferred[fn] {
-			continue
-		}
 		proved, blockers := immutableReturnProof(fn, accept, rt)
 		if proved {
 			inferred[fn] = true
-			queue = append(queue, waiting[fn]...)
+			for _, w := range waiting[fn] {
+				if pending[w]--; pending[w] == 0 {
+					queue = append(queue, w)
+				}
+			}
 			delete(waiting, fn)
 			continue
 		}
+		distinct := make(map[*ssa.Function]bool, len(blockers))
 		for _, callee := range blockers {
-			if isCandidate[callee] {
+			if !isCandidate[callee] {
+				distinct = nil
+				break
+			}
+			distinct[callee] = true
+		}
+		if len(distinct) == 0 {
+			continue
+		}
+		pending[fn] = len(distinct)
+		for _, callee := range blockers {
+			if distinct[callee] {
+				delete(distinct, callee)
 				waiting[callee] = append(waiting[callee], fn)
 			}
 		}
