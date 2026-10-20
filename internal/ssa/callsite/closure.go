@@ -20,9 +20,10 @@ type ClosureRun struct {
 // use of it, such as a call, a go or defer statement, an argument or a store
 // into a slice or a field. A comparison with nil is not one.
 //
-// The value is followed through a merge (Phi), and through a local variable
-// it is stored to: the variable's loads are followed, also in the closures
-// that capture the variable at any depth, so a closure that another closure
+// The value is followed through a merge (Phi), a conversion to a named func
+// type (ChangeType, #341), and through a local variable it is stored to: the
+// variable's loads are followed, also in the closures that capture the
+// variable at any depth, so a closure that another closure
 // calls runs at that call (#305). This is the reverse of FuncVars.LocalValue,
 // which goes from a call to the closure it runs. A store of another value to
 // the variable is not a use, so a variable assigned twice is followed too.
@@ -84,8 +85,10 @@ func ClosureRuns(v ssa.Value) []ClosureRun {
 				// A func value can only be compared with nil, as in
 				// `if f != nil { f() }`, which does not run it (#309).
 				continue
-			case *ssa.Phi:
-				follow(ref)
+			case *ssa.Phi, *ssa.ChangeType:
+				// A conversion to a named func type, as in
+				// `h := handlerFunc(func() { ... })`, is the same closure (#341).
+				follow(ref.(ssa.Value))
 				continue
 			case *ssa.Store:
 				if alloc, ok := ref.Addr.(*ssa.Alloc); ok && ref.Val == v {

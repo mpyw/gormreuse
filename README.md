@@ -759,6 +759,7 @@ gormreuse cannot follow a `*gorm.DB` everywhere. These count as a branch: an int
 | Interface conversion | `interface{}(db)` | It may be extracted via a type assertion |
 | Non-pure function call | `helper(db)` | Unless the function is marked `//gormreuse:pure` |
 | The address of the variable, passed to a non-pure function | `applyP(&q)` | The function may change `*p` in place, or store another chain in it. A later read of `q` sees both (#345) |
+| A struct that holds it, handed to a call | `useDeps(deps{DB: q})`, `r := &repo{db: q}; r.active()` | The callee can reach it through the struct. Not for a pure function, an inferred getter, a `*gorm.DB` method, a method of `gorm.Statement`, or a package that does not import gorm |
 | Struct field access | `h.db.Find(nil)` | It traces back to the stored value |
 
 A struct field is followed in these forms:
@@ -772,6 +773,7 @@ A struct field is followed in these forms:
 
 - A field read through a parameter or a receiver, by value or by pointer, is not a mutable root. Only the stores to it in the same function are followed. A getter that returns such a field is read the same way, as the field of the receiver at each call (see [Inferred immutable-return](#inferred-immutable-return)).
 - Simple struct literal storage (`_ = &S{db: q}`) without actual field usage does NOT pollute.
+- A struct handed to a call is followed when the call gets the struct, its address or a copy, also in an interface or as a method receiver. A struct sent on a channel, stored in a slice or a map, or packed into a variadic argument is not.
 - A field read sees only the stores that can run before it. So the builder idiom `r.db = r.db.Where(...)` in a pointer-receiver method, followed by one use of `r.db`, is not reported. A second use of `r.db` is.
 
 </details>
@@ -1028,7 +1030,7 @@ for v := range slices.Values(ids) {
 
 </td><td><b>Yes</b></td><td>
 
-A loop body runs more than once, so one use inside it is reuse. Range-over-func loops (Go 1.23+) count as loops too.
+A loop body runs more than once, so one use inside it is reuse. Range-over-func loops (Go 1.23+) count as loops too. A chain that a range-over-func body assigns is seen after the loop, as for a plain loop.
 
 </td></tr>
 <tr><td>
@@ -1485,7 +1487,7 @@ for _, id := range ids {
 
 </td><td>No</td><td>
 
-Some closures may run at any point after they are created. That is a closure that is deferred, run with `go`, stored, passed on (errgroup's `Go`, a `Transaction` callback) or used as a range-over-func body. It reads the value the variable held when the closure was created, or any value stored later. The same applies to a field read through a captured pointer, such as `d := &deps{db: db}; d.db = d.db.WithContext(ctx)`.
+Some closures may run at any point after they are created. That is a closure that is deferred, run with `go`, stored or passed on (errgroup's `Go`, a `Transaction` callback). It reads the value the variable held when the closure was created, or any value stored later. A range-over-func body runs only during its loop, so it reads only the values that can reach the loop. The same applies to a field read through a captured pointer, such as `d := &deps{db: db}; d.db = d.db.WithContext(ctx)`.
 
 </td></tr>
 <tr><td>

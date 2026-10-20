@@ -11,6 +11,12 @@ import (
 // the yield closure holding the body of a range-over-func loop.
 const rangeFuncLoopSynthetic = "range-over-func yield"
 
+// IsRangeFuncLoopBody reports whether fn is the yield closure that holds the body
+// of a range-over-func loop.
+func IsRangeFuncLoopBody(fn *ssa.Function) bool {
+	return fn.Synthetic == rangeFuncLoopSynthetic
+}
+
 // LoopInfo contains information about loops in a function.
 //
 // Used to detect when a mutable root defined outside a loop is used
@@ -88,7 +94,7 @@ func (a *Analyzer) findLoops(fn *ssa.Function) *LoopInfo {
 	if fn.Blocks == nil {
 		return info
 	}
-	if fn.Synthetic == rangeFuncLoopSynthetic {
+	if IsRangeFuncLoopBody(fn) {
 		body := make(map[*ssa.BasicBlock]bool)
 		for _, b := range fn.Blocks {
 			body[b] = true

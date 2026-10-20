@@ -58,6 +58,8 @@ import (
 const (
 	gormPkgPath = "gorm.io/gorm"
 	gormDBType  = "DB"
+	// gormStatementType is the type of the Statement a *gorm.DB carries.
+	gormStatementType = "Statement"
 )
 
 // =============================================================================
@@ -127,6 +129,19 @@ func ReachesGorm(pkg *types.Package) bool {
 
 // isGormDBNamed checks if the type is gorm.DB (named type).
 func isGormDBNamed(t types.Type) bool {
+	return isGormNamed(t, gormDBType)
+}
+
+// IsGormStatement reports whether t is gorm.Statement or *gorm.Statement.
+func IsGormStatement(t types.Type) bool {
+	if ptr, ok := types.Unalias(t).(*types.Pointer); ok {
+		t = ptr.Elem()
+	}
+	return isGormNamed(t, gormStatementType)
+}
+
+// isGormNamed reports whether t is the named type name of gorm.io/gorm.
+func isGormNamed(t types.Type, name string) bool {
 	named, ok := types.Unalias(t).(*types.Named)
 	if !ok {
 		return false
@@ -136,7 +151,7 @@ func isGormDBNamed(t types.Type) bool {
 		return false
 	}
 	// Use exact match to prevent false positives from packages like "evil.com/fake-gorm.io/gorm"
-	return obj.Name() == gormDBType && obj.Pkg().Path() == gormPkgPath
+	return obj.Name() == name && obj.Pkg().Path() == gormPkgPath
 }
 
 // =============================================================================

@@ -38,11 +38,12 @@ On gorm's own repository (v1.31.2), 0.23.0 reports fewer problems:
 
 | Module | 0.22.0 | 0.23.0 | Removed | Added |
 | --- | --- | --- | --- | --- |
-| Root | 151 | 66 | 90 | 5 |
+| Root | 151 | 69 | 90 | 8 |
 | `tests` | 15 | 14 | 2 | 1 |
 
 - Most removed reports in the root module had a state-only call such as `AddError` as a branch (#307).
-- Four of the five added ones are a `*gorm.DB` parameter used in a loop. The fifth is a report that moved within its line.
+- Four of the eight added ones are a `*gorm.DB` parameter used in a loop. One is a report that moved within its line.
+- Three hand a struct that holds the handle to code gormreuse cannot see into (#341). Two pass a `Statement` to the `Dialector` interface in a loop. One passes a `preloadBuilder` to the user's `Preload` callback, which changes the handle in place.
 - In `tests`, the added report is a `Connection` callback.
 - The removed ones in `tests` are two Scopes warnings: a `WithContext` that the callback does not return, and a `Session` whose chain ends in `Find`.
 
@@ -341,6 +342,81 @@ A named callback that is also called directly or exported (#191)
 </td><td>
 
 Its parameter is mutable again. Mark the function `//gormreuse:immutable-param`, or stop calling it directly
+
+</td></tr>
+<tr><td>
+
+A chain reassigned in a range-over-func body and used twice after the loop (#341)
+
+</td><td>
+
+```go
+for k, v := range maps.All(filters) {
+    q = q.Where(k+" = ?", v)
+}
+q.Count(&n)
+q.Find(&users)
+```
+
+</td><td>
+
+`-fix` ends the `Where` in the body with `.Session(&gorm.Session{})`
+
+</td></tr>
+<tr><td>
+
+A struct that holds a mutable chain, handed to a function or a method, and the chain used again (#341)
+
+</td><td>
+
+```go
+useDeps(deps{DB: q})
+r := &repo{db: q}
+r.active()
+q.Find(&users)
+```
+
+</td><td>
+
+End `q`'s chain with `.Session(&gorm.Session{})` before you store it. There is no fix: the callee may change `q` in place
+
+</td></tr>
+<tr><td>
+
+A `Session` copy or a subquery of a value that may hold either of two roots, after the second root changed (#341)
+
+</td><td>
+
+```go
+src := a
+if c {
+    src = b
+}
+cp := src.Session(&gorm.Session{})
+b.Where("x").Find(&x)
+cp.Find(&y)
+```
+
+</td><td>
+
+End each root's chain with `.Session(&gorm.Session{})` before you copy it
+
+</td></tr>
+<tr><td>
+
+A closure that captures only a method value, and a closure converted to a named func type and called twice (#341)
+
+</td><td>
+
+```go
+find := q.Find
+func() { find(&a) }()
+q.Count(&n)
+```
+
+</td><td>
+
+Make the root immutable with `.Session(&gorm.Session{})`
 
 </td></tr>
 </table>
@@ -740,6 +816,21 @@ db.AutoMigrate(&User{})
 ```go
 q.Where("a").Find(&x)
 q.AddError(err)
+```
+
+</td></tr>
+<tr><td>
+
+A use in a range-over-func body of a value stored after the loop (#341). The body runs only while the loop runs
+
+</td><td>
+
+```go
+q := db.Session(&gorm.Session{})
+for k := range seq {
+    q.Where(k).Find(&x)
+}
+q = db.Where("late")
 ```
 
 </td></tr>

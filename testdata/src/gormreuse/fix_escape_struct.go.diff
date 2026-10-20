@@ -1,6 +1,6 @@
 --- fix_escape_struct.go	1970-01-01 00:00:00
 +++ fix_escape_struct.go.golden	1970-01-01 00:00:00
-@@ -1,398 +1,398 @@
+@@ -1,400 +1,400 @@
  package internal
  
  import (
@@ -13,7 +13,9 @@
  // Fixtures for issue #310: a store of the root into a struct, or into an
  // element of a value, hands it to other code once that value leaves the
  // function's own field reads. Such code may change the root in place, so the
- // fix of #243 is withheld as for a call argument.
+ // fix of #243 is withheld as for a call argument. Since #341 a call that is
+ // handed the struct is a branch of the root too, as helper(q) is, so the use
+ // after it is reported as well.
  
  type fixEscapeStructSvc struct{ db *gorm.DB }
  
@@ -42,7 +44,7 @@
  	q := db.Model(&User{}).Where("x = 1")
  	s := &fixEscapeStructSvc{db: q}
  	s.apply()
- 	q.Find(&[]User{})
+ 	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
  	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
  }
  
@@ -51,7 +53,7 @@
  	q := db.Model(&User{}).Where("x = 1")
  	s := fixEscapeStructSvc{db: q}
  	s.applyValue()
- 	q.Find(&[]User{})
+ 	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
  	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
  }
  
@@ -59,7 +61,7 @@
  func fixEscapeStructLiteral(db *gorm.DB) {
  	q := db.Model(&User{}).Where("x = 1")
  	fixEscapeStructApplyParams(fixEscapeStructParams{db: q})
- 	q.Find(&[]User{})
+ 	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
  	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
  }
  
@@ -67,7 +69,7 @@
  func fixEscapeStructPointerLiteral(db *gorm.DB) {
  	q := db.Model(&User{}).Where("x = 1")
  	fixEscapeStructApplyParamsPtr(&fixEscapeStructParams{db: q})
- 	q.Find(&[]User{})
+ 	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
  	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
  }
  
@@ -78,7 +80,7 @@
  	var p fixEscapeStructParams
  	p.db = q
  	fixEscapeStructApplyParamsPtr(&p)
- 	q.Find(&[]User{})
+ 	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
  	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
  }
  
@@ -86,7 +88,7 @@
  func fixEscapeStructNested(db *gorm.DB) {
  	q := db.Model(&User{}).Where("x = 1")
  	fixEscapeStructApplyOuter(fixEscapeStructOuter{in: fixEscapeStructParams{db: q}})
- 	q.Find(&[]User{})
+ 	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
  	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
  }
  
@@ -97,7 +99,7 @@
  	in := fixEscapeStructParams{db: q}
  	o := fixEscapeStructOuter{in: in}
  	fixEscapeStructApplyOuter(o)
- 	q.Find(&[]User{})
+ 	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
  	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
  }
  
@@ -114,8 +116,8 @@
  func fixEscapeStructResult(db *gorm.DB) {
  	q := db.Model(&User{}).Where("x = 1")
  	q.Find(&[]User{})
- 	r := fixEscapeStructBuild(fixEscapeStructParams{db: q})
- 	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+ 	r := fixEscapeStructBuild(fixEscapeStructParams{db: q}) // want `\*gorm\.DB reused: second branch from mutable root`
+ 	q.Find(&[]User{})                                       // want `\*gorm\.DB reused: second branch from mutable root`
  	r.Find(&[]User{})
  }
  
@@ -124,7 +126,7 @@
  	q := db.Model(&User{}).Where("x = 1")
  	s := &fixEscapeStructSvc{db: q}
  	func() { s.apply() }()
- 	q.Find(&[]User{})
+ 	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
  	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
  }
  
@@ -133,7 +135,7 @@
  func fixEscapeStructParam(tx *gorm.DB) {
  	s := &fixEscapeStructSvc{db: tx}
  	s.apply()
- 	tx.Find(&[]User{})
+ 	tx.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
  	tx.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
  }
  
@@ -151,7 +153,7 @@
  	q := db.Model(&User{}).Where("x = 1")
  	fixEscapeStructGlobal.db = q
  	fixEscapeStructApplyParamsPtr(&fixEscapeStructGlobal)
- 	q.Find(&[]User{})
+ 	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
  	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
  }
  
@@ -160,7 +162,7 @@
  	q := db.Model(&User{}).Where("x = 1")
  	p.db = q
  	fixEscapeStructApplyParamsPtr(p)
- 	q.Find(&[]User{})
+ 	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
  	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
  }
  
@@ -169,8 +171,8 @@
  func fixEscapeStructInLoop(db *gorm.DB, xs []int) {
  	q := db.Model(&User{}).Where("x = 1")
  	for range xs {
- 		q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
- 		fixEscapeStructApplyParams(fixEscapeStructParams{db: q})
+ 		q.Find(&[]User{})                                        // want `\*gorm\.DB reused: second branch from mutable root`
+ 		fixEscapeStructApplyParams(fixEscapeStructParams{db: q}) // want `\*gorm\.DB reused: second branch from mutable root`
  	}
  }
  
@@ -210,8 +212,8 @@
 -	q := db.Model(&User{}).Where("x = 1")
 +	q := db.Model(&User{}).Where("x = 1").Session(&gorm.Session{})
  	q.Find(&[]User{})
- 	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
- 	fixEscapeStructApplyParams(fixEscapeStructParams{db: q})
+ 	q.Find(&[]User{})                                        // want `\*gorm\.DB reused: second branch from mutable root`
+ 	fixEscapeStructApplyParams(fixEscapeStructParams{db: q}) // want `\*gorm\.DB reused: second branch from mutable root`
  }
  
  // fixEscapeStructOtherField: the struct that reaches other code holds
@@ -231,8 +233,8 @@
 +	q := db.Model(&User{}).Where("x = 1").Session(&gorm.Session{})
  	fixEscapeStructGlobal.db = q
  	q.Find(&[]User{})
- 	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
- 	fixEscapeStructApplyParamsPtr(&fixEscapeStructGlobal)
+ 	q.Find(&[]User{})                                     // want `\*gorm\.DB reused: second branch from mutable root`
+ 	fixEscapeStructApplyParamsPtr(&fixEscapeStructGlobal) // want `\*gorm\.DB reused: second branch from mutable root`
  }
  
  // fixEscapeStructCapturedRead: a closure captures the struct and only reads

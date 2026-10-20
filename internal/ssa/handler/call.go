@@ -39,6 +39,7 @@ package handler
 
 import (
 	"go/token"
+	"go/types"
 	"slices"
 
 	"golang.org/x/tools/go/ssa"
@@ -296,28 +297,9 @@ func (u siteUse) call() *ssa.Call {
 	return call
 }
 
-// roots returns the mutable roots that v may hold: first the one it resolves
-// to (FindMutableRoot), then the others that FindAllMutableRoots finds through
-// a merge. It is nil when v has no mutable root.
-//
-// It is also nil when FindMutableRoot finds no root but FindAllMutableRoots
-// does. That list holds what a merge may hold, immutable values included, and
-// the roots inside a closure that an immutable-return directive vouches for,
-// which FindMutableRoot trusts. So FindMutableRoot decides whether v is
-// mutable; it tries every value a merge or a variable in memory may hold
-// (#340).
+// roots returns the mutable roots that v may hold (RootTracer.MutableRoots).
 func (u siteUse) roots(v ssa.Value) []ssa.Value {
-	root := u.ctx.RootTracer.FindMutableRoot(v, u.ctx.LoopInfo)
-	if root == nil {
-		return nil
-	}
-	roots := []ssa.Value{root}
-	for _, r := range u.ctx.RootTracer.FindAllMutableRoots(v, u.ctx.LoopInfo) {
-		if r != root {
-			roots = append(roots, r)
-		}
-	}
-	return roots
+	return u.ctx.RootTracer.MutableRoots(v, u.ctx.LoopInfo)
 }
 
 // checkRoots reports a violation at the site for each of roots that is already
@@ -544,6 +526,93 @@ func (u siteUse) handleArgs() {
 		// assignment escapes it.
 		u.branch(roots, pollution.UsageInfo{Block: u.block, Pos: u.pos, Escapes: true}, assigns)
 	}
+
+	u.handleHolders()
+}
+
+// handleHolders handles the structs that the site hands on, as an argument or
+// as the receiver of a method, when they hold a *gorm.DB with a mutable root
+// (#341). The callee can reach the root through the struct as well as through
+// the *gorm.DB itself, so each such root is branched, as for helper(q):
+//
+//	q := db.Where("name = ?", "x")
+//	useDeps(deps{DB: q})  // a branch of q's root
+//	q.Find(&users)        // the second branch
+//
+// These are the hand-offs that -fix already takes as escapes (#310): a
+// struct, its address, or a copy of it passed to a call, also boxed in an
+// interface or as the receiver of a method value. A gorm method only reads a
+// struct it is passed, and so does a pure function, or a static call to a
+// package that does not reach gorm and gets no function. So does a method of
+// gorm.Statement, as in `stmt := &gorm.Statement{DB: db}; stmt.Parse(&User{})`:
+// it reads only the configuration of stmt.DB, such as its Dialector and
+// NamingStrategy, and calls AddError, which changes no clause. So does a getter
+// whose call is traced as the field it returns (RootTracer.HasParamReads,
+// #342): `r.DB().Find(&a)` is one branch of what r.db holds, at the Find. A
+// struct sent on a
+// channel, stored in a slice, a map or another variable's memory, or packed
+// into a variadic argument is not followed. Neither is a call through an
+// interface, whose receiver is boxed before the call.
+func (u siteUse) handleHolders() {
+	site, ctx := u.site, u.ctx
+	if site.IsGormMethod() || isGormStatementMethod(site) {
+		return
+	}
+	if site.Declared != nil && (ctx.RootTracer.IsPureFunction(site.Declared) || ctx.RootTracer.HasParamReads(site.Declared)) {
+		return
+	}
+	operands := site.Args
+	if site.Recv != nil {
+		operands = append([]ssa.Value{site.Recv}, operands...)
+	}
+	// Each held value is branched once, with every root it may hold, as an
+	// argument is. Two fields that hold one root branch it once.
+	var held [][]ssa.Value
+	for _, operand := range operands {
+		if mi, ok := operand.(*ssa.MakeInterface); ok {
+			operand = mi.X
+		}
+		if typeutil.IsGormDB(operand.Type()) {
+			continue // handleArgs or handleReceiver handles it
+		}
+		for _, v := range ctx.RootTracer.GormDBFieldValues(operand, site.Instr) {
+			roots := u.roots(v)
+			if roots != nil && !slices.ContainsFunc(held, func(seen []ssa.Value) bool { return seen[0] == roots[0] }) {
+				held = append(held, roots)
+			}
+		}
+	}
+	if len(held) == 0 || !holderCalleeReachesGorm(site) {
+		return
+	}
+	use := pollution.UsageInfo{Block: u.block, Pos: u.pos, Escapes: true}
+	for _, roots := range held {
+		u.branch(roots, use, func(ssa.Value) bool { return false })
+	}
+}
+
+// isGormStatementMethod reports whether site calls a method of gorm.Statement.
+func isGormStatementMethod(site callsite.Site) bool {
+	if site.Declared == nil {
+		return false
+	}
+	recv := site.Declared.Signature.Recv()
+	return recv != nil && typeutil.IsGormStatement(recv.Type())
+}
+
+// holderCalleeReachesGorm reports whether the callee of site may reach a
+// *gorm.DB inside a struct it is passed. A static call to a package that does
+// not reach gorm cannot name the type, unless a function among its arguments
+// does it for the callee. Any other call may.
+func holderCalleeReachesGorm(site callsite.Site) bool {
+	callee := site.Declared
+	if callee == nil || callee.Pkg == nil || typeutil.ReachesGorm(callee.Pkg.Pkg) {
+		return true
+	}
+	return slices.ContainsFunc(site.Instr.Common().Args, func(arg ssa.Value) bool {
+		_, ok := arg.Type().Underlying().(*types.Signature)
+		return ok
+	})
 }
 
 // recordCallAliasUses records a use, at pos, of every mutable root whose

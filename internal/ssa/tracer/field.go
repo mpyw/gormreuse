@@ -10,6 +10,7 @@ import (
 
 	"github.com/mpyw/gormreuse/internal/ssa/callsite"
 	"github.com/mpyw/gormreuse/internal/ssa/cfg"
+	"github.com/mpyw/gormreuse/internal/typeutil"
 )
 
 // traceFieldStore traces a struct field access by finding Store instructions.
@@ -206,4 +207,72 @@ func (t *RootTracer) traceAllFieldStores(fa *ssa.FieldAddr, load *ssa.UnOp, sear
 		roots = append(roots, t.traceAll(v, search, loopInfo)...)
 	}
 	return roots
+}
+
+// GormDBFieldValues returns the *gorm.DB values that v, a struct or a pointer
+// to one, holds in its fields, as a read of each field at at would see them
+// (#341). Only the fields the struct holds inline are searched: a *gorm.DB
+// field, at any depth of struct fields, embedded or not, but not through a
+// pointer field. The values are the stores into a local struct, or into a
+// struct a parameter or a global points to, that the function makes; the
+// field of a struct that a call returned (FieldRoot) is left out, so a struct
+// built elsewhere holds nothing here.
+//
+//	q := db.Where("name = ?", "x")
+//	useDeps(deps{DB: q})  // the struct holds q
+//	r := &repo{db: q}
+//	r.active()            // so does the receiver
+func (t *RootTracer) GormDBFieldValues(v ssa.Value, at ssa.Instruction) []ssa.Value {
+	typ, addr := v.Type(), false
+	if ptr, ok := typ.Underlying().(*types.Pointer); ok {
+		typ, addr = ptr.Elem(), true
+	}
+	paths := gormDBFieldPaths(typ, nil, make(map[types.Type]bool))
+	if len(paths) == 0 {
+		return nil
+	}
+	root, prefix := v, []int(nil)
+	if fa, ok := v.(*ssa.FieldAddr); ok && addr {
+		root, prefix = fieldAddrPath(fa)
+	}
+	var vals []ssa.Value
+	for _, path := range paths {
+		var found []ssa.Value
+		if addr {
+			found = t.stores.fieldStoredValuesAt(at.Parent(), root, slices.Concat(prefix, path), at)
+		} else {
+			found = t.stores.structFieldStoredValues(v, path, make(map[ssa.Value]bool))
+		}
+		for _, val := range found {
+			if _, ok := val.(*FieldRoot); !ok {
+				vals = append(vals, val)
+			}
+		}
+	}
+	return vals
+}
+
+// gormDBFieldPaths returns the field paths, below prefix, of the *gorm.DB
+// fields that a value of type t holds inline (see GormDBFieldValues). seen
+// stops a struct type that holds itself through an array.
+func gormDBFieldPaths(t types.Type, prefix []int, seen map[types.Type]bool) [][]int {
+	st, ok := t.Underlying().(*types.Struct)
+	if !ok || seen[t] {
+		return nil
+	}
+	seen[t] = true
+	defer delete(seen, t)
+	var paths [][]int
+	for i := range st.NumFields() {
+		field := st.Field(i).Type()
+		path := append(slices.Clip(prefix), i)
+		if typeutil.IsGormDB(field) {
+			if _, ptr := types.Unalias(field).(*types.Pointer); ptr {
+				paths = append(paths, path)
+			}
+			continue
+		}
+		paths = append(paths, gormDBFieldPaths(field, path, seen)...)
+	}
+	return paths
 }

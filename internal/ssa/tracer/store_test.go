@@ -144,3 +144,81 @@ func TestMakeClosureInStoreFuncNested(t *testing.T) {
 		t.Errorf("a closure not nested in the function should give nil, got %v", got)
 	}
 }
+
+// storeRangeBody returns the Alloc that comment names in fn and the
+// MakeClosure of fn's range-over-func body.
+func storeRangeBody(t *testing.T, fn *ssa.Function, comment string) (*ssa.Alloc, *ssa.MakeClosure) {
+	t.Helper()
+	var alloc *ssa.Alloc
+	var body *ssa.MakeClosure
+	for _, block := range fn.Blocks {
+		for _, instr := range block.Instrs {
+			switch x := instr.(type) {
+			case *ssa.Alloc:
+				if x.Comment == comment {
+					alloc = x
+				}
+			case *ssa.MakeClosure:
+				if cfg.IsRangeFuncLoopBody(x.Fn.(*ssa.Function)) {
+					body = x
+				}
+			}
+		}
+	}
+	if alloc == nil || body == nil {
+		t.Fatalf("%s: no Alloc for %s or no range-over-func body", fn.Name(), comment)
+	}
+	return alloc, body
+}
+
+// TestReachingFieldStoresAfterRangeBody pins #341 for a read in the block of
+// the body's MakeClosure, after it: the body's store does not end the search,
+// so the stores of both branches of the if before the loop are seen too,
+// first. The iterator call stands for such a read.
+func TestReachingFieldStoresAfterRangeBody(t *testing.T) {
+	t.Parallel()
+	fixtures, _ := loadFixtureProgram(t)
+	fn := fixtures["rangeFuncBodyStoreAfterIf"]
+	if fn == nil {
+		t.Fatal("rangeFuncBodyStoreAfterIf fixture missing")
+	}
+	alloc, mc := storeRangeBody(t, fn, "q")
+	var iterate *ssa.Call
+	for _, ref := range *mc.Referrers() {
+		if call, ok := ref.(*ssa.Call); ok {
+			iterate = call
+		}
+	}
+	if iterate == nil {
+		t.Fatal("no iterator call of the body")
+	}
+	got, open := newStoreMemo().reachingFieldStores(fn, storeTarget{root: alloc}, nil, iterate)
+	if len(got) != 3 || open || got[0].Parent() != fn || got[1].Parent() != fn || got[2].Parent() == fn {
+		t.Errorf("want the two stores before the loop, then the body's, got %v (open %v)", got, open)
+	}
+}
+
+// TestFieldStoredValuesRangeBody pins #341 without a memo, as the callback
+// resolver asks: every store of the field is seen, the body's included.
+func TestFieldStoredValuesRangeBody(t *testing.T) {
+	t.Parallel()
+	fixtures, _ := loadFixtureProgram(t)
+	fn := fixtures["rangeFuncBodyStoreField"]
+	if fn == nil {
+		t.Fatal("rangeFuncBodyStoreField fixture missing")
+	}
+	var fa *ssa.FieldAddr
+	for _, block := range fn.Blocks {
+		for _, instr := range block.Instrs {
+			if x, ok := instr.(*ssa.FieldAddr); ok {
+				fa = x
+			}
+		}
+	}
+	if fa == nil {
+		t.Fatal("no field address in rangeFuncBodyStoreField")
+	}
+	if got := FieldStoredValues(fa, nil); len(got) != 2 {
+		t.Errorf("want the literal's store and the body's, got %v", got)
+	}
+}

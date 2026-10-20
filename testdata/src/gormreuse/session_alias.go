@@ -230,3 +230,49 @@ func sessionInitializedFalseIsImmutable(db *gorm.DB) {
 	q.Where("a").Find(&[]User{})
 	q.Where("b").Find(&[]User{}) // OK
 }
+
+// A copy of a value that may hold either of two roots reads the Statement of
+// each, whichever edge the merge lists first (#341).
+func sessionAliasOfMergeSecondEdge(a, b *gorm.DB, c bool) {
+	src := a
+	if c {
+		src = b
+	}
+	cp := src.Session(&gorm.Session{})
+	b.Where("x").Find(&[]User{})
+	cp.Find(&[]User{}) // want `\*gorm\.DB reused: Session/Debug copy shares the Statement of a mutable root`
+}
+
+// The same with the edges swapped, which was already reported.
+func sessionAliasOfMergeFirstEdge(a, b *gorm.DB, c bool) {
+	src := b
+	if c {
+		src = a
+	}
+	cp := src.Session(&gorm.Session{})
+	b.Where("x").Find(&[]User{})
+	cp.Find(&[]User{}) // want `\*gorm\.DB reused: Session/Debug copy shares the Statement of a mutable root`
+}
+
+// A subquery that may hold either of two roots is read for each (#341).
+func subqueryOfMergeSecondEdge(db, a, b *gorm.DB, c bool) {
+	sub := a
+	if c {
+		sub = b
+	}
+	x := db.Session(&gorm.Session{}).Where("id IN (?)", sub)
+	b.Where("age > 1").Find(&[]User{})
+	x.Find(&[]User{}) // want `\*gorm\.DB reused: mutable root passed as a query argument`
+}
+
+// A merge that may also hold an immutable value: the copy reads the Statement
+// of the mutable root only (#341).
+func sessionAliasOfMergeWithImmutable(db, b *gorm.DB, c bool) {
+	src := b
+	if c {
+		src = db.Session(&gorm.Session{})
+	}
+	cp := src.Session(&gorm.Session{})
+	b.Where("x").Find(&[]User{})
+	cp.Find(&[]User{}) // want `\*gorm\.DB reused: Session/Debug copy shares the Statement of a mutable root`
+}
