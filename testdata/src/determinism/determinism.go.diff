@@ -1,0 +1,69 @@
+--- determinism.go	1970-01-01 00:00:00
++++ determinism.go.golden	1970-01-01 00:00:00
+@@ -1,60 +1,60 @@
+ // Package determinism holds multi-root reuse scenarios where several roots are
+ // reused at the same position. The analyzer must report them identically on
+ // every run: the same message (the earliest root wins a shared position) and the
+ // same suggested fixes (#184).
+ package determinism
+ 
+ import "gorm.io/gorm"
+ 
+ func use2(a, b *gorm.DB) {}
+ 
+ func use3(a, b, c *gorm.DB) {}
+ 
+ // twoRoots: both q and r are reused at the use2 call. immutable-param keeps db
+ // off the root set so only the local roots are reported.
+ //
+ //gormreuse:immutable-param
+ func twoRoots(db *gorm.DB) {
+-	q := db.Where("a")
+-	r := db.Where("b")
++	q := db.Where("a").Session(&gorm.Session{})
++	r := db.Where("b").Session(&gorm.Session{})
+ 	q.Find(nil)
+ 	r.Find(nil)
+ 	use2(q, r) // want `\*gorm\.DB reused: second branch from mutable root \(root at determinism\.go:18, first branch at determinism\.go:20\)`
+ }
+ 
+ // twoRootsSwapped: the argument order does not decide the reported root.
+ //
+ //gormreuse:immutable-param
+ func twoRootsSwapped(db *gorm.DB) {
+-	q := db.Where("a")
+-	r := db.Where("b")
++	q := db.Where("a").Session(&gorm.Session{})
++	r := db.Where("b").Session(&gorm.Session{})
+ 	q.Find(nil)
+ 	r.Find(nil)
+ 	use2(r, q) // want `\*gorm\.DB reused: second branch from mutable root \(root at determinism\.go:29, first branch at determinism\.go:31\)`
+ }
+ 
+ // threeRoots: three roots share both reuse positions.
+ //
+ //gormreuse:immutable-param
+ func threeRoots(db *gorm.DB) {
+ 	p := db.Where("a")
+ 	q := db.Where("b")
+ 	r := db.Where("c")
+ 	p.Find(nil)
+ 	q.Find(nil)
+ 	r.Find(nil)
+ 	use3(r, q, p) // want `\*gorm\.DB reused: second branch from mutable root \(root at determinism\.go:40, first branch at determinism\.go:43\)`
+ 	use3(q, p, r) // want `\*gorm\.DB reused: second branch from mutable root \(root at determinism\.go:40, first branch at determinism\.go:43\)`
+ }
+ 
+ // pureAndPolluting: a pure use (Session) and a polluting use of different
+ // roots in one call.
+ //
+ //gormreuse:immutable-param
+ func pureAndPolluting(db *gorm.DB) {
+-	q := db.Where("a")
+-	r := db.Where("b")
++	q := db.Where("a").Session(&gorm.Session{})
++	r := db.Where("b").Session(&gorm.Session{})
+ 	q.Find(nil)
+ 	r.Find(nil)
+ 	use2(r.Session(&gorm.Session{}), q.Where("c")) // want `\*gorm\.DB reused: second branch from mutable root \(root at determinism\.go:56, first branch at determinism\.go:58\)` `\*gorm\.DB reused: second branch from mutable root \(root at determinism\.go:55, first branch at determinism\.go:57\)`
+ }

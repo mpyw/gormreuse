@@ -24,16 +24,53 @@ import (
 	"github.com/mpyw/gormreuse/internal/goldentest"
 )
 
-// TestGoldenFiles checks every committed .golden and .diff fixture under
-// testdata/src/gormreuse against what the analyzer's suggested fixes produce
-// now. A plain run never writes. Set GORMREUSE_UPDATE_GOLDEN=1 to regenerate
-// the fixtures and delete orphaned ones, then review and commit the result
-// (#203).
-func TestGoldenFiles(t *testing.T) {
-	testdata := analysistest.TestData()
-	srcDir := filepath.Join(testdata, "src", "gormreuse")
-	update := goldentest.Updating()
+// goldenSkipped are the package directories of testdata/src that
+// goldenPackages leaves out, with the reason.
+var goldenSkipped = map[string]string{
+	"gorm.io":    "the gorm stub",
+	"github.com": "stubs of other modules",
+	"converge":   "TestFixesConverge applies its fixes, type-checks the result and lints it again",
+}
 
+// goldenPackages returns the fixture packages of testdata/src whose
+// suggested fixes TestGoldenFiles and TestGoldenFilesCompile check, sorted:
+// every package directory but those in goldenSkipped. A new fixture package
+// is checked without a change here. cgofile is left out when cgo is not
+// available (see cgoUnavailable).
+func goldenPackages(t *testing.T) []string {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Join(analysistest.TestData(), "src"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pkgs []string
+	for _, e := range entries {
+		if !e.IsDir() || goldenSkipped[e.Name()] != "" {
+			continue
+		}
+		if e.Name() == "cgofile" {
+			if reason := cgoUnavailable(); reason != "" {
+				t.Logf("leaving out cgofile: %s", reason)
+				continue
+			}
+		}
+		pkgs = append(pkgs, e.Name())
+	}
+	if !slices.Contains(pkgs, "gormreuse") {
+		t.Fatalf("goldenPackages = %v, want gormreuse among them", pkgs)
+	}
+	return pkgs
+}
+
+// goldenFixtures returns the base names of the files of pkg in srcDir that
+// have .golden and .diff files. In gormreuse every fixture has them, so a
+// .diff also records that a fixture has no fix. In any other package only the
+// files that a fix of run edits have them, test files included.
+func goldenFixtures(t *testing.T, pkg, srcDir string, run *goldentest.Analysis) []string {
+	t.Helper()
+	if pkg != "gormreuse" {
+		return run.FixedFiles(srcDir)
+	}
 	fixtures, err := goldentest.Fixtures(srcDir)
 	if err != nil {
 		t.Fatalf("Failed to list fixtures: %v", err)
@@ -41,78 +78,99 @@ func TestGoldenFiles(t *testing.T) {
 	if len(fixtures) == 0 {
 		t.Fatalf("No fixtures found in %s", srcDir)
 	}
+	return fixtures
+}
 
-	orphans, err := goldentest.SyncOrphans(srcDir, update)
-	if err != nil {
-		t.Fatalf("Failed to check orphaned fixtures: %v", err)
-	}
-	for _, path := range orphans {
-		t.Errorf("%s has no source fixture.\nRun: %s\nThen review and commit the changes.", path, goldentest.UpdateCommand)
-	}
-
-	// One run gives the fixes of every fixture. A run per fixture repeated
-	// the analysis of the package and of all its dependencies (#195).
-	run, err := goldentest.Analyze(testdata, "gormreuse", gormreuse.Analyzer)
-	if err != nil {
-		t.Fatalf("Failed to analyze the fixtures: %v", err)
-	}
-	for _, filename := range fixtures {
-		t.Run(filename, func(t *testing.T) {
+// TestGoldenFiles checks every committed .golden and .diff fixture of the
+// goldenPackages against what the analyzer's suggested fixes produce now. A
+// plain run never writes. Set GORMREUSE_UPDATE_GOLDEN=1 to regenerate the
+// fixtures and delete orphaned ones, then review and commit the result
+// (#203). Each package is analyzed once: a run per fixture repeated the
+// analysis of the package and of all its dependencies (#195).
+func TestGoldenFiles(t *testing.T) {
+	testdata := analysistest.TestData()
+	update := goldentest.Updating()
+	for _, pkg := range goldenPackages(t) {
+		t.Run(pkg, func(t *testing.T) {
 			t.Parallel()
-			srcPath := filepath.Join(srcDir, filename)
-
-			stale, err := run.SyncFixture(srcPath, update)
+			srcDir := filepath.Join(testdata, "src", pkg)
+			run, err := goldentest.Analyze(testdata, pkg, gormreuse.Analyzer)
 			if err != nil {
-				t.Fatalf("Failed to check fixtures for %s: %v", srcPath, err)
+				t.Fatalf("Failed to analyze the fixtures: %v", err)
 			}
-			for _, path := range stale {
-				t.Errorf("%s is missing or out of date.\nRun: %s\nThen review and commit the changes.", filepath.Base(path), goldentest.UpdateCommand)
+			fixtures := goldenFixtures(t, pkg, srcDir, run)
+
+			orphans, err := goldentest.SyncOrphans(srcDir, fixtures, update)
+			if err != nil {
+				t.Fatalf("Failed to check orphaned fixtures: %v", err)
+			}
+			for _, path := range orphans {
+				t.Errorf("%s has no source fixture, or its fixture has no fix.\nRun: %s\nThen review and commit the changes.", path, goldentest.UpdateCommand)
+			}
+
+			for _, filename := range fixtures {
+				t.Run(filename, func(t *testing.T) {
+					t.Parallel()
+					srcPath := filepath.Join(srcDir, filename)
+					stale, err := run.SyncFixture(srcPath, update)
+					if err != nil {
+						t.Fatalf("Failed to check fixtures for %s: %v", srcPath, err)
+					}
+					for _, path := range stale {
+						t.Errorf("%s is missing or out of date.\nRun: %s\nThen review and commit the changes.", filepath.Base(path), goldentest.UpdateCommand)
+					}
+				})
 			}
 		})
 	}
 }
 
-// TestGoldenFilesCompile type-checks the gormreuse fixture package with every
-// fixture replaced by its .golden, so a suggested fix that rewrites the wrong
-// variable into a type error (`t = q.Where(...)` inside t.Run, issue #198)
-// fails here. TestGoldenFiles and RunWithSuggestedFixes only compare text.
+// TestGoldenFilesCompile type-checks the goldenPackages with every fixture
+// replaced by its .golden, test files included, so a suggested fix that
+// rewrites the wrong variable into a type error (`t = q.Where(...)` inside
+// t.Run, issue #198) fails here. TestGoldenFiles and RunWithSuggestedFixes
+// only compare text.
 func TestGoldenFilesCompile(t *testing.T) {
 	t.Parallel()
 	testdata := analysistest.TestData()
-	srcDir := filepath.Join(testdata, "src", "gormreuse")
-
-	fixtures, err := goldentest.Fixtures(srcDir)
-	if err != nil {
-		t.Fatalf("list fixtures: %v", err)
-	}
-	if len(fixtures) == 0 {
-		t.Fatalf("no fixtures in %s", srcDir)
-	}
+	pkgs := goldenPackages(t)
 
 	gopath := t.TempDir()
 	if err := os.CopyFS(filepath.Join(gopath, "src"), os.DirFS(filepath.Join(testdata, "src"))); err != nil {
 		t.Fatalf("copy testdata: %v", err)
 	}
-	pkgDir := filepath.Join(gopath, "src", "gormreuse")
-	for _, name := range fixtures {
-		golden, err := os.ReadFile(filepath.Join(srcDir, name+".golden"))
+	swapped := 0
+	for _, pkg := range pkgs {
+		goldens, err := filepath.Glob(filepath.Join(testdata, "src", pkg, "*.go.golden"))
 		if err != nil {
-			t.Fatalf("read golden: %v", err)
+			t.Fatalf("list goldens: %v", err)
 		}
-		if err := os.WriteFile(filepath.Join(pkgDir, name), golden, 0o644); err != nil {
-			t.Fatalf("write golden: %v", err)
+		for _, path := range goldens {
+			golden, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read golden: %v", err)
+			}
+			name := strings.TrimSuffix(filepath.Base(path), ".golden")
+			if err := os.WriteFile(filepath.Join(gopath, "src", pkg, name), golden, 0o644); err != nil {
+				t.Fatalf("write golden: %v", err)
+			}
+			swapped++
 		}
 	}
+	if swapped == 0 {
+		t.Fatal("no .golden files in the golden packages")
+	}
 
-	pkgs, err := packages.Load(&packages.Config{
-		Mode: packages.NeedName | packages.NeedTypes | packages.NeedSyntax | packages.NeedTypesInfo,
-		Dir:  pkgDir,
-		Env:  append(os.Environ(), "GOPATH="+gopath, "GO111MODULE=off", "GOPROXY=off", "GOFLAGS="),
-	}, "gormreuse")
+	loaded, err := packages.Load(&packages.Config{
+		Mode:  packages.NeedName | packages.NeedTypes | packages.NeedSyntax | packages.NeedTypesInfo,
+		Dir:   filepath.Join(gopath, "src"),
+		Env:   append(os.Environ(), "GOPATH="+gopath, "GO111MODULE=off", "GOPROXY=off", "GOFLAGS="),
+		Tests: true,
+	}, pkgs...)
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	packages.Visit(pkgs, nil, func(p *packages.Package) {
+	packages.Visit(loaded, nil, func(p *packages.Package) {
 		for _, e := range p.Errors {
 			t.Errorf("golden output does not compile: %v", e)
 		}
@@ -231,22 +289,51 @@ func e2eFixtureNames(dir string) ([]string, error) {
 }
 
 // TestEachFixCompiles applies the suggested fix of each diagnostic in the
-// gormreuse fixtures on its own and type-checks the package. An editor applies
-// one quick fix at a time, so a fix must not rely on an edit, such as the gorm
-// import, that only another diagnostic's fix carries (#200).
-// TestGoldenFilesCompile checks all fixes applied together.
+// goldenPackages and in converge on its own, and type-checks the package. An
+// editor applies one quick fix at a time, so a fix must not rely on an edit,
+// such as the gorm import, that only another diagnostic's fix carries (#200).
+// TestGoldenFilesCompile checks all fixes applied together. Each variant of a
+// package with test files is checked with its own files.
 func TestEachFixCompiles(t *testing.T) {
 	t.Parallel()
-	results := analysistest.Run(goldentest.NoopT{}, analysistest.TestData(), gormreuse.Analyzer, "gormreuse")
-	if len(results) != 1 || results[0].Err != nil {
-		t.Fatalf("analysis failed: %v", results)
-	}
-	pass := results[0].Pass
-	importer := importerFunc(func(path string) (*types.Package, error) {
-		for _, pkg := range pass.Pkg.Imports() {
-			if pkg.Path() == path {
-				return pkg, nil
+	checked := 0
+	for _, pkg := range append(goldenPackages(t), "converge") {
+		results := analysistest.Run(goldentest.NoopT{}, analysistest.TestData(), gormreuse.Analyzer, pkg)
+		if len(results) == 0 {
+			t.Fatalf("%s: analysis loaded no package", pkg)
+		}
+		for _, result := range results {
+			if result.Err != nil {
+				t.Fatalf("%s: analysis failed: %v", pkg, result.Err)
 			}
+			checked += eachFixCheck(t, result.Pass, result.Diagnostics)
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no diagnostic in the fixtures has a fix")
+	}
+}
+
+// eachFixCheck type-checks pass's package once for each of diags that has a
+// fix, with only that fix applied, and returns how many it checked.
+func eachFixCheck(t *testing.T, pass *analysis.Pass, diags []analysis.Diagnostic) int {
+	t.Helper()
+	// A fix may add the gorm import to a package that reaches gorm only through
+	// another package (noimport), so the imports are searched transitively.
+	importable := map[string]*types.Package{}
+	var add func(pkgs []*types.Package)
+	add = func(pkgs []*types.Package) {
+		for _, pkg := range pkgs {
+			if importable[pkg.Path()] == nil {
+				importable[pkg.Path()] = pkg
+				add(pkg.Imports())
+			}
+		}
+	}
+	add(pass.Pkg.Imports())
+	importer := importerFunc(func(path string) (*types.Package, error) {
+		if pkg := importable[path]; pkg != nil {
+			return pkg, nil
 		}
 		return nil, fmt.Errorf("%s is not imported by the fixtures", path)
 	})
@@ -266,7 +353,7 @@ func TestEachFixCompiles(t *testing.T) {
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, runtime.GOMAXPROCS(0))
 	checked := 0
-	for _, diag := range results[0].Diagnostics {
+	for _, diag := range diags {
 		if len(diag.SuggestedFixes) == 0 {
 			continue
 		}
@@ -280,16 +367,14 @@ func TestEachFixCompiles(t *testing.T) {
 				t.Errorf("%s: the fix does not parse: %v", at, err)
 				return
 			}
-			conf := types.Config{Importer: importer}
-			if _, err := conf.Check("gormreuse", fset, files, nil); err != nil {
+			conf := types.Config{Importer: importer, FakeImportC: true}
+			if _, err := conf.Check(pass.Pkg.Path(), fset, files, nil); err != nil {
 				t.Errorf("%s: this diagnostic's fix alone does not compile: %v", at, err)
 			}
 		})
 	}
 	wg.Wait()
-	if checked == 0 {
-		t.Fatal("no diagnostic in the fixtures has a fix")
-	}
+	return checked
 }
 
 // TestEveryDiagnosticCarriesFix requires every diagnostic in

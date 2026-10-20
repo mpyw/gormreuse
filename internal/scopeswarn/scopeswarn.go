@@ -1,6 +1,6 @@
 // Package scopeswarn warns about Session()-family results returned from Scopes
-// callbacks (TEMPORARY — GORM bug workaround). analyzer.go in package
-// internal drives this check.
+// callbacks (TEMPORARY — GORM bug workaround). RunSSA in internal/run.go
+// drives this check.
 package scopeswarn
 
 import (
@@ -41,12 +41,13 @@ import (
 //
 // **Removal condition**: once the upstream fix ships in a tagged GORM
 // release and gormreuse drops support for older versions, delete this
-// entire package and the call site in RunSSA. The remaining detection
-// (Scopes callback parameter reuse) is handled by Phase 1 alone.
+// entire package and the "Scopes warnings" block in RunSSA
+// (internal/run.go), which calls ReadsOnly and Validate. Reuse of a Scopes
+// callback's parameter is part of reuse detection, which stays.
 //
 // Why this lives in its own package: it is independent of pollution
 // tracking, has a known sunset, and would otherwise pollute the
-// general orchestration code in analyzer.go.
+// general orchestration code in internal/run.go.
 
 // Warning represents a warning about a Session()-family result returned
 // from a Scopes callback.
@@ -63,8 +64,8 @@ const maxCallDepth = 16
 // (callback.CollectScopesOnlyCallbacks). The returned value is followed through
 // Phi edges, variables, captured variables, and the returns of helpers and
 // closures the callback calls. The warnings are sorted by position, one per
-// call. vars resolves calls through package-level function variables; it may
-// be nil. analyzer.go (package internal) drives this check.
+// call. vars resolves calls through function variables; the zero FuncVars
+// resolves none. RunSSA (internal/run.go) drives this check.
 func Validate(callbacks map[*ssa.Function]bool, vars callsite.FuncVars, skip func(*ssa.Function) bool) []Warning {
 	found := make(map[*ssa.Call]bool)
 	for fn := range callbacks {

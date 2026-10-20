@@ -4,6 +4,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"go/types"
 	"maps"
 	"path/filepath"
 	"reflect"
@@ -46,22 +47,26 @@ var gormStubOmitted = map[string]string{
 // against the real gorm of this module. Dependabot bumps the real gorm, not
 // the stub, so a method that gorm adds or changes could otherwise be
 // misclassified with no failing test (#264). For each method of *gorm.DB it
-// compares the name and, for each result, whether it is a *gorm.DB. A method
-// that the stub omits must be in gormStubOmitted.
+// compares the name, and the shape of its parameters and results (see
+// gormShape): which are a *gorm.DB, and which are callbacks that take or
+// return one, since the analyzer finds callback parameters by their declared
+// types (#257). A method that the stub omits must be in gormStubOmitted.
+// TestGormStubFuncsMatchGorm and TestGormStubSessionMatchesGorm check the
+// package-level functions and the Session fields.
 func TestGormStubMatchesGorm(t *testing.T) {
 	stub := gormStubMethods(t)
 	actual := gormRealMethods()
 
 	for _, name := range slices.Sorted(maps.Keys(actual)) {
-		stubResults, inStub := stub[name]
+		stubShape, inStub := stub[name]
 		_, omitted := gormStubOmitted[name]
 		switch {
 		case inStub && omitted:
 			t.Errorf("%s is in the stub and in gormStubOmitted; remove it from gormStubOmitted", name)
 		case !inStub && !omitted:
-			t.Errorf("gorm has (*DB).%s returning %s, but the stub does not; add it to the stub or to gormStubOmitted", name, actual[name])
-		case inStub && stubResults != actual[name]:
-			t.Errorf("(*DB).%s returns %s in gorm but %s in the stub", name, actual[name], stubResults)
+			t.Errorf("gorm has (*DB).%s%s, but the stub does not; add it to the stub or to gormStubOmitted", name, actual[name])
+		case inStub && stubShape != actual[name]:
+			t.Errorf("(*DB).%s is %s in gorm but %s in the stub", name, actual[name], stubShape)
 		}
 	}
 	for _, name := range slices.Sorted(maps.Keys(stub)) {
@@ -76,53 +81,264 @@ func TestGormStubMatchesGorm(t *testing.T) {
 	}
 }
 
-// gormRealMethods returns the result shape (see gormResultShape) of each
-// method of the real *gorm.DB, promoted methods included.
-func gormRealMethods() map[string]string {
-	dbType := reflect.TypeFor[*gorm.DB]()
-	methods := map[string]string{}
-	for m := range dbType.Methods() {
-		var isDB []bool
-		for out := range m.Type.Outs() {
-			isDB = append(isDB, out == dbType)
+// gormRealFuncs are the package-level functions of the real gorm that the
+// stub declares. The analyzer reads gorm.Open as a new root and gorm.Expr as
+// a subquery holder, so their shapes must match.
+var gormRealFuncs = map[string]any{
+	"Expr": gorm.Expr,
+	"Open": gorm.Open,
+}
+
+// TestGormStubFuncsMatchGorm checks each exported package-level function of
+// the stub against the real one of the same name (see gormRealFuncs): the
+// shape of its parameters and results.
+func TestGormStubFuncsMatchGorm(t *testing.T) {
+	stub := gormStubDecls(t, func(fn *ast.FuncDecl) bool { return fn.Recv == nil })
+	if len(stub) == 0 {
+		t.Fatal("found no package-level function in the stub")
+	}
+	for _, name := range slices.Sorted(maps.Keys(stub)) {
+		real, ok := gormRealFuncs[name]
+		if !ok {
+			t.Errorf("the stub declares gorm.%s; add the real function to gormRealFuncs", name)
+			continue
 		}
-		methods[m.Name] = gormResultShape(isDB)
+		if want := gormFuncShape(reflect.TypeOf(real), 0); stub[name] != want {
+			t.Errorf("gorm.%s is %s in gorm but %s in the stub", name, want, stub[name])
+		}
+	}
+	for _, name := range slices.Sorted(maps.Keys(gormRealFuncs)) {
+		if _, ok := stub[name]; !ok {
+			t.Errorf("gormRealFuncs lists %s, but the stub does not declare it", name)
+		}
+	}
+}
+
+// TestGormStubSessionMatchesGorm checks the fields of the stub's Session
+// against the real gorm.Session: each must exist with the same type. Each
+// field that the analyzer reads from a Session literal
+// (internal/ssa/callsite/session.go) must be in the stub, so the tests cover
+// it.
+func TestGormStubSessionMatchesGorm(t *testing.T) {
+	stub := gormStubStructFields(t, "Session")
+	real := reflect.TypeFor[gorm.Session]()
+	for _, name := range slices.Sorted(maps.Keys(stub)) {
+		f, ok := real.FieldByName(name)
+		switch {
+		case !ok:
+			t.Errorf("the stub's Session has %s, but gorm's does not", name)
+		case f.Type.String() != stub[name]:
+			t.Errorf("Session.%s is %s in gorm but %s in the stub", name, f.Type, stub[name])
+		}
+	}
+	read := gormSessionFieldsRead(t)
+	if len(read) == 0 {
+		t.Fatal("found no Session field that the analyzer reads")
+	}
+	for _, name := range read {
+		if _, ok := stub[name]; !ok {
+			t.Errorf("the analyzer reads Session.%s, but the stub's Session has no such field", name)
+		}
+		if _, ok := real.FieldByName(name); !ok {
+			t.Errorf("the analyzer reads Session.%s, but gorm's Session has no such field", name)
+		}
+	}
+}
+
+// gormRealMethods returns the shape (see gormShape) of each method of the
+// real *gorm.DB, promoted methods included.
+func gormRealMethods() map[string]string {
+	methods := map[string]string{}
+	for m := range reflect.TypeFor[*gorm.DB]().Methods() {
+		methods[m.Name] = gormFuncShape(m.Type, 1)
 	}
 	return methods
 }
 
-// gormStubMethods returns the result shape (see gormResultShape) of each
-// exported method declared on *DB in the stub.
+// gormRealResults returns the result shape of each method of the real
+// *gorm.DB, such as "(*DB, other)".
+func gormRealResults() map[string]string {
+	results := map[string]string{}
+	for m := range reflect.TypeFor[*gorm.DB]().Methods() {
+		var parts []string
+		for out := range m.Type.Outs() {
+			parts = append(parts, gormTypeShape(out))
+		}
+		results[m.Name] = "(" + strings.Join(parts, ", ") + ")"
+	}
+	return results
+}
+
+// gormFuncShape renders the shape of a function type, skipping its first skip
+// parameters (the receiver of a method value's type).
+func gormFuncShape(fn reflect.Type, skip int) string {
+	var params, results []string
+	for i := skip; i < fn.NumIn(); i++ {
+		in := fn.In(i)
+		if fn.IsVariadic() && i == fn.NumIn()-1 {
+			params = append(params, "..."+gormTypeShape(in.Elem()))
+			continue
+		}
+		params = append(params, gormTypeShape(in))
+	}
+	for out := range fn.Outs() {
+		results = append(results, gormTypeShape(out))
+	}
+	return "(" + strings.Join(params, ", ") + ") (" + strings.Join(results, ", ") + ")"
+}
+
+// gormTypeShape renders a type as gormShape does.
+func gormTypeShape(typ reflect.Type) string {
+	switch {
+	case typ == reflect.TypeFor[*gorm.DB]():
+		return "*DB"
+	case typ.Kind() == reflect.Func:
+		return "func" + gormFuncShape(typ, 0)
+	default:
+		return "other"
+	}
+}
+
+// gormStubMethods returns the shape (see gormShape) of each exported method
+// declared on *DB in the stub.
 func gormStubMethods(t *testing.T) map[string]string {
+	t.Helper()
+	return gormStubDecls(t, func(fn *ast.FuncDecl) bool {
+		return fn.Recv != nil && gormIsStubDB(fn.Recv.List[0].Type)
+	})
+}
+
+// gormStubFiles parses the files of the gorm stub.
+func gormStubFiles(t *testing.T) []*ast.File {
 	t.Helper()
 	paths, err := filepath.Glob(filepath.Join("..", "..", "testdata", "src", "gorm.io", "gorm", "*.go"))
 	if err != nil || len(paths) == 0 {
 		t.Fatalf("find the gorm stub: %v (found %d files)", err, len(paths))
 	}
-	methods := map[string]string{}
+	var files []*ast.File
 	fset := token.NewFileSet()
 	for _, path := range paths {
 		f, err := parser.ParseFile(fset, path, nil, 0)
 		if err != nil {
 			t.Fatalf("parse the gorm stub: %v", err)
 		}
+		files = append(files, f)
+	}
+	return files
+}
+
+// gormStubDecls returns the shape (see gormShape) of each exported function
+// of the stub that keep selects.
+func gormStubDecls(t *testing.T, keep func(*ast.FuncDecl) bool) map[string]string {
+	t.Helper()
+	decls := map[string]string{}
+	for _, f := range gormStubFiles(t) {
 		for _, decl := range f.Decls {
 			fn, ok := decl.(*ast.FuncDecl)
-			if !ok || fn.Recv == nil || !fn.Name.IsExported() || !gormIsStubDB(fn.Recv.List[0].Type) {
-				continue
+			if ok && fn.Name.IsExported() && keep(fn) {
+				decls[fn.Name.Name] = gormShape(fn.Type)
 			}
-			var isDB []bool
-			if fn.Type.Results != nil {
-				for _, field := range fn.Type.Results.List {
-					for range max(len(field.Names), 1) {
-						isDB = append(isDB, gormIsStubDB(field.Type))
-					}
-				}
-			}
-			methods[fn.Name.Name] = gormResultShape(isDB)
 		}
 	}
-	return methods
+	return decls
+}
+
+// gormStubStructFields returns the type of each field of the stub's struct
+// type name, as reflect prints it for the real gorm ("bool",
+// "context.Context").
+func gormStubStructFields(t *testing.T, name string) map[string]string {
+	t.Helper()
+	for _, f := range gormStubFiles(t) {
+		for _, decl := range f.Decls {
+			gen, ok := decl.(*ast.GenDecl)
+			if !ok || gen.Tok != token.TYPE {
+				continue
+			}
+			for _, spec := range gen.Specs {
+				ts := spec.(*ast.TypeSpec)
+				st, ok := ts.Type.(*ast.StructType)
+				if ts.Name.Name != name || !ok {
+					continue
+				}
+				fields := map[string]string{}
+				for _, field := range st.Fields.List {
+					typ := types.ExprString(field.Type)
+					for _, n := range field.Names {
+						fields[n.Name] = typ
+					}
+				}
+				return fields
+			}
+		}
+	}
+	t.Fatalf("the gorm stub declares no struct %s", name)
+	return nil
+}
+
+// gormSessionFieldsRead returns the Session fields that the analyzer reads
+// by name: the string keys of fields[...] in internal/ssa/callsite/session.go.
+// This module does not import the analyzer, so it reads the source.
+func gormSessionFieldsRead(t *testing.T) []string {
+	t.Helper()
+	path := filepath.Join("..", "..", "internal", "ssa", "callsite", "session.go")
+	f, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
+	if err != nil {
+		t.Fatalf("parse %s: %v", path, err)
+	}
+	var names []string
+	ast.Inspect(f, func(n ast.Node) bool {
+		idx, ok := n.(*ast.IndexExpr)
+		if !ok {
+			return true
+		}
+		if id, ok := idx.X.(*ast.Ident); !ok || id.Name != "fields" {
+			return true
+		}
+		if lit, ok := idx.Index.(*ast.BasicLit); ok && lit.Kind == token.STRING {
+			if name, err := strconv.Unquote(lit.Value); err == nil {
+				names = append(names, name)
+			}
+		}
+		return true
+	})
+	slices.Sort(names)
+	return slices.Compact(names)
+}
+
+// gormShape renders the parameters and results of a function type as
+// "(params) (results)". Each is *DB for a *gorm.DB, func(...) (...) for a
+// function type, with the same rendering inside, and other for any other
+// type. A variadic parameter has a ... prefix. The stub may use another type
+// in place of gorm's other types, such as interface{} for *sql.Rows.
+func gormShape(fn *ast.FuncType) string {
+	var params, results []string
+	for _, field := range fn.Params.List {
+		for range max(len(field.Names), 1) {
+			params = append(params, gormExprShape(field.Type))
+		}
+	}
+	if fn.Results != nil {
+		for _, field := range fn.Results.List {
+			for range max(len(field.Names), 1) {
+				results = append(results, gormExprShape(field.Type))
+			}
+		}
+	}
+	return "(" + strings.Join(params, ", ") + ") (" + strings.Join(results, ", ") + ")"
+}
+
+// gormExprShape renders a type expression of the stub as gormShape does.
+func gormExprShape(expr ast.Expr) string {
+	switch e := expr.(type) {
+	case *ast.Ellipsis:
+		return "..." + gormExprShape(e.Elt)
+	case *ast.FuncType:
+		return "func" + gormShape(e)
+	}
+	if gormIsStubDB(expr) {
+		return "*DB"
+	}
+	return "other"
 }
 
 // gormIsStubDB reports whether expr is *DB in the stub's package.
@@ -133,20 +349,6 @@ func gormIsStubDB(expr ast.Expr) bool {
 	}
 	ident, ok := star.X.(*ast.Ident)
 	return ok && ident.Name == "DB"
-}
-
-// gormResultShape renders a result list as "(*DB, other)": *DB for a
-// *gorm.DB result and other for any other type. The stub may use another type
-// in place of gorm's other results, such as interface{} for *sql.Rows.
-func gormResultShape(isDB []bool) string {
-	parts := make([]string, len(isDB))
-	for i, db := range isDB {
-		parts[i] = "other"
-		if db {
-			parts[i] = "*DB"
-		}
-	}
-	return "(" + strings.Join(parts, ", ") + ")"
 }
 
 // gormNonChainBranches are the methods declared on the real *gorm.DB that
@@ -173,7 +375,7 @@ var gormNonChainBranches = map[string]string{
 // so they are in neither.
 func TestGormReceiverUsesMatchGorm(t *testing.T) {
 	uses := gormReceiverUses(t)
-	results := gormRealMethods()
+	results := gormRealResults()
 	declared := map[string]bool{}
 	for m := range reflect.TypeFor[*gorm.DB]().Methods() {
 		fn := runtime.FuncForPC(m.Func.Pointer())

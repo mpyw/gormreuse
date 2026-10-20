@@ -241,7 +241,7 @@ func TestSyncOrphans(t *testing.T) {
 	}
 	want := []string{filepath.Join(dir, "generated.go.golden"), filepath.Join(dir, "gone.go.diff")}
 
-	orphans, err := SyncOrphans(dir, false)
+	orphans, err := SyncOrphans(dir, []string{"a.go"}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -254,7 +254,7 @@ func TestSyncOrphans(t *testing.T) {
 		}
 	}
 
-	if orphans, err := SyncOrphans(dir, true); err != nil || orphans != nil {
+	if orphans, err := SyncOrphans(dir, []string{"a.go"}, true); err != nil || orphans != nil {
 		t.Fatalf("update: orphans = %v, err = %v", orphans, err)
 	}
 	for _, path := range want {
@@ -268,7 +268,7 @@ func TestSyncOrphans(t *testing.T) {
 }
 
 func TestSyncOrphansBadPattern(t *testing.T) {
-	if _, err := SyncOrphans(filepath.Join(t.TempDir(), "["), false); err == nil {
+	if _, err := SyncOrphans(filepath.Join(t.TempDir(), "["), nil, false); err == nil {
 		t.Error("malformed glob pattern: want an error")
 	}
 }
@@ -283,7 +283,7 @@ func TestSyncOrphansRemoveError(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
-	if _, err := SyncOrphans(dir, true); err == nil {
+	if _, err := SyncOrphans(dir, nil, true); err == nil {
 		t.Error("read-only directory: want an error")
 	}
 }

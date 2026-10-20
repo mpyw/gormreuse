@@ -1145,7 +1145,7 @@ The rule finds the callback the same way reuse detection does. The callback may 
 
 [`Preload`](https://pkg.go.dev/gorm.io/gorm#DB.Preload) callbacks are **unaffected** (Preload builds a fresh DB), so the same code inside a Preload callback is not flagged.
 
-**Removal condition**: once the upstream fix ships in a supported GORM release, this rule is deleted. Removing the `internal/scopeswarn` package and its single call site in `RunSSA` deletes it, as the package documents. Re-check go-gorm/gorm#7592 on each GORM version bump.
+**Removal condition**: once the upstream fix ships in a supported GORM release, this rule is deleted. Removing the `internal/scopeswarn` package and the `Scopes warnings` block of `RunSSA` deletes it, as the package documents. Re-check go-gorm/gorm#7592 on each GORM version bump.
 
 ## Known Limitations
 
@@ -1156,8 +1156,8 @@ gormreuse reports a reuse only when it can follow the value. These cases are kno
 | Code | Why it is missed |
 | --- | --- |
 | A closure assigns a captured variable: `f := func() { q = db.Where("x") }; f()` | The assignment inside the closure is not followed |
-| `defer` inside a `go` closure, or `defer` → `go` → `defer`, with the other use after the statement | These nested calls are not followed |
 | `c := q.Session(&gorm.Session{}); defer c.Count(nil)`, then `q.Where("a").Find(nil)` | The use of the copy is ordered at the `defer` statement, before the change |
+| `defer` inside a `go` closure, or `defer` → `go` → `defer`, with the other use after the statement | These nested calls are not followed |
 | A method value that a branch picks: `if c { find = q.Find } else { find = q.Find }` | A method value merged from branches is not traced to `q` |
 | A closure passed once to a function that calls it many times: `slices.SortFunc(s, func(a, b T) int { q.Find(nil); ... })` | Only the call sites in your code are counted. A closure passed to another function outside a loop is taken to run once |
 | A closure called twice through a slice or a struct field: `fs := []func(){f}; fs[0](); fs[0]()` | A call through the container is not a call site of the closure |

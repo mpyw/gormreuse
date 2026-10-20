@@ -284,7 +284,8 @@ gormreuse/
 ├── golden_test.go               # .golden/.diff fixtures: check, compile, regenerate
 ├── convergence_test.go          # TestFixesConverge: one pass of fixes leaves no diagnostic
 ├── determinism_test.go          # TestDeterministicDiagnostics: same output on every run
-├── limitation_test.go           # Known Limitations lists every [LIMITATION] fixture; these notes name only code that exists
+├── limitation_test.go           # Known Limitations lists every [LIMITATION] fixture, here and in the README
+├── docs_test.go                 # These notes name only code that exists; the README pins name the latest release
 ├── growth_test.go               # TestAllocationGrowth: allocation growth on generated shapes (#302)
 ├── cmd/gormreuse/
 │   ├── main.go                  # CLI entry point (singlechecker)
@@ -298,6 +299,7 @@ gormreuse/
 │   ├── pure.go                  # validatePureFuncs: the pure functions' contracts, to a fixed point
 │   ├── immutable.go             # Inferring and checking immutable-return, and the need for immutable-param
 │   ├── fact.go                  # exportFacts: the facts importing packages read
+│   ├── distrust.go              # distrustContracts: contracts that rely on a broken one stay out of the facts (#314)
 │   ├── guard.go                 # panicGuard: one function's panic does not abort the package
 │   ├── directive/               # Comment directives
 │   │   ├── directive.go         # readDirective, FindDirectiveProblems
@@ -319,6 +321,7 @@ gormreuse/
 │   │   ├── session.go           # Where Sessions go, and their edits
 │   │   ├── merge.go             # Values that merge with a root: Phi edges, other stores (#247)
 │   │   ├── change.go            # In-place changes outside the variable (#243)
+│   │   ├── holder.go            # Struct stores of a root that other code reaches: escapes for #243 (#310)
 │   │   ├── closure.go           # Closures: captured variables, reassignments in a closure
 │   │   ├── gorm.go              # gorm.io/gorm name and import, finishers, state fields
 │   │   ├── call.go              # Calls in the syntax: the call at an Lparen, direct and inline calls
@@ -640,7 +643,7 @@ A call, a `go` statement and a `defer` statement are each one `callsite.Site`, a
 
 The mode (`Site.Mode`) decides only two things. How an earlier change is found: a plain call leaves it to `DetectViolations`, which orders uses by position; a `go` statement checks the changes that reach its block (`IsPollutedAt`), and a `defer` checks every change (`IsPollutedAnywhere`). And what a branch records: a plain call records a use; a `go` or `defer` records a branch use, which a later `go` or `defer` sees and position-ordered detection skips. `go` and `defer` statements are handled after the other instructions of their function, so every plain use is recorded by then. A root with no plain branch, as in `go q.Count(nil); go q.Find(nil)`, names as its first branch the earliest branch use recorded before the reported one (#309).
 
-Before #254, the method-value path (`processBoundMethodCall`) always recorded a branch, so `if c { w := q.Where; q = w("a") }; q.Find(nil)` was reported. The `go`/`defer` path read a method value as its `m$bound` wrapper, which has no receiver, so `f := q.Find; defer f(nil); q.Count(nil)` was missed. It also had no `pure` exemption, did not unwrap boxed arguments, ignored read-only arguments and calls with no static callee, and recorded no alias uses. `pollutionsource.isReadOnlyUse` now accepts a `go`/`defer` statement too, so the varargs of `defer db.Find(&rows, "id IN (?)", sub)` are not a leak. Since #309 so does `isReadOnlyVariadicArg`, so `defer log.Printf("%v", q)` is not a leak either, for the handler and the pure validator alike.
+Before #254, the method-value path always recorded a branch, so `if c { w := q.Where; q = w("a") }; q.Find(nil)` was reported. The `go`/`defer` path read a method value as its `m$bound` wrapper, which has no receiver, so `f := q.Find; defer f(nil); q.Count(nil)` was missed. It also had no `pure` exemption, did not unwrap boxed arguments, ignored read-only arguments and calls with no static callee, and recorded no alias uses. `pollutionsource.isReadOnlyUse` now accepts a `go`/`defer` statement too, so the varargs of `defer db.Find(&rows, "id IN (?)", sub)` are not a leak. Since #309 so does `isReadOnlyVariadicArg`, so `defer log.Printf("%v", q)` is not a leak either, for the handler and the pure validator alike.
 
 **A value that may hold several roots (#252).** After `q := b; if c { q = a }`, `q` resolves to `b` (`FindMutableRoot`), and `FindAllMutableRoots` returns `a` too. Before #252 only `b` got the use; `a` was only checked for an earlier change. So `q.Find(nil); a.Find(nil)` was missed. Now the other roots get a *may branch* (`Tracker.RecordMayBranch`). `DetectViolations` checks a may branch against the root's own uses, both ways: a use of `a` after it, and a polluting use of `a` before it. The second also catches `boundMethodWithPhiOnePollutedReverse`, where the polluting branch is in a block that is handled after the merge. A `go`/`defer` checks its first root against may branches too.
 
@@ -1278,7 +1281,7 @@ GORMREUSE_UPDATE_GOLDEN=1 go test -run TestGoldenFiles .
 Releases are cut from GitHub Actions, never locally. Before you dispatch one, prepare it in a pull request:
 
 1. In `CHANGELOG.md`, rename `## Unreleased (planned as X.Y.Z)` to `## X.Y.Z (YYYY-MM-DD)`. Check that it covers every behaviour change since the last tag: `git log --oneline vLAST..`.
-2. Bump every version pin in `README.md` to the new version. They are the `mise use` line, the `mise.toml` example, the `@vX.Y.Z` caution, `VERSION=` in the tarball steps, and the `.custom-gcl.yml` example. `TestReadmeVersionPinsAgree` fails when they name different versions.
+2. Bump every version pin in `README.md` to the new version. They are the `mise use` line, the `mise.toml` example, the `@vX.Y.Z` caution, `VERSION=` in the tarball steps, and the `.custom-gcl.yml` example. `TestReadmeVersionPinsAgree` fails when any of them names another version than the newest `v*` tag. While a release is prepared, the newest dated `CHANGELOG.md` section names a newer version, and the pins must name that one. The test needs the tags, so CI's test job fetches the full history (`fetch-depth: 0`). In CI a missing tag fails the test. Elsewhere, such as in a shallow clone or a source tarball, the test checks only that the pins agree, and skips the comparison with the release.
 3. Merge it, and wait for CI on the merge commit.
 
 Then dispatch the release:
@@ -1299,15 +1302,16 @@ goreleaser groups the commit list by conventional-commit type (`changelog.groups
 - Test structure:
   - `===== SHOULD REPORT =====` - Cases that should trigger warnings
   - `===== SHOULD NOT REPORT =====` - Negative cases
-- A fixture function that pins a known limitation carries `[LIMITATION]` in its doc comment or body, and is named in [Known Limitations](#known-limitations). `TestKnownLimitationsListed` checks this. Remove the marker and the entry when a fix makes the case work.
+- A fixture function that pins a known limitation carries `[LIMITATION]` in its doc comment or body, and is named in [Known Limitations](#known-limitations). `TestKnownLimitationsListed` checks this in both directions, and checks the README's list against it. Remove the marker and both entries when a fix makes the case work.
+- `TestImplementationNotesNamesExist` checks that each code span of these notes names a file or a Go name that exists. A name counts only where code uses it, not in a comment. `TestImplementationNotesArchitectureTree` checks the [Architecture](#architecture) tree both ways: each entry and each Go name in its comments exists, and each directory it lists has all of its Go files listed.
 
 ### Suggested-fix fixtures
 
-Each fixture `testdata/src/gormreuse/X.go` has two committed files that record its suggested fixes:
+Each fixture `testdata/src/gormreuse/X.go` has two committed files that record its suggested fixes. So does each file of another fixture package that a fix edits, test files included. `goldenPackages` lists every package directory of `testdata/src` except the gorm stubs and `converge`, so a new package is covered without a change:
 
 | File | Content | Checked by |
 | --- | --- | --- |
-| `X.go.golden` | The source with every suggested fix applied | `TestSuggestedFixes`, `TestGoldenFiles`, and `TestGoldenFilesCompile` (the whole package must type-check with every `.golden` swapped in) |
+| `X.go.golden` | The source with every suggested fix applied | `TestGoldenFiles`, `TestGoldenFilesCompile` (the packages must type-check with every `.golden` swapped in), and `RunWithSuggestedFixes` for `gormreuse`, `linedirective`, `noimport` and `aliasimport` |
 | `X.go.diff` | A full-context unified diff from `X.go` to `X.go.golden`, for review | `TestGoldenFiles` |
 
 A plain `go test` only compares these files. It never writes them, so CI fails when they are stale. To regenerate them after a change to detection or fixes:
@@ -1316,11 +1320,13 @@ A plain `go test` only compares these files. It never writes them, so CI fails w
 GORMREUSE_UPDATE_GOLDEN=1 go test -run TestGoldenFiles .
 ```
 
-This rewrites every `.golden` and `.diff` file and deletes the ones whose source fixture is gone. Read each changed `.diff` before you commit it: it shows exactly what `-fix` now does to the fixture. The failure message of `TestGoldenFiles` prints the same command. Rendering a `.diff` needs `diff` on `PATH`, and a failing `diff` fails the test.
+This rewrites every `.golden` and `.diff` file and deletes the ones whose source fixture is gone. Outside `gormreuse` it also deletes those of a file that no fix edits any more. `RunWithSuggestedFixes` does not catch that case: it ignores the golden file of a file without fixes. Before #316, two `linedirective` goldens kept a Session fix that #243 had withheld. Read each changed `.diff` before you commit it: it shows exactly what `-fix` now does to the fixture. The failure message of `TestGoldenFiles` prints the same command. Rendering a `.diff` needs `diff` on `PATH`, and a failing `diff` fails the test.
+
+`TestEachFixCompiles` applies each diagnostic's fix on its own to the same packages and to `converge`, and type-checks each variant of the package (#200).
 
 `TestFixesConverge` applies the fixes to each fixture in `testdata/src/converge`, then lints the fixed output again. It fails when the directory has no fixture, when a fixture's fixes change nothing, when the fixed output does not type-check, or when any diagnostic remains. So every fixture there must need a fix, and one pass of fixes must resolve all of it. It analyzes the package once and re-lints all the fixed files as one package.
 
-A fixture of `testdata/src/gormreuse` whose fixes must also converge is listed in `convergeGormreuseFixtures` (today `fix_paths.go`, `fix_isolate_arg.go` and `fix_later_loop_merge.go`) instead of being copied into `converge`. `TestFixesConverge` re-lints its committed `.golden`, which `TestGoldenFiles` keeps equal to the current fixes.
+A fixture of `testdata/src/gormreuse` whose fixes must also converge is listed in `convergeGormreuseFixtures` (today `fix_paths.go`, `fix_isolate_arg.go`, `fix_later_loop_merge.go` and `fix_closure_param.go`) instead of being copied into `converge`. `TestFixesConverge` re-lints its committed `.golden`, which `TestGoldenFiles` keeps equal to the current fixes.
 
 > **Trap: never name a fixture `*_test.go` unless you mean to.** `analysistest`
 > loads a package's `*_test.go` files as part of both the normal package and the
@@ -1374,9 +1380,18 @@ Directives across packages are tested by `TestCrossPackageDirectives`: `testdata
 
 ### E2E Tests
 
-The `e2e/internal/` directory contains tests that verify actual GORM SQL behavior using sqlmock. This is a separate Go module (its own `go.mod`) to avoid dependency conflicts, and CI tests and lints it on every PR (`cd e2e/internal && go test ./... && golangci-lint run ./...`). Dependabot covers it, so GORM bumps arrive as PRs; re-check go-gorm/gorm#7592 on each (see the README). Every test asserts (`t.Errorf`) — the suite guards the linter's core clone-semantics premise: mid-chain (`clone==0`) reuse accumulates conditions; root / `Session()` / `Transaction`- and `FindInBatches`-callback (`clone>0`) handles fork a fresh Statement and are safe; a `Connection`-callback handle is `clone==0` and accumulates. `scopes_session_test.go` pins which Session-family calls inside a `Scopes` callback leak the transaction (go-gorm/gorm#7592): only a returned one. It also pins the exceptions in [Session and Debug copies](#session-and-debug-copies-174): a `Session()`/`Debug()` copy of a mid-chain value sees later changes to it, and `Session{Initialized: true}` returns a mid-chain value. `subquery_test.go` pins that a subquery, group condition or Joins condition argument is only read, and that a change to it before the outer query runs leaks into that query (see [Subquery and condition arguments](#subquery-and-condition-arguments-185)). `fixsql_test.go` checks that suggested fixes keep every condition the code applied (see [Discarded Statements Under a Session Fix](#discarded-statements-under-a-session-fix-199)). `TestFixsqlCasesCoverBefore` fails when an exported function of `fixsql/before` is in no case list of `fixsql_test.go` or `fix_paths_test.go`.
+The `e2e/internal/` directory contains tests that verify actual GORM SQL behavior using sqlmock. This is a separate Go module (its own `go.mod`) to avoid dependency conflicts, and CI tests and lints it on every PR (`cd e2e/internal && go test ./... && golangci-lint run ./...`). Dependabot covers it, so GORM bumps arrive as PRs; re-check go-gorm/gorm#7592 on each (see the README). Every test asserts (`t.Errorf`) — the suite guards the linter's core clone-semantics premise: mid-chain (`clone==0`) reuse accumulates conditions; root / `Session()` / `Transaction`- and `FindInBatches`-callback (`clone>0`) handles fork a fresh Statement and are safe; a `Connection`-callback handle is `clone==0` and accumulates. `scopes_session_test.go` pins which Session-family calls inside a `Scopes` callback leak the transaction (go-gorm/gorm#7592): only a returned one. It also pins the exceptions in [Session and Debug copies](#session-and-debug-copies-174): a `Session()`/`Debug()` copy of a mid-chain value sees later changes to it, and `Session{Initialized: true}` returns a mid-chain value. `subquery_test.go` pins that a subquery, group condition or Joins condition argument is only read, and that a change to it before the outer query runs leaks into that query (see [Subquery and condition arguments](#subquery-and-condition-arguments-185)). `fixsql_test.go` checks that suggested fixes keep every condition the code applied (see [Discarded Statements Under a Session Fix](#discarded-statements-under-a-session-fix-199)). `TestFixsqlCasesCoverBefore` fails when an exported function of `fixsql/before` is in no case list. A topic's test file registers its cases with `registerFixsqlCases`.
 
-`gorm_stub_test.go` checks the gorm stub in `testdata/src/gorm.io/gorm` against the real gorm, since Dependabot bumps only the real one. For each method of `*gorm.DB`, it compares the name and, for each result, whether it is a `*gorm.DB`. A method of the real `*gorm.DB` that the stub leaves out must be listed, with the reason, in `gormStubOmitted`. When a gorm bump fails this test, decide how the analyzer should treat the new or changed method, then add it to the stub or to the list.
+`gorm_stub_test.go` checks the gorm stub in `testdata/src/gorm.io/gorm` against the real gorm, since Dependabot bumps only the real one:
+
+| Test | Checks |
+| --- | --- |
+| `TestGormStubMatchesGorm` | Each method of `*gorm.DB`: its name, and for each parameter and result whether it is a `*gorm.DB`, a callback (with the same check inside) or another type. The analyzer finds callback parameters by their declared types (#257). A method that the stub leaves out must be in `gormStubOmitted`, with the reason |
+| `TestGormStubFuncsMatchGorm` | Each package-level function of the stub (`Open`, `Expr`) against `gormRealFuncs`, in the same way |
+| `TestGormStubSessionMatchesGorm` | Each field of the stub's `Session` exists in gorm's with the same type. Each field that `callsite` reads from a Session literal (`Initialized`, `NewDB`, `Context`) is in both |
+| `TestGormReceiverUsesMatchGorm` | Each method that returns no `*gorm.DB` is in `typeutil.receiverUses` or in `gormNonChainBranches` (#307) |
+
+When a gorm bump fails one of them, decide how the analyzer should treat the new or changed name, then add it to the stub or to the list.
 
 ## Code Style
 
@@ -1399,7 +1414,12 @@ When refactoring code, follow these rules strictly:
 
 ## Known Limitations
 
-Each fixture function marked `[LIMITATION]` under `testdata/src` pins one of these cases. `TestKnownLimitationsListed` fails when a marked function is not named in this section. The README lists the same cases for users.
+Each fixture function marked `[LIMITATION]` under `testdata/src` pins one of these cases. The README lists the same cases for users, in the same order. `TestKnownLimitationsListed` fails when:
+
+- a marked function is not named in this section;
+- a fixture named here (in a Fixtures column, or after "Fixtures:") is not a marked function;
+- a marker comes after the last function of its file, so it marks none;
+- the README's section lacks one of the four kinds below, or one of its tables has a different number of rows.
 
 **Missed reuse (false negatives).** The fixture has no `want` at the missed use.
 
