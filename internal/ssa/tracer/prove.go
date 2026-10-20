@@ -39,6 +39,25 @@ func (t *RootTracer) ProvesImmutable(v ssa.Value, inferred func(*ssa.Function) b
 	return p.proves(v)
 }
 
+// ProvesImmutableArgs reports whether call, a call of fn, passes values
+// proved immutable (see ProvesImmutable) at every *gorm.DB parameter of fn,
+// not counting a receiver. The immutable-param inference asks it of every
+// call, and so does the fix before it suggests the directive (#387).
+func (t *RootTracer) ProvesImmutableArgs(fn *ssa.Function, call ssa.CallInstruction, inferred func(*ssa.Function) bool, globals ProvenGlobals) bool {
+	params := fn.Signature.Params()
+	site := t.Site(call)
+	for i, arg := range call.Common().Args {
+		p := site.ArgParam(i)
+		if p < 0 || p >= params.Len() || !typeutil.IsGormDB(params.At(p).Type()) {
+			continue
+		}
+		if !t.ProvesImmutable(arg, inferred, globals) {
+			return false
+		}
+	}
+	return true
+}
+
 // ProvenGlobals maps a package-level *gorm.DB variable of the package to the
 // values that the package stores into it. A variable that the package never
 // stores into, or whose address it uses for anything but a load or a store,

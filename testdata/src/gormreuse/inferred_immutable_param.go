@@ -316,7 +316,8 @@ func ipCallsDeclaredEntry(db *gorm.DB) {
 }
 
 // A helper that changes its parameter in place makes its caller change it
-// too, as does a closure (#371). Neither caller is inferred.
+// too, as does a closure (#371). Neither caller is inferred, and -fix does
+// not declare one immutable-param either (#387).
 func ipApplyTenant(tx *gorm.DB) {
 	tx.Where("tenant = 1")
 }

@@ -2541,7 +2541,7 @@ A parameter root has no call to append a Session to. `Generate` in `internal/fix
 | Check | Fix |
 | --- | --- |
 | `canFixParam` fails: a Scopes/Preload callback, a closure with a `*gorm.DB` result, or a function declaration with a `*gorm.DB` result that `calledOnlyDirectly` rejects | None |
-| `paramCallersIsolate` holds. The function is a declaration. The pass sees every file of the package (`reportSeesWholePackage`). `calledOnlyDirectly` holds. `handler.BreaksImmutableParam` holds for no argument of any call to the function in the analysed functions | `//gormreuse:immutable-param`. Such a function is often [inferred](#inferred-immutable-param-and-immutable-input) and not reported (#349). A use of the parameter that is a discarded chain (`paramDiscardsChain`) withholds the directive, since the immutable-param body check would report the chain (#346) |
+| `paramCallersIsolate` holds. The function is a declaration. The pass sees every file of the package (`reportSeesWholePackage`). `calledOnlyDirectly` holds. The function does not change a parameter in place (`ImmutableParamRule.ChangesInPlace`, the inference's `inferChangesInPlace`), and every call to it in the analysed functions passes values proved immutable (`ImmutableParamRule.ProvesArgs`, `tracer.RootTracer.ProvesImmutableArgs`) (#387). `handler.BreaksImmutableParam` holds for no argument of any call | `//gormreuse:immutable-param`. Such a function is often [inferred](#inferred-immutable-param-and-immutable-input) and not reported (#349). A use of the parameter that is a discarded chain (`paramDiscardsChain`) withholds the directive, since the immutable-param body check would report the chain (#346) |
 | Otherwise | `tx = tx.Session(&gorm.Session{})` before the body's first statement (`paramSessionSite`), then the rest of the local-root fix. It is written by `sessionEdits`, with the same gorm name resolution and import as every other Session |
 
 <details><summary>Callers, test variants, merged values, discarded statements, Scopes callbacks and closures</summary>
@@ -2549,6 +2549,7 @@ A parameter root has no call to append a Session to. `Generate` in `internal/fix
 **The callers.**
 
 - `paramCallersIsolate` checks every argument of each call with the caller-side check's own predicate, not only the argument of the reused parameter. Declaring the function covers all its `*gorm.DB` parameters. It scans the analysed functions (`runFuncs`) and the package `init`, so a caller in a package-level closure or initializer counts (#183, #245, #346).
+- It also asks the rules of the [immutable-param inference](#inferred-immutable-param-and-immutable-input), which `run.go` hands it as `fix.ImmutableParamRule` (#387). Each argument must be proved immutable (`ProvesImmutableArgs`, which `inferCallersPassImmutable` asks too), and the function must not be in `inferChangesInPlace`, which `inferImmutableParams` computes once and returns for the fix. Before #387 the fix used only the caller-side check and `paramDiscardsChain`. It declared `func list(tx *gorm.DB) { applyTenant(tx); tx.Find(&us); tx.Count(&n) }` immutable-param, which promises an immutable `tx` on which `applyTenant`'s filter changes a copy. It declared a function whose caller passes `ctx.Value(k).(*gorm.DB)` too, which hides the reuse of a value that may be mid-chain. A function with no caller still gets the directive: no call breaks it. After a panic in the inference, every function is taken to change its parameter. `e2e/internal/in_place_param_test.go` runs `fixsql/before/in_place_param.go` against real GORM.
 - `calledOnlyDirectly` needs an unexported function, not a method (a method can be called through an interface). Every reference must be the function of a call (`f(x)`, `f[T](x)`, `(f)(x)`).
 - In the Session case the parameter is the reassignment target (`varToReassign` returns its variable). So a discarded `tx.Where("a")` becomes `tx = tx.Where("a")` and keeps its effect inside the function. The Session goes at the top of the body, so it also covers uses through an alias.
 
@@ -2595,6 +2596,8 @@ Tests:
 | `TestLaterLoopMergeStopsLeaks` in `e2e/internal/later_loop_merge_test.go` | Runs them against real GORM, and checks that the fixes of the first pass before #311 still leak |
 | `testdata/src/gormreuse/fix_closure_param.go` | The closure parameters, re-linted by `TestFixesConverge`. `fix_param_root.go` holds the closures without a fix |
 | `e2e/internal/closure_param_test.go` | The `ClosureParam` cases of `fixsql/before/closure_param.go` against real GORM |
+| `testdata/src/gormreuse/inferred_immutable_param.go` | The functions that inference refuses get no directive fix either (#387): `ipListViaHelper` and `ipListViaFuncValue` get no fix, and `ipCtxValue`, `ipClosureStore`, `ipFromChainGlobal` and `ipFromDeclared` the body Session |
+| `TestFixInPlaceParamPreservesQueries` in `e2e/internal/in_place_param_test.go` | Runs `fixsql/before/in_place_param.go` against real GORM: the tenant filter that a helper applies in place stays, and an unproved caller's body Session stops the leak |
 
 </details>
 
@@ -2792,7 +2795,7 @@ Limitations:
 - An error that is read is taken to be handled, even when the code goes on after it, as in `if q.Find(&x).Error != nil { log(...) }`.
 - The rule is conservative wherever the result goes out of sight. A builder that stores its chain in a field or a package-level variable (`r.db = r.db.Where(c)`) after a query whose error nothing reads gets no fix. Neither does a function that hands the root to a call whose result it returns, such as a recursive call.
 - Standard pagination that does not check `Count`'s error (`q.Count(&n); err := q.Find(&us).Error`) gets no fix. Check `Count`'s error to get it back.
-- The diagnostic still advises a Session. Its message is built by the checker, before the fix is known.
+- The diagnostic does not advise a Session for such a root. `checker.reportViolation` generates the fixes before it reports, and asks `Generator.SessionChangesErrors`, the memo of this check. When it holds, `pollution.Violation.AdviseCheckingErrors` replaces the Session advice with `a Session would let a later query run past an earlier query's unchecked error, so check that error first`. A root whose fix an earlier check withholds, such as `changedElsewhere`, or that gets the directive alone, keeps the Session advice: `Generate` returns before it asks this check.
 
 ### Fixes that compile
 

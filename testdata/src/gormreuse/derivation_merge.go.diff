@@ -69,8 +69,8 @@
  
  // conditionalReassignmentFromMutableParamStraight: the straight-line control
  // for repro D.
-+//gormreuse:immutable-param
  func conditionalReassignmentFromMutableParamStraight(db *gorm.DB) {
++	db = db.Session(&gorm.Session{})
  	q := db.Where("base")
  	q = db.Where("alt") // want `\*gorm\.DB reused: second branch from mutable root`
  	q.Find(nil)

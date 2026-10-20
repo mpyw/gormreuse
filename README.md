@@ -2188,7 +2188,7 @@ return q.Update("id", id).Error
 
 On a mutable `q`, a failed query leaves its error on `q`. gorm skips the later `Update`, and the function returns the first error. With a Session, the later `Update` runs and the function returns `nil`. In a `Transaction` callback, that turns a rollback into a commit.
 
-The later code sees the error when it reads `Error` or `RowsAffected`, returns the chain, passes it to a call whose result is used, or stores it in a field. Check the first query's error (`if err := q.Update(...).Error; err != nil { return err }`), and the fix comes back.
+The later code sees the error when it reads `Error` or `RowsAffected`, returns the chain, passes it to a call whose result is used, or stores it in a field. Check the first query's error (`if err := q.Update(...).Error; err != nil { return err }`), and the fix comes back. The message says so: it ends with `a Session would let a later query run past an earlier query's unchecked error, so check that error first`.
 
 </td></tr>
 <tr><td>
@@ -2258,14 +2258,15 @@ Every one of these holds:
 
 - unexported, and not a method
 - only called directly in the package. Callers in package-level closures (`var f = func(...)`) count
-- every caller passes an immutable value for every `*gorm.DB` parameter
+- every caller passes a value that gormreuse proves immutable for every `*gorm.DB` parameter, as [inference](#inferred-immutable-param) asks. A value it cannot follow, such as `ctx.Value(k).(*gorm.DB)`, proves nothing
+- it does not change a parameter in place, itself or through a helper, a closure or a func value, as inference asks too
 - when the package has test files, declared in a test file
 
 </td><td>
 
 Add [`//gormreuse:immutable-param`](#gormreuseimmutable-param). The caller-side check keeps the callers isolated.
 
-Such a function is usually [inferred `immutable-param`](#inferred-immutable-param) and not reported. One with a discarded statement on the parameter (`tx.Where("a")`) is not inferred, and does not get the directive either. Under the directive the statement would do nothing, and the [body check](#gormreuseimmutable-param) would report it. See the last row.
+Such a function is usually [inferred `immutable-param`](#inferred-immutable-param) and not reported. One that changes its parameter in place, such as with `tx.Where("a")` or `applyTenant(tx)`, is not inferred, and does not get the directive either (#387). Under the directive the change would do nothing, and for a discarded statement the [body check](#gormreuseimmutable-param) would report it. See the last row.
 
 </td></tr>
 <tr><td>
@@ -2314,7 +2315,8 @@ A `*gorm.DB` result carries it back only to a caller that reads it. So every cal
 Why the rules are this strict:
 
 - `immutable-param` on an exported function would hide the reuse: callers in other packages are never checked.
-- On a function with a mid-chain caller, it would move the report to that caller.
+- On a function with a mid-chain caller, it would move the report to that caller. On one whose caller passes a value gormreuse cannot follow, it would hide the reuse.
+- On a function that changes its parameter in place, it would promise an immutable value on which the change does nothing (#387).
 - A closure never gets the directive. Write it yourself where it fits.
 - A package with test files is analyzed twice: without the test files and with them. The run without them cannot see the callers in the test files. So both runs use the body Session for a function outside the test files, and their fixes agree.
 

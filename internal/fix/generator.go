@@ -102,6 +102,9 @@ type Generator struct {
 	cursors map[*ast.File]inspector.Cursor // file cursors in the pass inspector
 
 	discardsParam map[*ssa.Function]bool // immutable-param functions that discard a chain on a parameter (#346)
+
+	//declscope:shared // param.go's paramCallersIsolate asks it
+	immutableParam ImmutableParamRule // the inference's rules for immutable-param (#387)
 }
 
 // NewGenerator creates a new fix Generator. scopesCallbacks lists
@@ -120,8 +123,9 @@ type Generator struct {
 // to one of them, since the isolation would drop the change (#346).
 // importedFinisherOnly returns the finisher-only parameters of a function of
 // another package, from its fact (see HandoffFinisherOnlyParams, #347); it
-// may be nil.
-func NewGenerator(pass *analysis.Pass, scopesCallbacks map[*ssa.Function]bool, rt *tracer.RootTracer, funcs []*ssa.Function, seesAllCallers func(token.Pos) bool, cfgs *cfg.Analyzer, discardsParam map[*ssa.Function]bool, importedFinisherOnly func(*ssa.Function) []int) *Generator {
+// may be nil. immutableParam holds the rules of the immutable-param
+// inference that the directive fix must meet too (#387).
+func NewGenerator(pass *analysis.Pass, scopesCallbacks map[*ssa.Function]bool, rt *tracer.RootTracer, funcs []*ssa.Function, seesAllCallers func(token.Pos) bool, cfgs *cfg.Analyzer, discardsParam map[*ssa.Function]bool, importedFinisherOnly func(*ssa.Function) []int, immutableParam ImmutableParamRule) *Generator {
 	// Build token.File -> ast.File mapping
 	files := make(map[*token.File]*ast.File)
 	for _, f := range pass.Files {
@@ -150,6 +154,7 @@ func NewGenerator(pass *analysis.Pass, scopesCallbacks map[*ssa.Function]bool, r
 		discardsParam:   discardsParam,
 
 		importedFinisherOnly: importedFinisherOnly,
+		immutableParam:       immutableParam,
 	}
 }
 

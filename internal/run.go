@@ -227,8 +227,9 @@ func RunSSA(
 	// immutable values (#349), before any pass reads the parameters. A
 	// panic keeps the functions inferred so far, each proved.
 	cfgs := cfg.NewAnalyzer()
+	var changesInPlace map[*ssa.Function]bool
 	guard.runPackage("immutable-param inference", func() {
-		inferImmutableParams(funcs, ssaInfo.Pkg.Func("init"), immutableParamFuncs, func() *tracer.RootTracer {
+		changesInPlace = inferImmutableParams(funcs, ssaInfo.Pkg.Func("init"), immutableParamFuncs, func() *tracer.RootTracer {
 			return tracer.NewRootTracer(pureFuncs, immutableReturnFuncs, immutableParamFuncs, pureVerdicts, mutableCallbacks, immutableCallbacks, funcVars)
 		}, func(fn *ssa.Function) []int { return table.Of(fn).FinisherOnly }, globals, skip)
 	})
@@ -278,22 +279,17 @@ func RunSSA(
 	})
 
 	// Share a single fix generator across all violations (it caches AST
-	// inspectors). It needs scopesCallbacks to withhold the immutable-param fix on
-	// Scopes/Preload callbacks, whose parameters cannot be exempted (stage 2c).
-	// inputTracer gives it the analysis' own mutability rule, and the analysed
-	// functions let it check every caller, in package-level closures too,
-	// before it suggests immutable-param (#201, #245).
-	// The checker and the fixes ask one CFG cache about the functions (#299).
-	// The package initializer is a caller too (#346).
-	callers := funcs
-	if init := ssaInfo.Pkg.Func("init"); init != nil {
-		callers = append(slices.Clone(funcs), init)
-	}
+	// inspectors). It needs scopesCallbacks to withhold the immutable-param fix
+	// on Scopes/Preload callbacks, whose parameters cannot be exempted (stage
+	// 2c). inputTracer gives it the analysis' own mutability rule, and the
+	// analysed functions, the package initializer included (#346), let it check
+	// every caller before it suggests immutable-param (#201, #245), as the
+	// inference would (#387). The checker and the fixes share one CFG cache (#299).
 	// An immutable-param function that discards a chain on its parameter
 	// relies on changing its caller's value, so no fix isolates an argument
 	// to it (#346).
 	discardsParam := reportImmutableParamDiscards(funcs, immutableParamFuncs, pureFuncs, skip, report, guard)
-	fixGen := fix.NewGenerator(pass, scopesCallbacks, inputTracer, callers, reportSeesWholePackage(pass), cfgs, discardsParam, func(fn *ssa.Function) []int { return table.Of(fn).FinisherOnly })
+	fixGen := fix.NewGenerator(pass, scopesCallbacks, inputTracer, runCallers(funcs, ssaInfo.Pkg), reportSeesWholePackage(pass), cfgs, discardsParam, func(fn *ssa.Function) []int { return table.Of(fn).FinisherOnly }, inferImmutableParamRule(changesInPlace, inputTracer, immutableParamFuncs, globals))
 
 	// Determine which //gormreuse:immutable-param functions actually rely on
 	// immutability — they would reuse a *gorm.DB parameter if it were treated as
@@ -390,6 +386,15 @@ func RunSSA(
 		reportUnusedIgnores(removals, ignores, removable, reportIgnoresLeftToTests(pass))
 	})
 	removals.Flush()
+}
+
+// runCallers returns funcs with the package initializer, when pkg has one:
+// the functions whose calls the fix checks (#346).
+func runCallers(funcs []*ssa.Function, pkg *ssa.Package) []*ssa.Function {
+	if init := pkg.Func("init"); init != nil {
+		return append(slices.Clone(funcs), init)
+	}
+	return funcs
 }
 
 // runFuncs returns the functions the analysis runs on: the source

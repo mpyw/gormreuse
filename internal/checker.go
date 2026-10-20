@@ -159,6 +159,13 @@ func (c *checker) reportViolation(v pollution.Violation, fixes func() []analysis
 	// that apply several fixes, such as -fix, merge identical edits.
 	suggestedFixes := mergeReportFixes(fixes())
 
+	// A Session at the root would let a later query run past an earlier
+	// query's error, so the fix withheld it, and the message does not advise
+	// it either (#372). The fixes above decided it for the root.
+	if v.Root != nil && c.fixGen.SessionChangesErrors(v.Root) {
+		v.AdviseCheckingErrors()
+	}
+
 	// Report with diagnostic
 	c.pass.Report(analysis.Diagnostic{
 		Pos:            pos,

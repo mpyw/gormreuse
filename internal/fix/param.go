@@ -43,11 +43,28 @@ func (g *Generator) canFixParam(p *ssa.Parameter) bool {
 	return false
 }
 
-// paramCallersIsolate reports whether no call to the function that declares p
-// breaks the caller-side contract of //gormreuse:immutable-param, so declaring
-// it keeps the reuse checked (#201). Each argument of each call in the
-// analysed functions is checked as the caller-side check does
-// (handler.BreaksImmutableParam), not only p's (#245). It must also see every
+// ImmutableParamRule holds the rules by which the analysis infers
+// //gormreuse:immutable-param, which the directive fix must meet too (#387).
+// A directive that the inference would refuse makes a value immutable that
+// the function relies on being mutable, or one that may be a mid-chain value.
+type ImmutableParamRule struct {
+	// ChangesInPlace reports whether a declared function may change one of
+	// its *gorm.DB parameters in place: itself, through a helper or a
+	// closure, a func value, a store or a write to its Statement.
+	ChangesInPlace func(fn *ssa.Function) bool
+	// ProvesArgs reports whether call, a call of fn, passes values proved
+	// immutable at every *gorm.DB parameter of fn
+	// (tracer.RootTracer.ProvesImmutableArgs).
+	ProvesArgs func(fn *ssa.Function, call ssa.CallInstruction) bool
+}
+
+// paramCallersIsolate reports whether the function that declares p may be
+// declared //gormreuse:immutable-param, so declaring it keeps the reuse
+// checked (#201). The function must not change a parameter in place, and
+// each call in the analysed functions must pass values proved immutable, as
+// the inference asks (ImmutableParamRule, #387). Each argument is also
+// checked as the caller-side check does (handler.BreaksImmutableParam), not
+// only p's (#245). It must also see every
 // caller, so the function must be called only directly (see
 // calledOnlyDirectly), and the pass must see every file of the package (see
 // NewGenerator). Declaring any other function would hide the reuse from the
@@ -64,10 +81,13 @@ func (g *Generator) paramCallersIsolate(p *ssa.Parameter) bool {
 	if _, ok := fn.Syntax().(*ast.FuncDecl); !ok {
 		return false
 	}
-	if !g.seesAllCallers(fn.Pos()) || !g.calledOnlyDirectly(fn) {
+	if !g.seesAllCallers(fn.Pos()) || !g.calledOnlyDirectly(fn) || g.immutableParam.ChangesInPlace(fn) {
 		return false
 	}
 	for _, c := range g.callsOf(fn) {
+		if !g.immutableParam.ProvesArgs(fn, c.call) {
+			return false
+		}
 		loopInfo := g.cfg.DetectLoops(c.caller)
 		// Every argument, not only p's: the caller-side check asks the
 		// same of each one (#245).
