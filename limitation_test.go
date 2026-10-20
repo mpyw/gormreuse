@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -33,7 +34,10 @@ var limitationKinds = []string{
 //     function of its file fails.
 //   - The README's Known Limitations section has the same kinds of
 //     limitation, and each table has as many rows as the notes' table. The
-//     rows are in the same order.
+//     rows are in the same order. Either file may write a table in Markdown
+//     or in HTML, folded in <details> or not.
+//   - The README's summary table gives each table kind's case count, and the
+//     count matches that kind's table.
 func TestKnownLimitationsListed(t *testing.T) {
 	section := limitationSection(t, "design/implementation.md")
 	marked := markedLimitationFuncs(t, filepath.Join("testdata", "src"))
@@ -53,13 +57,23 @@ func TestKnownLimitationsListed(t *testing.T) {
 
 	readme := limitationSection(t, "README.md")
 	for _, kind := range limitationKinds {
-		notesRows, inNotes := limitationTableRows(section, kind)
-		readmeRows, inReadme := limitationTableRows(readme, kind)
+		notesRows, inNotes := limitationTableRows(t, "design/implementation.md", section, kind)
+		readmeRows, inReadme := limitationTableRows(t, "README.md", readme, kind)
 		switch {
 		case !inNotes || !inReadme:
 			t.Errorf("Known Limitations: %s is in design/implementation.md: %t, in README.md: %t; want both", kind, inNotes, inReadme)
 		case notesRows != readmeRows:
 			t.Errorf("Known Limitations: %s has %d rows in design/implementation.md and %d in README.md; list each case in both", kind, notesRows, readmeRows)
+		}
+		if readmeRows > 0 {
+			name := strings.TrimPrefix(kind, "**")
+			m := regexp.MustCompile(`(?m)^\| ` + regexp.QuoteMeta(name) + ` \| (\d+) \|`).FindStringSubmatch(readme)
+			switch {
+			case m == nil:
+				t.Errorf("README.md: Known Limitations: the summary table has no %s row with a case count", name)
+			case m[1] != strconv.Itoa(readmeRows):
+				t.Errorf("README.md: Known Limitations: the summary table says %s has %s cases, but its table has %d rows", name, m[1], readmeRows)
+			}
 		}
 	}
 }
@@ -107,8 +121,11 @@ func limitationNamedFixtures(section string) []string {
 
 // limitationTableRows returns the number of body rows in the table that
 // follows the paragraph starting with kind, and whether that paragraph is
-// there. A kind without a table has 0 rows.
-func limitationTableRows(section, kind string) (rows int, found bool) {
+// there. A kind without a table has 0 rows. The table may be a Markdown
+// table or an HTML <table>, whose body rows are the <tr> lines without a
+// <th>. An HTML table without its closing </table> fails the test.
+func limitationTableRows(t *testing.T, path, section, kind string) (rows int, found bool) {
+	t.Helper()
 	i := strings.Index(section, "\n"+kind)
 	if i < 0 {
 		return 0, false
@@ -116,6 +133,18 @@ func limitationTableRows(section, kind string) (rows int, found bool) {
 	lines := strings.Split(section[i+1:], "\n")[1:]
 	for len(lines) > 0 && lines[0] == "" {
 		lines = lines[1:]
+	}
+	if len(lines) > 0 && lines[0] == "<table>" {
+		for _, line := range lines[1:] {
+			switch {
+			case line == "</table>":
+				return rows, true
+			case strings.HasPrefix(line, "<tr>") && !strings.Contains(line, "<th>"):
+				rows++
+			}
+		}
+		t.Errorf("%s: Known Limitations: the %s table has no </table>", path, kind)
+		return rows, true
 	}
 	for j, line := range lines {
 		if !strings.HasPrefix(line, "|") {
