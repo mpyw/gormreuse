@@ -152,6 +152,18 @@ gormreuse -test=false ./... # skip *_test.go files
 
 Some reports have no fix on purpose. See [Automatic Fixes](#automatic-fixes).
 
+### Contents
+
+| Section | Read it to |
+| --- | --- |
+| [Installation & Usage](#installation--usage) | Install gormreuse, or run it in golangci-lint |
+| [Flags](#flags) | See the command's flags and exit status |
+| [Detection Model](#detection-model-mutable-branching) | Learn which code counts as reuse, with examples |
+| [Temporary rule for `Scopes`](#temporary-rule-sessionwithcontextdebug-returned-from-scopes-callbacks) | Understand the transaction-leak warning |
+| [Directives](#directives) | State what a helper guarantees, or suppress a report |
+| [Automatic Fixes](#automatic-fixes) | See what `-fix` changes, and when it offers no fix |
+| [Known Limitations](#known-limitations) | See the cases that are missed or reported by mistake |
+
 ## Installation & Usage
 
 > [!NOTE]
@@ -389,7 +401,7 @@ gormreuse cannot follow a `*gorm.DB` everywhere. These count as a branch: an int
 | Slice/Map storage | `[]*gorm.DB{db}` | It may be accessed elsewhere |
 | Interface conversion | `interface{}(db)` | It may be extracted via a type assertion |
 | Non-pure function call | `helper(db)` | Unless the function is marked `//gormreuse:pure` |
-| The address of the variable, passed to a non-pure function | `applyP(&q)` | The function may change `*p` in place, or store another chain in it. A later read of `q` sees both (#345) |
+| The address of the variable, passed to a non-pure function | `applyP(&q)` | The function may change `*p` in place, or store another chain in it. A later read of `q` sees both |
 | A struct that holds it, handed to a call | `useDeps(deps{DB: q})`, `r := &repo{db: q}; r.active()` | The callee can reach it through the struct. Not for a pure function, an inferred getter, a `*gorm.DB` method, a method of `gorm.Statement`, or a package that does not import gorm |
 | Struct field access | `h.db.Find(nil)` | It traces back to the stored value |
 
@@ -404,7 +416,7 @@ A struct field is followed in these forms:
 
 - A field read through a parameter or a receiver, by value or by pointer, is not a mutable root. Only the stores to it in the same function are followed. A getter that returns such a field is read the same way, as the field of the receiver at each call (see [Inferred immutable-return](#inferred-immutable-return)).
 - Simple struct literal storage (`_ = &S{db: q}`) without actual field usage does NOT pollute.
-- A struct handed to a call is followed when the call gets the struct, its address or a copy, also in an interface or as a method receiver. A struct sent on a channel, stored in a slice or a map, or packed into a variadic argument is not.
+- A struct handed to a call is followed when the call gets the struct, its address or a copy. That includes a struct in an interface, and one used as a method receiver. A struct sent on a channel, stored in a slice or a map, or packed into a variadic argument is not.
 - A field read sees only the stores that can run before it. So the builder idiom `r.db = r.db.Where(...)` in a pointer-receiver method, followed by one use of `r.db`, is not reported. A second use of `r.db` is.
 
 </details>
@@ -1256,7 +1268,8 @@ The rule finds the callback the same way reuse detection does:
 
 </details>
 
-**Removal condition**: once the upstream fix ships in a supported GORM release, this rule is deleted. Removing the `internal/scopeswarn` package and the `Scopes warnings` block of `RunSSA` deletes it, as the package documents. Re-check go-gorm/gorm#7592 on each GORM version bump.
+> [!NOTE]
+> **Removal condition:** this rule is deleted once the upstream fix ships in a supported GORM release. go-gorm/gorm#7592 is checked again on each GORM version bump.
 
 ## Directives
 
@@ -1561,9 +1574,16 @@ Each `*gorm.DB` result, in a `(*gorm.DB, error)` result too, must be one of thes
 | A local variable, such as one a closure captures, whose every assignment is in the function and holds one of these values | `get := func() *gorm.DB { return conn }` |
 | A type assertion of a value that holds no chain, as reuse detection reads it | `if tx, ok := ctx.Value(txKey).(*gorm.DB); ok { return tx }` |
 
-So a getter is treated like the field it returns, **at each call**: the call reads the field of its own receiver. `d := r.DB(); d.Find(&a); d.Count(&n)` is not reported when `r` is a parameter, as `r.db.Find(&a); r.db.Count(&n)` is not. It is reported when `r := &repo{db: q.Where("x")}`, as `r.db` would be. A getter of a field or package-level variable is not inferred at all when code in its package assigns the variable a chain, such as `r.db = r.db.Where("x")`. A caller may call the getter after that.
+So a getter is treated like the field it returns, **at each call**. The call reads the field of its own receiver:
 
-A helper that returns a struct is inferred the same way when it builds the struct and every `*gorm.DB` field it fills in holds one of these values. Then `env := newTestEnv(); env.DB.Create(&u); env.DB.Find(&us)` is not reported. A struct the helper passes to another function, or did not build, turns inference off.
+| Code | Reported? |
+| --- | --- |
+| `d := r.DB()`, then `d.Find(&a)` and `d.Count(&n)`, with `r` a parameter | No, as for `r.db.Find(&a)` and `r.db.Count(&n)` |
+| The same after `r := &repo{db: q}`, with `q` a mutable value | Yes, as `r.db` would be. The report names `q` as the root |
+
+A getter of a field or a package-level variable is not inferred at all when code in its package assigns the variable a chain. An example is `r.db = r.db.Where("x")`. A caller may call the getter after that.
+
+A helper that returns a struct is inferred the same way when it builds the struct. Every `*gorm.DB` field it fills in must hold one of these values. Then `env := newTestEnv()`, followed by `env.DB.Create(&u)` and `env.DB.Find(&us)`, is not reported. A struct the helper passes to another function, or did not build, turns inference off.
 
 Anything else turns inference off for the function:
 
@@ -1640,7 +1660,7 @@ func applyTenant(tx *gorm.DB) {
 
 Without the directive this statement adds the condition to the caller's value, and the function's own `Find` sees it. So a mutable argument to such a function gets no fix: a Session would drop the condition. Assign the result (`tx = tx.Where(...)`), or remove the directive.
 
-`immutable-param` does not exempt the parameter of a function passed to `Scopes`, `Preload` or `Connection`. gorm passes these callbacks a `clone == 0` handle, so their reuse is still reported.
+`immutable-param` does not exempt the parameter of a `Scopes`, `Preload` or `Connection` callback. gorm passes these callbacks a `clone == 0` handle. So their reuse is still reported.
 
 A **redundant** `immutable-param` is reported. See [Unused and redundant directives](#unused-and-redundant-directives).
 
@@ -1674,7 +1694,7 @@ Every `*gorm.DB` argument of every call must be one of these:
 
 | Argument | Example |
 | --- | --- |
-| A value with no mutable root, as reuse detection reads it: a `Session`-family, `Begin` or `gorm.Open` result, the result of an `immutable-return` function, a field read through a parameter, a package-level variable | `helper(db.Session(&gorm.Session{}))` |
+| A value with no mutable root, as reuse detection reads it. That is a `Session`-family, `Begin` or `gorm.Open` result, or the result of an `immutable-return` function. It is also a field read through a parameter, or a package-level variable | `helper(db.Session(&gorm.Session{}))` |
 | The `tx` of a `Transaction` or `FindInBatches` callback, or of a callback that an `immutable-input` function calls, declared or [inferred](#inferred-immutable-input) | `db.Transaction(func(tx *gorm.DB) error { return helper(tx) })` |
 | The parameter of another inferred function | `func outer(tx *gorm.DB) { helper(tx) }` |
 
@@ -1805,7 +1825,7 @@ func useIt(db *gorm.DB) error {
 <details>
 <summary>What can be inferred, and what turns inference off</summary>
 
-The check is the [body check](#gormreuseimmutable-inputname) of the directive. So the function may hand the callback to `Transaction`, `FindInBatches` or another `immutable-input` function, declared or inferred, and call it with immutable values, such as the `tx` of such a callback. A closure in a local variable counts: `transaction := func(db *gorm.DB, cb func(*gorm.DB) error) error { ... }`.
+The check is the [body check](#gormreuseimmutable-inputname) of the directive. So the function may hand the callback to `Transaction`, `FindInBatches` or another `immutable-input` function, declared or inferred. It may call the callback with immutable values, such as the `tx` of such a callback. A closure in a local variable counts: `transaction := func(db *gorm.DB, cb func(*gorm.DB) error) error { ... }`.
 
 Anything else turns inference off:
 
@@ -1984,10 +2004,12 @@ A root that still has two or more branches on one path gets `.Session(&gorm.Sess
 
 | Applied to | Detail |
 | --- | --- |
-| A root or a reassigned value with 2+ branches on one path | This holds after the reassignments. A use in a loop that does not create the value again counts too. So `q.Where("t"); for _, id := range ids { q.Where("id = ?", id).Find(nil) }` becomes `q = q.Where("t").Session(&gorm.Session{})`. The paths come from the control flow. So in `if c { q.Where("a") }; q.Where("b").Find(nil); q.Where("c").Find(nil)`, both the root and `q = q.Where("a")` get a Session. A reassigned value used once gets none. Neither does a chain that already ends in a Session |
+| A root or a reassigned value with 2+ branches on one path | Counted after the reassignments. A reassigned value used once gets none. Neither does a chain that already ends in a Session |
+| A value used in a loop that does not create it again | The loop counts as a second branch. `q.Where("t")` before `for … { q.Where("id = ?", id).Find(nil) }` becomes `q = q.Where("t").Session(&gorm.Session{})` |
+| Each value whose branches are on different paths | The paths come from the control flow. In `if c { q.Where("a") }` followed by `q.Where("b").Find(nil)` and `q.Where("c").Find(nil)`, both the root and `q = q.Where("a")` get a Session |
 | Every root or reassigned value with a later use | When the fix cannot see every use of the root in order. Examples are a `defer`/`go` use, a use inside a closure, and a read through a `Session` copy |
 | Each incoming edge of a Phi node (a conditional merge) that is still mutable | An edge counts as immutable by the same rule as detection: its **last** call must return an immutable value. `db.Session(&gorm.Session{}).Where("y")` and `db.WithContext(ctx).Where("y")` are mutable, so they get a Session too |
-| Every filter of a chain of conditional filters | `if a != "" { q = q.Where("a = ?", a) }; if b != "" { q = q.Where("b = ?", b) }; q.Count(&n); q.Find(&us)` gets a Session on each filter in one pass, also across a loop (#343). A parameter among them gets its parameter fix. A value handed to other code, or with a discarded statement on it, stops the walk back |
+| Every filter of a chain of conditional filters | `if a != "" { q = q.Where("a = ?", a) }` and the same for `b`, followed by `q.Count(&n)` and `q.Find(&us)`. Each filter gets a Session in one pass, also across a loop. A parameter among them gets its parameter fix. A value handed to other code, or with a discarded statement on it, stops the walk back |
 | Only a call that returns `*gorm.DB` | An edge that has no such call gets none. Examples are a closure parameter (`if c { q = tx }`) and one result of `q, err := open()` |
 
 </details>
@@ -2066,30 +2088,24 @@ A discarded statement cannot be reassigned
 
 </td><td>
 
-- An argument of a function that is not `//gormreuse:pure`: `applyTenant(q)`, `apply := func(d *gorm.DB) { ... }; apply(q)`, `_ = withTenant(q)`, `base.Model(q)`. So is the address of `q` (`applyP(&q)`), also when it is stored first (`applyAll([]**gorm.DB{&q})`) (#345).
+- An argument of a function that is not `//gormreuse:pure`: `applyTenant(q)`, `apply(q)` for a closure `apply`, `_ = withTenant(q)`, `base.Model(q)`. Some helpers do not count. See the table below.
+- The address of `q` (`applyP(&q)`), also when it is stored first (`applyAll([]**gorm.DB{&q})`).
 - A store into a slice, map or channel.
 - A function other than a `*gorm.DB` method that returns a `*gorm.DB` may return `q` itself. So its argument counts even as the last use (`q = withTenant(q)`).
 - An argument of a `go` statement, and the receiver of a chain method it runs (`go q.Where("a")`).
-- The same for a `defer` statement, when another `defer` uses `q` or the statement is in a loop. `defer q.Find(&x); defer q.Where("a")` runs `Where` first, and `Find` reads its condition.
-
-These do not count:
-
-- The receiver of a query (`go q.Count(&n)`). With the Session, the query runs on a copy.
-- A subquery (`db.Where("id IN (?)", q)`). It only reads `q`.
-- An argument of a function that only runs queries on it (#347), as in `func deleteByID(db *gorm.DB, id int) error { return db.Where("id = ?", id).Delete(&User{}).Error }`. Each use of the parameter must start a chain that ends in a finisher or in `Session`, `WithContext` or `Debug`. The function must not read the parameter's `Error`, other than the `Error` or `RowsAffected` of a query's result. It must not store it, return a `*gorm.DB`, capture it in a closure, hand it to another call, or pass a function to a method of the chain. The call must be a plain call by name, and no other argument may hold `q` or a function. A function in another package counts when its package's analysis found the same.
-- A parameter passed to a recursive call of its own function, as in `createMenus(tx, m.Children)` inside `createMenus`, when no discarded statement is reassigned (#347). The body Session rebinds the parameter in every call.
+- The same for a `defer` statement, when another `defer` uses `q` or the statement is in a loop. In `defer q.Find(&x)` followed by `defer q.Where("a")`, `Where` runs first, and `Find` reads its condition.
 
 </td></tr>
 <tr><td>
 
-`q` is stored in a struct field that other code can reach before a later use of `q` (#310)
+`q` is stored in a struct field that other code can reach before a later use of `q`
 
 </td><td>
 
-- A local struct is reached where it is handed on: `s := &Svc{db: q}; s.apply()`, `applyP(params{db: q})`, or a closure that does so.
-- A package-level variable, or a struct that a parameter points to, is reached by any call after the store that may run other code (#345):
+- A local struct is reached where it is handed on: `s := &Svc{db: q}` with `s.apply()`, `applyP(params{db: q})`, or a closure that does so.
+- A package-level variable, or a struct that a parameter points to, is reached by any call after the store that may run other code:
   - A `*gorm.DB` method counts only when it takes a function, which it may run before it returns: `Connection`, `Transaction`, `FindInBatches`, `ToSQL`, and the scopes of `Scopes`.
-  - A call into a package that does not import gorm counts only when an argument can run code of one that does: a function, an interface, or a value whose type has methods in such a package. `sort.Sort(byTenant(xs))` counts, and so does `json.Marshal(v)` when the type of `v` has methods. `fmt.Sprint(n)` and `strings.ToUpper(s)` do not.
+  - A call into a package that does not import gorm counts only when an argument can run code of one that does. That is a function, an interface, or a value whose type has methods in such a package. `sort.Sort(byTenant(xs))` counts, and so does `json.Marshal(v)` when the type of `v` has methods. `fmt.Sprint(n)` and `strings.ToUpper(s)` do not.
   - A channel operation, `close`, and a call into `sync` or `sync/atomic` count. They let a goroutine that is already running go on.
 
 Reading the field in the same function (`s.db.Find(&x)`) is a use of `q`, and does not count.
@@ -2125,7 +2141,37 @@ A root with a diagnostic that an ignore suppresses
 The ignore says that reuse is meant. See [Strategy 2](#strategy-2-session-making-roots-immutable).
 
 </td></tr>
+<tr><td>
+
+A root whose `Statement` may carry `Attrs`, `Assign` or `InstanceSet` state
+
+</td><td>
+
+`q := db.Model(&User{}).Assign(u)`, then `q.FirstOrInit(&a)` and `q.FirstOrCreate(&b)`.
+
+A Session drops that state, so `FirstOrInit` and `FirstOrCreate` would change their result. Build each branch from a fresh chain instead.
+
+</td></tr>
 </table>
+
+These hand-offs keep the fix:
+
+| Hand-off | Why the fix is safe |
+| --- | --- |
+| The receiver of a query under `go` (`go q.Count(&n)`) | With the Session, the query runs on a copy |
+| A subquery (`db.Where("id IN (?)", q)`) | It only reads `q` |
+| An argument of a helper that only runs queries on it (`deleteByID(q, 7)`) | Its only change to `q` is the reuse that the fix removes. The conditions are below |
+| A parameter passed to a recursive call of its own function (`createMenus(tx, m.Children)` inside `createMenus`) | The body Session rebinds the parameter in every call. No discarded statement may be reassigned |
+
+A helper only runs queries on a parameter when all of these hold:
+
+- Each use of the parameter starts a chain that ends in a finisher, or in `Session`, `WithContext` or `Debug`.
+- It reads no `Error`, `RowsAffected` or `Statement` of the parameter. It may read the `Error` or `RowsAffected` of a query's result, as in `return db.Where("id = ?", id).Delete(&User{}).Error`.
+- It does not store the parameter, capture it in a closure, or hand it to another call.
+- It returns no `*gorm.DB`. It passes no function to a method of the chain, such as `Scopes` or `Transaction`.
+- It calls no state-only method, such as `AddError`, on the parameter.
+- The call is a plain call by name, not a `go` or `defer` statement. No other argument holds `q` or a function.
+- A helper in another package counts when the analysis of its own package found the same.
 
 </details>
 
@@ -2151,7 +2197,7 @@ Every one of these holds:
 
 Add [`//gormreuse:immutable-param`](#gormreuseimmutable-param). The caller-side check keeps the callers isolated.
 
-Such a function is usually [inferred `immutable-param`](#inferred-immutable-param) and not reported. One with a discarded statement on the parameter (`tx.Where("a")`) is not inferred, and does not get the directive either: under it the statement would do nothing, which the [body check](#gormreuseimmutable-param) reports. See the last row.
+Such a function is usually [inferred `immutable-param`](#inferred-immutable-param) and not reported. One with a discarded statement on the parameter (`tx.Where("a")`) is not inferred, and does not get the directive either. Under the directive the statement would do nothing, and the [body check](#gormreuseimmutable-param) would report it. See the last row.
 
 </td></tr>
 <tr><td>
@@ -2467,7 +2513,7 @@ if c { f() } else { run() }
 
 **Wrong position:** a use inside a deferred closure runs at function exit. gormreuse orders it by its source position. So `defer func() { q.Count(nil) }(); q.Find(nil)` is reported at `q.Find`, which runs first.
 
-**No fix:** a `go` or `defer` statement that changes the root in place, where another use may see the change, gets no suggested fix. That is `go q.Where("a")` or `go applyTenant(q)`, and `defer q.Where("a")` or `defer applyTenant(q)` with another `defer` that uses `q`, or in a loop. A Session at the root would make the call change a copy. Isolate the root by hand where the change is not needed. A root whose `Statement` may carry `Attrs`, `Assign` or `InstanceSet` state, such as `db.Model(&User{}).Assign(u)`, gets no Session either: a Session drops that state, so `FirstOrInit` and `FirstOrCreate` would change their result. Build each branch from a fresh chain instead.
+**No fix:** a `go` or `defer` statement that changes the root in place, where another use may see the change, gets no suggested fix. That is `go q.Where("a")` or `go applyTenant(q)`, and `defer q.Where("a")` or `defer applyTenant(q)` with another `defer` that uses `q`, or in a loop. A Session at the root would make the call change a copy. Isolate the root by hand where the change is not needed. A root whose `Statement` may carry `Attrs`, `Assign` or `InstanceSet` state gets no Session either. An example is `db.Model(&User{}).Assign(u)`. A Session drops that state, so `FirstOrInit` and `FirstOrCreate` would change their result. Build each branch from a fresh chain instead.
 
 </details>
 

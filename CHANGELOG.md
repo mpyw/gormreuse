@@ -4,7 +4,7 @@ These notes say what changes for users in each release, and what to do about it.
 
 ## Unreleased (planned as 0.23.0)
 
-gormreuse now follows a `*gorm.DB` through far more code. It also reads directives across packages, and infers `immutable-return` for most connection helpers. It no longer counts methods such as `AddError` as a branch. `-fix` offers fewer fixes, but each one compiles and keeps every condition.
+gormreuse now follows a `*gorm.DB` through far more code. It also reads directives across packages. It infers `immutable-return` for most connection helpers, and `immutable-param` and `immutable-input` for most helpers that only get fresh handles. It no longer counts methods such as `AddError` as a branch. `-fix` offers fewer fixes, but each one compiles and keeps every condition.
 
 > [!IMPORTANT]
 > **Expect new reports on code that passed with 0.22.0.** Most of them are real reuse. Follow [Upgrading from 0.22.0](#upgrading-from-0220) before you bump the version in CI. Also check your exclude rules: [some messages changed](#changed-messages).
@@ -28,7 +28,7 @@ gormreuse now follows a `*gorm.DB` through far more code. It also reads directiv
 | More code is followed | Loops, closures that run more than once, `go`/`defer`, method values, method expressions, struct fields, package-level variables, local function variables and helper results |
 | Fewer false reports | `AddError`, `DB`, `Get`, `InstanceGet` and `Callback` are not branches. The Scopes warning needs a chain that may write |
 | Directives across packages | A directive on an exported function applies in the packages that call it. It travels as an analysis fact, so a broken contract is not trusted there |
-| Inferred `immutable-return` | A helper whose body returns only `Session`, `WithContext`, `Debug`, `Begin`, `gorm.Open` or `nil` needs no directive. So does a getter of a field or a package-level variable, a closure that returns an immutable value, and a helper that returns a struct of such values. A getter's call reads the field of its own receiver |
+| Inferred `immutable-return` | A helper whose body returns only `Session`, `WithContext`, `Debug`, `Begin`, `gorm.Open` or `nil` needs no directive. So does a getter of a field or a package-level variable, and a closure that returns an immutable value. So does a helper that returns a struct of such values. A getter's call reads the field of its own receiver |
 | Inferred `immutable-param` and `immutable-input` | An unexported helper whose every caller passes a fresh handle needs no directive. Neither does a wrapper that forwards its callback to `Transaction` (#349) |
 | Safer `-fix` | Every fix compiles, alone or with the others. A fix never drops a condition. When it cannot keep every condition, there is no fix |
 
@@ -348,25 +348,6 @@ Its parameter is mutable again. Mark the function `//gormreuse:immutable-param`,
 </td></tr>
 <tr><td>
 
-A chain reassigned in a range-over-func body and used twice after the loop (#341)
-
-</td><td>
-
-```go
-for k, v := range maps.All(filters) {
-    q = q.Where(k+" = ?", v)
-}
-q.Count(&n)
-q.Find(&users)
-```
-
-</td><td>
-
-`-fix` ends the `Where` in the body with `.Session(&gorm.Session{})`
-
-</td></tr>
-<tr><td>
-
 A struct that holds a mutable chain, handed to a function or a method, and the chain used again (#341)
 
 </td><td>
@@ -524,7 +505,7 @@ The message is `callback cb escapes (...)`. Pass the callback only to another `i
 </td></tr>
 <tr><td>
 
-An `immutable-input` callback called with the result of a func value
+An `immutable-input` callback called with the result of a func value (#176)
 
 </td><td>
 
@@ -681,14 +662,21 @@ d.Count(&n)
 </td></tr>
 <tr><td>
 
-The result of a helper that assigns a captured variable more than once, returns a context's transaction, or returns a struct it fills with safe handles (#342)
+The result of a helper that returns a context's transaction, or that assigns a captured variable more than once (#342)
 
 </td><td>
 
 ```go
-env := newTestEnv(t)
-env.DB.Create(&u)
-env.DB.Find(&us)
+func txOf(ctx context.Context) *gorm.DB {
+    if tx, ok := ctx.Value(txKey{}).(*gorm.DB); ok {
+        return tx
+    }
+    return db
+}
+
+d := txOf(ctx)
+d.Find(&a)
+d.Count(&n)
 ```
 
 </td></tr>
@@ -767,7 +755,12 @@ A closure that builds a new chain on each call (#251)
 
 </td><td>
 
-`base := func() *gorm.DB { return db.Model(&User{}) }` on an immutable `db`, called twice
+```go
+db = db.Session(&gorm.Session{})
+base := func() *gorm.DB { return db.Model(&User{}) }
+base().Find(&a)
+base().Find(&b)
+```
 
 </td></tr>
 <tr><td>
@@ -861,16 +854,16 @@ q.AddError(err)
 </td></tr>
 <tr><td>
 
-A use in a range-over-func body of a value stored after the loop (#341). The body runs only while the loop runs
+A chain reassigned in a range-over-func body, then read after the loop (#177). The reassignment extends the chain, as in a plain loop. When the chain is read twice after the loop, only the second read is reported
 
 </td><td>
 
 ```go
-q := db.Session(&gorm.Session{})
-for k := range seq {
-    q.Where(k).Find(&x)
+q := db.Model(&User{})
+for k, v := range maps.All(filters) {
+    q = q.Where(k+" = ?", v)
 }
-q = db.Where("late")
+q.Find(&users)
 ```
 
 </td></tr>
@@ -909,7 +902,7 @@ Directives now work across packages, through method expressions and function var
 | --- | --- |
 | Inferred `immutable-return` (#261, #308) | A function without the directive is treated as `immutable-return` when its body proves it. See [Inferred immutable-return](README.md#inferred-immutable-return). A declared directive on such a function is not reported unused |
 | Inferred `immutable-param` (#349) | An unexported function without the directive is treated as `immutable-param` when it is only called directly and every call passes immutable values. See [Inferred immutable-param](README.md#inferred-immutable-param) |
-| Inferred `immutable-input(name)` (#349) | An unexported function or a closure without the directive is treated as `immutable-input(name)` for a callback when its body check passes, such as a wrapper that forwards the callback to `Transaction`. See [Inferred immutable-input](README.md#inferred-immutable-input) |
+| Inferred `immutable-input(name)` (#349) | An unexported function or a closure without the directive is treated as `immutable-input(name)` for a callback when its body check passes. An example is a wrapper that forwards the callback to `Transaction`. See [Inferred immutable-input](README.md#inferred-immutable-input) |
 | Directives across packages (#195, #314) | `pure`, `immutable-return`, `immutable-param` and `immutable-input(name)` on an exported function apply in other packages. A same-line directive and a generic instance work too. A contract that the body breaks is trusted only in its own package. So is a contract that holds only because the body relies on a broken one |
 | Facts need the dependencies | The `gormreuse` command, `go vet` and golangci-lint analyze each dependency first |
 | Generated files (#259, #315) | A directive in a generated file is not checked, so it is not trusted, in its own package too. The function exports no fact |
@@ -941,11 +934,11 @@ Directives now work across packages, through method expressions and function var
 | Roots used only in `go`/`defer` (#309, #312) | `go q.Count(&n); go q.Find(&x)` and `for … { go q.Find(&x) }` get a Session at the root. The message names the first branch |
 | The right variable (#198) | A reassignment rebinds the variable that holds the reused root, never an outer receiver |
 | Parameter roots (#201, #245, #313, #349) | An exported function, a method, a function value or a closure without a `*gorm.DB` result gets `tx = tx.Session(&gorm.Session{})` at the top of the body. The callback of an exported `Transaction` wrapper is such a closure. `immutable-param` is added only when every caller of a function declaration is checked. Most such functions are now inferred `immutable-param` and not reported. A function with a discarded statement on the parameter (`tx.Where("a")`) never gets the directive, since the `immutable-param` body check would then report the statement |
-| Sessions by control flow (#202, #247, #306, #311, #343) | Sessions go where the paths need them. That includes a reassignment read in a later loop, a value merged with a parameter, every root that a merge may hold, and every filter of a chain of conditional filters. One pass of fixes resolves the diagnostics |
+| Sessions by control flow (#202, #247, #306, #311, #343) | Sessions go where the paths need them. That includes a reassignment read in a later loop, and a value merged with a parameter. It also includes every root that a merge may hold, and every filter of a chain of conditional filters. One pass of fixes resolves the diagnostics |
 | New fixes (#248) | Isolate an argument passed to an `immutable-param` parameter. Delete an unused or redundant directive, or an unused ignore |
 | Helpers that only run queries (#347) | A root handed to a function that only runs queries on it, such as `deleteByID(q, 7)`, keeps its fix. So does a parameter passed to a recursive call of its own function. The function's summary is exported as a fact, so a helper in another package counts too |
 | Every diagnostic carries its root's fix (#246, #312, #346) | A quick fix works on each diagnostic. A root with an ignored diagnostic gets no fix, so the fix cannot make the ignore unused. That includes an ignore in a closure stored in a variable |
-| Callers in package-level initializers (#346) | `var n = count(DB.Where("x"))` is a caller. A parameter it passes a mutable value to gets the body Session, not `immutable-param`, and a helper that changes its parameter keeps no fix when the initializer discards its result |
+| Callers in package-level initializers (#346) | `var n = count(DB.Where("x"))` is a caller. A parameter it passes a mutable value to gets the body Session, not `immutable-param`. A helper that changes its parameter keeps no fix when the initializer discards its result |
 | Same output on every run (#184, #273) | `-json` lists diagnostics in position order |
 
 <details>
