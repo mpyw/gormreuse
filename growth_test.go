@@ -1316,4 +1316,94 @@ var growthCases = []growthCase{
 		}
 		return []string{b.String()}
 	}},
+	// n optional filters, then a use in a loop: build the filters, then page
+	// through the results. The fix checks each merged edge for state a
+	// Session drops, and each check walked the whole Phi chain, once per
+	// root (#377).
+	{name: "filtersloopuse", n: 25, limit: growthQuadratic, shape: func(n int) []string {
+		var b strings.Builder
+		b.WriteString("func f(db *gorm.DB, xs []int, c []bool) {\n\tq := db.Model(nil)\n")
+		for i := range n {
+			fmt.Fprintf(&b, "\tif c[%d] {\n\t\tq = q.Where(\"z\")\n\t}\n", i)
+		}
+		b.WriteString("\tfor range xs {\n\t\tq.Find(nil)\n\t}\n}\n")
+		return []string{b.String()}
+	}},
+	// n loops, each with an optional filter and a use inside (#377).
+	// Its steps are cubic: the use in loop i may see the roots of the i
+	// merges before it, the fix of each such root has a Session for each of
+	// the merges before it, and the diagnostic merges those fixes, an edit
+	// at a time, with no allocation for an edit seen before. The rest of
+	// the steps are quadratic.
+	{name: "loopfilteruse", n: 25, limit: growthQuadratic, steps: growthCubic, shape: func(n int) []string {
+		var b strings.Builder
+		b.WriteString("func f(db *gorm.DB, xs []int, c []bool) {\n\tq := db.Model(nil)\n")
+		for i := range n {
+			fmt.Fprintf(&b, "\tfor range xs {\n\t\tif c[%d] {\n\t\t\tq = q.Where(\"z\")\n\t\t}\n\t\tq.Count(nil)\n\t}\n", i)
+		}
+		b.WriteString("}\n")
+		return []string{b.String()}
+	}},
+	// n loops using one query, each followed by an optional filter (#377).
+	// Its steps are cubic, as loopfilteruse's are.
+	{name: "loopsfilters", n: 25, limit: growthQuadratic, steps: growthCubic, shape: func(n int) []string {
+		var b strings.Builder
+		b.WriteString("func f(db *gorm.DB, xs []int, c []bool) {\n\tq := db.Model(nil)\n")
+		for i := range n {
+			fmt.Fprintf(&b, "\tfor range xs {\n\t\tq.Where(\"c%d\").Find(nil)\n\t}\n\tif c[%d] {\n\t\tq = q.Where(\"z\")\n\t}\n", i, i)
+		}
+		b.WriteString("}\n")
+		return []string{b.String()}
+	}},
+	// The same, with the uses in go statements (#377).
+	{name: "goloopsfilters", n: 25, limit: growthQuadratic, steps: growthCubic, shape: func(n int) []string {
+		var b strings.Builder
+		b.WriteString("func f(db *gorm.DB, xs []int, c []bool) {\n\tq := db.Model(nil)\n")
+		for i := range n {
+			fmt.Fprintf(&b, "\tfor range xs {\n\t\tgo q.Where(\"c%d\").Find(nil)\n\t}\n\tif c[%d] {\n\t\tq = q.Where(\"z\")\n\t}\n", i, i)
+		}
+		b.WriteString("}\n")
+		return []string{b.String()}
+	}},
+	// An else-if ladder of n filters, then two uses. IfStmt.End recurses
+	// down the else chain, so checking every statement of the file for the
+	// statement of each use was cubic, and allocated little (#377).
+	{name: "elseifs", limit: growthNearLinear, shape: func(n int) []string {
+		var b strings.Builder
+		b.WriteString("func f(db *gorm.DB, k int) {\n\tq := db.Model(nil)\n\tif k == -1 {\n\t}")
+		for i := range n {
+			fmt.Fprintf(&b, " else if k == %d {\n\t\tq = q.Where(\"c%d\")\n\t}", i, i)
+		}
+		b.WriteString("\n\tq.Count(nil)\n\tq.Find(nil)\n}\n")
+		return []string{b.String()}
+	}},
+	// n functions with an optional filter, a discarded chain and two uses.
+	// The statement of each use, and the call that ends each reassigned
+	// chain, are looked up in indexes of the file, not by walking it (#377).
+	{name: "filterfuncs", limit: growthLinear, shape: func(n int) []string {
+		var b strings.Builder
+		for i := range n {
+			fmt.Fprintf(&b, "func f%d(db *gorm.DB, c bool) {\n\tq := db.Model(nil)\n\tif c {\n\t\tq = q.Where(\"a\")\n\t}\n\tq.Where(\"b\")\n\tq.Count(nil)\n\tq.Find(nil)\n}\n\n", i)
+		}
+		return []string{b.String()}
+	}},
+	// n functions that reuse their parameter, each called once with a
+	// mutable value. Whether each is called only directly, and its calls,
+	// are looked up in indexes of the package, not by walking it once per
+	// parameter (#377).
+	{name: "paramcallers", limit: growthLinear, shape: func(n int) []string {
+		var b strings.Builder
+		for i := range n {
+			fmt.Fprintf(&b, "func h%d(db *gorm.DB) {\n\tdb.Find(nil)\n\tdb.Find(nil)\n}\n\nfunc c%d(db *gorm.DB) { h%d(db.Where(\"x\")) }\n\n", i, i, i)
+		}
+		return []string{b.String()}
+	}},
+	// n functions that reuse their parameter, one per file (#377).
+	{name: "paramfiles", limit: growthLinear, shape: func(n int) []string {
+		files := make([]string, n)
+		for i := range n {
+			files[i] = fmt.Sprintf("func f%d(db *gorm.DB) {\n\tdb.Find(nil)\n\tdb.Count(nil)\n}\n", i)
+		}
+		return files
+	}},
 }

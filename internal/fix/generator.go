@@ -83,8 +83,16 @@ type Generator struct {
 	statements map[*ssa.Function]*changeStatements
 	//declscope:shared // closure.go memoizes the variables each function's closures capture in it
 	captured map[inspector.Cursor]map[*types.Var]bool
-	//declscope:shared // call.go indexes the calls of each file by Lparen in it
-	calls map[*ast.File]map[token.Pos]*ast.CallExpr
+	//declscope:shared // call.go indexes the calls of each file by Lparen and by End in it
+	calls map[*ast.File]fileCalls
+	//declscope:shared // call.go keeps the functions referred to other than by a call in it (#377)
+	uncalledFuncs map[types.Object]bool
+	//declscope:shared // call.go indexes the calls of the analysed functions by callee in it (#377)
+	callees map[*ssa.Function][]calleeCall
+	//declscope:shared // stmt.go indexes the statements of each file in it (#377)
+	stmtIndexes map[*ast.File]*stmtIndex
+	//declscope:shared // virtual.go indexes the calls of each function by position in it (#377)
+	ssaCalls map[*ssa.Function]map[token.Pos]*ssa.Call
 	//declscope:shared // reassign.go indexes the variables calls are assigned to in it
 	assigned map[*ast.File]map[token.Pos]ast.Expr
 

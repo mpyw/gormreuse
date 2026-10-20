@@ -1,12 +1,12 @@
 package fix
 
 import (
-	"go/ast"
 	"go/token"
 	"slices"
 
 	"golang.org/x/tools/go/ssa"
 
+	"github.com/mpyw/gormreuse/internal/effort"
 	"github.com/mpyw/gormreuse/internal/ssa/cfg"
 	"github.com/mpyw/gormreuse/internal/ssa/pollution"
 	"github.com/mpyw/gormreuse/internal/ssa/tracer"
@@ -92,26 +92,39 @@ func virtualRootReaches(a *cfg.Analyzer, def, use *ssa.BasicBlock) (reaches, dom
 // virtualRootEndsImmutable reports whether the chain that vr, a virtual root,
 // reassigns already ends in a call whose result is immutable by the tracer's
 // rule, as q.Where("a").Session(&gorm.Session{}) does. A second Session after
-// it would be redundant (#202).
+// it would be redundant (#202). The call that ends the chain, and its SSA
+// call, are looked up in indexes of the file and of the function, not found
+// by a walk of them per virtual root (#377).
 //
 //declscope:shared // generator.go's Generate skips a redundant Session with it
 func (g *Generator) virtualRootEndsImmutable(vr virtualRootKey) bool {
-	file := g.findFileContaining(vr.end)
-	lparen := token.NoPos
-	for c := range g.fileCursor(file).Preorder(callExprNodeTypes...) {
-		if call := c.Node().(*ast.CallExpr); call.End() == vr.end {
-			lparen = call.Lparen
-			break
-		}
+	// A statement in parentheses, (q.Where("a")), ends after its call, and
+	// leaves lparen invalid.
+	lparen := g.callEndingAt(g.findFileContaining(vr.end), vr.end)
+	if !lparen.IsValid() {
+		return false
 	}
-	for _, block := range vr.block.Parent().Blocks {
-		for _, instr := range block.Instrs {
-			// A statement in parentheses, (q.Where("a")), ends after its
-			// call, and leaves lparen invalid.
-			if call, ok := instr.(*ssa.Call); ok && lparen.IsValid() && call.Pos() == lparen {
-				return g.tracer.IsImmutableCall(call)
+	fn := vr.block.Parent()
+	calls, ok := g.ssaCalls[fn]
+	if !ok {
+		calls = make(map[token.Pos]*ssa.Call)
+		for _, block := range fn.Blocks {
+			for _, instr := range block.Instrs {
+				effort.Step()
+				if call, ok := instr.(*ssa.Call); ok {
+					if _, seen := calls[call.Pos()]; !seen {
+						calls[call.Pos()] = call
+					}
+				}
 			}
 		}
+		if g.ssaCalls == nil {
+			g.ssaCalls = make(map[*ssa.Function]map[token.Pos]*ssa.Call)
+		}
+		g.ssaCalls[fn] = calls
+	}
+	if call, ok := calls[lparen]; ok {
+		return g.tracer.IsImmutableCall(call)
 	}
 	return false
 }

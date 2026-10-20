@@ -3,6 +3,7 @@ package tracer
 import (
 	"golang.org/x/tools/go/ssa"
 
+	"github.com/mpyw/gormreuse/internal/effort"
 	"github.com/mpyw/gormreuse/internal/typeutil"
 )
 
@@ -44,7 +45,21 @@ var unclonedStateReaders = map[string]bool{
 // An immutable value never carries such state: the next call on it clones
 // its Statement. The suggested fixes withhold every Session for such a value,
 // and its diagnostics do not advise one (#344).
+//
+// The answer is memoized per value. The fix asks it of every value merged
+// with each root, and each walk follows the whole Phi chain, so asking again
+// made a use in a loop after n filters cubic (#377).
 func (t *RootTracer) SessionDropsState(v ssa.Value) bool {
+	if drops, ok := t.sessionDrops[v]; ok {
+		return drops
+	}
+	drops := t.sessionDropsState(v)
+	t.sessionDrops[v] = drops
+	return drops
+}
+
+// sessionDropsState is SessionDropsState without the memo.
+func (t *RootTracer) sessionDropsState(v ssa.Value) bool {
 	if t.chainSetsState(v, make(map[ssa.Value]bool)) {
 		return true
 	}
@@ -60,6 +75,7 @@ func (t *RootTracer) chainSetsState(v ssa.Value, visited map[ssa.Value]bool) boo
 		return false
 	}
 	visited[v] = true
+	effort.Step()
 	switch v := v.(type) {
 	case *ssa.Call:
 		site := t.Site(v)
@@ -97,6 +113,7 @@ func (t *RootTracer) stateUsesFrom(v ssa.Value, sets bool, visited map[ssa.Value
 		return false, false
 	}
 	visited[v] = true
+	effort.Step()
 	refs := v.Referrers()
 	if refs == nil {
 		// A value with no referrer list, such as a FieldRoot, is not

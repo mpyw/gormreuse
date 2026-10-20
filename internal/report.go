@@ -2,6 +2,7 @@
 package internal
 
 import (
+	"bytes"
 	"cmp"
 	"go/ast"
 	"go/build"
@@ -14,6 +15,7 @@ import (
 	"golang.org/x/tools/go/analysis"
 
 	"github.com/mpyw/gormreuse/internal/directive"
+	"github.com/mpyw/gormreuse/internal/effort"
 	"github.com/mpyw/gormreuse/internal/ssa/pollution"
 )
 
@@ -248,21 +250,29 @@ func reportGroupByPos(violations []pollution.Violation) [][]pollution.Violation 
 
 // mergeReportFixes combines fixes into one fix. Its edits are sorted by position,
 // an edit that two roots both need appears once, and its message joins the
-// distinct messages in order.
+// distinct messages in order. The edits seen are kept in a set, since a
+// diagnostic may merge the fixes of many roots, each with many edits (#377).
 func mergeReportFixes(fixes []analysis.SuggestedFix) []analysis.SuggestedFix {
 	if len(fixes) <= 1 {
 		return fixes
 	}
+	// The texts seen at each range. Keying on the text too would copy it
+	// for every edit.
+	type editRange struct{ pos, end token.Pos }
 	var messages []string
 	var edits []analysis.TextEdit
+	seenMessages := make(map[string]bool)
+	seenEdits := make(map[editRange][][]byte)
 	for _, f := range fixes {
-		if !slices.Contains(messages, f.Message) {
+		if !seenMessages[f.Message] {
+			seenMessages[f.Message] = true
 			messages = append(messages, f.Message)
 		}
 		for _, e := range f.TextEdits {
-			if !slices.ContainsFunc(edits, func(x analysis.TextEdit) bool {
-				return x.Pos == e.Pos && x.End == e.End && string(x.NewText) == string(e.NewText)
-			}) {
+			effort.Step()
+			key := editRange{e.Pos, e.End}
+			if texts := seenEdits[key]; !slices.ContainsFunc(texts, func(t []byte) bool { return bytes.Equal(t, e.NewText) }) {
+				seenEdits[key] = append(texts, e.NewText)
 				edits = append(edits, e)
 			}
 		}
