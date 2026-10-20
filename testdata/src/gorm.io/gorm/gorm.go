@@ -13,7 +13,12 @@ type DB struct {
 // Statement holds the clauses of a query.
 type Statement struct {
 	Table string
+	DB    *DB
 }
+
+// Parse reads the schema of value. It reads only the configuration of
+// stmt.DB.
+func (stmt *Statement) Parse(value interface{}) error { return nil }
 
 // Session configuration
 type Session struct {

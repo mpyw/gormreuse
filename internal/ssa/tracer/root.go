@@ -224,6 +224,30 @@ func (t *RootTracer) FindMutableRoot(recv ssa.Value, loopInfo *cfg.LoopInfo) ssa
 	return t.trace(recv, make(map[ssa.Value]bool), loopInfo)
 }
 
+// MutableRoots returns the mutable roots that v may hold: first the one it
+// resolves to (FindMutableRoot), then the others that FindAllMutableRoots
+// finds through a merge. It is nil when v has no mutable root.
+//
+// It is also nil when FindMutableRoot finds no root but FindAllMutableRoots
+// does. That list holds what a merge may hold, immutable values included, and
+// the roots inside a closure that an immutable-return directive vouches for,
+// which FindMutableRoot trusts. So FindMutableRoot decides whether v is
+// mutable; it tries every value a merge or a variable in memory may hold
+// (#340).
+func (t *RootTracer) MutableRoots(v ssa.Value, loopInfo *cfg.LoopInfo) []ssa.Value {
+	root := t.FindMutableRoot(v, loopInfo)
+	if root == nil {
+		return nil
+	}
+	roots := []ssa.Value{root}
+	for _, r := range t.FindAllMutableRoots(v, loopInfo) {
+		if r != root {
+			roots = append(roots, r)
+		}
+	}
+	return roots
+}
+
 // FindAllMutableRoots finds ALL possible mutable roots (for Phi nodes).
 //
 // Unlike FindMutableRoot which returns the first root found, this function
@@ -1007,4 +1031,10 @@ func (t *RootTracer) paramReads(callee *ssa.Function) []directive.ParamRead {
 		return nil
 	}
 	return t.immutableReturnFuncs.ParamReads(callee)
+}
+
+// HasParamReads reports whether a call of callee is traced as the reads of
+// its parameters that it may return (see paramReads), as for a getter.
+func (t *RootTracer) HasParamReads(callee *ssa.Function) bool {
+	return len(t.paramReads(callee)) > 0
 }

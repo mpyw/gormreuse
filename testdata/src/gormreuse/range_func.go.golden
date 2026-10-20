@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"context"
 	"iter"
 	"maps"
 	"slices"
@@ -228,4 +229,158 @@ func rangeFuncPlainClosure(db *gorm.DB, run func(func())) {
 	run(func() {
 		q.Find(nil)
 	})
+}
+
+// =============================================================================
+// STORES IN THE BODY (#341)
+//
+// A store in a range-over-func body runs before the loop statement ends, so a
+// read after the loop sees it, as it sees the loop-header Phi of a plain loop.
+// The body may run no time, so the value before the loop is seen too.
+// =============================================================================
+
+// rangeFuncBodyStoreReused is #341: the Where stored in the body is queried
+// twice after the loop. Before #341 the read saw only the WithContext.
+func rangeFuncBodyStoreReused(ctx context.Context, db *gorm.DB, filters map[string]any) {
+	q := db.WithContext(ctx)
+	for k, v := range maps.All(filters) {
+		q = q.Where(k+" = ?", v).Session(&gorm.Session{})
+	}
+	q.Count(nil)
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// rangeFuncBodyStoreBreak: a break leaves the body after some iterations.
+func rangeFuncBodyStoreBreak(db *gorm.DB, seq iter.Seq2[string, any]) {
+	q := db.Session(&gorm.Session{})
+	for k, v := range seq {
+		if k == "" {
+			break
+		}
+		q = q.Where(k, v).Session(&gorm.Session{})
+	}
+	q.Find(nil)
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// rangeFuncBodyStoreNested: the store is in a loop nested in the body.
+func rangeFuncBodyStoreNested(db *gorm.DB, outer iter.Seq[int], inner iter.Seq2[string, any]) {
+	q := db.Session(&gorm.Session{})
+	for range outer {
+		for k, v := range inner {
+			q = q.Where(k, v).Session(&gorm.Session{})
+		}
+	}
+	q.Find(nil)
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+type rangeFuncHolder struct{ db *gorm.DB }
+
+// rangeFuncBodyStoreField: the body rebuilds a field of a local struct.
+func rangeFuncBodyStoreField(db *gorm.DB, seq iter.Seq2[string, any]) {
+	h := &rangeFuncHolder{db: db.Session(&gorm.Session{})}
+	for k, v := range seq {
+		h.db = h.db.Where(k, v).Session(&gorm.Session{})
+	}
+	h.db.Find(nil)
+	h.db.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// rangeFuncBodyStoreSpawned: a goroutine started after the loop reads the
+// body's store too.
+func rangeFuncBodyStoreSpawned(db *gorm.DB, seq iter.Seq2[string, any]) {
+	q := db.Session(&gorm.Session{})
+	for k, v := range seq {
+		q = q.Where(k, v).Session(&gorm.Session{})
+	}
+	q.Find(nil)
+	go func() {
+		q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	}()
+}
+
+// rangeFuncBodyStoreOnce: one query after the loop.
+func rangeFuncBodyStoreOnce(ctx context.Context, db *gorm.DB, filters map[string]any) {
+	q := db.WithContext(ctx)
+	for k, v := range maps.All(filters) {
+		q = q.Where(k+" = ?", v)
+	}
+	q.Find(nil)
+}
+
+// rangeFuncBodyStoreReadInBody: a read in the body does not see the body's
+// own store, so the query in the body is not a second branch of the Where
+// before it.
+func rangeFuncBodyStoreReadInBody(db *gorm.DB, seq iter.Seq2[string, any]) {
+	q := db.Session(&gorm.Session{})
+	for k, v := range seq {
+		q = q.Where(k, v)
+		q.Find(nil)
+	}
+}
+
+// rangeFuncBodyStoreAfterLoop: the body runs only while its loop statement
+// does, so it does not see a store made after the loop (#341). Before, it read
+// the Where("late") and reported the body's query on every iteration.
+func rangeFuncBodyStoreAfterLoop(db *gorm.DB, seq iter.Seq[string]) {
+	q := db.Session(&gorm.Session{})
+	for k := range seq {
+		q.Where(k).Find(nil)
+	}
+	q = db.Where("late")
+	q.Find(nil)
+}
+
+// rangeFuncSpawnedStoreAfterLoop: a goroutine started in the body may run
+// after the loop, so it sees the store made after it.
+func rangeFuncSpawnedStoreAfterLoop(db *gorm.DB, seq iter.Seq[string]) {
+	q := db.Session(&gorm.Session{})
+	for k := range seq {
+		go func() {
+			q.Where(k).Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+		}()
+	}
+	q = db.Where("late").Session(&gorm.Session{})
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+var rangeFuncGlobal *gorm.DB
+
+// rangeFuncBodyStoreGlobal: the body rebuilds a package-level variable.
+func rangeFuncBodyStoreGlobal(seq iter.Seq2[string, any]) {
+	for k, v := range seq {
+		rangeFuncGlobal = rangeFuncGlobal.Where(k, v).Session(&gorm.Session{})
+	}
+	rangeFuncGlobal.Find(nil)
+	rangeFuncGlobal.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// rangeFuncBodyStoreSpawnedBefore: a goroutine started before the loops may
+// run after them, so it sees the store of the nested body.
+func rangeFuncBodyStoreSpawnedBefore(db *gorm.DB, outer iter.Seq[int], inner iter.Seq2[string, any]) {
+	q := db.Session(&gorm.Session{})
+	go func() {
+		q.Find(nil)
+	}()
+	for range outer {
+		for k, v := range inner {
+			q = q.Where(k, v).Session(&gorm.Session{})
+		}
+	}
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// rangeFuncBodyStoreAfterIf: the loop starts in the block after an if, so
+// what the if stored is seen with the body's store.
+func rangeFuncBodyStoreAfterIf(db *gorm.DB, c bool, seq iter.Seq2[string, any]) {
+	q := db.Session(&gorm.Session{})
+	if c {
+		q = db.Session(&gorm.Session{}).Where("c").Session(&gorm.Session{})
+	}
+	for k, v := range seq {
+		q = q.Where(k, v)
+	}
+	q.Find(nil)
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }

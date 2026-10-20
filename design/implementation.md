@@ -462,6 +462,8 @@ An interface method value has no declared method, so `origin.Declared` keeps the
 
 A method value's wrapper is never analyzed as a closure of its caller (`processFunction`, `isMethodValue`). That holds even when its receiver holds a `*gorm.DB`, so that the `MakeClosure` captures one. Analyzing it read the wrapper's parameter as a mutable parameter, and reported its forwarding call to an `immutable-param` method at no position (#255).
 
+A function literal that captures only a method value is analyzed (#341). In `find := q.Find; func() { find(&a) }()` the literal captures the variable `find`, whose type is a func, not a `*gorm.DB`. `ClosureCapturesGormDB` also accepts a captured variable that may hold a method value of a receiver that holds a `*gorm.DB` (`closureHoldsGormMethodValue`). Before #341 the closure was skipped, so its call of `q.Find` was no branch.
+
 As a last guard, `Analyzer.Analyze` moves a violation without a position to its call, then to the analyzed function (`positionedViolation`). A diagnostic at no position cannot be suppressed, and golangci-lint drops it.
 
 The fixes for a method value are in [Suggested fixes](#method-values-and-fixes).
@@ -692,6 +694,8 @@ The results do not change. The goldens, and `-json` and `-fix -diff` over `e2e/i
 - A root defined inside the body is in a loop block, so it is fresh on each iteration.
 - The body reaches outer variables through `FreeVar`s, so `q = q.Where(v)` inside it is a `Store` to a `FreeVar`, not to an `Alloc`. `isAssignment` treats a `FreeVar` as a merge point like an `Alloc` ([Which merges are reassignments](#which-merges-are-reassignments)). Its values are those of the captured variable, so the store is an assignment only when that variable can hold `root`. That is the in-place update of a plain loop. A store into another variable, such as `last = q.Where(v)`, still counts as a use of `q`.
 - A closure nested inside the body (an IIFE, a `defer`) runs once per run of the body, so it repeats as the body does.
+- A store in the body is a store at the loop (#341). The iterator calls the body only while the loop statement runs, so a read after the loop sees the body's stores, and the value before the loop too, since the body may run no time. That is what the loop-header Phi of a plain loop gives. Before #341 a read after the loop saw only the value before it. So `for k, v := range maps.All(f) { q = q.Where(k, v) }; q.Count(&n); q.Find(&us)` was missed ([Captured variables](#captured-variables)).
+- For the same reason, a read in the body sees only the stores that reach the loop, not those after it. Before #341 it also saw every later store, as a spawned closure does. So `q = db.Where("late")` after the loop made a query in the body a reuse on every iteration.
 
 <details><summary>Effect on gorm's own source (#252)</summary>
 
@@ -791,6 +795,7 @@ go func() { for … { update(id) } }()
 | --- | --- |
 | A comparison with nil (`if f != nil { f() }`) | Not a site: it does not run the closure (#309) |
 | A Phi of the closure, or a local variable that holds it | Followed to their uses. `held = f` in a loop with `held()` after it is one site after the loop |
+| A conversion to a named func type (`ChangeType`, #341) | Followed to its uses. `h := handlerFunc(func() { … }); h(); h()` is two sites. Before #341 the conversion was one site, and the body counted as run once |
 | A closure that captures that variable, at any depth | Followed. A call of `update` inside `run` is a site in `run`, and asks `run`'s own `Repeats` |
 | A slice element or a struct field | Not followed. The store is one site, and a call through it is a dynamic call (`repeatsClosureCalledThroughSlice`) |
 | Calls on two exclusive branches (`if c { f() } else { f() }`) | Not two runs |
@@ -1050,7 +1055,10 @@ A variable that a closure captures and that is reassigned lives in an `Alloc`, w
 | --- | --- |
 | In the function that declares the variable | The stores that reach the read |
 | In a closure declared there whose only uses are plain calls (`f()`, an IIFE) | The stores that reach any of those calls |
-| In any other closure: deferred, spawned, stored, passed on (errgroup's `Go`, a `Transaction` callback), a range-over-func body, or nested in another closure (#303) | The stores that reach the `MakeClosure` in the declaring function (the outermost one, for a nested closure), plus every store that can run after it (`fieldStoresAfter`) |
+| In a range-over-func body, or in a closure nested only in such bodies (#341) | The stores that reach the body's `MakeClosure` in the declaring function (`missesLaterStores`) |
+| In any other closure: deferred, spawned, stored, passed on (errgroup's `Go`, a `Transaction` callback), or nested in another closure (#303) | The stores that reach the `MakeClosure` in the declaring function (the outermost one, for a nested closure), plus every store that can run after it (`fieldStoresAfter`) |
+
+Every search also sees the stores of a range-over-func body, as stores at its `MakeClosure` (`yieldStores`, #341). Such a store does not end the backward walk, since the body may run no time. The stores of a loop nested in the body count, where its `MakeClosure` is. A read in a body does not see the body's own stores, as before: the receiver of `q = q.Where(v)` in the body resolves to the value before the loop, and `isAssignment` reads the store to the `FreeVar` as the reassignment.
 
 <details><summary>Why the MakeClosure, and fields through a captured pointer</summary>
 
@@ -1063,8 +1071,9 @@ A variable that a closure captures and that is reassigned lives in an `Alloc`, w
 Limitations:
 
 - The single-root trace takes the first store, in block order, that has a root, as `tracePhi` does for the edges of a Phi (`traceStores`, #340). Before #340 it took the first store. An immutable one, such as `q := db.WithContext(ctx)` before `if name != "" { q = q.Where(...) }`, then hid the mutable value of the other. A captured `q`, a struct field or a global was not reported where a plain local was.
-- A store made inside a closure is not seen (`closureModifiesCaptured`). This also fixes `p := &q; *p = db.Where("y")`, which is a direct store to `q`'s `Alloc` (`reassignPointerDeref`).
+- A store made inside a closure other than a range-over-func body is not seen (`closureModifiesCaptured`). This also fixes `p := &q; *p = db.Where("y")`, which is a direct store to `q`'s `Alloc` (`reassignPointerDeref`).
 - The fix's `mergedEdges` still gives a Session to a store that may run before two reads of the variable. A store whose own reads need none can get a redundant one.
+- `mergedEdges` does not see the stores of a range-over-func body. When the value before the loop is mutable, as in `q := db.Model(&User{}); for k, v := range seq { q = q.Where(k, v) }; q.Count(&n); q.Find(&us)`, `-fix` adds a Session only at `Model` (`rangeFuncBodyStoreAfterIf`). The next run then reports the `Where` in the body, and its fix ends it with a Session. When the value before the loop is immutable, as in #341's `WithContext`, one run fixes it (`RangeFuncFilter` in `e2e/internal/fixsql`).
 
 <details><summary>History (#251, #303)</summary>
 
@@ -1084,8 +1093,9 @@ The tracer keeps these searches in a `storeMemo`, per address, field path and fu
 | --- | --- | --- |
 | The stores that reach the start of a block (`fieldStoresInto`) | Block | A backward walk for every read. Only the part of the read's block before it is still scanned per read |
 | What the loads in a closure see (`observedFieldStores`) | Closure | Every load walked back from every call site of the closure. A closure called at `n` sites with `n/10` loads took 9 s at `n = 800` |
+| The stores of a range-over-func body (`yieldStores`, #341) | Body | Not seen before #341. Without the memo, a walk back from the last of `n` loops scanned the `n - 1` bodies before it again |
 
-The results are the same as the walks', so no report changes. `FieldStoredValues`, which the callback resolver calls with a nil load, keeps nothing (a nil `storeMemo`).
+The results are the same as the walks', so no report changes. A closure with one read returns that read's stores, which are in program order already. Otherwise `sortStoresInProgramOrder` merges the reads, and places a body's stores at its `MakeClosure`. It finds each `MakeClosure` with one scan of the function. Looking it up for every comparison scanned the function once per body, which made `n` loops cubic (`rangeloops` in the growth gate). `FieldStoredValues`, which the callback resolver calls with a nil load, keeps nothing (a nil `storeMemo`).
 
 </details>
 
@@ -1250,7 +1260,7 @@ Not reported. Each copy reads `q`, and nothing changed it in between (`TestSessi
 
 </details>
 
-**The alias use.** `RootTracer.FindAliasedRoots` finds the copies a value reaches through `FindAllMutableRoots`, so Phi, variables and closure captures work. It returns each copy's receiver root, following copies of copies. The call handler records an alias use for a gorm method receiver, a bound-method receiver, and a `*gorm.DB` argument of a non-gorm function.
+**The alias use.** `RootTracer.FindAliasedRoots` finds the copies a value reaches through `FindAllMutableRoots`, so Phi, variables and closure captures work. It returns each copy's receiver root, following copies of copies. A receiver that may hold several roots gives each of them, through `MutableRoots` (`aliasedRootsOf`, #341). So does a read-only argument. After `src := a; if c { src = b }`, a copy of `src` reads `b`'s Statement as much as `a`'s. Before #341 only the first root (`FindMutableRoot`) was given, so whether `b.Where("x").Find(&x); cp.Find(&y)` was reported depended on the order of the Phi's edges. An immutable value that the merge may hold, such as a `Session` result, has no Statement to change and is left out. The call handler records an alias use for a gorm method receiver, a bound-method receiver, and a `*gorm.DB` argument of a non-gorm function.
 
 `DetectViolations` reports an alias use when a polluting **or assignment** use of the root lies between the copy and the use, and reaches the use. Assignment uses count here because `q = q.Where(...)` changes a `clone == 0` Statement in place. A change before the copy is not counted. It already makes the `Session`/`Debug` call itself a second branch, so counting it again would duplicate that report.
 
@@ -1418,10 +1428,29 @@ On the safe side, the linter marks a `*gorm.DB` as polluted in these cases:
 | Map storage | `map[string]*gorm.DB{"k": db}` | |
 | Interface conversion | `interface{}(db)` | A type assertion may extract it. A read-only argument of a query method is the exception (#185) |
 | Function argument | `helper(db)` | A branch when the callee is not trusted as pure. A `*gorm.DB` result assigned back in a merge is an assignment, as for a gorm method |
+| A struct that holds it, handed to a call (#341) | `useDeps(deps{DB: q})`, `r := &repo{db: q}; r.active()` | A branch of each root that the struct's `*gorm.DB` fields hold, as for `helper(q)`. See below |
 | Struct field access | `h.field.Find(nil)` | Traced back to the value stored in the field, including fields reached through embedding (`outer{db: q}`, where `db` is promoted from an embedded struct) |
 
 > [!NOTE]
 > A struct literal store alone (`_ = &S{db: q}`) does NOT pollute. The linter tracks actual use through struct fields, not the store.
+
+**Structs handed on (#341).** A callee that gets a struct can reach the `*gorm.DB` inside it as well as one passed directly. Before #341 only a `*gorm.DB` argument, or one boxed in an interface, was a branch. So `useDeps(deps{DB: q}); q.Find(&us)` was missed, and at run time the helper's condition reached the later query (`e2e/internal/handoff_test.go`). `-fix` already took these hand-offs as escapes ([Struct stores](#struct-stores)). Now `handleHolders` makes them branches too:
+
+| Rule | Detail |
+| --- | --- |
+| What is handed on | An argument or the receiver of a call, `go` or `defer`, through a method value too: a struct, its address or a copy, also boxed in an interface. A closure that captures the struct and makes such a call makes it at its own site |
+| What it holds | `RootTracer.GormDBFieldValues`: the `*gorm.DB` fields it holds inline, at any depth of struct fields, embedded or not. Each field is read at the call as a field load is (`fieldStoredValuesAt`), so a field replaced before the call holds the new value. A pointer field is not followed |
+| Not a branch | A `*gorm.DB` method. A `pure` function. An inferred getter, whose call is read as the field it returns (`HasParamReads`, #342). A method of `gorm.Statement`, which reads only the configuration of its `DB` (`stmt.Parse(&User{})`). A static call into a package that does not reach gorm, with no function argument (`reflect.ValueOf(s)`) |
+| Not followed | A struct sent on a channel, stored in a slice, a map or memory other than a variable, or packed into a variadic argument (`fmt.Println(s)`). A call through an interface, whose receiver is boxed before the call |
+| No root | The field of a struct that a call returned (`FieldRoot`). `r := newRepo(db); r.a(); r.b()` stays unreported, as a call's struct is not a local one |
+
+Decisions:
+
+- **The same rule as `helper(q)`.** A callee that only reads the struct is still a branch, as `voidFunc(q)` is. Mark a read-only helper `//gormreuse:pure`.
+- **A getter only reads.** `r.DB()` is traced as `r.db` since #342, so the query on its result is the branch. Counting the call too made `r.DB().Find(&a)` two branches. `r.DB().Find(&a); r.DB().Find(&b)` is still reported, as both queries run on `q`. A getter that also branches the field in its body is missed.
+- **No fix.** `-fix` withholds the Session for a stored root that other code reaches ([Struct stores](#struct-stores)), and the reports here are such roots.
+
+On gorm's own repository the root module goes from 66 to 69 reports. Two pass a Statement that holds the query callback's handle to the Dialector interface's BindVarTo, in a loop. One hands gorm's preload builder to the user's `Preload` callback, which changes the handle in place. `tests`, new-api and gin-vue-admin are unchanged. Without the `gorm.Statement` rule, five more reports came from Statements that gorm builds around a handle and calls the methods of, such as Build and Parse.
 
 ### One handler for every call site
 
@@ -2394,7 +2423,7 @@ The #199 rule covers a discarded statement written on the root's variable. Other
 
 #### Struct stores
 
-A store of the root into a struct field is not a use (#310). Detection reads the fields of a local struct as the value stored in them (#181), so `s.db.Find(&x)` is a use of `q`. The handler marks nothing at the store either, so `UsageInfo.Escapes` never covered it. `s := &Svc{db: q}; s.apply(); q.Find(&a); q.Find(&b)` got a Session at `q` that made `apply` add its filter to a copy.
+A store of the root into a struct field is not a use (#310). Since #341 the call that is handed a local struct is a branch of the root in detection too ([Pollution sources](#pollution-sources)). Detection reads the fields of a local struct as the value stored in them (#181), so `s.db.Find(&x)` is a use of `q`. The handler marks nothing at the store either, so `UsageInfo.Escapes` never covered it. `s := &Svc{db: q}; s.apply(); q.Find(&a); q.Find(&b)` got a Session at `q` that made `apply` add its filter to a copy.
 
 <details><summary>Where other code reaches a stored root, and tests</summary>
 

@@ -1,6 +1,6 @@
 --- bound_method_values.go	1970-01-01 00:00:00
 +++ bound_method_values.go.golden	1970-01-01 00:00:00
-@@ -1,210 +1,210 @@
+@@ -1,239 +1,239 @@
  package internal
  
  import "gorm.io/gorm"
@@ -217,4 +217,35 @@
  	f := h.same
  	f(q).Find(nil)
  	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root \(root at [^)]+\)`
+ }
+ 
+ // boundMethodValueCapturedOnly: a closure that captures only the method value
+ // is analysed too (#341). Its call of find is a call of q.Find.
+ func boundMethodValueCapturedOnly(db *gorm.DB) {
+-	q := db.Where("x")
++	q := db.Where("x").Session(&gorm.Session{})
+ 	find := q.Find
+ 	func() { find(nil) }()
+ 	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // boundMethodValueCapturedNested: the method value is captured by a closure
+ // nested in another one.
+ func boundMethodValueCapturedNested(db *gorm.DB) {
+-	q := db.Where("x")
++	q := db.Where("x").Session(&gorm.Session{})
+ 	find := q.Find
+ 	func() {
+ 		func() { find(nil) }()
+ 	}()
+ 	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // boundMethodValueCapturedImmutable: a method value of an immutable receiver
+ // captured by a closure is no reuse.
+ func boundMethodValueCapturedImmutable(db *gorm.DB) {
+ 	q := db.Session(&gorm.Session{})
+ 	find := q.Find
+ 	func() { find(nil) }()
+ 	q.Count(nil)
  }

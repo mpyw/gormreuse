@@ -59,14 +59,18 @@ func (m *storeMemo) allocReachingStoreValues(alloc *ssa.Alloc, load ssa.Instruct
 //
 // A load in fn sees the stores that reach it. A load in a closure declared in
 // fn whose only uses are plain calls sees the stores that reach those calls.
-// Any other closure, deferred, spawned, stored, passed on, used as a
-// range-over-func body, or nested deeper, runs at some point after the
-// MakeClosure that fn runs for it, so it sees the stores that reach that
-// MakeClosure and every store that can run after it:
+// Any other closure, deferred, spawned, stored, passed on, or nested deeper,
+// runs at some point after the MakeClosure that fn runs for it, so it sees the
+// stores that reach that MakeClosure and every store that can run after it:
 //
 //	db = db.WithContext(ctx)                // reaches the MakeClosure
 //	g.Go(func() error { return db.... })    // sees WithContext, not the parameter
 //	db = db.Where("x")                      // runs after it: seen too
+//
+// A range-over-func body, and a closure nested only in such bodies, runs only
+// while its loop statement does, so it sees only the stores that reach the
+// MakeClosure (#341, see missesLaterStores). A read in a body does not see
+// the body's own stores, as before.
 //
 // A load that no MakeClosure in fn leads to sees every store, as a nil load
 // does.
@@ -105,7 +109,13 @@ func (m *storeMemo) closureObservedStores(fn *ssa.Function, target storeTarget, 
 	}
 	if len(reads) == 0 {
 		reads = []ssa.Instruction{mc}
-		stores = fieldStoresAfter(target, path, mc)
+		if !missesLaterStores(closure, fn) {
+			stores = m.fieldStoresAfter(target, path, mc)
+		}
+	}
+	if len(reads) == 1 && len(stores) == 0 {
+		// The stores of one read are in program order already.
+		return m.reachingFieldStores(fn, target, path, reads[0])
 	}
 	found := make(map[*ssa.Store]bool, len(stores))
 	for _, store := range stores {
@@ -121,8 +131,23 @@ func (m *storeMemo) closureObservedStores(fn *ssa.Function, target storeTarget, 
 			}
 		}
 	}
-	stores = slices.Clip(slices.Compact(sortStoresInProgramOrder(stores)))
+	stores = slices.Clip(sortStoresInProgramOrder(fn, stores))
 	return stores, open
+}
+
+// missesLaterStores reports whether closure cannot see a store made after its
+// MakeClosure in fn: it is a range-over-func body in fn, or nested in fn only
+// through such bodies (#341). It runs only while the loop
+// statement runs, and go/ssa panics on a call of it after the statement ends,
+// so no store after the statement reaches it. A store on a later iteration of
+// a loop around the statement reaches the MakeClosure on the back-edge.
+func missesLaterStores(closure, fn *ssa.Function) bool {
+	for f := closure; f != fn; f = f.Parent() {
+		if !cfg.IsRangeFuncLoopBody(f) {
+			return false
+		}
+	}
+	return true
 }
 
 // makeClosureInStoreFunc returns the MakeClosure in fn that creates closure, or
@@ -140,18 +165,28 @@ func makeClosureInStoreFunc(fn, closure *ssa.Function) *ssa.MakeClosure {
 // fieldStoresAfter returns the stores that write the field that path selects
 // from target and can run after from: on some CFG path that leaves from. As in
 // reachingFieldStores, a path ends at the call that defines the root, since a
-// store past it writes the struct of a later iteration.
-func fieldStoresAfter(target storeTarget, path []int, from ssa.Instruction) []*ssa.Store {
+// store past it writes the struct of a later iteration. The stores of a
+// range-over-func body run where the loop does (see yieldStores). from is
+// never the MakeClosure of such a body (see missesLaterStores).
+func (m *storeMemo) fieldStoresAfter(target storeTarget, path []int, from ssa.Instruction) []*ssa.Store {
 	def, _ := target.root.(*ssa.Call)
 	var found []*ssa.Store
+	add := func(store *ssa.Store) {
+		if !slices.Contains(found, store) {
+			found = append(found, store)
+		}
+	}
 	// scan collects the stores in instrs and reports whether def ends the path.
 	scan := func(instrs []ssa.Instruction) bool {
 		for _, instr := range instrs {
 			if def != nil && instr == ssa.Instruction(def) {
 				return true
 			}
-			if store, ok := instr.(*ssa.Store); ok && storeWritesFieldPath(store, target, path) && !slices.Contains(found, store) {
-				found = append(found, store)
+			if store, ok := instr.(*ssa.Store); ok && storeWritesFieldPath(store, target, path) {
+				add(store)
+			}
+			for _, store := range m.yieldStores(target, path, instr) {
+				add(store)
 			}
 		}
 		return false
@@ -178,15 +213,116 @@ func fieldStoresAfter(target storeTarget, path []int, from ssa.Instruction) []*s
 	return found
 }
 
-// sortStoresInProgramOrder sorts stores by block, then by position in it.
-func sortStoresInProgramOrder(stores []*ssa.Store) []*ssa.Store {
-	slices.SortFunc(stores, func(a, b *ssa.Store) int {
-		if a.Block() != b.Block() {
-			return a.Block().Index - b.Block().Index
+// sortStoresInProgramOrder sorts stores, which are distinct, by block of fn,
+// then by position in it. A store in a range-over-func body is placed at the
+// MakeClosure in fn that creates the body (see yieldStores), and the stores
+// placed there keep their order.
+func sortStoresInProgramOrder(fn *ssa.Function, stores []*ssa.Store) []*ssa.Store {
+	// The MakeClosure in fn of each closure that fn creates, found on the
+	// first store outside fn.
+	var closures map[*ssa.Function]*ssa.MakeClosure
+	anchor := func(store *ssa.Store) ssa.Instruction {
+		f := store.Parent()
+		if f == fn {
+			return store
 		}
-		return slices.Index(a.Block().Instrs, ssa.Instruction(a)) - slices.Index(b.Block().Instrs, ssa.Instruction(b))
+		for f.Parent() != fn {
+			f = f.Parent()
+		}
+		if closures == nil {
+			closures = make(map[*ssa.Function]*ssa.MakeClosure)
+			for _, block := range fn.Blocks {
+				for _, instr := range block.Instrs {
+					if mc, ok := instr.(*ssa.MakeClosure); ok {
+						closures[mc.Fn.(*ssa.Function)] = mc
+					}
+				}
+			}
+		}
+		return closures[f]
+	}
+	type keyed struct {
+		store        *ssa.Store
+		block, index int
+	}
+	keys := make([]keyed, len(stores))
+	for i, store := range stores {
+		at := anchor(store)
+		keys[i] = keyed{store, at.Block().Index, slices.Index(at.Block().Instrs, at)}
+	}
+	slices.SortStableFunc(keys, func(a, b keyed) int {
+		if a.block != b.block {
+			return a.block - b.block
+		}
+		return a.index - b.index
 	})
+	for i, k := range keys {
+		stores[i] = k.store
+	}
 	return stores
+}
+
+// yieldStores returns, in program order, the stores that write the field that
+// path selects from target in the range-over-func body that instr creates,
+// when instr is the MakeClosure of one (#341). The body reaches target
+// through its FreeVars (see storeTarget.inBody). The stores of a loop nested
+// in the body are included, where its MakeClosure is.
+//
+// A body runs only while its loop statement runs: the iterator calls it right
+// after the MakeClosure, and a call after the loop ends panics. So its stores
+// are taken as stores at the MakeClosure. A body may run no time, so they do
+// not replace what was stored before:
+//
+//	q := db.WithContext(ctx)
+//	for k, v := range maps.All(filters) {
+//		q = q.Where(k+" = ?", v) // a store to q's FreeVar in the body
+//	}
+//	q.Find(&users)               // sees WithContext and the Where
+//
+// Before #341 a read after the loop saw only WithContext, so a reuse of the
+// Where was missed. A store in any other closure is still not seen.
+//
+// The stores of each body are kept in m, so a walk that passes n loops does
+// not scan their bodies again: a read after n loops, each in a loop body,
+// scanned the earlier bodies once per read.
+func (m *storeMemo) yieldStores(target storeTarget, path []int, instr ssa.Instruction) []*ssa.Store {
+	mc, ok := instr.(*ssa.MakeClosure)
+	if !ok {
+		return nil
+	}
+	body, ok := mc.Fn.(*ssa.Function)
+	if !ok || !cfg.IsRangeFuncLoopBody(body) {
+		return nil
+	}
+	if m == nil {
+		return m.searchYieldStores(target, path, mc, body)
+	}
+	key := yieldStoreKey{storeQueryOf(nil, target, path), mc}
+	found, ok := m.yields[key]
+	if !ok {
+		found = m.searchYieldStores(target, path, mc, body)
+		m.yields[key] = found
+	}
+	return found
+}
+
+// searchYieldStores is yieldStores without the memo, for the body that mc
+// creates.
+func (m *storeMemo) searchYieldStores(target storeTarget, path []int, mc *ssa.MakeClosure, body *ssa.Function) []*ssa.Store {
+	inner, ok := target.inBody(mc, body)
+	if !ok {
+		return nil
+	}
+	var found []*ssa.Store
+	for _, block := range body.Blocks {
+		for _, instr := range block.Instrs {
+			if store, ok := instr.(*ssa.Store); ok && storeWritesFieldPath(store, inner, path) {
+				found = append(found, store)
+			}
+			found = append(found, m.yieldStores(inner, path, instr)...)
+		}
+	}
+	return slices.Clip(found)
 }
 
 // AllocStoredValues returns, in program order, the values stored into alloc.
@@ -246,7 +382,7 @@ func (m *storeMemo) fieldValueStoredValues(f *ssa.Field) []ssa.Value {
 // structFieldStoredValues returns the values of the field that path selects
 // from the struct value x. seen stops Phi cycles through loops.
 //
-//declscope:shared // param_read.go selects the fields of a struct argument with it
+//declscope:shared // param_read.go selects the fields of a struct argument with it, and field.go's GormDBFieldValues those of a struct handed to a call
 func (m *storeMemo) structFieldStoredValues(x ssa.Value, path []int, seen map[ssa.Value]bool) []ssa.Value {
 	for {
 		field, ok := x.(*ssa.Field)
@@ -291,7 +427,7 @@ func (m *storeMemo) structFieldStoredValues(x ssa.Value, path []int, seen map[ss
 // defining function, reached through a captured pointer, sees the stores that
 // reach the closure's calls or creation and those that run after it (#303).
 //
-//declscope:shared // param_read.go selects the fields of a pointer argument with it
+//declscope:shared // param_read.go selects the fields of a pointer argument with it, and field.go's GormDBFieldValues those of a struct handed to a call
 func (m *storeMemo) fieldStoredValuesAt(fn *ssa.Function, root ssa.Value, path []int, load ssa.Instruction) []ssa.Value {
 	var vals []ssa.Value
 	for _, base := range fieldBaseAddrs(root, make(map[ssa.Value]bool)) {
@@ -360,7 +496,8 @@ func (m *storeMemo) fieldStoredValuesFrom(fn *ssa.Function, root ssa.Value, path
 		switch agg := store.Val.(type) {
 		case *ssa.UnOp:
 			if agg.Op == token.MUL {
-				vals = append(vals, m.fieldStoredValuesFrom(fn, agg.X, path[len(storePath):], agg, seen)...)
+				// The copy may be in a range-over-func body (yieldStores).
+				vals = append(vals, m.fieldStoredValuesFrom(agg.Parent(), agg.X, path[len(storePath):], agg, seen)...)
 			}
 		case *ssa.Call:
 			vals = append(vals, &FieldRoot{Call: agg, Path: slices.Clone(path[len(storePath):])})
@@ -383,9 +520,12 @@ func (m *storeMemo) fieldStoredValuesFrom(fn *ssa.Function, root ssa.Value, path
 //
 // With more than one store in slot, a load of it may hold another pointer, so
 // a store through it is not matched, as before.
+//
+// In a range-over-func body, both are the FreeVars that the body reads them
+// through (see inBody), so slot is not always an Alloc.
 type storeTarget struct {
 	root ssa.Value
-	slot *ssa.Alloc
+	slot ssa.Value
 }
 
 // newStoreTarget returns the storeTarget of root.
@@ -425,7 +565,26 @@ func (target storeTarget) holds(addr ssa.Value) bool {
 		return true
 	}
 	load, ok := addr.(*ssa.UnOp)
-	return ok && target.slot != nil && load.Op == token.MUL && load.X == ssa.Value(target.slot)
+	return ok && target.slot != nil && load.Op == token.MUL && load.X == target.slot
+}
+
+// inBody returns target as the range-over-func body that mc creates reaches
+// it: through the FreeVar of each address that mc binds. A package-level
+// variable is reached directly. ok is false when the body reaches neither
+// address.
+func (target storeTarget) inBody(mc *ssa.MakeClosure, body *ssa.Function) (inner storeTarget, ok bool) {
+	if _, global := target.root.(*ssa.Global); global {
+		inner.root = target.root
+	}
+	for i, binding := range mc.Bindings {
+		switch binding {
+		case target.root:
+			inner.root = body.FreeVars[i]
+		case target.slot:
+			inner.slot = body.FreeVars[i]
+		}
+	}
+	return inner, inner.root != nil || inner.slot != nil
 }
 
 // fieldStorePath returns the field path that store writes below target. ok is
@@ -486,61 +645,85 @@ func (m *storeMemo) reachingFieldStores(fn *ssa.Function, target storeTarget, pa
 	}
 	start := load.Block()
 	instrs, defined := fieldStoreDefTail(target, start.Instrs[:slices.Index(start.Instrs, load)])
-	if store := lastFieldStore(target, path, instrs); store != nil {
-		return []*ssa.Store{store}, false
+	last, written := m.appendLastFieldStores(nil, target, path, instrs)
+	switch {
+	case written:
+		return last, false
+	case defined:
+		return last, true
 	}
-	if defined {
-		return nil, true
+	before, open := m.fieldStoresInto(fn, target, path, start)
+	if len(last) == 0 {
+		return before, open
 	}
-	return m.fieldStoresInto(fn, target, path, start)
+	// A loop back to start already put start's stores in before.
+	stores = slices.Clone(before)
+	for _, store := range last {
+		if !slices.Contains(before, store) {
+			stores = append(stores, store)
+		}
+	}
+	return stores, open
 }
 
 // fieldStoresInto returns reachingFieldStores for a read at the start of
 // block, or for a nil load when block is nil. The result is kept in m.
 func (m *storeMemo) fieldStoresInto(fn *ssa.Function, target storeTarget, path []int, block *ssa.BasicBlock) (stores []*ssa.Store, open bool) {
 	if m == nil {
-		return searchFieldStoresInto(fn, target, path, block)
+		return m.searchFieldStoresInto(fn, target, path, block)
 	}
 	key := reachingStoreKey{storeQueryOf(fn, target, path), block}
 	if seen, ok := m.reaching[key]; ok {
 		return seen.stores, seen.open
 	}
-	stores, open = searchFieldStoresInto(fn, target, path, block)
+	stores, open = m.searchFieldStoresInto(fn, target, path, block)
 	m.reaching[key] = storedReach{stores, open}
 	return stores, open
 }
 
 // searchFieldStoresInto is fieldStoresInto without the memo.
-func searchFieldStoresInto(fn *ssa.Function, target storeTarget, path []int, block *ssa.BasicBlock) ([]*ssa.Store, bool) {
+func (m *storeMemo) searchFieldStoresInto(fn *ssa.Function, target storeTarget, path []int, block *ssa.BasicBlock) ([]*ssa.Store, bool) {
 	if block == nil {
-		return slices.Clip(allFieldStores(fn, target, path)), true
+		return slices.Clip(m.allFieldStores(fn, target, path)), true
 	}
-	stores, open := walkFieldStoresBack(target, path, block)
+	stores, open := m.walkFieldStoresBack(target, path, block)
 	return slices.Clip(stores), open
 }
 
 // allFieldStores returns, in program order, every store in fn that writes the
-// field that path selects from target.
-func allFieldStores(fn *ssa.Function, target storeTarget, path []int) []*ssa.Store {
+// field that path selects from target, with those of its range-over-func
+// bodies (see yieldStores).
+func (m *storeMemo) allFieldStores(fn *ssa.Function, target storeTarget, path []int) []*ssa.Store {
 	var all []*ssa.Store
 	for _, block := range fn.Blocks {
 		for _, instr := range block.Instrs {
 			if store, ok := instr.(*ssa.Store); ok && storeWritesFieldPath(store, target, path) {
 				all = append(all, store)
 			}
+			all = append(all, m.yieldStores(target, path, instr)...)
 		}
 	}
 	return all
 }
 
-// lastFieldStore returns the last store in instrs that writes the field.
-func lastFieldStore(target storeTarget, path []int, instrs []ssa.Instruction) *ssa.Store {
+// appendLastFieldStores appends to dst, in program order, the stores in
+// instrs that the end of instrs sees: the last store that writes the field,
+// and the stores of each range-over-func body after it (see yieldStores).
+// written reports whether there is such a last store. A body may run no time,
+// so its stores do not end the search.
+func (m *storeMemo) appendLastFieldStores(dst []*ssa.Store, target storeTarget, path []int, instrs []ssa.Instruction) (stores []*ssa.Store, written bool) {
+	start := len(dst)
 	for _, instr := range slices.Backward(instrs) {
 		if store, ok := instr.(*ssa.Store); ok && storeWritesFieldPath(store, target, path) {
-			return store
+			dst, written = append(dst, store), true
+			break
+		}
+		for _, store := range slices.Backward(m.yieldStores(target, path, instr)) {
+			dst = append(dst, store)
 		}
 	}
-	return nil
+	slices.Reverse(dst[start:])
+	return dst, written
 }
 
 // fieldStoreDefTail returns the part of instrs that can write the field of
@@ -564,12 +747,13 @@ func fieldStoreDefTail(target storeTarget, instrs []ssa.Instruction) ([]ssa.Inst
 // that path with its last such store. block itself is scanned in full when a
 // loop leads back to it, since its stores then run before its start on the
 // next iteration.
-func walkFieldStoresBack(target storeTarget, path []int, block *ssa.BasicBlock) (found []*ssa.Store, open bool) {
+func (m *storeMemo) walkFieldStoresBack(target storeTarget, path []int, block *ssa.BasicBlock) (found []*ssa.Store, open bool) {
 	if len(block.Preds) == 0 {
 		return nil, true
 	}
 	visitedBlocks := make(map[*ssa.BasicBlock]bool)
 	work := slices.Clone(block.Preds)
+	var spans []blockStores
 	for len(work) > 0 {
 		block := work[len(work)-1]
 		work = work[:len(work)-1]
@@ -578,21 +762,42 @@ func walkFieldStoresBack(target storeTarget, path []int, block *ssa.BasicBlock) 
 		}
 		visitedBlocks[block] = true
 		instrs, defined := fieldStoreDefTail(target, block.Instrs)
-		if store := lastFieldStore(target, path, instrs); store != nil {
-			found = append(found, store)
-			continue
+		start := len(found)
+		var written bool
+		found, written = m.appendLastFieldStores(found, target, path, instrs)
+		if len(found) > start {
+			spans = append(spans, blockStores{block.Index, start, len(found)})
 		}
-		if defined || len(block.Preds) == 0 {
+		switch {
+		case written:
+			continue
+		case defined || len(block.Preds) == 0:
 			open = true
 			continue
 		}
 		work = append(work, block.Preds...)
 	}
-	// Each block contributes at most one store, so block order is program
-	// order.
-	slices.SortFunc(found, func(a, b *ssa.Store) int { return a.Block().Index - b.Block().Index })
-	return found, open
+	// Each block's stores are in program order, so block order makes the
+	// whole program order.
+	if slices.IsSortedFunc(spans, compareBlockStores) {
+		return found, open
+	}
+	slices.SortFunc(spans, compareBlockStores)
+	ordered := make([]*ssa.Store, 0, len(found))
+	for _, b := range spans {
+		ordered = append(ordered, found[b.start:b.end]...)
+	}
+	return ordered, open
 }
+
+// blockStores is the part found[start:end] of what walkFieldStoresBack finds
+// that the block with this index holds.
+type blockStores struct {
+	index, start, end int
+}
+
+// compareBlockStores orders blockStores by block.
+func compareBlockStores(a, b blockStores) int { return a.index - b.index }
 
 // storeMemo keeps the stores that reads of an address see (#325). A nil
 // storeMemo keeps nothing, for the callers outside a tracer.
@@ -606,6 +811,8 @@ type storeMemo struct {
 	reaching map[reachingStoreKey]storedReach // What reaches the start of each block, or every store for a nil block
 	//declscope:private
 	observed map[observedStoreKey]storedReach // What the loads in each closure see
+	//declscope:private
+	yields map[yieldStoreKey][]*ssa.Store // The stores of each range-over-func body (#341)
 }
 
 // newStoreMemo returns an empty storeMemo.
@@ -615,6 +822,7 @@ func newStoreMemo() *storeMemo {
 	return &storeMemo{
 		reaching: make(map[reachingStoreKey]storedReach),
 		observed: make(map[observedStoreKey]storedReach),
+		yields:   make(map[yieldStoreKey][]*ssa.Store),
 	}
 }
 
@@ -622,7 +830,7 @@ func newStoreMemo() *storeMemo {
 type storeQuery struct {
 	fn   *ssa.Function
 	root ssa.Value
-	slot *ssa.Alloc
+	slot ssa.Value
 	path string
 }
 
@@ -640,6 +848,13 @@ func storeQueryOf(fn *ssa.Function, target storeTarget, path []int) storeQuery {
 type reachingStoreKey struct {
 	storeQuery
 	block *ssa.BasicBlock
+}
+
+// yieldStoreKey is a yieldStores search in the body that mc creates. Its fn
+// is nil: the body, reached through mc, defines where it searches.
+type yieldStoreKey struct {
+	storeQuery
+	mc *ssa.MakeClosure
 }
 
 // observedStoreKey is an observedFieldStores search for the loads in closure.

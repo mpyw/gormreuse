@@ -85,18 +85,34 @@ func (t *RootTracer) collectAliasedRoots(v ssa.Value, loopInfo *cfg.LoopInfo, co
 		seen[aliasedRootVisit{call, copies}] = true
 		isCopy := copies && t.aliasSharesStatement(site)
 		if isCopy {
-			if r := t.FindMutableRoot(site.Recv, loopInfo); r != nil {
+			for _, r := range t.aliasedRootsOf(site.Recv, loopInfo) {
 				*roots = append(*roots, AliasedRoot{Root: r, Copy: call})
 			}
 		}
 		for _, arg := range pollutionsource.ReadOnlyGormArgs(site) {
-			if r := t.FindMutableRoot(arg, loopInfo); r != nil {
+			for _, r := range t.aliasedRootsOf(arg, loopInfo) {
 				*roots = append(*roots, AliasedRoot{Root: r, Copy: call, Argument: true})
 			}
 			t.collectAliasedRoots(arg, loopInfo, true, seen, roots)
 		}
 		t.collectAliasedRoots(site.Recv, loopInfo, isCopy, seen, roots)
 	}
+}
+
+// aliasedRootsOf returns the roots whose Statement a copy of v, or v passed as
+// a read-only argument, reads: every mutable root that v may hold
+// (MutableRoots), not only the first. After `src := a; if c { src = b }`, a
+// copy of src reads b's Statement as much as a's, whichever edge comes first
+// (#341). A merge may also hold an immutable value, such as a Session result,
+// which has no Statement of its own to change, so it is left out.
+func (t *RootTracer) aliasedRootsOf(v ssa.Value, loopInfo *cfg.LoopInfo) []ssa.Value {
+	roots := t.MutableRoots(v, loopInfo)
+	for i := len(roots) - 1; i > 0; i-- {
+		if t.IsImmutableCall(roots[i]) {
+			roots = slices.Delete(roots, i, i+1)
+		}
+	}
+	return roots
 }
 
 // mayAlias reports whether collectAliasedRoots(v, loopInfo, copies, ...) may
@@ -151,6 +167,8 @@ func (t *RootTracer) mayAliasVisit(key aliasedRootsKey, s *aliasCycles) (bool, i
 			return false
 		}
 		isCopy := key.copies && t.aliasSharesStatement(site)
+		// aliasedRootsOf has a root exactly when FindMutableRoot does, so
+		// the first root answers for all of them.
 		if isCopy && t.FindMutableRoot(site.Recv, key.loopInfo) != nil {
 			return true
 		}

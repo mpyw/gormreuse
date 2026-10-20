@@ -245,3 +245,26 @@ func rcsMergedSessionInLoop(db *gorm.DB, batch int) {
 		queryDB = tx.Clauses("x")
 	}
 }
+
+// rcsHandlerFunc is a named func type that a closure is converted to.
+type rcsHandlerFunc func()
+
+// rcsChangeTypeCalledTwice: a closure converted to a named func type is the
+// same closure, so two calls of it run the body twice (#341).
+func rcsChangeTypeCalledTwice(db *gorm.DB) {
+	q := db.Where("x").Session(&gorm.Session{})
+	h := rcsHandlerFunc(func() {
+		q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	})
+	h()
+	h()
+}
+
+// rcsChangeTypeCalledOnce: one call runs the body once.
+func rcsChangeTypeCalledOnce(db *gorm.DB) {
+	q := db.Where("x")
+	h := rcsHandlerFunc(func() {
+		q.Find(nil)
+	})
+	h()
+}

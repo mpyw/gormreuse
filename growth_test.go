@@ -487,6 +487,32 @@ var growthCases = []growthCase{
 		b.WriteString("\tq.Count(nil)\n\tq.Find(nil)\n}\n")
 		return []string{b.String()}
 	}},
+	// n sequential range-over-func loops rebuilding one query, then two uses.
+	// The stores of each body are seen where its loop is (#341), so the read
+	// in each body may hold the root of every body before it. A body sees only
+	// the stores that reach its loop, not those of the bodies after it, and the
+	// stores of a body are searched once. The shape was as superlinear before
+	// #341, from the Repeats of the n bodies.
+	{name: "rangeloops", limit: growthQuadratic, shape: func(n int) []string {
+		var b strings.Builder
+		b.WriteString("func f(db *gorm.DB, seq func(func(string) bool)) {\n\tq := db.Model(nil)\n")
+		for range n {
+			b.WriteString("\tfor x := range seq {\n\t\tq = q.Where(x)\n\t}\n")
+		}
+		b.WriteString("\tq.Count(nil)\n\tq.Find(nil)\n}\n")
+		return []string{b.String()}
+	}},
+	// n struct hand-offs of one root, as arguments and as receivers (#341).
+	{name: "handoffs", limit: growthNearLinear, shape: func(n int) []string {
+		var b strings.Builder
+		b.WriteString("type S struct{ db *gorm.DB }\n\nfunc (s *S) m() {}\n\nfunc use(S) {}\n\n")
+		b.WriteString("func f(db *gorm.DB) {\n\tq := db.Model(nil)\n\tr := &S{db: q}\n")
+		for range n {
+			b.WriteString("\tuse(S{db: q})\n\tr.m()\n")
+		}
+		b.WriteString("}\n")
+		return []string{b.String()}
+	}},
 	// n sequential loops, each uses a fixed root (n diagnostics, n loops).
 	{name: "loopsuse", limit: growthQuadratic, shape: func(n int) []string {
 		var b strings.Builder

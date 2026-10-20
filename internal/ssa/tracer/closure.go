@@ -19,9 +19,33 @@ import (
 //
 // Looks through pointer chains (*gorm.DB, **gorm.DB, ...) and struct fields, so
 // a closure capturing a struct that holds a *gorm.DB is analyzed too (#181).
+// A captured variable that holds a method value of such a receiver counts too
+// (#341): `find := q.Find; func() { find(nil) }()` calls q.Find.
 func ClosureCapturesGormDB(mc *ssa.MakeClosure) bool {
 	return slices.ContainsFunc(mc.Bindings, func(binding ssa.Value) bool {
-		return closureHoldsGormDB(binding.Type(), make(map[types.Type]bool))
+		return closureHoldsGormDB(binding.Type(), make(map[types.Type]bool)) || closureHoldsGormMethodValue(binding)
+	})
+}
+
+// closureHoldsGormMethodValue reports whether binding, a variable that a closure
+// captures, may hold a method value whose receiver holds a *gorm.DB (see
+// closureHoldsGormDB). Any value stored into the variable counts, and a
+// FreeVar is followed to the variable that its closure captures.
+func closureHoldsGormMethodValue(binding ssa.Value) bool {
+	alloc, ok := binding.(*ssa.Alloc)
+	if fv, nested := binding.(*ssa.FreeVar); nested {
+		alloc, ok = freeVarAlloc(fv)
+	}
+	if !ok {
+		return false
+	}
+	return slices.ContainsFunc(AllocStoredValues(alloc), func(v ssa.Value) bool {
+		mc, ok := v.(*ssa.MakeClosure)
+		if !ok {
+			return false
+		}
+		site, bound := callsite.BoundSite(mc)
+		return bound && closureHoldsGormDB(site.Recv.Type(), make(map[types.Type]bool))
 	})
 }
 
