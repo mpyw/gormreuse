@@ -18,7 +18,10 @@ import (
 // variable (see findReassignedChains). That is so when:
 //   - a use hands the root to other code, such as a helper, a closure or a
 //     container, which may change it in place (see UsageInfo.Escapes), and
-//     a later use may see the change (see changeSeenAfterEscape);
+//     a later use may see the change (see changeSeenAfterEscape). A helper
+//     that only runs queries on it, or a recursive call that the fix's own
+//     body Session isolates, does not count (see handoffKeepsChanges, #347).
+//     noDiscarded says that the fix reassigns no discarded statement;
 //   - the Error, RowsAffected or Statement field is read from the root, or
 //     from a chain on it that runs no query. Such a read sees what the calls
 //     on the root left in it: the errors of its queries, or the conditions of
@@ -40,10 +43,10 @@ import (
 // A Session at the root makes each of them see a copy (#243).
 //
 //declscope:shared // generator.go's Generate withholds the fix with it
-func (g *Generator) changedElsewhere(v pollution.Violation) bool {
+func (g *Generator) changedElsewhere(v pollution.Violation, noDiscarded bool) bool {
 	ordered := usesOrdered(v)
 	for _, use := range v.AllUses {
-		if use.Escapes && changeSeenAfterEscape(g.cfg, tracer.RootBlock(v.Root), use, v.AllUses, ordered, g.tracer.FuncVars()) {
+		if use.Escapes && changeSeenAfterEscape(g.cfg, tracer.RootBlock(v.Root), use, v.AllUses, ordered, g.tracer.FuncVars()) && !g.handoffKeepsChanges(v, use, noDiscarded) {
 			return true
 		}
 	}

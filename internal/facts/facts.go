@@ -53,6 +53,10 @@ type Func struct {
 	// ImmutableInput holds the //gormreuse:immutable-input(name) callbacks of
 	// a function whose body keeps the contract.
 	ImmutableInput []directive.ImmutableInputCallback
+	// FinisherOnly holds the indexes into the parameters, the receiver first,
+	// of the *gorm.DB parameters that the function uses only to run queries.
+	// A fix in a caller may then give an argument a Session (#347).
+	FinisherOnly []int
 }
 
 // AFact marks Func as an analysis fact.
@@ -78,13 +82,14 @@ func (f *Func) String() string {
 	for _, cb := range f.ImmutableInput {
 		add(true, "immutable-input("+cb.ParamName+")")
 	}
+	add(len(f.FinisherOnly) > 0, fmt.Sprintf("finisher-only%v", f.FinisherOnly))
 	return strings.Join(words, " ")
 }
 
 // isZero reports whether f says nothing.
 func (f *Func) isZero() bool {
 	return !f.Pure && !f.PureFailed && len(f.Returned) == 0 && !f.ReturnsOnlyParams &&
-		!f.ImmutableReturn && len(f.ParamReads) == 0 && !f.BranchesImmutableParam && len(f.ImmutableInput) == 0
+		!f.ImmutableReturn && len(f.ParamReads) == 0 && !f.BranchesImmutableParam && len(f.ImmutableInput) == 0 && len(f.FinisherOnly) == 0
 }
 
 // Table reads the facts of functions declared in other packages. A nil Table

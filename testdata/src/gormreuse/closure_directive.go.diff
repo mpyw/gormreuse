@@ -76,7 +76,8 @@
  		_ = q
  	}
  
- 	q := db.Where("base")
+-	q := db.Where("base")
++	q := db.Where("base").Session(&gorm.Session{})
  	impureHelper(q)
  	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  }
@@ -479,7 +480,8 @@
  	a(q)
  	q.Find(nil) // OK - a is pure
  
- 	q2 := db.Where("base2")
+-	q2 := db.Where("base2")
++	q2 := db.Where("base2").Session(&gorm.Session{})
  	b(q2)
  	q2.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  }
@@ -494,7 +496,8 @@
  	a(q)
  	q.Find(nil) // OK - a is pure
  
- 	q2 := db.Where("base2")
+-	q2 := db.Where("base2")
++	q2 := db.Where("base2").Session(&gorm.Session{})
  	b(q2)
  	q2.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  }
@@ -567,7 +570,8 @@
  	a(q1)
  	q1.Find(nil) // OK - a is pure
  
- 	q2 := db.Where("base2")
+-	q2 := db.Where("base2")
++	q2 := db.Where("base2").Session(&gorm.Session{})
  	b(q2)
  	q2.Find(nil) // want "reused"
  

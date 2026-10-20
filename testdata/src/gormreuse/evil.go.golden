@@ -318,7 +318,7 @@ func helperPollute(db *gorm.DB) {
 // interProceduralPollution demonstrates function call pollution detection.
 // Functions receiving *gorm.DB are assumed to pollute unless marked pure.
 func interProceduralPollution(db *gorm.DB) {
-	q := db.Where("x = ?", 1)
+	q := db.Where("x = ?", 1).Session(&gorm.Session{})
 	helperPollute(q) // Marks q as polluted (function assumed to pollute)
 
 	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
@@ -769,7 +769,7 @@ func nestedIIFE(db *gorm.DB) {
 
 // iifeWithArgument demonstrates IIFE with argument passing.
 func iifeWithArgument(db *gorm.DB) {
-	q := db.Where("x = ?", 1)
+	q := db.Where("x = ?", 1).Session(&gorm.Session{})
 
 	func(d *gorm.DB) {
 		d.Find(nil)

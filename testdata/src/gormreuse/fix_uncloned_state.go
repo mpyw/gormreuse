@@ -65,7 +65,7 @@ func ucsAssignOnEdge(db *gorm.DB, upsert bool) {
 // Session would drop. It is exported, so it would get the body Session.
 //
 // [LIMITATION] No fix.
-func UcsParamFirstOrCreate(tx *gorm.DB) {
+func UcsParamFirstOrCreate(tx *gorm.DB) { // want UcsParamFirstOrCreate:`gormreuse finisher-only\[0\]`
 	var u User
 	tx.Where("name = ?", "a").FirstOrCreate(&u)
 	tx.Where("name = ?", "b").FirstOrCreate(&u) // want `a Session would drop its Attrs, Assign or InstanceSet`
@@ -119,7 +119,7 @@ func ucsSetRoot(db *gorm.DB) {
 }
 
 // UcsParamFind: a parameter that reaches no FirstOrInit or FirstOrCreate.
-func UcsParamFind(tx *gorm.DB) {
+func UcsParamFind(tx *gorm.DB) { // want UcsParamFind:`gormreuse finisher-only\[0\]`
 	tx.Where("a = 1").Find(&[]User{})
 	tx.Where("b = 1").Find(&[]User{}) // want `make the root immutable with \.Session`
 }

@@ -226,7 +226,7 @@ func (namedCallbackRepo) txAndIface(q *gorm.DB) error {
 }
 
 // TxExported is a method other packages can call.
-func (namedCallbackRepo) TxExported(q *gorm.DB) error {
+func (namedCallbackRepo) TxExported(q *gorm.DB) error { // want TxExported:`gormreuse finisher-only\[1\]`
 	q.Find(nil)
 	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 	return nil
@@ -276,7 +276,7 @@ func namedCallbackUseRecursive(db *gorm.DB) {
 
 // NamedCallbackExported is only passed to Transaction here, but another
 // package may call it with a mutable value, so its parameter stays mutable.
-func NamedCallbackExported(q *gorm.DB) error {
+func NamedCallbackExported(q *gorm.DB) error { // want NamedCallbackExported:`gormreuse finisher-only\[0\]`
 	q.Find(nil)
 	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 	return nil

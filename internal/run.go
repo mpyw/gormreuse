@@ -259,7 +259,7 @@ func RunSSA(
 	// relies on changing its caller's value, so no fix isolates an argument
 	// to it (#346).
 	discardsParam := reportImmutableParamDiscards(funcs, immutableParamFuncs, pureFuncs, skip, report, guard)
-	fixGen := fix.NewGenerator(pass, scopesCallbacks, inputTracer, callers, reportSeesWholePackage(pass), cfgs, discardsParam)
+	fixGen := fix.NewGenerator(pass, scopesCallbacks, inputTracer, callers, reportSeesWholePackage(pass), cfgs, discardsParam, func(fn *ssa.Function) []int { return table.Of(fn).FinisherOnly })
 
 	// Determine which //gormreuse:immutable-param functions actually rely on
 	// immutability — they would reuse a *gorm.DB parameter if it were treated as
@@ -344,6 +344,7 @@ func RunSSA(
 		distrusted:           distrusted,
 		needsImmutableParam:  needsImmutableParam,
 		tracer:               inputTracer,
+		finisherOnly:         fixGen.HandoffFinisherOnlyParams,
 	}, skip, guard)
 
 	// Report unused ignore directives last, once every other diagnostic has had

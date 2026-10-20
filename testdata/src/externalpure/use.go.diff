@@ -72,7 +72,8 @@
  }
  
  func unmarkedArgument(db *gorm.DB) {
- 	q := db.Where("x = ?", 1)
+-	q := db.Where("x = ?", 1)
++	q := db.Where("x = ?", 1).Session(&gorm.Session{})
  	purelib.Unmarked(q) // Unmarked function pollutes q
  	q.Find(nil)         // want `\*gorm\.DB reused: second branch from mutable root`
  }

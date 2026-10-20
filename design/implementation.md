@@ -191,6 +191,7 @@ gormreuse/
 │   │   ├── merge.go             # Values that merge with a root: Phi edges, other stores (#247)
 │   │   ├── change.go            # In-place changes outside the variable (#243)
 │   │   ├── holder.go            # Struct stores of a root that other code reaches: escapes for #243 (#310)
+│   │   ├── handoff.go           # Escapes that change nothing: finisher-only helpers, recursive calls (#347)
 │   │   ├── closure.go           # Closures: captured variables, reassignments in a closure
 │   │   ├── gorm.go              # gorm.io/gorm name and import, finishers, state fields
 │   │   ├── call.go              # Calls in the syntax: the call at an Lparen, direct and inline calls
@@ -1991,7 +1992,7 @@ The arguments the callback receives:
 
 ### Directives across packages
 
-`exportFacts` in `internal/fact.go` exports a `facts.Func` object fact for every exported function and method with a directive, after every pass has run (#195). A caller reads it through `facts.Table`, which `RunSSA` plugs into each consumer. A function of another package has no syntax in the SSA program, so a consumer asks the table only for a function without syntax.
+`exportFacts` in `internal/fact.go` exports a `facts.Func` object fact for every exported function and method with a directive or a finisher-only parameter, after every pass has run (#195). A caller reads it through `facts.Table`, which `RunSSA` plugs into each consumer. A function of another package has no syntax in the SSA program, so a consumer asks the table only for a function without syntax.
 
 <details><summary>The fact fields</summary>
 
@@ -2003,6 +2004,7 @@ The arguments the callback receives:
 | `ImmutableReturn` | Marked `immutable-return` or inferred (#261), and not distrusted: the body keeps the contract without relying on a broken one (#314) | `DirectiveFuncSet.Import` on the immutable-return set |
 | `BranchesImmutableParam` | In `needsImmutableParam` | The caller-side check (`handler.Context.NeedsImmutableParam`) |
 | `ImmutableInput` | Marked `immutable-input(name)`, and not distrusted: `ValidateImmutableInputs` reports nothing, and the body does not rely on a broken contract (#314) | `ImmutableInputSet.Import`. The callback collectors and the body check then see the callee's callbacks |
+| `FinisherOnly` | The function uses those `*gorm.DB` parameters only to run queries (`fix.Generator.HandoffFinisherOnlyParams`, #347). It needs no directive | `fix.Generator.HandoffFinisherOnlyParams`, so a caller's fix may give the argument a Session ([Helpers that only run queries](#helpers-that-only-run-queries)) |
 
 </details>
 
@@ -2424,6 +2426,30 @@ The #199 rule covers a discarded statement written on the root's variable. Other
 | A defer statement changes the root in place, and another deferred call may see it (#309) | `defer q.Find(nil); defer q.Where("a")`, `defer applyTenant(q); defer q.Find(nil)`, `for … { defer applyTenant(q) }` | An `*ssa.Defer` that `statementRootChange` says changes the root, when another `*ssa.Defer` uses the root, or the statement repeats (`useRepeatsAfter`). Deferred calls run after every other use, so only a deferred call sees the change. Their run order is not followed, so any other one is taken to |
 | The root is stored in a struct field that other code reaches (#310) | `s := &Svc{db: q}; s.apply()`, `applyP(params{db: q})`, `p.db = q; helper(&p)` | `holderChangesRoot`, over the stores that `holderStores` finds ([Struct stores](#struct-stores)) |
 
+#### Helpers that only run queries
+
+An escape to a helper that only runs queries on the root changes it only by the pollution of those queries (#347). That is the reuse the fix removes. In application code every root left without a fix was of this kind: a `*gorm.DB` handed to a same-package helper and used again. `handoffKeepsChanges` in `internal/fix/handoff.go` lets `changedElsewhere` skip such an escape:
+
+| Escape | Kept fix when |
+| --- | --- |
+| A call of a finisher-only helper | Each `*gorm.DB` argument goes to a parameter that `HandoffFinisherOnlyParams` lists |
+| A recursive call of the parameter's own function | The root is that parameter, the argument goes to the same parameter, and the fix reassigns no discarded statement. The body Session rebinds the parameter in every call, so the callee changes only its own copy |
+
+Both need a plain static call (no go or defer statement, method value or method expression) of a function that returns no `*gorm.DB`. No other argument may hold the root (`PointeeRoots`, `GormDBFieldValues`) or code (a function, an interface or a type parameter, in a field or element too).
+
+`HandoffFinisherOnlyParams` summarises a function once per pass (`Generator.handoffs`). A parameter is listed when each of its uses starts a chain of `*gorm.DB` methods on the receiver that ends in a finisher or in `Session`, `WithContext` or `Debug`:
+
+| Rejected | Example |
+| --- | --- |
+| A discarded statement, also after a finisher | `tx.Where("a")`, `tx.Find(&x).Where("a")` |
+| A state-field read other than the `Error` or `RowsAffected` of a finisher's result | `tx.Error`, `tx.Where("a").Error`, `tx.Find(&x).Statement` |
+| Any use other than as the receiver of the next method | A store, a return, a Phi, a closure capture, an argument of another call |
+| A method that takes a function, also boxed or in a variadic argument, or an interface whose value is unknown | `tx.Scopes(f).Find(&x)`, `tx.Transaction(fn)` |
+| `AddError` and the other state-only methods | `tx.AddError(err)` changes the caller's `Error` |
+| A `*gorm.DB` result | It could carry the parameter back |
+
+The summary of an exported function travels as `facts.Func.FinisherOnly`, so a helper in another package counts too (`purelib/handoff.go` and `externalpure/handoff_use.go`). `testdata/src/gormreuse/fix_handoff.go` holds the cases with and without a fix. `TestFixHandoffPreservesQueries` in `e2e/internal/handoff_fix_test.go` runs `fixsql/before/handoff.go` against real GORM: the leaked conditions are gone, and every query keeps its own.
+
 <details><summary>go statements, and what keeps the fix</summary>
 
 **go statements (#312).** The receiver of a finisher or a Session-family call, as in `go q.Count(nil)`, is not handed over. The call is a use like any other. It runs on a copy once the root has a Session, as in `go func() { q.Count(nil) }()`. It is found by `Site.ArgParam`, since a static method call's arguments start with the receiver. A chain method's receiver is handed over: the goroutine changes the root in place, and a go statement cannot be reassigned.
@@ -2475,7 +2501,7 @@ Tests: `TestFixEscapePreservesQueries` in `e2e/internal/fix_escape_test.go` runs
 
 Limitations:
 
-- An escape before a later use withholds the fix even when the callee only reads the value. Examples are `voidFunc(q)` with an empty body, and a `*gorm.DB` method argument (`base.Model(q)`). Mark a read-only helper `//gormreuse:pure`, or pass it an isolated value.
+- An escape before a later use withholds the fix even when the callee only reads the value, unless the callee only runs queries on it ([Helpers that only run queries](#helpers-that-only-run-queries)). An example is a `*gorm.DB` method argument (`base.Model(q)`). Mark a read-only helper `//gormreuse:pure`, or pass it an isolated value.
 - A parameter's body Session still drops the in-place changes of the function's queries ([Parameter-root fix](#parameter-root-fix)).
 - A deferred call that takes the root, as in `defer applyTenant(q)`, keeps the fix when no other deferred call uses the root and it runs once. It runs after every use the fix orders, so only another deferred call could see its change. With another one, the fix is withheld even when that one runs first and cannot see it.
 - A `*gorm.DB` method can also run code through the model's hooks (such as AfterFind), a driver.Valuer or a registered callback. These are not counted: gorm runs them on every query, and counting them would withhold the fix after any query.

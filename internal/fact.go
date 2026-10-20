@@ -23,11 +23,12 @@ type factSources struct {
 	distrusted                      distrustedContracts
 	needsImmutableParam             map[*ssa.Function]bool
 	tracer                          *tracer.RootTracer
+	finisherOnly                    func(*ssa.Function) []int
 }
 
 // exportFacts exports a facts.Func for every exported function and method of
-// the package that carries a directive, so that the packages that
-// call it see what this pass found (#195):
+// the package that carries a directive or a finisher-only parameter, so that
+// the packages that call it see what this pass found (#195):
 //
 //   - pure, whether the body broke the contract, and which parameters the
 //     result may be;
@@ -36,7 +37,9 @@ type factSources struct {
 //     reads of its parameters that its results may be (#342);
 //   - immutable-param, only when the function branches a parameter, which is
 //     when its callers must pass an isolated value;
-//   - immutable-input(name), only when the body keeps the contract.
+//   - immutable-input(name), only when the body keeps the contract;
+//   - the *gorm.DB parameters that the function uses only to run queries,
+//     which a caller's fix may isolate (#347). These carry no directive.
 //
 // A contract that the body breaks is reported here, at the declaration, and
 // still trusted in this package so that the report is not repeated at every
@@ -71,6 +74,7 @@ func exportFacts(pass *analysis.Pass, ssaInfo *buildssa.SSA, src factSources, sk
 			if !src.distrusted.distrustsInput(fn) {
 				f.ImmutableInput = src.immutableInputSet.Callbacks(fn)
 			}
+			f.FinisherOnly = src.finisherOnly(fn)
 			facts.Export(pass, fn, f)
 		})
 	}

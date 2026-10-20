@@ -13,9 +13,25 @@ import (
 	"github.com/mpyw/gormreuse/internal/goldentest"
 )
 
-// wantComment strips analysistest `// want ...` directives from fixed source so
-// the re-lint pass asserts on real diagnostics, not the originals.
+// wantComment matches the analysistest `// want ...` directives of fixed
+// source. The re-lint pass keeps only their fact expectations (see
+// wantFacts), so it asserts on real diagnostics, not the originals.
 var wantComment = regexp.MustCompile(`(?m)[ \t]*// want .*$`)
+
+// wantFact matches one fact expectation of a want directive, such as
+// Name:`gormreuse finisher-only\[0\]`. A fixed exported function still
+// exports its fact (#347).
+var wantFact = regexp.MustCompile("\\w+:(`[^`]*`|\"[^\"]*\")")
+
+// wantFacts reduces a want directive to its fact expectations, or drops it
+// when it has none.
+func wantFacts(directive []byte) []byte {
+	facts := wantFact.FindAll(directive, -1)
+	if len(facts) == 0 {
+		return nil
+	}
+	return append([]byte(" // want "), bytes.Join(facts, []byte(" "))...)
+}
 
 // convergeGormreuseFixtures are the fixtures of testdata/src/gormreuse whose
 // fixes must also resolve every diagnostic in one pass. TestFixesConverge
@@ -56,8 +72,8 @@ func TestFixesConverge(t *testing.T) {
 	}
 
 	// Re-lint the fixed output in an isolated GOPATH containing the gorm stub
-	// and the fixed files. analysistest.Run fails on any diagnostic (there are
-	// no `// want` comments left), so a non-convergent or wrong fix — one that
+	// and the fixed files. analysistest.Run fails on any diagnostic (only the
+	// fact expectations of the `// want` comments are left), so a non-convergent or wrong fix — one that
 	// still triggers a violation — is caught here.
 	gopath := t.TempDir()
 	if err := os.CopyFS(filepath.Join(gopath, "src", "gorm.io", "gorm"),
@@ -73,7 +89,7 @@ func TestFixesConverge(t *testing.T) {
 			t.Errorf("the suggested fixes did not change %s; every converge fixture must need a fix", name)
 		}
 		fixed = bytes.Replace(fixed, []byte(pkgClause), []byte("package converge"), 1)
-		fixed = wantComment.ReplaceAll(fixed, nil)
+		fixed = wantComment.ReplaceAllFunc(fixed, wantFacts)
 		if err := os.WriteFile(filepath.Join(pkgDir, name), fixed, 0o644); err != nil {
 			t.Fatalf("write fixed: %v", err)
 		}

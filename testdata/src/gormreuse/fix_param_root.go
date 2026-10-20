@@ -41,11 +41,11 @@ func fixParamCallsGeneric(db *gorm.DB) {
 // ===== SESSION IN THE BODY =====
 
 // FixParamOneLine: the Session goes on the same line as the body.
-func FixParamOneLine(tx *gorm.DB) { tx.Where("a").Find(nil); tx.Where("b").Find(nil) } // want `\*gorm\.DB reused: second branch from mutable root`
+func FixParamOneLine(tx *gorm.DB) { tx.Where("a").Find(nil); tx.Where("b").Find(nil) } // want FixParamOneLine:`gormreuse finisher-only\[0\]` `\*gorm\.DB reused: second branch from mutable root`
 
 // FixParamExported can be called from another package, which the caller
 // check never sees. The parameter gets a Session at the top of the body.
-func FixParamExported(tx *gorm.DB) {
+func FixParamExported(tx *gorm.DB) { // want FixParamExported:`gormreuse finisher-only\[0\]`
 	tx.Where("a").Find(nil)
 	tx.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
@@ -89,7 +89,7 @@ func FixParamDiscarded(tx *gorm.DB) {
 
 // FixParamAlias reuses its parameter through an alias. A Session at the top
 // of the body covers the alias too.
-func FixParamAlias(tx *gorm.DB) {
+func FixParamAlias(tx *gorm.DB) { // want FixParamAlias:`gormreuse finisher-only\[0\]`
 	r := tx
 	r.Where("a").Find(nil)
 	tx.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
@@ -216,7 +216,7 @@ func fixPhiSessionLast(db *gorm.DB, c bool) {
 
 // FixParamNamedGorm: the parameter shadows the gorm import in the body, so
 // the Session is qualified with an added import (#200).
-func FixParamNamedGorm(gorm *gorm.DB) {
+func FixParamNamedGorm(gorm *gorm.DB) { // want FixParamNamedGorm:`gormreuse finisher-only\[0\]`
 	gorm.Where("a").Find(nil)
 	gorm.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
