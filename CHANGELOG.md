@@ -2,6 +2,16 @@
 
 These notes say what changes for users in each release, and what to do about it. The full commit list of each release is on [GitHub Releases](https://github.com/mpyw/gormreuse/releases). Releases up to 0.22.0 have their notes there only.
 
+## Unreleased
+
+### New diagnostics
+
+| Now reported | Example | What to do |
+| --- | --- | --- |
+| A getter called on an embedded or nested struct, or through a pointer field, that holds a chain (#376) | `o := &Outer{}` (embedding `H`), `o.DB = q`, then `d := o.Get(); d.Find(&a); d.Count(&n)`. Also `o.H.Get()`, `get(&o.H)`, and `PO{&H{DB: q}}.Get()` | The same as for `o.DB.Find(&a); o.DB.Count(&n)`: make `q` immutable with `Session` |
+| A `pure` function that returns its argument inside a struct, a pointer, an interface or a closure (#376) | `return S{DB: db}`, `return &S{DB: db}`, `return func() *gorm.DB { return db }`. Message: `pure function leaks *gorm.DB argument via return of ...` | Return the `*gorm.DB` itself, or remove `pure`. Callers no longer trust the function, so `s := Wrap(q); s.DB.Where("a"); q.Where("b")` is reported |
+| A `pure` function that pollutes its argument through an interface (#376) | `var x any = db; x.(*gorm.DB).Where("x")`, `var i wherer = db; i.Where("x")` | Fix the function, or remove `pure`. A method called through an interface that is not the boxed argument itself, such as `x.(wherer).Where("x")`, is a warning: `pure function passes *gorm.DB argument to interface method Where` |
+
 ## 0.23.0 (2026-10-20)
 
 gormreuse now follows a `*gorm.DB` through far more code. It also reads directives across packages. It infers `immutable-return` for most connection helpers, and `immutable-param` and `immutable-input` for most helpers that only get fresh handles. It no longer counts methods such as `AddError` as a branch. `-fix` offers fewer fixes, but each one compiles and keeps every condition.

@@ -1,0 +1,144 @@
+package internal
+
+import "gorm.io/gorm"
+
+// =============================================================================
+// A getter called on an embedded or nested struct (#376)
+//
+// o.Get(), with Get promoted from an embedded struct, passes &o.geInner, a
+// fresh address of the field. The getter's read selects the field from that
+// address, so it must see the stores made through o, as o.db written at the
+// call does. A getter reached through a pointer field reads each pointer
+// stored there.
+// =============================================================================
+
+type geInner struct{ db *gorm.DB }
+
+func (i *geInner) Get() *gorm.DB { return i.db } // want Get:`gormreuse immutable-return reads0\[0\]`
+
+func (i geInner) GetV() *gorm.DB { return i.db } // want GetV:`gormreuse immutable-return reads0\[0\]`
+
+func GeGet(i *geInner) *gorm.DB { return i.db } // want GeGet:`gormreuse immutable-return reads0\[0\]`
+
+type geOuter struct{ geInner }
+
+type gePtrOuter struct{ *geInner }
+
+type geDeep struct{ outer geOuter }
+
+type geHolder struct{ ptr *geInner }
+
+// geMk returns a chain. A getter of a field that the package assigns a
+// provable chain is not inferred (#308), so the chain comes through it.
+func geMk(db *gorm.DB) *gorm.DB { return db.Where("x") }
+
+// --- 1. a struct that holds a chain ---
+
+func gePromotedStore(db *gorm.DB) {
+	o := &geOuter{}
+	o.db = geMk(db)
+	d := o.Get()
+	d.Find(nil)
+	d.Count(nil) // want `second branch from mutable root`
+}
+
+func gePromotedInline(db *gorm.DB) {
+	o := &geOuter{}
+	o.db = geMk(db)
+	o.db.Find(nil)
+	o.db.Count(nil) // want `second branch from mutable root`
+}
+
+func gePromotedLiteral(db *gorm.DB) {
+	o := &geOuter{geInner: geInner{db: geMk(db)}}
+	d := o.Get()
+	d.Find(nil)
+	d.Count(nil) // want `second branch from mutable root`
+}
+
+func geExplicitField(db *gorm.DB) {
+	o := &geOuter{}
+	o.geInner.db = geMk(db)
+	d := o.geInner.Get()
+	d.Find(nil)
+	d.Count(nil) // want `second branch from mutable root`
+}
+
+func geFieldAddrArg(db *gorm.DB) {
+	o := &geOuter{}
+	o.db = geMk(db)
+	d := GeGet(&o.geInner)
+	d.Find(nil)
+	d.Count(nil) // want `second branch from mutable root`
+}
+
+func geLocalValue(db *gorm.DB) {
+	o := geOuter{geInner{db: geMk(db)}}
+	d := o.Get()
+	d.Find(nil)
+	d.Count(nil) // want `second branch from mutable root`
+}
+
+func geValueReceiver(db *gorm.DB) {
+	o := geOuter{geInner{db: geMk(db)}}
+	d := o.GetV()
+	d.Find(nil)
+	d.Count(nil) // want `second branch from mutable root`
+}
+
+func geDeepField(db *gorm.DB) {
+	o := &geDeep{}
+	o.outer.db = geMk(db)
+	d := o.outer.Get()
+	d.Find(nil)
+	d.Count(nil) // want `second branch from mutable root`
+}
+
+// --- 2. a getter reached through a pointer field ---
+
+func geEmbeddedPointer(db *gorm.DB) {
+	o := gePtrOuter{&geInner{db: geMk(db)}}
+	d := o.Get()
+	d.Find(nil)
+	d.Count(nil) // want `second branch from mutable root`
+}
+
+func geEmbeddedPointerAddr(db *gorm.DB) {
+	o := &gePtrOuter{&geInner{db: geMk(db)}}
+	d := o.Get()
+	d.Find(nil)
+	d.Count(nil) // want `second branch from mutable root`
+}
+
+func gePointerField(db *gorm.DB) {
+	o := &geHolder{ptr: &geInner{db: geMk(db)}}
+	d := o.ptr.Get()
+	d.Find(nil)
+	d.Count(nil) // want `second branch from mutable root`
+}
+
+// --- 3. a struct that holds an immutable value, or one the caller passed ---
+
+func geImmutableStore(db *gorm.DB) {
+	o := &geOuter{}
+	o.db = db.Session(&gorm.Session{})
+	d := o.Get()
+	d.Find(nil)
+	d.Count(nil) // OK
+}
+
+func geImmutablePointer(db *gorm.DB) {
+	o := &geHolder{ptr: &geInner{db: db.Session(&gorm.Session{})}}
+	d := o.ptr.Get()
+	d.Find(nil)
+	d.Count(nil) // OK
+}
+
+func geParamReceiver(o *geOuter, p gePtrOuter) {
+	d := o.Get()
+	d.Find(nil)
+	d.Count(nil) // OK: a field read through a parameter
+	e := p.Get()
+	e.Find(nil)
+	e.Count(nil) // OK
+}

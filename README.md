@@ -1426,9 +1426,9 @@ func badPure(db *gorm.DB) {
 
 | A pure function | Rule | Includes |
 | --- | --- | --- |
-| Must NOT call polluting methods ([`Where`](https://pkg.go.dev/gorm.io/gorm#DB.Where), [`Find`](https://pkg.go.dev/gorm.io/gorm#DB.Find), etc.) on [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) **arguments** | Reported | `go db.Find(nil)`, `defer db.Find(nil)`, a method value (`f := db.Find`), a method expression (`(*gorm.DB).Find(db, nil)`), and a closure the function creates (`func() { db.Find(nil) }()`). An argument reached through a pointer, slice, variadic or struct parameter (`(*pp).Find`, `dbs[0].Find`, `h.db.Find`). An argument returned from another pure function that returns its argument (`same(db).Find`, see below) |
-| Must NOT let an argument escape | Reported | A channel send, a slice/array or map store, a store to a package-level variable, or a store through a pointer (`h.db = db`) |
-| Must NOT pass an argument to a function that is not pure | Reported | Also a pure function that fails this contract itself |
+| Must NOT call polluting methods ([`Where`](https://pkg.go.dev/gorm.io/gorm#DB.Where), [`Find`](https://pkg.go.dev/gorm.io/gorm#DB.Find), etc.) on [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) **arguments** | Reported | `go db.Find(nil)`, `defer db.Find(nil)`, a method value (`f := db.Find`), a method expression (`(*gorm.DB).Find(db, nil)`), and a closure the function creates (`func() { db.Find(nil) }()`). An argument reached through a pointer, slice, variadic or struct parameter (`(*pp).Find`, `dbs[0].Find`, `h.db.Find`). An argument returned from another pure function that returns its argument (`same(db).Find`, see below). An argument boxed in an interface, then asserted back (`var x any = db; x.(*gorm.DB).Where(...)`) or called through it (`var i wherer = db; i.Where(...)`) |
+| Must NOT let an argument escape | Reported | A channel send, a slice/array or map store, a store to a package-level variable, or a store through a pointer (`h.db = db`). A return of the argument inside another value: a struct, a pointer, an interface, or a closure that returns it (`return S{DB: db}`, `return &db`, `return func() *gorm.DB { return db }`). Return it as a `*gorm.DB` instead, as `same` below does |
+| Must NOT pass an argument to a function that is not pure | Reported | Also a pure function that fails this contract itself, and a method called through an interface that may hold the argument but is not the boxed argument itself, such as `x.(wherer).Where(...)` |
 | MAY call polluting methods on **immutable values** | Allowed | `db.Session(&gorm.Session{}).Where(...)` |
 | MAY pass an argument to output functions | Allowed | `fmt`, `log` and `testing` |
 | MAY use its receiver | Allowed | A method's receiver is not an argument, so `r.db.Where(...)` inside a pure method is fine |
@@ -1580,6 +1580,9 @@ So a getter is treated like the field it returns, **at each call**. The call rea
 | --- | --- |
 | `d := r.DB()`, then `d.Find(&a)` and `d.Count(&n)`, with `r` a parameter | No, as for `r.db.Find(&a)` and `r.db.Count(&n)` |
 | The same after `r := &repo{db: q}`, with `q` a mutable value | Yes, as `r.db` would be. The report names `q` as the root |
+| `d := o.DB()`, with `DB` promoted from an embedded struct (`type outer struct{ repo }`), after `o.db = q`. Also `o.inner.DB()`, `get(&o.repo)`, and a getter reached through a pointer field that holds `&repo{db: q}` | Yes, as `o.db` would be |
+
+A store through another read of a pointer field is not seen: `o.p.db = q; o.p.DB()` is not reported, and neither is `o.p.db` written in place.
 
 A getter of a field or a package-level variable is not inferred at all when code in its package assigns the variable a chain. An example is `r.db = r.db.Where("x")`. A caller may call the getter after that.
 

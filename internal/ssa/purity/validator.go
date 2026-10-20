@@ -10,7 +10,8 @@
 //   - No passing parameter-derived values to non-pure functions, or to pure
 //     functions that themselves fail this contract
 //   - No letting parameter-derived values escape (channel send, slice/array or
-//     map store, store to a package-level variable or through a pointer)
+//     map store, store to a package-level variable or through a pointer, or
+//     a return inside a struct, a pointer, an interface or a closure)
 //
 // # Analysis Strategy
 //
@@ -19,7 +20,8 @@
 //     **gorm.DB, []*gorm.DB, a struct with a *gorm.DB field, ...) as
 //     "parameter-derived"
 //  2. Track derivation through Phi, Extract, Call results, loads, field and
-//     element access, conversions, and stores into local variables, until a
+//     element access, conversions, interfaces the function boxes them in and
+//     type assertions of them, and stores into local variables, until a
 //     fixed point (loops feed values back through Phi and Alloc)
 //  3. Report violations when parameter-derived values are polluted or leak;
 //     closures inherit the derivation of the values they capture
@@ -171,6 +173,10 @@ func (v *Validator) validateBody(fn *ssa.Function) []Violation {
 				violations = append(violations, v.checkClosure(i)...)
 			case *ssa.Store:
 				violations = append(violations, v.checkStoreEscape(i)...)
+			case *ssa.Return:
+				if fn == v.fn {
+					violations = append(violations, v.checkWrappedReturn(i)...)
+				}
 			}
 
 			// Non-call leaks (channel send, slice/array store, map store).
@@ -233,6 +239,9 @@ func (v *Validator) trackDerivation(instr ssa.Instruction) bool {
 
 	case *ssa.Extract:
 		if v.paramDerived[i.Tuple] {
+			if _, ok := i.Tuple.(*ssa.TypeAssert); ok && types.IsInterface(i.Type()) {
+				return v.markDerived(i)
+			}
 			return v.markHolding(i)
 		}
 
@@ -250,6 +259,28 @@ func (v *Validator) trackDerivation(instr ssa.Instruction) bool {
 	case *ssa.Range:
 		if v.paramDerived[i.X] {
 			return v.markDerived(i)
+		}
+
+	case *ssa.MakeInterface:
+		// An interface holds what it boxes. A type assertion or a method
+		// call through it reaches the argument again (#376). Only these
+		// interfaces are derived: one read from a field, such as
+		// db.Statement.Context, holds no argument.
+		if v.paramDerived[i.X] {
+			return v.markDerived(i)
+		}
+
+	case *ssa.ChangeInterface:
+		if v.paramDerived[i.X] {
+			return v.markDerived(i)
+		}
+
+	case *ssa.TypeAssert:
+		if v.paramDerived[i.X] {
+			if types.IsInterface(i.AssertedType) {
+				return v.markDerived(i)
+			}
+			return v.markHolding(i)
 		}
 
 	case *ssa.MakeClosure:
@@ -323,8 +354,11 @@ func (v *Validator) markHolding(val ssa.Value) bool {
 // that may return a derived argument, or any other call with a derived
 // argument.
 func (v *Validator) callResultDerived(call *ssa.Call) bool {
-	// An interface method call never has a *gorm.DB receiver (it is a
-	// concrete type), so it falls through to the regular-call rule below.
+	// An interface method call on a derived interface may return what its
+	// dynamic value holds: i.Where("x") on one that boxes db (#376).
+	if common := &call.Call; common.IsInvoke() && v.paramDerived[common.Value] {
+		return !typeutil.IsImmutableReturningBuiltin(common.Method.Name())
+	}
 
 	// A gorm method, called directly or as a method value (f := db.Find; f(nil)).
 	site := callsite.SiteOf(call, v.funcVars)
@@ -378,11 +412,14 @@ func (v *Validator) seedClosure(mc *ssa.MakeClosure) bool {
 
 // checkCallPollution checks a call, go or defer statement.
 func (v *Validator) checkCallPollution(call ssa.CallInstruction) []Violation {
-	// Interface method calls (common.Method != nil) on *gorm.DB are not
-	// possible: IsGormDB only matches the concrete type, and GORM's DB is a
-	// struct, so all method calls have a static callee.
+	// A *gorm.DB method called directly has a static callee. One called
+	// through an interface that boxes the argument is an invoke on a derived
+	// interface.
 	site, pos := callsite.SiteOf(call, v.funcVars), call.Pos()
 
+	if common := call.Common(); common.IsInvoke() && v.paramDerived[common.Value] {
+		return v.checkInvokePollution(common, pos)
+	}
 	if site.IsGormMethod() {
 		// Calling a method value is checked where the method value is
 		// created (checkClosure), so f := db.Find; f(nil) is reported once.
@@ -413,6 +450,77 @@ func (v *Validator) checkCallPollution(call ssa.CallInstruction) []Violation {
 	// callee is nil for builtins and indirect calls; those are never pure, so
 	// they leak conservatively, matching the main handler.
 	return v.checkFunctionCallPollution(common, callee, pos)
+}
+
+// checkInvokePollution checks an interface method call on a derived
+// interface (#376). One that boxes the argument itself, as `var i wherer =
+// db; i.Where("x")` does, calls the *gorm.DB method: it pollutes the argument
+// as db.Where("x") does. Any other dynamic value is handed to a method the
+// validator cannot see, as an argument to a non-pure function is.
+func (v *Validator) checkInvokePollution(common *ssa.CallCommon, pos token.Pos) []Violation {
+	name := common.Method.Name()
+	if _, ok := pollutionsource.UnwrapGormDB(common.Value); ok {
+		if typeutil.IsImmutableReturningBuiltin(name) {
+			return nil
+		}
+		return []Violation{{
+			Pos:        pos,
+			Message:    "pure function pollutes *gorm.DB argument by calling " + name,
+			Definitive: true,
+		}}
+	}
+	return []Violation{{
+		Pos:     pos,
+		Message: "pure function passes *gorm.DB argument to interface method " + name,
+	}}
+}
+
+// checkWrappedReturn reports a pure function that returns a derived
+// *gorm.DB inside another value: a struct, a pointer, an interface, or a
+// closure that returns it. ReturnedParams covers only a *gorm.DB result, so a
+// caller would trust `s := Wrap(q); s.DB.Where("a")` not to branch q (#376).
+//
+// A slice, a map or a channel is left out: its elements are shared memory,
+// which the caller's store into it already counts as a leak. So is a closure
+// that only uses what it captures, whose body is checked as part of the
+// function.
+func (v *Validator) checkWrappedReturn(ret *ssa.Return) []Violation {
+	var violations []Violation
+	for _, res := range ret.Results {
+		if typeutil.IsGormDB(res.Type()) || !v.paramDerived[res] && !v.isDerivedArg(res) {
+			continue
+		}
+		switch res.Type().Underlying().(type) {
+		case *types.Slice, *types.Map, *types.Chan:
+			continue
+		case *types.Signature:
+			if !v.closureReturnsDerived(res) {
+				continue
+			}
+		}
+		violations = append(violations, Violation{
+			Pos:        ret.Pos(),
+			Message:    "pure function leaks *gorm.DB argument via return of " + types.TypeString(res.Type(), (*types.Package).Name),
+			Definitive: true,
+		})
+	}
+	return violations
+}
+
+// closureReturnsDerived reports whether calling the function value f may
+// return a derived value. A gorm method value (f := db.Where) is reported
+// where it is created. A function value the validator cannot resolve to a
+// closure may.
+func (v *Validator) closureReturnsDerived(f ssa.Value) bool {
+	mc, ok := v.funcVars.LocalValue(f).(*ssa.MakeClosure)
+	if !ok {
+		return true
+	}
+	if site, ok := callsite.BoundSite(mc); ok && site.IsGormMethod() {
+		return false
+	}
+	closure, _ := mc.Fn.(*ssa.Function)
+	return v.seedClosure(mc) && v.returnsDerived(closure)
 }
 
 // checkClosure checks a MakeClosure: a method value on a derived receiver

@@ -1,6 +1,7 @@
 package tracer
 
 import (
+	"go/token"
 	"go/types"
 	"slices"
 
@@ -89,7 +90,7 @@ func (m *storeMemo) paramReadSelect(x ssa.Value, path []int, at ssa.Instruction)
 		// The field of a struct that a call returned is the call's FieldRoot.
 		vals = []ssa.Value{&FieldRoot{Call: root.Call, Path: append(slices.Clone(root.Path), path[:n]...)}}
 	} else if paramReadIsPointer(x.Type()) {
-		vals = m.fieldStoredValuesAt(at.Parent(), x, slices.Clone(path[:n]), at)
+		vals = m.paramReadPointee(x, path[:n], at, make(map[ssa.Value]bool))
 	} else {
 		vals = m.structFieldStoredValues(x, slices.Clone(path[:n]), make(map[ssa.Value]bool))
 	}
@@ -101,6 +102,46 @@ func (m *storeMemo) paramReadSelect(x ssa.Value, path []int, at ssa.Instruction)
 		selected = append(selected, m.paramReadSelect(v, path[n:], at)...)
 	}
 	return selected
+}
+
+// paramReadPointee returns the values stored into the field that path
+// selects from what the pointer x points to, as read at at. Two forms of x
+// are not the address the stores are made through (#376):
+//
+//   - The address of a field, such as &o.H for o.Get() with lib.H embedded
+//     in o, is its base with the field's path in front, as a FieldAddr chain
+//     written in place is.
+//   - A pointer read from a field, such as the embedded *lib.H of
+//     PO{&lib.H{...}}, also stands for each pointer stored into that field.
+//
+// seen stops pointer fields that are stored into each other.
+func (m *storeMemo) paramReadPointee(x ssa.Value, path []int, at ssa.Instruction, seen map[ssa.Value]bool) []ssa.Value {
+	if seen[x] {
+		return nil
+	}
+	seen[x] = true
+	root, prefix := x, []int(nil)
+	if fa, ok := x.(*ssa.FieldAddr); ok {
+		root, prefix = fieldAddrPath(fa)
+	}
+	vals := m.fieldStoredValuesAt(at.Parent(), root, slices.Concat(prefix, path), at)
+	var ptrs []ssa.Value
+	switch p := x.(type) {
+	case *ssa.Field:
+		ptrs = m.fieldValueStoredValues(p)
+	case *ssa.UnOp:
+		if fa, ok := p.X.(*ssa.FieldAddr); ok && p.Op == token.MUL {
+			ptrs = m.fieldAddrStoredValues(fa, p)
+		}
+	}
+	for _, ptr := range ptrs {
+		if root, ok := ptr.(*FieldRoot); ok {
+			vals = append(vals, &FieldRoot{Call: root.Call, Path: slices.Concat(root.Path, path)})
+		} else {
+			vals = append(vals, m.paramReadPointee(ptr, path, at, seen)...)
+		}
+	}
+	return vals
 }
 
 // paramReadField returns field i of the struct that t is or points to.
