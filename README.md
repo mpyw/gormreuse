@@ -639,10 +639,10 @@ A struct field is followed in these forms:
 | --- | --- |
 | A field of a struct literal or variable | Includes nested fields and fields reached through embedding |
 | Methods promoted from an embedded `*gorm.DB` | `e := E{db.Where("x")}; e.Where("a")` |
-| A field of a struct that a function returned, by value or by pointer | `s := mk(db); s.DB.Where("a")`. Each field of each call is its own mutable root, like a function that returns `*gorm.DB`. A call inside a loop makes a new root on each iteration. A store to the field through the returned pointer replaces it, as for a local struct. No fix is suggested for it, because the `Session` belongs inside the function. Mark a helper that returns a struct of safe handles, such as a test setup function, with `//gormreuse:immutable-return` |
+| A field of a struct that a function returned, by value or by pointer | `s := mk(db); s.DB.Where("a")`. Each field of each call is its own mutable root, like a function that returns `*gorm.DB`. A call inside a loop makes a new root on each iteration. A store to the field through the returned pointer replaces it, as for a local struct. No fix is suggested for it, because the `Session` belongs inside the function. A helper that builds the struct from safe handles, such as a test setup function, is [inferred](#inferred-immutable-return) `immutable-return`. Mark one the analyzer cannot prove with `//gormreuse:immutable-return` |
 | A struct captured by a closure | Also through a pointer |
 
-- A field read through a parameter or a receiver, by value or by pointer, is not a mutable root. Only the stores to it in the same function are followed. A getter that returns such a field is read the same way (see [Inferred immutable-return](#inferred-immutable-return)).
+- A field read through a parameter or a receiver, by value or by pointer, is not a mutable root. Only the stores to it in the same function are followed. A getter that returns such a field is read the same way, as the field of the receiver at each call (see [Inferred immutable-return](#inferred-immutable-return)).
 - Simple struct literal storage (`_ = &S{db: q}`) without actual field usage does NOT pollute.
 - A field read sees only the stores that can run before it. So the builder idiom `r.db = r.db.Where(...)` in a pointer-receiver method, followed by one use of `r.db`, is not reported. A second use of `r.db` is.
 
@@ -1585,20 +1585,23 @@ Each `*gorm.DB` result, in a `(*gorm.DB, error)` result too, must be one of thes
 | `nil` | `return nil, err` |
 | The result of another `immutable-return` function, declared or inferred, in this package or another | `return r.conn(ctx)` |
 | A field read through a parameter or the receiver, or a package-level variable, as reuse detection reads them where they are used | `return r.db` |
-| A local variable assigned once, such as one a closure captures, that holds one of these values | `get := func() *gorm.DB { return conn }` |
+| A local variable, such as one a closure captures, whose every assignment is in the function and holds one of these values | `get := func() *gorm.DB { return conn }` |
+| A type assertion of a value that holds no chain, as reuse detection reads it | `if tx, ok := ctx.Value(txKey).(*gorm.DB); ok { return tx }` |
 
-So a getter is treated like the field it returns: `d := r.DB(); d.Find(&a); d.Count(&n)` is not reported, as `r.db.Find(&a); r.db.Count(&n)` is not. A getter of a field or package-level variable is not inferred when code in its package assigns the variable a chain, such as `r.db = r.db.Where("x")`. A caller may call the getter after that.
+So a getter is treated like the field it returns, **at each call**: the call reads the field of its own receiver. `d := r.DB(); d.Find(&a); d.Count(&n)` is not reported when `r` is a parameter, as `r.db.Find(&a); r.db.Count(&n)` is not. It is reported when `r := &repo{db: q.Where("x")}`, as `r.db` would be. A getter of a field or package-level variable is not inferred at all when code in its package assigns the variable a chain, such as `r.db = r.db.Where("x")`. A caller may call the getter after that.
+
+A helper that returns a struct is inferred the same way when it builds the struct and every `*gorm.DB` field it fills in holds one of these values. Then `env := newTestEnv(); env.DB.Create(&u); env.DB.Find(&us)` is not reported. A struct the helper passes to another function, or did not build, turns inference off.
 
 Anything else turns inference off for the function:
 
-- a parameter, a field of a struct built in the function, or a variable assigned more than once or written by a deferred closure
+- a `*gorm.DB` parameter, a field of a struct built in the function, or a variable assigned in a closure, a deferred one included
 - a func-typed value, or a call to an unmarked helper
 - a chain after `Session` (`Session(...).Where(...)`)
 - a `Session` config that is not a `&gorm.Session{...}` literal with `Initialized` unset or false
 
 | Also note | Detail |
 | --- | --- |
-| Exported | An exported inferred function exports the same fact as a declared one, so other packages trust it too |
+| Exported | An exported inferred function exports the same fact as a declared one, so other packages trust it too. A getter's fact names the field it reads, so a call in another package reads the field of its own receiver too |
 | Recursion | A function that returns its own result is never inferred. Add the directive |
 | Generated files | A function in a generated file is never inferred, since its body is not analyzed |
 | Relying on a broken contract | A declared `immutable-return` function may break its contract. A function inferred only because it returns that function's result is trusted in its own package, like that function. Another package does not trust it |
@@ -1953,7 +1956,7 @@ A package-level `*gorm.DB` that another function, a closure or the initializer a
 
 A struct field read through a parameter or a receiver (`s.db`, `r.db`), or a getter of it (`r.DB()`)
 
-</td><td>The field is not a mutable root. Only the stores to it in the same function are followed, and for a getter, the stores in its package</td></tr>
+</td><td>The field is not a mutable root. Only the stores to it in the same function are followed, and for a getter, also the stores in its package</td></tr>
 <tr><td>
 
 `immutable-param` called through an interface or a func-typed parameter

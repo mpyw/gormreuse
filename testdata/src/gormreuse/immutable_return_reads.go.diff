@@ -1,0 +1,505 @@
+--- immutable_return_reads.go	1970-01-01 00:00:00
++++ immutable_return_reads.go.golden	1970-01-01 00:00:00
+@@ -1,498 +1,498 @@
+ package internal
+ 
+ import (
+ 	"context"
+ 	"testing"
+ 
+ 	"gorm.io/gorm"
+ )
+ 
+ // =============================================================================
+ // Inferred getters read the caller's argument (#342)
+ //
+ // A getter such as `func (h *rrHolder) DB() *gorm.DB { return h.db }` is
+ // inferred immutable-return because a field read through a receiver is
+ // immutable where it is read. That holds only where the receiver holds an
+ // immutable value, so each call reads the field of its own argument, as if
+ // h.db were written at the call.
+ // =============================================================================
+ 
+ type rrHolder struct {
+ 	db    *gorm.DB
+ 	inner rrInner
+ 	ptr   *rrInner
+ }
+ 
+ type rrInner struct{ db *gorm.DB }
+ 
+ func (h *rrHolder) DB() *gorm.DB { return h.db } // want DB:`gormreuse immutable-return reads0\[0\]`
+ 
+ func (h rrHolder) ValueDB() *gorm.DB { return h.db } // want ValueDB:`gormreuse immutable-return reads0\[0\]`
+ 
+ func (h *rrHolder) InnerDB() *gorm.DB { return h.inner.db } // want InnerDB:`gormreuse immutable-return reads0\[1 0\]`
+ 
+ func (h *rrHolder) PtrDB() *gorm.DB { return h.ptr.db } // want PtrDB:`gormreuse immutable-return reads0\[2 0\]`
+ 
+ // Conn returns another getter's result, and reads the same field.
+ func Conn(h *rrHolder) *gorm.DB { return h.DB() } // want Conn:`gormreuse immutable-return reads0\[0\]`
+ 
+ // --- 1. a receiver that holds a chain ---
+ 
+ // rrMk returns a chain. A getter of a field that the package assigns a
+ // provable chain, such as db.Where("x"), is not inferred at all (#308), so
+ // these receivers are given the chain through rrMk.
+ func rrMk(db *gorm.DB) *gorm.DB { return db.Where("x") }
+ 
+ func rrLocalChain(db *gorm.DB) {
+ 	h := &rrHolder{db: rrMk(db)}
+ 	d := h.DB()
+ 	d.Find(nil)
+ 	d.Count(nil) // want `second branch from mutable root`
+ }
+ 
+ func rrLocalChainInline(db *gorm.DB) {
+-	h := &rrHolder{db: rrMk(db)}
++	h := &rrHolder{db: rrMk(db).Session(&gorm.Session{})}
+ 	h.db.Find(nil)
+ 	h.db.Count(nil) // want `second branch from mutable root`
+ }
+ 
+ func rrValueReceiverChain(db *gorm.DB) {
+ 	h := rrHolder{db: rrMk(db)}
+ 	d := h.ValueDB()
+ 	d.Find(nil)
+ 	d.Count(nil) // want `second branch from mutable root`
+ }
+ 
+ func rrNestedChain(db *gorm.DB) {
+ 	h := &rrHolder{inner: rrInner{db: rrMk(db)}}
+ 	d := h.InnerDB()
+ 	d.Find(nil)
+ 	d.Count(nil) // want `second branch from mutable root`
+ }
+ 
+ func rrPointerFieldChain(db *gorm.DB) {
+ 	h := &rrHolder{ptr: &rrInner{db: rrMk(db)}}
+ 	d := h.PtrDB()
+ 	d.Find(nil)
+ 	d.Count(nil) // want `second branch from mutable root`
+ }
+ 
+ func rrWrapperChain(db *gorm.DB) {
+ 	d := Conn(&rrHolder{db: rrMk(db)})
+ 	d.Find(nil)
+ 	d.Count(nil) // want `second branch from mutable root`
+ }
+ 
+ func rrMethodValueChain(db *gorm.DB) {
+ 	h := &rrHolder{db: rrMk(db)}
+ 	get := h.DB
+ 	d := get()
+ 	d.Find(nil)
+ 	d.Count(nil) // want `second branch from mutable root`
+ }
+ 
+ func rrStoredLater(db *gorm.DB) {
+ 	h := &rrHolder{db: db.Session(&gorm.Session{})}
+ 	h.db = rrMk(h.db)
+ 	d := h.DB()
+ 	d.Find(nil)
+ 	d.Count(nil) // want `second branch from mutable root`
+ }
+ 
+ // rrMkHolder returns a struct holding its argument, so the field of its call
+ // is a root (#250), and so is the getter's result.
+ func rrMkHolder(db *gorm.DB) *rrHolder { return &rrHolder{db: db} }
+ 
+ func rrCallReceiver(db *gorm.DB) {
+ 	d := rrMkHolder(db).DB()
+ 	d.Find(nil)
+ 	d.Count(nil) // want `second branch from mutable root`
+ }
+ 
+ // A closure that reads its parameter's field is a getter too.
+ func rrClosureGetter(db *gorm.DB, h *rrHolder) {
+ 	get := func(h *rrHolder) *gorm.DB { return h.db }
+ 	d := get(&rrHolder{db: rrMk(db)})
+ 	d.Find(nil)
+ 	d.Count(nil) // want `second branch from mutable root`
+ 	e := get(h)
+ 	e.Find(nil)
+ 	e.Count(nil) // OK: a field read through a parameter
+ 	q := func(h *rrHolder) *gorm.DB { return h.db }(&rrHolder{db: rrMk(h.db)})
+ 	q.Find(nil)
+ 	q.Count(nil) // want `second branch from mutable root`
+ }
+ 
+ // --- 2. a receiver that holds an immutable value, or one the caller passed ---
+ 
+ func rrParamReceiver(h *rrHolder) {
+ 	d := h.DB()
+ 	d.Find(nil)
+ 	d.Count(nil) // OK: a field read through a parameter, as h.db is
+ 	p := h.PtrDB()
+ 	p.Find(nil)
+ 	p.Count(nil) // OK
+ 	c := Conn(h)
+ 	c.Find(nil)
+ 	c.Count(nil) // OK
+ }
+ 
+ func rrLocalSession(db *gorm.DB) {
+ 	h := &rrHolder{db: db.Session(&gorm.Session{})}
+ 	d := h.DB()
+ 	d.Find(nil)
+ 	d.Count(nil) // OK: the receiver holds a Session result
+ 	v := rrHolder{db: db.WithContext(context.Background())}
+ 	w := v.ValueDB()
+ 	w.Find(nil)
+ 	w.Count(nil) // OK
+ }
+ 
+ func rrGlobalReceiver() {
+ 	d := rrGlobalHolder.DB()
+ 	d.Find(nil)
+ 	d.Count(nil) // OK: a global the function only reads, as rrGlobalHolder.db is
+ }
+ 
+ var rrGlobalHolder = &rrHolder{}
+ 
+ // --- 3. a pure function that branches what the getter returns ---
+ 
+ //gormreuse:pure
+ func rrTenant(q *gorm.DB) {
+ 	h := &rrHolder{db: q}
+ 	h.DB().Where("tenant = ?", 1) // want `pure function passes \*gorm\.DB argument to non-pure function DB` `pure function pollutes \*gorm\.DB argument by calling Where`
+ }
+ 
+ func rrTenantUse(db *gorm.DB) {
+ 	q := db.Session(&gorm.Session{}).Where("a = 1")
+ 	rrTenant(q)
+ 	q.Find(nil) // want `second branch from mutable root`
+ }
+ 
+ // --- 4. a parameter asserted to *gorm.DB ---
+ 
+ func rrAssert(v any) *gorm.DB {
+ 	db, _ := v.(*gorm.DB)
+ 	return db
+ }
+ 
+ func rrAssertUse(db *gorm.DB) {
+ 	s := rrAssert(db.Session(&gorm.Session{}))
+ 	s.Find(nil)
+ 	s.Count(nil) // OK
+ 	// Passing the chain to rrAssert is its first branch, as for any call.
+ 	q := rrAssert(db.Where("x"))
+ 	q.Find(nil)  // want `second branch from mutable root`
+ 	q.Count(nil) // want `second branch from mutable root`
+ }
+ 
+ // =============================================================================
+ // What detection reads as immutable, inference proves (#342)
+ // =============================================================================
+ 
+ // --- 5. a captured local assigned more than once ---
+ 
+ func rrOpenTest(t *testing.T) *gorm.DB {
+ 	db, _ := gorm.Open("sqlite")
+ 	if testing.Verbose() {
+ 		db = db.Debug()
+ 	}
+ 	t.Cleanup(func() { _, _ = db.DB() })
+ 	return db
+ }
+ 
+ func rrOpenTestUse(t *testing.T) {
+ 	db := rrOpenTest(t)
+ 	db.Create(nil)
+ 	db.Find(nil) // OK: every value stored into db is immutable
+ }
+ 
+ func rrOpenChained(t *testing.T) *gorm.DB {
+ 	db, _ := gorm.Open("sqlite")
+ 	if testing.Verbose() {
+ 		db = db.Where("x")
+ 	}
+ 	t.Cleanup(func() { _, _ = db.DB() })
+ 	return db
+ }
+ 
+ func rrOpenChainedUse(t *testing.T) {
+-	db := rrOpenChained(t)
++	db := rrOpenChained(t).Session(&gorm.Session{})
+ 	db.Create(nil)
+ 	db.Find(nil) // want `second branch from mutable root`
+ }
+ 
+ // rrOpenClosureStore assigns db in a closure, which may run at any point.
+ func rrOpenClosureStore(t *testing.T) *gorm.DB {
+ 	db, _ := gorm.Open("sqlite")
+ 	t.Cleanup(func() { db = db.Debug() })
+ 	return db
+ }
+ 
+ func rrOpenClosureStoreUse(t *testing.T) {
+-	db := rrOpenClosureStore(t)
++	db := rrOpenClosureStore(t).Session(&gorm.Session{})
+ 	db.Create(nil)
+ 	db.Find(nil) // want `second branch from mutable root`
+ }
+ 
+ // --- 6. a transaction carried in a context ---
+ 
+ type rrTxKey struct{}
+ 
+ type rrService struct{ db *gorm.DB }
+ 
+ func (s *rrService) tx(ctx context.Context) *gorm.DB {
+ 	if tx, ok := ctx.Value(rrTxKey{}).(*gorm.DB); ok {
+ 		return tx
+ 	}
+ 	return s.db.WithContext(ctx)
+ }
+ 
+ func (s *rrService) rrTxUse(ctx context.Context) {
+ 	q := s.tx(ctx)
+ 	q.Create(nil)
+ 	q.Find(nil) // OK: as the same code written in place
+ }
+ 
+ func (s *rrService) rrTxInline(ctx context.Context) {
+ 	var q *gorm.DB
+ 	if tx, ok := ctx.Value(rrTxKey{}).(*gorm.DB); ok {
+ 		q = tx
+ 	} else {
+ 		q = s.db.WithContext(ctx)
+ 	}
+ 	q.Create(nil)
+ 	q.Find(nil) // OK
+ }
+ 
+ // --- 7. a struct a helper builds ---
+ 
+ type rrEnv struct {
+ 	DB   *gorm.DB
+ 	Name string
+ }
+ 
+ func rrNewEnv() *rrEnv {
+ 	db, _ := gorm.Open("sqlite")
+ 	return &rrEnv{DB: db, Name: "test"}
+ }
+ 
+ func rrNewEnvValue() rrEnv {
+ 	return rrEnv{DB: DB.Session(&gorm.Session{})}
+ }
+ 
+ func rrEnvUse() {
+ 	env := rrNewEnv()
+ 	env.DB.Create(nil)
+ 	env.DB.Find(nil) // OK: rrNewEnv fills DB with gorm.Open's result
+ 	v := rrNewEnvValue()
+ 	v.DB.Create(nil)
+ 	v.DB.Find(nil) // OK
+ }
+ 
+ func rrChainEnv(db *gorm.DB) *rrEnv { return &rrEnv{DB: db.Where("x")} }
+ 
+ func rrParamEnv(db *gorm.DB) *rrEnv { return &rrEnv{DB: db} }
+ 
+ // rrFilledEnv hands its struct to a function that may change it.
+ func rrFilledEnv() *rrEnv {
+ 	env := &rrEnv{DB: DB.Session(&gorm.Session{})}
+ 	rrFill(env)
+ 	return env
+ }
+ 
+ func rrFill(env *rrEnv) { env.DB = env.DB.Where("x") }
+ 
+ // rrPassedEnv returns a struct it did not build.
+ func rrPassedEnv(env *rrEnv) *rrEnv { return env }
+ 
+ func rrEnvNotInferred(db *gorm.DB, env *rrEnv) {
+ 	db = db.Session(&gorm.Session{})
+ 	a := rrChainEnv(db)
+ 	a.DB.Create(nil)
+ 	a.DB.Find(nil) // want `second branch from mutable root`
+ 	b := rrParamEnv(db.Session(&gorm.Session{}))
+ 	b.DB.Create(nil)
+ 	b.DB.Find(nil) // want `second branch from mutable root`
+ 	c := rrFilledEnv()
+ 	c.DB.Create(nil)
+ 	c.DB.Find(nil) // want `second branch from mutable root`
+ 	d := rrPassedEnv(env)
+ 	d.DB.Create(nil)
+ 	d.DB.Find(nil) // want `second branch from mutable root`
+ }
+ 
+ // =============================================================================
+ // The proof in detail (#342)
+ // =============================================================================
+ 
+ // rrWrapStored returns a getter's result on a struct it fills with a Session
+ // result: the value the read selects is proved, so it reads nothing.
+ func rrWrapStored(db *gorm.DB) *gorm.DB {
+ 	h := &rrHolder{db: db.Session(&gorm.Session{})}
+ 	return h.DB()
+ }
+ 
+ // rrAssertVia passes its parameter on to rrAssert, so it reads it too.
+ func rrAssertVia(v any) *gorm.DB { return rrAssert(v) }
+ 
+ // rrBoxed asserts a value it boxed.
+ func rrBoxed(db *gorm.DB) *gorm.DB {
+ 	var v any = db.Session(&gorm.Session{})
+ 	return v.(*gorm.DB)
+ }
+ 
+ // rrMapValue returns a map element, which is not proved.
+ func rrMapValue(m map[string]*gorm.DB) *gorm.DB {
+ 	v, _ := m["a"]
+ 	return v
+ }
+ 
+ // Of reads a field of a parameter that is not the receiver.
+ func (h *rrHolder) Of(o *rrHolder) *gorm.DB { return o.db } // want Of:`gormreuse immutable-return reads1\[0\]`
+ 
+ func rrProofUse(db *gorm.DB, h *rrHolder, m map[string]*gorm.DB) {
+ 	a := rrWrapStored(DB)
+ 	a.Find(nil)
+ 	a.Count(nil) // OK
+ 	b := rrAssertVia(db.Where("x"))
+ 	b.Find(nil)  // want `second branch from mutable root`
+ 	b.Count(nil) // want `second branch from mutable root`
+ 	c := rrBoxed(DB)
+ 	c.Find(nil)
+ 	c.Count(nil) // OK
+-	d := rrMapValue(m)
++	d := rrMapValue(m).Session(&gorm.Session{})
+ 	d.Find(nil)
+ 	d.Count(nil) // want `second branch from mutable root`
+ 	e := h.Of(&rrHolder{db: rrMk(h.db)})
+ 	e.Find(nil)
+ 	e.Count(nil) // want `second branch from mutable root`
+ }
+ 
+ // rrNewHolder builds a holder of a Session result. Its ptr field is behind a
+ // pointer, which the proof of a struct result does not cover.
+ func rrNewHolder() *rrHolder { return &rrHolder{db: DB.Session(&gorm.Session{})} }
+ 
+ func rrNewHolderUse() {
+ 	d := rrNewHolder().DB()
+ 	d.Find(nil)
+ 	d.Count(nil) // OK
+ 	p := rrNewHolder().PtrDB()
+ 	p.Find(nil)
+ 	p.Count(nil) // want `second branch from mutable root`
+ }
+ 
+ // rrSwapEnvs returns one of two structs it built, merged in a loop.
+ func rrSwapEnvs(n int) *rrEnv {
+ 	a, b := &rrEnv{DB: DB.Session(&gorm.Session{})}, &rrEnv{}
+ 	for range n {
+ 		a, b = b, a
+ 	}
+ 	return a
+ }
+ 
+ func rrEnvVia() *rrEnv { return rrNewEnv() }
+ 
+ func rrEnvTuple() (*rrEnv, error) { return rrNewEnv(), nil }
+ 
+ func rrEnvViaTuple() *rrEnv {
+ 	e, _ := rrEnvTuple()
+ 	return e
+ }
+ 
+ func rrStructProofUse() {
+ 	a := rrSwapEnvs(3)
+ 	a.DB.Create(nil)
+ 	a.DB.Find(nil) // OK
+ 	b := rrEnvVia()
+ 	b.DB.Create(nil)
+ 	b.DB.Find(nil) // OK
+ 	c := rrEnvViaTuple()
+ 	c.DB.Create(nil)
+ 	c.DB.Find(nil) // OK
+ }
+ 
+ func rrEnvViaChain(db *gorm.DB) *rrEnv { return rrChainEnv(db) }
+ 
+ func rrEnvFromMap(m map[string]*rrEnv) *rrEnv {
+ 	e, _ := m["a"]
+ 	return e
+ }
+ 
+ func rrEnvRecv(ch chan rrEnv) rrEnv { return <-ch }
+ 
+ func rrEnvDeref(p *rrEnv) rrEnv { return *p }
+ 
+ var rrEnvSink *rrEnv
+ 
+ func rrEnvStored() *rrEnv {
+ 	env := &rrEnv{DB: DB.Session(&gorm.Session{})}
+ 	rrEnvSink = env
+ 	return env
+ }
+ 
+ func rrFillDB(p **gorm.DB) { *p = DB.Session(&gorm.Session{}) }
+ 
+ func rrEnvFieldPassed() *rrEnv {
+ 	env := &rrEnv{}
+ 	rrFillDB(&env.DB)
+ 	return env
+ }
+ 
+ func rrEnvMergedPassed(c bool) *rrEnv {
+ 	env := &rrEnv{}
+ 	if c {
+ 		env = &rrEnv{}
+ 	}
+ 	rrFill(env)
+ 	return env
+ }
+ 
+ func rrEnvCaptured() *rrEnv {
+ 	env := &rrEnv{DB: DB.Session(&gorm.Session{})}
+ 	func() { env = &rrEnv{} }()
+ 	return env
+ }
+ 
+ // rrEnvOf fills its struct with a field of its receiver, which a caller's
+ // FieldRoot cannot select from.
+ func (h *rrHolder) rrEnvOf() *rrEnv { return &rrEnv{DB: h.db} }
+ 
+ func rrEnvDynamic(f func() *rrEnv) *rrEnv { return f() }
+ 
+ func rrStructReadsUse(h *rrHolder, f func() *rrEnv) {
+ 	a := h.rrEnvOf()
+ 	a.DB.Create(nil)
+ 	a.DB.Find(nil) // want `second branch from mutable root`
+ 	b := rrEnvDynamic(f)
+ 	b.DB.Create(nil)
+ 	b.DB.Find(nil) // want `second branch from mutable root`
+ }
+ 
+ func rrStructNotProvedUse(db *gorm.DB, m map[string]*rrEnv, ch chan rrEnv, p *rrEnv) {
+ 	a := rrEnvViaChain(db)
+ 	a.DB.Create(nil)
+ 	a.DB.Find(nil) // want `second branch from mutable root`
+ 	b := rrEnvFromMap(m)
+ 	b.DB.Create(nil)
+ 	b.DB.Find(nil) // want `second branch from mutable root`
+ 	c := rrEnvRecv(ch)
+ 	c.DB.Create(nil)
+ 	c.DB.Find(nil) // want `second branch from mutable root`
+ 	d := rrEnvDeref(p)
+ 	d.DB.Create(nil)
+ 	d.DB.Find(nil) // want `second branch from mutable root`
+ 	e := rrEnvStored()
+ 	e.DB.Create(nil)
+ 	e.DB.Find(nil) // want `second branch from mutable root`
+ 	f := rrEnvFieldPassed()
+ 	f.DB.Create(nil)
+ 	f.DB.Find(nil) // want `second branch from mutable root`
+ 	g := rrEnvMergedPassed(true)
+ 	g.DB.Create(nil)
+ 	g.DB.Find(nil) // want `second branch from mutable root`
+ 	h := rrEnvCaptured()
+ 	h.DB.Create(nil)
+ 	h.DB.Find(nil) // want `second branch from mutable root`
+ }

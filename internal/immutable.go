@@ -71,19 +71,20 @@ func inferImmutableReturns(funcs []*ssa.Function, set *directive.DirectiveFuncSe
 	}
 	builtins := tracer.NewRootTracer(nil, nil, nil, nil, nil, nil, funcVars)
 	assigned := purity.NewImmutableReturnValidator(funcs, set, builtins)
-	inferred := purity.InferImmutableReturns(candidates, set.Contains, builtins, assigned.AssignedMutable)
+	inferred := purity.InferImmutableReturns(candidates, set.Contains, set.ParamReads, builtins, assigned.AssignedMutable)
 	for _, fn := range candidates {
-		if inferred[fn] {
-			set.Infer(fn)
+		if reads, ok := inferred[fn]; ok {
+			set.InferParamReads(fn, reads)
 		}
 	}
 }
 
-// immutableReturnCandidate reports whether fn has a *gorm.DB result, which
-// inference needs.
+// immutableReturnCandidate reports whether fn has a *gorm.DB result, or a
+// struct result with *gorm.DB fields that callers read as its FieldRoots
+// (#342), which inference needs.
 func immutableReturnCandidate(fn *ssa.Function) bool {
 	for v := range fn.Signature.Results().Variables() {
-		if typeutil.IsGormDB(v.Type()) {
+		if typeutil.IsGormDB(v.Type()) || len(purity.ImmutableReturnFieldPaths(v.Type())) > 0 {
 			return true
 		}
 	}

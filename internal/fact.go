@@ -32,7 +32,8 @@ type factSources struct {
 //   - pure, whether the body broke the contract, and which parameters the
 //     result may be;
 //   - immutable-return, declared or inferred, only when the body keeps the
-//     contract without relying on a function whose body breaks it;
+//     contract without relying on a function whose body breaks it, with the
+//     reads of its parameters that its results may be (#342);
 //   - immutable-param, only when the function branches a parameter, which is
 //     when its callers must pass an isolated value;
 //   - immutable-input(name), only when the body keeps the contract.
@@ -63,6 +64,9 @@ func exportFacts(pass *analysis.Pass, ssaInfo *buildssa.SSA, src factSources, sk
 				f.ReturnsOnlyParams = len(f.Returned) > 0 && src.tracer.PureReturnsOnlyParams(fn)
 			}
 			f.ImmutableReturn = src.immutableReturnFuncs.Contains(fn) && !src.distrusted.distrustsReturn(fn)
+			if f.ImmutableReturn {
+				f.ParamReads = src.immutableReturnFuncs.ParamReads(fn)
+			}
 			f.BranchesImmutableParam = src.needsImmutableParam[fn]
 			if !src.distrusted.distrustsInput(fn) {
 				f.ImmutableInput = src.immutableInputSet.Callbacks(fn)

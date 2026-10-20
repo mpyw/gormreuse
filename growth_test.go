@@ -765,6 +765,21 @@ var growthCases = []growthCase{
 		}
 		return []string{b.String()}
 	}},
+	// A chain of n getters, each returning the one before it on the same
+	// receiver, and n callers that each read one of them on a struct they
+	// build (#342: the reads compose, and each call selects the field of its
+	// own receiver).
+	{name: "getterchain", limit: growthLinear, shape: func(n int) []string {
+		var b strings.Builder
+		b.WriteString("type repo struct{ db *gorm.DB }\n\nfunc mk(db *gorm.DB) *gorm.DB { return db.Where(\"x\") }\n\nfunc (r *repo) g0() *gorm.DB { return r.db }\n\n")
+		for i := 1; i < n; i++ {
+			fmt.Fprintf(&b, "func (r *repo) g%d() *gorm.DB { return r.g%d() }\n\n", i, i-1)
+		}
+		for i := range n {
+			fmt.Fprintf(&b, "func u%d(db *gorm.DB) { r := &repo{db: mk(db)}; q := r.g%d(); q.Find(nil); q.Find(nil) }\n\n", i, i)
+		}
+		return []string{b.String()}
+	}},
 	// A chain of n closures, each returning the call of the one before it,
 	// the first one a captured immutable value, the last one's result
 	// reused (#308: closureReturnsImmutable and inference).

@@ -172,6 +172,7 @@ gormreuse/
 │   │   ├── directive.go         # readDirective, FindDirectiveProblems
 │   │   ├── ignore.go            # //gormreuse:ignore scopes (Ignores), unused tracking
 │   │   ├── funcset.go           # DirectiveFuncSet: pure / immutable-return / immutable-param sets, Infer
+│   │   ├── param_read.go        # ParamRead: the reads of its parameters an inferred function returns (#342)
 │   │   ├── placement.go         # placement: which function a directive comment is written on
 │   │   ├── immutable_input.go   # ImmutableInputSet: immutable-input(name) callbacks
 │   │   ├── func.go              # FuncKey: a function as a directive names it
@@ -203,6 +204,7 @@ gormreuse/
 │       │   ├── site.go          # Site, SiteOf, EachSite: callee, receiver, arguments
 │       │   ├── session.go       # SessionEffect: what a Session/Debug call shares (#174)
 │       │   ├── funcvar.go       # FuncVars: package-level and local variables that hold one function
+│       │   ├── local.go         # LocalStores: every value stored into a local variable, when all are seen
 │       │   ├── freevar.go       # FreeVarBinding: the value a closure captured
 │       │   ├── closure.go       # ClosureRuns, ClosureCalls: where a closure value may run (#305)
 │       │   └── walk.go          # WalkInstrs: every instruction, nested closures included
@@ -215,6 +217,7 @@ gormreuse/
 │       │   ├── root.go          # RootTracer, NewRootTracer, RootBlock: trace dispatch, calls, immutable sources
 │       │   ├── store.go         # AllocStoredValues, FieldStoredValues: which stores reach a load
 │       │   ├── field.go         # FieldRoot, SameField: field paths and roots of returned structs
+│       │   ├── param_read.go    # ParamReadValues: a getter's call reads the field of its own argument (#342)
 │       │   ├── freevar.go       # traceFreeVar: roots through a closure's captured variables
 │       │   ├── phi.go           # Phi edges, loop variable swaps through Phis
 │       │   ├── pure.go          # PureVerdicts, IsPureFunction: pure calls and the arguments they return
@@ -1128,7 +1131,7 @@ A root defined in another function, such as an enclosing function's root used in
 Decisions and limitations:
 
 - No fix is suggested for a `FieldRoot`. `Session()` cannot be appended to a call that returns a struct. It belongs where the function builds the struct.
-- A field read through a parameter or a receiver is not a mutable root, whether the struct is passed by value or by pointer. Since #308 a getter that returns such a field is inferred `immutable-return`, so `d := r.DB()` is read like `r.db` ([Inferred immutable-return](#inferred-immutable-return)).
+- A field read through a parameter or a receiver is not a mutable root, whether the struct is passed by value or by pointer. Since #308 a getter that returns such a field is inferred `immutable-return`, so `d := r.DB()` is read like `r.db`. Since #342 each call reads the field of its own receiver, so `h := &Holder{db: mk(db)}; h.DB()` has `mk(db)`'s root ([Parameter reads](#parameter-reads)).
 - A write to a returned struct inside another function (`p.Reset()`, `reset(&s)`) is not seen. A later read still sees the call's field, so it can be reported though the field was replaced. A closure capturing such a parameter sees only the stores in the enclosing function, as the function itself does.
 - A captured pointer variable is resolved by its stores in program order: the single-root trace takes the first pointer stored into it. After `h = &T{q: b}`, a use of `h.q` can still be matched to the first value. A store through `h` is not matched to either pointer. A captured `*gorm.DB` variable is read by the stores that reach the read instead ([Captured variables](#captured-variables)). With one pointer ever stored, the fields are read the same way (#303).
 - A struct value that a Phi merges (`e := E{a}; if c { e = E{b} }`) yields the field of every edge. The single-root trace takes the first edge, so the suggested fix makes only that edge immutable. A struct from a channel receive, or a map or slice element, is not followed.
@@ -1758,10 +1761,20 @@ Decisions and limitations:
 | A `Call`, or an `Extract` of a tuple `Call` such as `gorm.Open`'s | `RootTracer.IsImmutableCall` accepts it with a tracer that has no immutable-return set. Its last call is `Session` (with a config literal whose `Initialized` is known false), `WithContext`, `Debug`, `Begin` or `gorm.Open`. Or the declared callee is trusted (declared, or imported from a fact) or already inferred |
 | The nil constant | Always |
 | A load of a local variable assigned once, such as one a closure captures (#308) | Its stored value is proved (`FuncVars.LocalValue`) |
-| A read of a field through a parameter or a receiver (#308). This covers any depth of fields and pointer fields, also when a closure captures the parameter. A read of a package-level variable counts too | Every store in the function that reaches the read is proved, through the roots `FindAllMutableRoots` finds. No store in the package assigns the variable a provably mutable value (`ImmutableReturnValidator.AssignedMutable`). With no store, the value is immutable, as reuse detection reads it |
-| Anything else. Examples are a parameter, a field of a local struct, and a dynamic or interface call. A variable assigned more than once is another, and a named result a deferred closure writes is one | Never |
+| A load of a local variable assigned more than once, such as one a `t.Cleanup` closure captures (#342) | Every value stored into it is proved, and every store is in its function: no closure stores into it, and its address is used only to load and store it (`callsite.LocalStores`) |
+| A read of a field through a parameter or a receiver (#308). This covers any depth of fields and pointer fields, also when a closure captures the parameter. A read of a package-level variable counts too | Every store in the function that reaches the read is proved, through the roots `FindAllMutableRoots` finds. No store in the package assigns the variable a provably mutable value (`ImmutableReturnValidator.AssignedMutable`). With no store, the value is immutable, as reuse detection reads it. A read through the function's own parameter is also one of its [parameter reads](#parameter-reads) |
+| A type assertion, such as `ctx.Value(k).(*gorm.DB)` (#342) | What the interface holds is proved: a `MakeInterface` of a proved value, or a call that returns no `*gorm.DB`, which reuse detection reads as no root. An assertion of the function's own interface parameter is a parameter read |
+| A call to a function with parameter reads | Every value the reads select at the call is proved. When the argument is the function's own parameter, or a field read through it, the read is the function's own too: `func Conn(h *Holder) *gorm.DB { return h.DB() }` reads `h.db` |
+| Anything else. Examples are a `*gorm.DB` parameter, a field of a local struct, and a dynamic or interface call. A variable that a closure assigns is another, and a named result a deferred closure writes is one | Never |
 
-A function needs at least one such result, so a function that only panics is not inferred. Candidates are the analyzed functions and closures with a body and a `*gorm.DB` result, not in a skipped file, and without the directive.
+A function needs at least one such result, so a function that only panics is not inferred. Candidates are the analyzed functions and closures with a body and a `*gorm.DB` result, or a struct result whose `*gorm.DB` fields callers read as its `FieldRoot`s (#342), not in a skipped file, and without the directive.
+
+**Struct results (#342).** `env := newEnv(); env.DB.Create(nil); env.DB.Find(nil)` was reported while the `*gorm.DB`-returning twin was not: the field of the call is a [`FieldRoot`](#struct-roots), and only a directive made it immutable. A struct result is now proved field by field. Its fields are the `*gorm.DB` fields of the struct and of the structs it holds by value (`ImmutableReturnFieldPaths`), the ones a `FieldRoot` names. The struct must be one of these:
+
+- one the function builds (`&T{...}` or `T{...}`, also merged by a Phi), whose address is used only to fill in its fields, load them and return it;
+- one that an accepted callee returns.
+
+Each field holds the values stored into it that reach the return, or nil. A struct passed to a call (`fill(env)`), stored elsewhere, kept in a variable a closure captures, or not built by the function (its parameter) rules the function out. So does a field that holds a parameter read: a `FieldRoot` has no argument to select from. A `FieldRoot` whose path passes through a pointer field, which only a getter's read makes, stays a root even for an immutable-return callee (`paramReadCrossesPointer`). The proof says nothing about it.
 
 <details><summary>Decisions</summary>
 
@@ -1776,7 +1789,7 @@ Decisions:
 - **No `-fix` to insert the directive.** The issue suggested it as an alternative to implicit inference. Inference is the same check the analyzer would make when validating an inserted directive, so inserting it adds a comment and no information.
 - **What detection reads as immutable, inference accepts (#308).** Reuse detection treats two reads as immutable ([Struct roots](#struct-roots), [Package-level variables](#package-level-variables)). One is a field read through a parameter or a receiver. The other is a global that the function only reads. A wrapper should not change the answer, so inference accepts the reads that detection accepts. The rule is still a positive proof for everything else: a parameter, a chain and an unknown call stay unproved.
 - **A getter of a variable the package assigns a chain to is not inferred.** A caller may run `r.db = r.db.Where("x")` before `r.DB()`. Detection sees such a store when it is in the reading function, but a getter is trusted at every call site. So inference refuses a read of a field or global that any function of the package, its initializer included, assigns a provably mutable value (`AssignedMutable`). That is the body check's rule for a global, made strict: the body check needs every assignment to be mutable to report, and inference refuses on one. A global whose address escapes is refused too. A store in another package, or through a field address passed to a function, is not seen, as for reads in detection.
-- **A captured variable assigned once.** Take `conn := db.Session(&gorm.Session{}); get := func() *gorm.DB { return conn }`. `conn` lives in an `Alloc` that the closure reads through a `FreeVar`. `LocalValue` resolves it to the stored value, with the conditions of [Function variables](#function-variables). A variable assigned twice, or in a closure, stays unproved even when the tracer finds no root. `LocalValue` resolves only a single store, and the tracer does not see a store made inside a closure.
+- **A captured variable.** Take `conn := db.Session(&gorm.Session{}); get := func() *gorm.DB { return conn }`. `conn` lives in an `Alloc` that the closure reads through a `FreeVar`. `LocalValue` resolves it to the stored value, with the conditions of [Function variables](#function-variables). Since #342 a variable assigned more than once is proved by every value stored into it (`callsite.LocalStores`). So gorm's test helper shape `db, _ := gorm.Open(...); if testing.Verbose() { db = db.Debug() }; t.Cleanup(func() { db.DB() }); return db` is inferred. Every store is proved, not only the ones that reach the return: that is simpler, and a store that does not reach it is rare. A variable a closure assigns stays unproved, since the closure may run at any point.
 
 </details>
 
@@ -1807,6 +1820,42 @@ Each removed report branched a `clone > 0` handle, so none was a real reuse. No 
 | gin-vue-admin | 32 | 32 | none |
 
 Each removed report branched a `clone > 0` handle. No report was added. The counts are diagnostic lines of `gormreuse ./...`, so they differ from the table above.
+
+</details>
+
+### Parameter reads
+
+Since #308 a getter such as `func (h *Holder) DB() *gorm.DB { return h.db }` is inferred, because a field read through a receiver is immutable where it is read. Until #342 the call was then trusted everywhere, also where the receiver holds the caller's mutable value:
+
+```go
+//gormreuse:pure
+func Tenant(q *gorm.DB) { h := &Holder{db: q}; h.DB().Where("tenant = ?", 1) } // pollutes q
+
+h := &Holder{db: mk(db)}; d := h.DB(); d.Find(nil); d.Count(nil)             // a reuse of mk(db)
+```
+
+Both were missed, while the forms written in place, `h.db.Where(...)` and `h.db.Find(nil); h.db.Count(nil)`, were reported. `e2e/internal/getter_receiver_test.go` shows the first one running `... WHERE a = 1 AND tenant = ?`.
+
+A read through the function's own parameter does not make its result immutable. It makes the result what the caller's argument holds there. So inference records it as a `directive.ParamRead`: the parameter, and the path of fields a Go selector selects from it. `h.inner.db` is `h` with the indexes of `inner` and `db`, through pointers too. `DirectiveFuncSet.InferParamReads` keeps the reads with the inferred function, and `facts.Func.ParamReads` exports them with its `ImmutableReturn` fact. A function with no reads is immutable at every call, as before.
+
+Each reader of an immutable-return call reads a function with reads as its selector written at the call:
+
+| Reader | A call of a function with reads |
+| --- | --- |
+| The tracer (`traceCall`, `traceAll`) | The roots of the values the selector reads from the call's argument (`ParamReadValues`). They are the stores into the field that reach the call, matched as for a `FieldAddr` chain, or the `FieldRoot` of a struct a call returned. A pointer field ends one address, and the rest of the path is selected from each value stored into it. `returnsImmutable` and `IsImmutableCall` say no. A closure with reads is read the same way, before its returns are traced |
+| The pure validator (`callResultDerived`) | Derived when the argument a read selects from is derived |
+| The immutable-return body check | Through the tracer: `return h.DB()` with `h := &Holder{db: db.Where("x")}` is a provably mutable root |
+| Inference of a caller | The values the selector reads at the call are proved. An argument selected from the caller's own parameter makes the read the caller's too |
+
+<details><summary>Decisions and limitations</summary>
+
+- **The safe case is unchanged.** A receiver that is a parameter, or a struct with no store into the field before the call, has no stored value there. So the call is immutable, as `h.db` is. So is a receiver that holds a Session result.
+- **A getter of a field the package assigns a chain is still not inferred (#308).** With the reads, a call sees the stores that reach it in the caller, as detection does. The package-wide rule stays because neither sees a store in another method, such as `r.filter()` running `r.db = r.db.Where("x")`.
+- **Every read counts, also one that a store in the getter always overwrites.** `func (c *Conn) Reset() *gorm.DB { c.db = open(); return c.db }` still reads the caller's `c.db`. So a caller whose struct holds a chain is reported. Telling the two apart needs the reaching-store walk on a parameter's copy, and the shape is rare.
+- **A struct result has no reads.** A helper whose returned struct holds a field of its parameter is not inferred ([Struct results](#inferred-immutable-return)).
+- **A field behind a pointer field that the getter writes is not seen.** `r.ptr = &Inner{db: q.Where("x")}; return r.ptr.db` loads `r.ptr` afresh, and no store matches that load, as in detection.
+
+On the modules #308 measured (gorm's root and `tests`, new-api, gin-vue-admin), the diagnostics did not change. None of them calls a getter on a struct holding a chain, and their `ctx.Value(k).(*gorm.DB)` reads are written in place, where detection already read them as immutable. `TestAllocationGrowth` (`getterchain`) holds a chain of getters, each returning the one before it, to linear growth.
 
 </details>
 
@@ -2786,7 +2835,7 @@ A root used only in `go`/`defer` statements also had no fix, as in `for … { go
 Other limitations have no fixture marker. They are described with their design:
 
 - A call through an exported, reassigned or address-taken `var f = func(...)` does not honour the closure's directives ([Function variables](#function-variables)).
-- A getter of a field or a global is inferred `immutable-return` though another package, or code given the field's address, assigns it a chain ([Inferred immutable-return](#inferred-immutable-return)). A direct read of the field misses the same reuse.
+- A getter of a field or a global is inferred `immutable-return` though another package, or code given the field's address, assigns it a chain ([Inferred immutable-return](#inferred-immutable-return)). A direct read of the field misses the same reuse. A store before the call, in the calling function, is seen ([Parameter reads](#parameter-reads)).
 - The limits of `-fix` are in [Suggested fixes](#suggested-fixes), from [Reassignment fix target](#reassignment-fix-target) to [Contract and directive fixes](#contract-and-directive-fixes).
 
 ## Related Projects

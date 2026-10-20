@@ -101,6 +101,8 @@ type FieldRoot struct {
 
 // fieldRootStruct returns the struct that a FieldRoot path step selects from:
 // t itself, or what it points to.
+//
+//declscope:shared // param_read.go selects a parameter read's fields the same way
 func fieldRootStruct(t types.Type) *types.Struct {
 	if ptr, ok := t.Underlying().(*types.Pointer); ok {
 		t = ptr.Elem()

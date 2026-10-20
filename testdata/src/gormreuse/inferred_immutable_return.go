@@ -304,9 +304,9 @@ func notInferredRecursiveUse(db *gorm.DB) {
 	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
-// notInferredCommaOk returns a value from a comma-ok type assertion, which is
-// not a call.
-func notInferredCommaOk(v any) *gorm.DB {
+// inferredCommaOk returns its parameter asserted to *gorm.DB, which holds
+// what the caller passes (#342): a call is as immutable as its argument.
+func inferredCommaOk(v any) *gorm.DB {
 	db, _ := v.(*gorm.DB)
 	return db
 }

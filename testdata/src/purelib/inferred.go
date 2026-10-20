@@ -41,3 +41,12 @@ func ViaViaBadImmutableReturn() *gorm.DB {
 func NotInferred() *gorm.DB {
 	return DB.Where("x = ?", 1)
 }
+
+// Holder holds a handle that its getter returns.
+type Holder struct{ Conn *gorm.DB }
+
+// Get reads the field of its receiver, so its fact carries the read, and a
+// caller reads the field of its own receiver (#342).
+func (h *Holder) Get() *gorm.DB { // want Get:`gormreuse immutable-return reads0\[0\]`
+	return h.Conn
+}

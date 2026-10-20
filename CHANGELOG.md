@@ -28,7 +28,7 @@ gormreuse now follows a `*gorm.DB` through far more code. It also reads directiv
 | More code is followed | Loops, closures that run more than once, `go`/`defer`, method values, method expressions, struct fields, package-level variables, local function variables and helper results |
 | Fewer false reports | `AddError`, `DB`, `Get`, `InstanceGet` and `Callback` are not branches. The Scopes warning needs a chain that may write |
 | Directives across packages | A directive on an exported function applies in the packages that call it. It travels as an analysis fact, so a broken contract is not trusted there |
-| Inferred `immutable-return` | A helper whose body returns only `Session`, `WithContext`, `Debug`, `Begin`, `gorm.Open` or `nil` needs no directive. So does a getter of a field or a package-level variable, and a closure that returns an immutable value |
+| Inferred `immutable-return` | A helper whose body returns only `Session`, `WithContext`, `Debug`, `Begin`, `gorm.Open` or `nil` needs no directive. So does a getter of a field or a package-level variable, a closure that returns an immutable value, and a helper that returns a struct of such values. A getter's call reads the field of its own receiver |
 | Safer `-fix` | Every fix compiles, alone or with the others. A fix never drops a condition. When it cannot keep every condition, there is no fix |
 
 <details>
@@ -570,7 +570,7 @@ db.Scopes(func(q *gorm.DB) *gorm.DB { return q.Session(s) }).Find(&x)
 </td></tr>
 <tr><td>
 
-The result of a getter of a field or a package-level variable, branched twice (#308)
+The result of a getter of a field or a package-level variable, branched twice, when the receiver holds no chain (#308, #342)
 
 </td><td>
 
@@ -578,6 +578,19 @@ The result of a getter of a field or a package-level variable, branched twice (#
 d := r.DB()
 d.Find(&a)
 d.Count(&n)
+```
+
+</td></tr>
+<tr><td>
+
+The result of a helper that assigns a captured variable more than once, returns a context's transaction, or returns a struct it fills with safe handles (#342)
+
+</td><td>
+
+```go
+env := newTestEnv(t)
+env.DB.Create(&u)
+env.DB.Find(&us)
 ```
 
 </td></tr>
