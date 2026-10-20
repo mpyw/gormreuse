@@ -62,6 +62,50 @@ func loadFixtureProgram(t *testing.T) (fixtureFuncs map[string]*ssa.Function, al
 	return fixtureFuncs, allFuncs
 }
 
+// loadFixtureSource builds SSA for a package made of src, which may import
+// gorm.io/gorm (the testdata stub), and returns its functions by name.
+//
+//declscope:shared // alias_test.go and root_test.go build shapes the fixtures lack with it
+func loadFixtureSource(t *testing.T, src string) map[string]*ssa.Function {
+	t.Helper()
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	gopath := t.TempDir()
+	stub := filepath.Join(filepath.Dir(file), "..", "..", "..", "testdata", "src", "gorm.io", "gorm")
+	if err := os.CopyFS(filepath.Join(gopath, "src", "gorm.io", "gorm"), os.DirFS(stub)); err != nil {
+		t.Fatalf("copy gorm stub: %v", err)
+	}
+	dir := filepath.Join(gopath, "src", "shape")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "shape.go"), []byte(src), 0o644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	pkgs, err := packages.Load(&packages.Config{
+		Mode: packages.LoadAllSyntax,
+		Dir:  gopath,
+		Env:  append(os.Environ(), "GOPATH="+gopath, "GO111MODULE=off", "GOPROXY=off", "GOFLAGS="),
+	}, "shape")
+	if err != nil {
+		t.Fatalf("packages.Load: %v", err)
+	}
+	if packages.PrintErrors(pkgs) > 0 {
+		t.Fatal("packages had errors")
+	}
+	prog, ssaPkgs := ssautil.Packages(pkgs, ssa.BuilderMode(0))
+	prog.Build()
+	funcs := make(map[string]*ssa.Function)
+	for _, m := range ssaPkgs[0].Members {
+		if fn, ok := m.(*ssa.Function); ok {
+			funcs[fn.Name()] = fn
+		}
+	}
+	return funcs
+}
+
 // fixtureGormMethod finds the gorm.DB method with the given name in the
 // program.
 //

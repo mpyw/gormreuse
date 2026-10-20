@@ -517,7 +517,15 @@ func (t *RootTracer) traceAllPhiEdges(phi *ssa.Phi, search *allRootsSearch, loop
 		if isNilPhiEdge(edge) || search.visited[edge] {
 			continue
 		}
-		roots = append(roots, t.traceAll(edge, search, loopInfo)...)
+		edgeRoots := t.traceAll(edge, search, loopInfo)
+		if len(roots) == 0 {
+			// The edge's slice is this search's own: take it instead of
+			// copying it. A chain of k Phis, such as k loops rebuilding one
+			// query, otherwise copied the roots once per Phi (#300).
+			roots = edgeRoots
+			continue
+		}
+		roots = append(roots, edgeRoots...)
 	}
 	return roots
 }

@@ -107,15 +107,16 @@ import (
 // Note: User-defined pure functions (//gormreuse:pure) are NOT immutable sources.
 // They may return mutable values - only builtin pure methods guarantee immutable returns.
 type RootTracer struct {
-	immutableReturnFuncs *directive.DirectiveFuncSet // Functions returning immutable *gorm.DB
-	immutableParamFuncs  *directive.DirectiveFuncSet // Functions whose *gorm.DB params are immutable (opt out of Phase 1b)
-	scopesCallbacks      map[*ssa.Function]bool      // Scopes/Preload callbacks (params are mutable roots)
-	immutableCallbacks   map[*ssa.Function]bool      // Transaction/FindInBatches callbacks (fresh tx)
-	fieldRoots           map[fieldRootKey]*FieldRoot // Interned FieldRoots (one per call and field path)
-	allRoots             map[allRootsKey][]ssa.Value // Memo of FindAllMutableRoots
-	funcVars             callsite.FuncVars           // Package-level variables that hold one function (#183)
-	distrustedReturn     func(*ssa.Function) bool    // immutable-return functions not trusted (#314); nil trusts all
-	distrustedCallback   func(*ssa.Function) bool    // immutableCallbacks not exempted (#314); nil exempts all
+	immutableReturnFuncs *directive.DirectiveFuncSet        // Functions returning immutable *gorm.DB
+	immutableParamFuncs  *directive.DirectiveFuncSet        // Functions whose *gorm.DB params are immutable (opt out of Phase 1b)
+	scopesCallbacks      map[*ssa.Function]bool             // Scopes/Preload callbacks (params are mutable roots)
+	immutableCallbacks   map[*ssa.Function]bool             // Transaction/FindInBatches callbacks (fresh tx)
+	fieldRoots           map[fieldRootKey]*FieldRoot        // Interned FieldRoots (one per call and field path)
+	allRoots             map[allRootsKey][]ssa.Value        // Memo of FindAllMutableRoots
+	rootSets             map[allRootsKey]map[ssa.Value]bool // Memo of HasMutableRoot, for long root lists
+	funcVars             callsite.FuncVars                  // Package-level variables that hold one function (#183)
+	distrustedReturn     func(*ssa.Function) bool           // immutable-return functions not trusted (#314); nil trusts all
+	distrustedCallback   func(*ssa.Function) bool           // immutableCallbacks not exempted (#314); nil exempts all
 
 	//declscope:shared // pure.go's IsPureFunction reads it
 	pureFuncs *directive.DirectiveFuncSet // User-defined pure functions
@@ -160,6 +161,7 @@ func NewRootTracer(pureFuncs, immutableReturnFuncs, immutableParamFuncs *directi
 		onlyParams:           make(map[*ssa.Function]bool),
 		fieldRoots:           make(map[fieldRootKey]*FieldRoot),
 		allRoots:             make(map[allRootsKey][]ssa.Value),
+		rootSets:             make(map[allRootsKey]map[ssa.Value]bool),
 		aliases:              make(map[aliasedRootsKey]bool),
 		cfgs:                 cfg.NewAnalyzer(),
 	}
@@ -232,7 +234,11 @@ func (t *RootTracer) FindMutableRoot(recv ssa.Value, loopInfo *cfg.LoopInfo) ssa
 // (#260): every gorm call asks for the roots of its receiver, and
 // collectAliasedRoots asks again at each step down the chain. The caller must
 // not modify the returned slice.
+//
+// A loopInfo with no loop header gives the same result as nil, so such
+// queries share one entry (see rootsLoopInfo).
 func (t *RootTracer) FindAllMutableRoots(v ssa.Value, loopInfo *cfg.LoopInfo) []ssa.Value {
+	loopInfo = rootsLoopInfo(loopInfo)
 	key := allRootsKey{v, loopInfo}
 	if roots, ok := t.allRoots[key]; ok {
 		return roots
@@ -240,6 +246,54 @@ func (t *RootTracer) FindAllMutableRoots(v ssa.Value, loopInfo *cfg.LoopInfo) []
 	roots := slices.Clip(t.traceAll(v, newAllRootsSearch(make(map[ssa.Value]bool)), loopInfo))
 	t.allRoots[key] = roots
 	return roots
+}
+
+// rootsLoopInfo returns the loopInfo that a search with loopInfo can use in
+// its place: nil when loopInfo has no loop header.
+//
+// The tracer reads a loopInfo only through IsLoopHeader. With no header every
+// answer is false, and each reader then does what it does for nil:
+// tracePhi skips the back-edge order, loopSwapPhis finds no loop-header edge,
+// and the rest only pass loopInfo on. A loopInfo describes one function, so a
+// closure without loops traced a value of its parent under its own loopInfo
+// and missed the entry the parent's analysis made, once per closure (#300).
+// Its search is now shared with every other one that sees no loop header.
+// A loopInfo that has headers still keys its own entry: its function may be
+// reached from v, such as the body of a closure that v calls.
+//
+//declscope:shared // alias.go's FindAliasedRoots keys its searches by it too
+func rootsLoopInfo(loopInfo *cfg.LoopInfo) *cfg.LoopInfo {
+	if !loopInfo.HasLoopHeaders() {
+		return nil
+	}
+	return loopInfo
+}
+
+// rootSetMinLen is the shortest FindAllMutableRoots list that HasMutableRoot
+// keeps as a set. A shorter one is searched in place.
+const rootSetMinLen = 16
+
+// HasMutableRoot reports whether root is one of FindAllMutableRoots(v,
+// loopInfo). A long list is kept as a set, once per pair: isAssignment asks it
+// about each root of a call's receiver, and after n loops that rebuild one
+// query the receiver has n roots, so searching the list took time cubic in n
+// (#300).
+func (t *RootTracer) HasMutableRoot(v ssa.Value, loopInfo *cfg.LoopInfo, root ssa.Value) bool {
+	loopInfo = rootsLoopInfo(loopInfo)
+	key := allRootsKey{v, loopInfo}
+	if set, ok := t.rootSets[key]; ok {
+		return set[root]
+	}
+	roots := t.FindAllMutableRoots(v, loopInfo)
+	if len(roots) < rootSetMinLen {
+		return slices.Contains(roots, root)
+	}
+	set := make(map[ssa.Value]bool, len(roots))
+	for _, r := range roots {
+		set[r] = true
+	}
+	t.rootSets[key] = set
+	return set[root]
 }
 
 // Site reads instr as a callsite.Site, resolving a call through a

@@ -96,8 +96,21 @@ func TestDetectLoopsNilBlocks(t *testing.T) {
 	if info == nil {
 		t.Fatal("expected non-nil LoopInfo")
 	}
-	if info.IsInLoop(nil) || info.IsLoopHeader(nil) {
+	if info.IsInLoop(nil) || info.IsLoopHeader(nil) || info.HasLoopHeaders() {
 		t.Error("empty LoopInfo should report no loop membership")
+	}
+	var none *LoopInfo
+	if none.HasLoopHeaders() {
+		t.Error("nil LoopInfo should report no loop header")
+	}
+	loop := buildFunc(t, `package p
+func f(n int) {
+	for i := 0; i < n; i++ {
+	}
+}
+`, "f")
+	if !NewAnalyzer().DetectLoops(loop).HasLoopHeaders() {
+		t.Error("a for loop should have a loop header")
 	}
 }
 

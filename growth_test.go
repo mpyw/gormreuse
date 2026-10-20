@@ -420,7 +420,7 @@ var growthCases = []growthCase{
 		return []string{b.String()}
 	}},
 	// n sequential loops rebuilding one query, then two uses.
-	{name: "loops", limit: growthLinear, after: "#300", shape: func(n int) []string {
+	{name: "loops", limit: growthLinear, shape: func(n int) []string {
 		var b strings.Builder
 		b.WriteString("func f(db *gorm.DB, xs []string) {\n\tq := db.Model(nil)\n")
 		for range n {

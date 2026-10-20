@@ -37,6 +37,12 @@ func (l *LoopInfo) IsLoopHeader(block *ssa.BasicBlock) bool {
 	return l.loopHeaders[block]
 }
 
+// HasLoopHeaders reports whether l marks any block as a loop header. A nil l
+// marks none.
+func (l *LoopInfo) HasLoopHeaders() bool {
+	return l != nil && len(l.loopHeaders) > 0
+}
+
 // IsInLoopWithout reports whether block is in a loop that does not hold def,
 // so it runs again without def running again. A nil def, or a def of
 // another function, is in none of the loops.
