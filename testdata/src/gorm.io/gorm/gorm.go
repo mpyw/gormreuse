@@ -226,6 +226,21 @@ func (db *DB) AddError(err error) error { return err }
 // DB returns the underlying *sql.DB.
 func (db *DB) DB() (interface{}, error) { return nil, nil }
 
+// Get reads a value from Statement.Settings.
+func (db *DB) Get(key string) (interface{}, bool) { return nil, false }
+
+// InstanceGet reads a value that InstanceSet stored for this Statement.
+func (db *DB) InstanceGet(key string) (interface{}, bool) { return nil, false }
+
+// Callbacks is the callback manager.
+type Callbacks struct{}
+
+// Callback returns the callback manager.
+func (db *DB) Callback() *Callbacks { return &Callbacks{} }
+
+// ToSQL builds the SQL of queryFn run on a DryRun copy of db.
+func (db *DB) ToSQL(queryFn func(tx *DB) *DB) string { return "" }
+
 // Association is a model's association.
 type Association struct {
 	Error error

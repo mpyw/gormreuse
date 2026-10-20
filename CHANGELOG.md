@@ -69,6 +69,7 @@ Most added reports in the root module are a `*gorm.DB` parameter branched in a l
 | Two calls through a method value of an immutable value (#178) | `where := db.Session(s).Where; where("a").Find(&x); where("b").Find(&y)` |
 | A Transaction or FindInBatches callback under `go`/`defer`, or held in a variable or field (#256, #257) | `go db.Transaction(cb)`, `db.Transaction(s.cb)` |
 | Directives on generic instances and method values (#180) | `helper[int](q)`, `f := r.helper; f(q)` |
+| `AddError`, `DB`, `Get`, `InstanceGet` and `Callback` counted as a branch (#307). `ToSQL` now only reads its receiver | `sqlDB, _ := db.DB(); db.AutoMigrate(&User{})`, `q.Where("a").Find(&x); q.AddError(err)` |
 
 > [!WARNING]
 > **A `//gormreuse:ignore` written for a removed report is now unused**, and is reported as such. The Scopes warning (#196) is the most common case. `-fix` deletes it. In a non-test file of a package with `_test.go` files there is no fix, because the test variant may still need it. Delete those by hand.

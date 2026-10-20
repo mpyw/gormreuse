@@ -54,10 +54,11 @@ branch2 := q.Where("b")                       // OK: creates new Statement
 The linter detects when a mutable `*gorm.DB` branches into multiple code paths:
 
 1. **Immutable-returning methods** ([`Session`](https://pkg.go.dev/gorm.io/gorm#DB.Session), [`WithContext`](https://pkg.go.dev/gorm.io/gorm#DB.WithContext), [`Debug`](https://pkg.go.dev/gorm.io/gorm#DB.Debug), [`Open`](https://pkg.go.dev/gorm.io/gorm#Open), [`Begin`](https://pkg.go.dev/gorm.io/gorm#DB.Begin)) return a new `clone > 0` instance (`clone == 1` or `2`; the exceptions are below). A call to one is a pure use of the receiver's root, not a branch. `typeutil.IsImmutableReturningBuiltin` also lists [`Transaction`](https://pkg.go.dev/gorm.io/gorm#DB.Transaction). It returns `error`, so only the pure use applies: it runs its callback on a `Begin` result. Its callback's fresh `tx` is a separate exemption (see [Directives](#directives))
-2. **All other methods** on a mutable instance create a **branch** that consumes the instance
-3. **Second branch** from the same mutable root is a **violation**
-4. A **use of a `Session`/`Debug` copy** after its mutable root changed is a **violation** (see below)
-5. A `*gorm.DB` **argument** of a query method is a **read** of its root, and a use of the outer chain after the argument's root changed is a **violation** (see [Subquery and condition arguments](#subquery-and-condition-arguments-185))
+2. **State-only methods** (`AddError`, `DB`, `Get`, `InstanceGet`, `Callback`) touch no clause, so a call of one is not a use at all. `ToSQL` reads the receiver like `Session`. See [Methods that do not branch](#methods-that-do-not-branch-307)
+3. **All other methods** on a mutable instance create a **branch** that consumes the instance
+4. **Second branch** from the same mutable root is a **violation**
+5. A **use of a `Session`/`Debug` copy** after its mutable root changed is a **violation** (see below)
+6. A `*gorm.DB` **argument** of a query method is a **read** of its root, and a use of the outer chain after the argument's root changed is a **violation** (see [Subquery and condition arguments](#subquery-and-condition-arguments-185))
 
 #### Session and Debug copies (#174)
 
@@ -123,6 +124,30 @@ Decisions and limitations:
 - **One report per argument.** Each call of `x.Order("id").Find(nil)` is a use of `x`. A changed argument is reported once per call that took it, at the earliest use that sees the change. `Session`/`Debug` alias uses keep one report per use.
 - **No suggested fix** for the later-change report, as for alias uses. A `.Session(&gorm.Session{})` at the end of the argument's chain fixes both reports.
 - **Not followed:** an outer chain returned from a function, or stored in a field and used elsewhere, as for `Session`/`Debug` copies. An outer chain used in `go`/`defer` is an alias use at the statement's position, as for a copy. A `//gormreuse:pure` function may now take a `*gorm.DB` argument and pass it to `Where`, and its caller does not see that the result holds it.
+
+#### Methods that do not branch (#307)
+
+Every gorm method used to branch its receiver unless it returns an immutable copy. So `sqlDB, _ := db.DB(); db.AutoMigrate(...)` on a parameter was reported, and so was each `db.AddError(...)` after a branch in a GORM callback. In the gorm corpus (the root module of `go-gorm/gorm` at commit b3d3bf2), 83 of 149 reports were of this kind. `typeutil.receiverUses` is the one table of methods whose call does not branch its receiver. GORM v1.31.2 does the following for each of them on a `clone == 0` receiver. `e2e/internal/state_methods_test.go` checks each claim with sqlmock.
+
+| Method | What GORM does | Model |
+| --- | --- | --- |
+| `Session`, `WithContext`, `Debug`, `Open`, `Begin`, `Transaction` | See above | Read |
+| `ToSQL` | Runs its callback on `db.Session(&Session{DryRun: true}).getInstance()`, a cloned Statement. The receiver is unchanged, but the SQL holds the receiver's clauses | Read: a branch before it is reported |
+| `AddError` | Sets `db.Error` (and `Statement.Result.Error`). Touches no clause | State only |
+| `DB` | Returns the `*sql.DB` behind the connection pool of the Statement or the `Config` | State only |
+| `Get`, `InstanceGet` | Read `Statement.Settings` | State only |
+| `Callback` | Returns the callback manager of the `Config` | State only |
+
+A read is `siteUse.read`, as for `Session`: a branch of the root that reaches the call is reported. A state-only call is skipped by `handleReceiver` before anything is recorded. `IsImmutableReturningBuiltin` covers both, so the `pure` validator, the immutable-return check and the fixes treat them as not branching too.
+
+Decisions:
+
+- **`AddError` is state only, although a later chain inherits the error.** All chain calls of a `clone == 0` value return that same `*gorm.DB`, so `q.AddError(err); q.Find(&users)` runs no SQL and returns `err` (`TestStateMethods_AddErrorIsInherited`). Stopping the chain is what `AddError` is for, and GORM's own callbacks use it that way. This linter reports clauses that one chain leaves for another. An error is outside that model, just as a failed `Find` leaves its error on the value. With the error cleared, the later query is the same (`TestStateMethods_TouchNoClause`).
+- **`Get` and `InstanceGet` after a branch are not reported.** A branch can store a setting with `Set` or `InstanceSet`, and a later `Get` sees it. No query is built from that read, so it is treated as a field read like `db.Statement`, which is not a use either.
+- **`Migrator` and `AutoMigrate` stay branches.** `Migrator` runs the receiver's pending scopes in place, and the `Migrator` it returns holds a `Session` copy that shares the receiver's Statement. A condition added to the receiver after the call leaks into the queries the `Migrator` runs (`TestStateMethods_MigratorSharesStatement`). The copy cannot be followed through the `Migrator` interface. `Association`, `Connection`, `Row`, `Rows`, `ScanRows`, `SetupJoinTable` and `Use` stay branches too. `gormNonChainBranches` in `e2e/internal/gorm_stub_test.go` gives the reason for each.
+- **Methods promoted from `*gorm.Config` are not in the table.** `Name`, `Explain`, `Apply` and the other dialector methods are calls on the embedded `Config` in SSA, not on the `*gorm.DB`, so they were never uses.
+
+`TestGormReceiverUsesMatchGorm` keeps the table in line with GORM. Every method declared on the real `*gorm.DB` that returns no `*gorm.DB` must be in `receiverUses` or in `gormNonChainBranches`. Every name in either must still be a method of it.
 
 ### Directives
 

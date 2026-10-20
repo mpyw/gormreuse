@@ -317,10 +317,11 @@ There is no fix when the reason would become a directive itself, as in `//gormre
 This linter detects when a **mutable [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) branches into multiple code paths**. The core concept:
 
 1. **Immutable-returning methods** ([`Session`](https://pkg.go.dev/gorm.io/gorm#DB.Session), [`WithContext`](https://pkg.go.dev/gorm.io/gorm#DB.WithContext), [`Debug`](https://pkg.go.dev/gorm.io/gorm#DB.Debug), etc.) return an **immutable** instance that can branch freely
-2. **All other methods** on a mutable instance create a **branch** that consumes the instance
-3. **Second branch** from the same mutable root is a **violation**
-4. A **`Session`/`Debug` copy** of a mutable instance still reads that instance's `Statement`. So using the copy **after the instance changed** is a **violation** (see [Session and Debug copies](#session-and-debug-copies))
-5. A mutable instance passed as a **subquery or condition argument** (`db.Where("id IN (?)", sub)`) is **read**, not branched. Running the outer query **after the argument changed** is a **violation** (see [Subqueries and condition arguments](#subqueries-and-condition-arguments))
+2. **State-only methods** ([`AddError`](https://pkg.go.dev/gorm.io/gorm#DB.AddError), [`DB`](https://pkg.go.dev/gorm.io/gorm#DB.DB), [`Get`](https://pkg.go.dev/gorm.io/gorm#DB.Get), [`InstanceGet`](https://pkg.go.dev/gorm.io/gorm#DB.InstanceGet), [`Callback`](https://pkg.go.dev/gorm.io/gorm#DB.Callback)) touch no clause, so a call of one does not count at all
+3. **All other methods** on a mutable instance create a **branch** that consumes the instance
+4. **Second branch** from the same mutable root is a **violation**
+5. A **`Session`/`Debug` copy** of a mutable instance still reads that instance's `Statement`. So using the copy **after the instance changed** is a **violation** (see [Session and Debug copies](#session-and-debug-copies))
+6. A mutable instance passed as a **subquery or condition argument** (`db.Where("id IN (?)", sub)`) is **read**, not branched. Running the outer query **after the argument changed** is a **violation** (see [Subqueries and condition arguments](#subqueries-and-condition-arguments))
 
 ### Method Classification
 
@@ -331,6 +332,8 @@ This linter detects when a **mutable [`*gorm.DB`](https://pkg.go.dev/gorm.io/gor
 | --------------------------- | ------------------------ | ------------------------------ |
 | Immutable-Returning Methods | [`Session`](https://pkg.go.dev/gorm.io/gorm#DB.Session), [`WithContext`](https://pkg.go.dev/gorm.io/gorm#DB.WithContext), [`Debug`](https://pkg.go.dev/gorm.io/gorm#DB.Debug), [`Open`](https://pkg.go.dev/gorm.io/gorm#Open), [`Begin`](https://pkg.go.dev/gorm.io/gorm#DB.Begin) | Return a new immutable instance (`clone > 0`). They read the receiver but do not branch it. `Session` and `Debug` have exceptions: see [Session and Debug copies](#session-and-debug-copies) |
 | Transaction                 | [`Transaction`](https://pkg.go.dev/gorm.io/gorm#DB.Transaction) | Returns an `error`. Like `Begin`, it reads the receiver but does not branch it. Its callback gets a fresh `tx` (see [Parameters are mutable](#parameters-are-mutable)) |
+| ToSQL                       | [`ToSQL`](https://pkg.go.dev/gorm.io/gorm#DB.ToSQL) | Returns a `string`. It builds SQL from a copy of the receiver's Statement, so it reads the receiver but does not branch it. A branch before it is reported |
+| State-Only Methods          | [`AddError`](https://pkg.go.dev/gorm.io/gorm#DB.AddError), [`DB`](https://pkg.go.dev/gorm.io/gorm#DB.DB), [`Get`](https://pkg.go.dev/gorm.io/gorm#DB.Get), [`InstanceGet`](https://pkg.go.dev/gorm.io/gorm#DB.InstanceGet), [`Callback`](https://pkg.go.dev/gorm.io/gorm#DB.Callback) | Touch no clause, so they neither read nor branch the receiver. `AddError` sets `db.Error`, which a later chain of the same value inherits and stops at. That is what `AddError` is for, so it is not reported |
 | All Other Methods           | [`Where`](https://pkg.go.dev/gorm.io/gorm#DB.Where), [`Find`](https://pkg.go.dev/gorm.io/gorm#DB.Find), [`Count`](https://pkg.go.dev/gorm.io/gorm#DB.Count), [`Order`](https://pkg.go.dev/gorm.io/gorm#DB.Order), etc. | Create a branch from receiver |
 
 ### Automatic Pollution Sources
