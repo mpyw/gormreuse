@@ -2170,6 +2170,7 @@ After the reassignments, `simulateVirtualRoots` decides which root each use read
 | Block order | The uses of one block are taken in the order the block runs them (`runOrderedUses`). They are not taken by position. go/ssa puts a `for` statement's post statement at the end of the body's block. So `for i := 0; i < 2; q.Where("a") { q.Find(nil); i++ }` reads the root in `q.Find` before the post statement reassigns it (#247) |
 | Loops | A root used again in a loop that does not hold its definition, other than by a reassignment, gets a Session (`usedAgainInLoop`). That holds for a root created by a reassignment as for the original one (#311). So does a reassignment in a loop that does not define the root again: the next iteration reads it. Both ask `cfg.Repeats`, as the checker does, and so does `changeSeenAfterEscape` |
 | A root that flows into a Phi | `sessionPositionsForRoot` always puts a Session on the root itself, and adds the other edges when the Phi is used twice |
+| A chain of Phis (#343) | Each conditional filter adds a Phi that takes the one before. `mergedEdges` follows the Phis forward from the root, and back from each one used twice, down to values that are not Phis (`mergingPhis`, `phiMergedEdges`). A parameter found there gets its parameter fix (`mergedParamFixes`). A value found only by the walk back is followed only when it is merged or chained on and nothing else (`mergeOnly`). No Session is written when any merged value may carry Attrs, Assign or InstanceSet state (`mergedDropsState`, #344) |
 | Already immutable | A reassignment whose chain already ends in an immutable call, by the tracer's `IsImmutableCall`, gets no second Session (`virtualRootEndsImmutable`) |
 
 <details><summary>A loop example, the every-use check, and the one-pass cases</summary>
@@ -2196,11 +2197,39 @@ When the check fails, a root gets a Session when it has a use other than the one
 
 </details>
 
+<details><summary>Chains of Phis (#343)</summary>
+
+```go
+q := DB.Model(&User{})
+if a != "" { q = q.Where("a = ?", a) } // Phi1(Model, Where a)
+if b != "" { q = q.Where("b = ?", b) } // Phi2(Phi1, Where b)
+q.Count(&n)                            // reads Phi2
+q.Limit(10).Find(&us)
+```
+
+Before #343, only the edges of the first Phi got a Session. That made `Where("b")` a new mutable root, so each filter took one more pass. The code after the first pass failed at run time: Count's `count(*)` leaked into Find (`sql: expected 5 destination arguments in Scan, not 1`). After one pass, 10 of the 38 fixable reports in new-api and 35 of the 46 in gin-vue-admin still had a fix to apply.
+
+| Step | What it takes |
+| --- | --- |
+| Forward from the root | The root when it is a Phi, the Phis that take it, and the Phis that take one of those |
+| Back from each one used twice | Its edges, and the edges of a Phi among them, down to values that are not Phis |
+
+The walk back is needed because the reported root is not always the first value. With a loop between the filters, the root is the last filter's `Where`. The Model and the first filter reach it only through the loop-header Phi.
+
+The fix's checks (`changedElsewhere`, the discarded statements of `findReassignedChains`) see the uses of the root and of the Phis forward from it. They do not see the uses of a value that only the walk back finds. `mergeOnly` accepts such a value only when each referrer is a Phi, or a `*gorm.DB` method with the value as its receiver that runs a query, returns a copy, or returns a value accepted by the same rule. In `if a != "" { q = q.Where("a") }; applyTenant(q); for … { q = q.Where(x) }; if b != "" { q = q.Where("b") }`, a Session on the Model would make `applyTenant` add its filter to a copy. The walk stops at the Phi that `applyTenant` takes.
+
+Rejected: one `q = q.Session(&gorm.Session{})` before the first use of the last Phi. The statement must come before every use after the merge, in source order. SSA's blocks do not give that order back, and the rest of the fix appends to calls instead of adding lines.
+
+Fixtures: `testdata/src/converge/phi_chain.go` has 2, 3 and 5 filters on a local root, a parameter, and a root on a package-level handle, with loops mixed in. `testdata/src/gormreuse/fix_phi_chain.go` has the values where the walk back stops. `e2e/internal/phi_chain_test.go` runs `fixsql/before/phi_chain.go` against real GORM. `filterloops` is in the growth gate. After one `-fix` pass over new-api and gin-vue-admin, no reuse diagnostic with a fix remains, and both still build.
+
+</details>
+
 Limitations:
 
 - The rules follow the CFG of one function, not the run-time order of deferred calls or closures. Those roots get the conservative Sessions above, some of them redundant.
 - A reassignment in a `for` statement's post statement is ordered before the body, so its root needs a second pass (`onePassForPost`, see [Known Limitations](#known-limitations)).
-- A Phi edge with no call of its own still gets no Session ([Fixes that compile](#fixes-that-compile)).
+- A Phi edge with no call of its own still gets no Session ([Fixes that compile](#fixes-that-compile)). A parameter edge gets its parameter fix (#343).
+- The walk back through a Phi chain is conservative: a value that is also read by `fmt.Println`, or whose `Error` is read, stops it. Such a root may need another pass (#343).
 
 <details><summary>The three defects #202 fixed</summary>
 

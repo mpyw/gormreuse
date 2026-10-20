@@ -11,8 +11,8 @@ func fixSessionTargetRun(db *gorm.DB, fn func(tx *gorm.DB)) { fn(db) }
 
 func fixSessionTargetOpen() (*gorm.DB, error) { return nil, nil }
 
-// fixSessionTargetClosureParam: the edge tx is a closure parameter. Only the
-// other edge gets a Session.
+// fixSessionTargetClosureParam: the edge tx is a closure parameter. The other
+// edge gets a Session, and tx the body Session of a parameter (#343).
 func fixSessionTargetClosureParam(db *gorm.DB, c bool) {
 	fixSessionTargetRun(db, func(tx *gorm.DB) {
 		q := tx.Where("x")

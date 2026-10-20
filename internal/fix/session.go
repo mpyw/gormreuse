@@ -123,9 +123,10 @@ func (g *Generator) findRootsNeedingSession(virtualUses map[virtualRootKey][]pol
 }
 
 // sessionPositionsForRoot returns where Sessions go to make root immutable.
-// For a Phi node it returns a position for each incoming edge that can take
-// one. Otherwise it returns the position after the call at pos and those of
-// the other values its uses may read instead of it (see mergedEdges).
+// For a Phi node it returns a position for each value that flows into it, or
+// into a Phi that takes it, and can take one. Otherwise it returns the
+// position after the call at pos and those of the other values its uses may
+// read instead of it (see mergedEdges).
 //
 // The root's own Session is needed even when the Phi it flows into is used
 // once: the root has 2+ uses, and some of them may come before the merge, as
@@ -134,11 +135,8 @@ func (g *Generator) findRootsNeedingSession(virtualUses map[virtualRootKey][]pol
 //
 //declscope:shared // generator.go's Generate places the original root's Sessions with it
 func (g *Generator) sessionPositionsForRoot(pos token.Pos, root ssa.Value, uses []pollution.UsageInfo) []token.Pos {
-	if phi, isPhi := root.(*ssa.Phi); isPhi {
-		if !mergeUsedTwice(phi) {
-			return nil
-		}
-		return g.edgeSessionPositions(phi.Edges)
+	if _, isPhi := root.(*ssa.Phi); isPhi {
+		return g.mergedSessionPositions(root, uses)
 	}
 
 	var positions []token.Pos
@@ -159,7 +157,7 @@ func (g *Generator) sessionPositionsForRoot(pos token.Pos, root ssa.Value, uses 
 //
 //declscope:shared // generator.go's Generate places a parameter root's merged Sessions with it
 func (g *Generator) mergedSessionPositions(root ssa.Value, uses []pollution.UsageInfo) []token.Pos {
-	return g.edgeSessionPositions(mergedEdges(g.cfg, root, uses))
+	return g.edgeSessionPositions(g.mergedEdges(root, uses))
 }
 
 // edgeSessionPositions returns where Sessions go on edges, the values that

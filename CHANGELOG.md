@@ -803,7 +803,7 @@ Directives now work across packages, through method expressions and function var
 | Roots used only in `go`/`defer` (#309, #312) | `go q.Count(&n); go q.Find(&x)` and `for … { go q.Find(&x) }` get a Session at the root. The message names the first branch |
 | The right variable (#198) | A reassignment rebinds the variable that holds the reused root, never an outer receiver |
 | Parameter roots (#201, #245, #313) | An exported function, a method, a function value or a closure without a `*gorm.DB` result gets `tx = tx.Session(&gorm.Session{})` at the top of the body. A `Transaction` wrapper's callback is such a closure. `immutable-param` is added only when every caller of a function declaration is checked |
-| Sessions by control flow (#202, #247, #306, #311) | Sessions go where the paths need them. That includes a reassignment read in a later loop, a value merged with a parameter, and every root that a merge may hold. One pass of fixes resolves the diagnostics |
+| Sessions by control flow (#202, #247, #306, #311, #343) | Sessions go where the paths need them. That includes a reassignment read in a later loop, a value merged with a parameter, every root that a merge may hold, and every filter of a chain of conditional filters. One pass of fixes resolves the diagnostics |
 | New fixes (#248) | Isolate an argument passed to an `immutable-param` parameter. Delete an unused or redundant directive, or an unused ignore |
 | Every diagnostic carries its root's fix (#246, #312) | A quick fix works on each diagnostic. A root with an ignored diagnostic gets no fix, so the fix cannot make the ignore unused |
 | Same output on every run (#184, #273) | `-json` lists diagnostics in position order |

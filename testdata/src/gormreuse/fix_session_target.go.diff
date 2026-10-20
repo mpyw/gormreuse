@@ -1,6 +1,6 @@
 --- fix_session_target.go	1970-01-01 00:00:00
 +++ fix_session_target.go.golden	1970-01-01 00:00:00
-@@ -1,36 +1,36 @@
+@@ -1,36 +1,37 @@
  package internal
  
  import "gorm.io/gorm"
@@ -14,11 +14,12 @@
  
  func fixSessionTargetOpen() (*gorm.DB, error) { return nil, nil }
  
- // fixSessionTargetClosureParam: the edge tx is a closure parameter. Only the
- // other edge gets a Session.
+ // fixSessionTargetClosureParam: the edge tx is a closure parameter. The other
+ // edge gets a Session, and tx the body Session of a parameter (#343).
  func fixSessionTargetClosureParam(db *gorm.DB, c bool) {
  	fixSessionTargetRun(db, func(tx *gorm.DB) {
 -		q := tx.Where("x")
++		tx = tx.Session(&gorm.Session{})
 +		q := tx.Where("x").Session(&gorm.Session{})
  		if c {
  			q = tx
