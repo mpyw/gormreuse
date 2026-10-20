@@ -35,6 +35,7 @@ package pollution
 
 import (
 	"cmp"
+	"go/ast"
 	"go/token"
 	"maps"
 	"path/filepath"
@@ -45,6 +46,7 @@ import (
 	"golang.org/x/tools/go/ssa"
 
 	"github.com/mpyw/gormreuse/internal/effort"
+	"github.com/mpyw/gormreuse/internal/ssa/cfg"
 )
 
 // Violation represents a detected reuse violation.
@@ -449,8 +451,8 @@ func (t *Tracker) aliasMessage(root ssa.Value, changePos token.Pos) string {
 // alias diagnostics, leaving out a position that is unknown.
 func (t *Tracker) changeLocs(root ssa.Value, changePos token.Pos) string {
 	var locs []string
-	if root != nil && root.Pos().IsValid() {
-		locs = append(locs, "root at "+t.loc(root.Pos()))
+	if root != nil && rootPos(root).IsValid() {
+		locs = append(locs, "root at "+t.loc(rootPos(root)))
 	}
 	if changePos.IsValid() {
 		locs = append(locs, "changed at "+t.loc(changePos))
@@ -671,8 +673,8 @@ func (t *Tracker) reuseMessage(root ssa.Value) string {
 	msg := "*gorm.DB reused: second branch from mutable root"
 
 	var locs []string
-	if root != nil && root.Pos().IsValid() {
-		locs = append(locs, "root at "+t.loc(root.Pos()))
+	if root != nil && rootPos(root).IsValid() {
+		locs = append(locs, "root at "+t.loc(rootPos(root)))
 	}
 	if fb := t.firstBranchPos(root); fb.IsValid() {
 		locs = append(locs, "first branch at "+t.loc(fb))
@@ -709,6 +711,26 @@ func (t *Tracker) loc(pos token.Pos) string {
 	// Deliberately adjusted: this text sits next to the driver-printed position.
 	p := t.fset.Position(pos)
 	return filepath.Base(p.Filename) + ":" + strconv.Itoa(p.Line)
+}
+
+// rootPos returns the position that a report names for root. A parameter of
+// the yield function of a range-over-func loop is a range variable, but its
+// own position is in the declaration of the iterator's yield type, such as
+// iter.Seq in the standard library (#378). Its position is that of the range
+// variable, or the for keyword when the loop does not name it.
+func rootPos(root ssa.Value) token.Pos {
+	param, ok := root.(*ssa.Parameter)
+	if !ok || !cfg.IsRangeFuncLoopBody(param.Parent()) {
+		return root.Pos()
+	}
+	// go/ssa gives the yield function its range statement as syntax, and a
+	// parameter for the key and one for the value at most.
+	rng := param.Parent().Syntax().(*ast.RangeStmt)
+	pos := rng.For
+	if v := []ast.Expr{rng.Key, rng.Value}[slices.Index(param.Parent().Params, param)]; v != nil {
+		pos = v.Pos()
+	}
+	return pos
 }
 
 // firstBranchPos returns the earliest polluting use of root (its first branch),

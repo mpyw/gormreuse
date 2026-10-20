@@ -345,6 +345,9 @@ gormreuse has no flags of its own. These come from the analysis driver:
 
 The command exits with status `3` when it reports a diagnostic. It exits with `0` when it reports none, or when `-json` is set.
 
+> [!NOTE]
+> With `-fix`, and with `-fix -diff`, the command prints no diagnostics and exits with `0`, even when some reports have no fix. This is how the [analysis driver](https://pkg.go.dev/golang.org/x/tools/go/analysis/singlechecker) works. Run the command again without `-fix` to see the reports that are left.
+
 <details>
 <summary>Which files are analyzed, and internal errors</summary>
 
@@ -1613,17 +1616,17 @@ Each `*gorm.DB` result, in a `(*gorm.DB, error)` result too, must be one of thes
 | A local variable, such as one a closure captures, whose every assignment is in the function and holds one of these values | `get := func() *gorm.DB { return conn }` |
 | A type assertion of a value that holds no chain, as reuse detection reads it | `if tx, ok := ctx.Value(txKey).(*gorm.DB); ok { return tx }` |
 
-So a getter is treated like the field it returns, **at each call**. The call reads the field of its own receiver:
+So a getter is treated like the field it returns, **at each call**. The call reads the field of its own receiver. With `d := r.DB()`, then `d.Find(&a)` and `d.Count(&n)`, and `r` a parameter, nothing is reported, as for `r.db.Find(&a)` and `r.db.Count(&n)`.
 
-| Code | Reported? |
+A getter promoted from an embedded struct reads the field the same way: `d := o.DB()` with `type outer struct{ repo }` reads `o.db`. So do `o.inner.DB()`, `get(&o.repo)`, and a getter reached through a pointer field that holds `&repo{db: q}`. A store through another read of a pointer field is not seen: `o.p.db = q; o.p.DB()` is not reported, and neither is `o.p.db` written in place. This holds while the getter is inferred, such as when `q` is the result of a helper. A store of a chain like `db.Where("x")` turns inference off, as below.
+
+A getter of a field or a package-level variable is not inferred at all when code in its package assigns the variable a chain that gormreuse can prove. A caller may call the getter after that. Then every call of the getter in the package returns a mutable root, and the report names the `d := r.DB()` line as the root:
+
+| Code in the package | Getter inferred? |
 | --- | --- |
-| `d := r.DB()`, then `d.Find(&a)` and `d.Count(&n)`, with `r` a parameter | No, as for `r.db.Find(&a)` and `r.db.Count(&n)` |
-| The same after `r := &repo{db: q}`, with `q` a mutable value | Yes, as `r.db` would be. The report names `q` as the root |
-| `d := o.DB()`, with `DB` promoted from an embedded struct (`type outer struct{ repo }`), after `o.db = q`. Also `o.inner.DB()`, `get(&o.repo)`, and a getter reached through a pointer field that holds `&repo{db: q}` | Yes, as `o.db` would be |
-
-A store through another read of a pointer field is not seen: `o.p.db = q; o.p.DB()` is not reported, and neither is `o.p.db` written in place.
-
-A getter of a field or a package-level variable is not inferred at all when code in its package assigns the variable a chain. An example is `r.db = r.db.Where("x")`. A caller may call the getter after that.
+| No function stores a chain in `db` | Yes |
+| `r.db = r.db.Where("x")` | No |
+| `r := &repo{db: q}`, with `q := db.Where("x")` | No. This holds in every function of the package, also where `r` is a parameter |
 
 A helper that returns a struct is inferred the same way when it builds the struct. Every `*gorm.DB` field it fills in must hold one of these values. Then `env := newTestEnv()`, followed by `env.DB.Create(&u)` and `env.DB.Find(&us)`, is not reported. A struct the helper passes to another function, or did not build, turns inference off.
 
@@ -2065,8 +2068,9 @@ A root that still has two or more branches on one path gets `.Session(&gorm.Sess
 | --- | --- |
 | A name for `gorm.io/gorm` | Uses it |
 | No such name | Adds the import `"gorm.io/gorm"` |
-| No such name, and `gorm` is taken there | Adds `gormio "gorm.io/gorm"`. A parameter or local variable named `gorm` takes the name. So does another package imported as `gorm` |
+| No such name, and `gorm` is taken anywhere in the file | Adds `gormio "gorm.io/gorm"`. A parameter or local variable named `gorm` takes the name, in any function of the file. So does another package imported as `gorm`. Every fix in the file adds the same import |
 | Only a blank import (`_ "gorm.io/gorm"`) | It gives no name, so the fix adds an import as above |
+| Is in package `gorm.io/gorm` itself | Writes `&Session{}` and adds no import |
 
 - Each diagnostic's fix carries its own import edit. So an editor can apply one quick fix alone.
 - Every diagnostic of a root carries the same fix.

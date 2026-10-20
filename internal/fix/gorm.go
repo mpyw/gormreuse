@@ -21,10 +21,19 @@ import (
 // When no import of the file can be used there, importName is the name of an
 // import to add: "gorm", or "gormio", "gormio2" and so on when gorm is taken,
 // such as by another package imported as gorm. A blank import has no usable
-// name.
+// name. The name must be free in the whole file, not only at positions: each
+// diagnostic's fix asks for its own positions, and the driver applies them
+// together, so a name that depended on them added the same import twice under
+// two names (#378).
+//
+// In package gorm itself, Session needs no qualifier and no import, which
+// would be an import cycle (#378).
 //
 //declscope:shared // session.go's sessionEdits qualifies each Session with it
 func (g *Generator) gormNameAt(file *ast.File, positions []token.Pos) (qualifier, importName string) {
+	if g.pass.Pkg.Path() == gormImportPath {
+		return "", ""
+	}
 	resolvesAt := func(name string, want func(types.Object) bool) bool {
 		for _, pos := range positions {
 			_, obj := g.pass.Pkg.Scope().Innermost(pos).LookupParent(name, pos)
@@ -52,15 +61,34 @@ func (g *Generator) gormNameAt(file *ast.File, positions []token.Pos) (qualifier
 			}
 		}
 	}
-	isFree := func(obj types.Object) bool { return obj == nil }
 	name := "gorm"
-	for i := 1; !resolvesAt(name, isFree); i++ {
+	for i := 1; !g.gormImportNameFree(file, name); i++ {
 		name = "gormio"
 		if i > 1 {
 			name += strconv.Itoa(i)
 		}
 	}
 	return name + ".", name
+}
+
+// gormImportNameFree reports whether name can be the name of an import added
+// to file: no identifier in file is spelled name, and neither the package nor
+// the file declares it.
+func (g *Generator) gormImportNameFree(file *ast.File, name string) bool {
+	if g.pass.Pkg.Scope().Lookup(name) != nil {
+		return false
+	}
+	if scope := g.pass.TypesInfo.Scopes[file]; scope != nil && scope.Lookup(name) != nil {
+		return false
+	}
+	free := true
+	ast.Inspect(file, func(n ast.Node) bool {
+		if id, ok := n.(*ast.Ident); ok && id.Name == name {
+			free = false
+		}
+		return free
+	})
+	return free
 }
 
 const gormImportPath = "gorm.io/gorm"
