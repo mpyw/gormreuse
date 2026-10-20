@@ -262,9 +262,11 @@ func ErrorOfFinisher(db *gorm.DB) {
 }
 
 // tenantAdults changes tx in place and returns a chain on it, which carries
-// the change back to the caller. Its discarded statement is reassigned (#243).
+// the change back to the caller (#243). Its query's error also stays on tx,
+// and the chain carries it to the caller's query, which gorm then skips. A
+// Session would drop that error, so no fix is offered (#372).
 func tenantAdults(tx *gorm.DB) *gorm.DB {
-	tx = tx.Where("tenant_id = ?", 7).Session(&gorm.Session{})
+	tx.Where("tenant_id = ?", 7)
 	tx.Where("name = ?", "x").Find(&[]User{})
 	return tx.Where("age > ?", 20)
 }

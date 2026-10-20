@@ -158,6 +158,8 @@ func (g *Generator) everyCallUsesResult(fn *ssa.Function) bool {
 
 // callResultUsed reports whether code reads the *gorm.DB that v, the result
 // of a call, holds: v itself, or, for a tuple, an element of type *gorm.DB.
+//
+//declscope:shared // change.go's changeRefPassesError asks whether a call's result may carry an error on
 func callResultUsed(v ssa.Value) bool {
 	for _, ref := range *v.Referrers() {
 		switch ref := ref.(type) {

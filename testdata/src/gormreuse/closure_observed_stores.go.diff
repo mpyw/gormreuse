@@ -181,9 +181,8 @@
  // iteration's closure is created, and maybe before this one runs.
  func cosStoreInLoop(db, other *gorm.DB, ids []int) {
 -	q := other.Where("y")
--	m := db.Where("x")
 +	q := other.Where("y").Session(&gorm.Session{})
-+	m := db.Where("x").Session(&gorm.Session{})
+ 	m := db.Where("x")
  	m.Find(nil)
  	var g cosGroup
  	for range ids {

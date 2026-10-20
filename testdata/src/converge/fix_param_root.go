@@ -41,7 +41,9 @@ func paramCallsIsolated(db *gorm.DB) {
 // *gorm.DB that carries the change back to its caller (#243).
 func paramDiscardedResult(tx *gorm.DB) *gorm.DB {
 	tx.Where("a")
-	tx.Find(nil)         // want `\*gorm\.DB reused: second branch from mutable root`
+	if err := tx.Find(nil).Error; err != nil { // want `\*gorm\.DB reused: second branch from mutable root`
+		return nil
+	}
 	return tx.Where("b") // want `\*gorm\.DB reused: second branch from mutable root`
 }
 

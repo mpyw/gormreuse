@@ -63,7 +63,7 @@ func (r *fsoRepo) fsoLoopCarriedStore(n int) {
 	for i := 0; i < n; i++ {
 		r.db.Find(nil)
 		r.db.Count(nil)           // want `\*gorm\.DB reused: second branch from mutable root`
-		r.db = r.db.Where("next").Session(&gorm.Session{}) // want `\*gorm\.DB reused: second branch from mutable root`
+		r.db = r.db.Where("next") // want `\*gorm\.DB reused: second branch from mutable root`
 	}
 }
 
@@ -71,7 +71,7 @@ func (r *fsoRepo) fsoLoopCarriedStore(n int) {
 // rebuilt again in the next.
 func (r *fsoRepo) fsoLoopRebuildThenUse(conds []string) {
 	for _, c := range conds {
-		r.db = r.db.Where(c).Session(&gorm.Session{}) // want `\*gorm\.DB reused: second branch from mutable root`
+		r.db = r.db.Where(c) // want `\*gorm\.DB reused: second branch from mutable root`
 		r.db.Find(nil)
 	}
 }
@@ -79,7 +79,7 @@ func (r *fsoRepo) fsoLoopRebuildThenUse(conds []string) {
 // fsoRebuildOfAliasedValue: rebuilding the field branches the value it holds,
 // which the local still refers to.
 func fsoRebuildOfAliasedValue(p *fsoRepo, db *gorm.DB) {
-	q := db.Where("x").Session(&gorm.Session{})
+	q := db.Where("x")
 	p.db = q
 	p.db = p.db.Where("y")
 	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`

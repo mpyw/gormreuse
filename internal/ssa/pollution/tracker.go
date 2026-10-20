@@ -62,6 +62,9 @@ type Violation struct {
 	// that may hold the root (#252). The fix cannot order them,
 	// so it cannot prove that a Session is redundant (#202).
 	HiddenUses bool
+	// Hidden lists those uses, in no order. The fix reads what each does
+	// with the error on the root (#372).
+	Hidden []UsageInfo
 
 	// Call and Param locate the argument of a violation of the caller-side
 	// immutable-param contract: the call, and the index of the parameter
@@ -563,9 +566,23 @@ func (t *Tracker) CollectViolations() []Violation {
 			}
 			t.violations[i].AllUses = t.violationUses(t.violations[i], uses)
 			t.violations[i].HiddenUses = len(t.branchUses[root]) > 0 || len(t.aliasUses[root]) > 0 || len(t.loopCarriedUses[root]) > 0 || len(t.mayUses[root]) > 0
+			t.violations[i].Hidden = t.hiddenUses(root)
 		}
 	}
 	return t.violations
+}
+
+// hiddenUses returns the uses of root that AllUses does not list (see
+// Violation.Hidden).
+func (t *Tracker) hiddenUses(root ssa.Value) []UsageInfo {
+	uses := slices.Concat(t.branchUses[root], t.loopCarriedUses[root])
+	for _, use := range t.aliasUses[root] {
+		uses = append(uses, use.UsageInfo)
+	}
+	for _, use := range t.mayUses[root] {
+		uses = append(uses, use.UsageInfo)
+	}
+	return uses
 }
 
 // violationUses returns the uses of v's root that its fix sees: the root's

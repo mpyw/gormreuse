@@ -1,6 +1,6 @@
 --- fix_later_loop_merge.go	1970-01-01 00:00:00
 +++ fix_later_loop_merge.go.golden	1970-01-01 00:00:00
-@@ -1,102 +1,104 @@
+@@ -1,106 +1,108 @@
  package internal
  
  import "gorm.io/gorm"
@@ -88,7 +88,9 @@
 -		db = db.Where("name = ?", f.Name)
 +		db = db.Where("name = ?", f.Name).Session(&gorm.Session{})
  	}
- 	db.Count(&total)
+ 	if err := db.Count(&total).Error; err != nil {
+ 		return 0, err
+ 	}
  	err := db.Offset(10).Limit(10).Find(nil).Error // want `\*gorm\.DB reused: second branch from mutable root`
  	return total, err
  }
@@ -106,7 +108,9 @@
 -		db = db.Where("name = ?", f.Name)
 +		db = db.Where("name = ?", f.Name).Session(&gorm.Session{})
  	}
- 	db.Count(&total)
+ 	if err := db.Count(&total).Error; err != nil {
+ 		return 0, err
+ 	}
  	err := db.Offset(10).Limit(10).Find(nil).Error // want `\*gorm\.DB reused: second branch from mutable root`
  	return total, err
  }

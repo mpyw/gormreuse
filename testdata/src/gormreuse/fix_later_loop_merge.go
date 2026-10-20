@@ -76,7 +76,9 @@ func laterLoopPaginate(db *gorm.DB, f laterLoopFilter) (int64, error) {
 	if f.Name != "" {
 		db = db.Where("name = ?", f.Name)
 	}
-	db.Count(&total)
+	if err := db.Count(&total).Error; err != nil {
+		return 0, err
+	}
 	err := db.Offset(10).Limit(10).Find(nil).Error // want `\*gorm\.DB reused: second branch from mutable root`
 	return total, err
 }
@@ -92,7 +94,9 @@ func laterLoopPaginateIsolated(db *gorm.DB, f laterLoopFilter) (int64, error) {
 	if f.Name != "" {
 		db = db.Where("name = ?", f.Name)
 	}
-	db.Count(&total)
+	if err := db.Count(&total).Error; err != nil {
+		return 0, err
+	}
 	err := db.Offset(10).Limit(10).Find(nil).Error // want `\*gorm\.DB reused: second branch from mutable root`
 	return total, err
 }

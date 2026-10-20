@@ -38,10 +38,10 @@ var fixEscapeCases = []fixsqlCase{
 	{"ErrorRead", before.ErrorRead, after.ErrorRead},
 	{"ResultDiscarded", before.ResultDiscarded, after.ResultDiscarded},
 	{"ErrorPropagation", before.ErrorPropagation, after.ErrorPropagation},
+	{"ParamResult", before.ParamResult, after.ParamResult},
 	// The cases below still get a fix.
 	{"EscapeLast", before.EscapeLast, after.EscapeLast},
 	{"ErrorOfFinisher", before.ErrorOfFinisher, after.ErrorOfFinisher},
-	{"ParamResult", before.ParamResult, after.ParamResult},
 }
 
 // TestFixEscapeDetectsSessionAtRoot checks that the comparison in

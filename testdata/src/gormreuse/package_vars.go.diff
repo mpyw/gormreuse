@@ -78,8 +78,7 @@
  // rebuilt again in the next.
  func pvLoopRebuildThenUse(conds []string) {
  	for _, c := range conds {
--		pvLoop = pvLoop.Where(c) // want `\*gorm\.DB reused: second branch from mutable root`
-+		pvLoop = pvLoop.Where(c).Session(&gorm.Session{}) // want `\*gorm\.DB reused: second branch from mutable root`
+ 		pvLoop = pvLoop.Where(c) // want `\*gorm\.DB reused: second branch from mutable root`
  		pvLoop.Find(nil)
  	}
  }
@@ -157,8 +156,7 @@
  // local's Phi is, so Where("a") counts as a branch of the stored root. A
  // struct field behaves the same.
  func pvConditionalRebuildOfStore(db *gorm.DB, cond bool) {
--	pvMerge = db.Where("x")
-+	pvMerge = db.Where("x").Session(&gorm.Session{})
+ 	pvMerge = db.Where("x")
  	if cond {
  		pvMerge = pvMerge.Where("a")
  	}
