@@ -350,10 +350,10 @@ func (u siteUse) read(v ssa.Value, use pollution.UsageInfo) {
 
 // branch records the site as a branch of roots, unless assigns reports that
 // the call's result reassigns the variable that holds that root (see
-// isAssignment). The first root gets the use itself, and a branch made on
-// every iteration of a loop that the root is defined outside of is reported at
-// once. The other roots get a branch through a merge that may hold them
-// (#252).
+// isAssignment). The first root gets the use itself, and the other roots get
+// a branch through a merge that may hold them (#252). A branch made on every
+// iteration of a loop that a root is defined outside of is reported at once,
+// for each of the roots.
 func (u siteUse) branch(roots []ssa.Value, use pollution.UsageInfo, assigns func(root ssa.Value) bool) {
 	t := u.ctx.Tracker
 	u.checkRoots(roots)
@@ -374,8 +374,14 @@ func (u siteUse) branch(roots []ssa.Value, use pollution.UsageInfo, assigns func
 			t.ProcessBranch(r, use)
 		}
 	}
-	if len(roots) > 0 && !assigns(roots[0]) && u.ctx.Repeats.RepeatsAfter(u.block, tracer.RootBlock(roots[0])) {
-		t.AddViolationWithRoot(u.pos, roots[0])
+	// Every root the site may branch is reused when the site runs again: the
+	// first one and those through a merge alike (#306). One diagnostic
+	// carries the fixes of them all. A merge may also hold an immutable
+	// value, such as a Session result, which FindAllMutableRoots keeps.
+	for _, r := range roots {
+		if !assigns(r) && !u.ctx.RootTracer.IsImmutableCall(r) && u.ctx.Repeats.RepeatsAfter(u.block, tracer.RootBlock(r)) {
+			t.AddViolationWithRoot(u.pos, r)
+		}
 	}
 }
 

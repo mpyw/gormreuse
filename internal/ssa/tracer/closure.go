@@ -7,6 +7,7 @@ import (
 
 	"golang.org/x/tools/go/ssa"
 
+	"github.com/mpyw/gormreuse/internal/ssa/callsite"
 	"github.com/mpyw/gormreuse/internal/ssa/cfg"
 	"github.com/mpyw/gormreuse/internal/typeutil"
 )
@@ -220,19 +221,12 @@ func (t *RootTracer) traceAllClosureReturns(fn *ssa.Function, search *allRootsSe
 
 // closureInvocationCalls returns the plain calls of mc, the closure of a
 // function literal, or nil when mc is used in any other way: deferred,
-// spawned, stored or passed on. Only then are the calls all the places it runs.
+// spawned, stored, passed on or called in another closure. Only then are the
+// calls all the places it runs. See callsite.ClosureCalls.
 //
 //declscope:shared // store.go reads a captured variable at the closure's calls
 func closureInvocationCalls(mc *ssa.MakeClosure) []*ssa.Call {
-	var calls []*ssa.Call
-	for _, ref := range *mc.Referrers() {
-		call, ok := ref.(*ssa.Call)
-		if !ok || call.Call.Value != ssa.Value(mc) {
-			return nil
-		}
-		calls = append(calls, call)
-	}
-	return calls
+	return callsite.ClosureCalls(mc)
 }
 
 // closureCallOwnsRoots reports whether call, a call of a function literal

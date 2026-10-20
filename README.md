@@ -441,6 +441,7 @@ for v := range slices.Values(ids) {
 
 // So does a closure that runs more than once: one called at two sites, or
 // called, spawned, deferred or passed to another function inside a loop.
+// A call inside another closure counts where that closure runs.
 q := db.Where("x")
 f := func() { q.Find(&users) } // VIOLATION: f runs twice
 f()
@@ -449,6 +450,33 @@ for _, id := range ids {
     g.Go(func() error {
         return q.Where("id = ?", id).Find(&users).Error // VIOLATION: one closure per iteration
     })
+}
+update := func(id int) { q.Where("id = ?", id).Find(&users) } // VIOLATION: run calls it in a loop
+run := func() {
+    for _, id := range ids {
+        update(id)
+    }
+}
+run()
+
+// A closure made in the loop body is a new closure on each iteration.
+for _, it := range items {
+    q := db.Where("id = ?", it.ID)
+    save := func() error { return q.Updates(it).Error }
+    if it.New {
+        err = save() // OK: each closure runs once
+    } else {
+        err = save()
+    }
+}
+
+// A use in a loop reuses every root that the variable may hold.
+q := db.Model(&User{})
+if org != nil {
+    q = q.Where("org = ?", *org)
+}
+for _, id := range ids {
+    q.Where("id = ?", id).Find(&users) // VIOLATION: the fix adds a Session to both roots
 }
 ```
 
@@ -1134,6 +1162,7 @@ gormreuse reports a reuse only when it can follow the value. These cases are kno
 | `G = db.Where("x"); if c { G = G.Where("a") }; G.Find(nil)` for a global or a field `G` | A store is not a merge point, so `Where("a")` counts as a branch of the stored root |
 | `p := mk(s); go func() { p.db.Find(nil) }(); p = mk(s); p.db.Count(nil)`, where `mk` returns a new struct | A pointer variable that a closure captures and that is reassigned may point to either struct, so the last read is matched to the first one too |
 | A recursive helper whose every path ends in `Session(...)`, branched twice | A function that returns its own result is never [inferred](#inferred-immutable-return) `immutable-return`. Add the directive |
+| A closure called on exclusive branches, once directly and once inside another closure: `if c { f() } else { run() }`, where `run` calls `f` | Calls in two functions are taken to both run |
 
 **Wrong position:** a use inside a deferred closure runs at function exit. gormreuse orders it by its source position. So `defer func() { q.Count(nil) }(); q.Find(nil)` is reported at `q.Find`, which runs first.
 

@@ -294,22 +294,13 @@ func isDeadClosure(mc *ssa.MakeClosure) bool {
 
 // closureInvocation returns the one plain call that invokes the closure value
 // mc, or nil when there is no such single call: it is invoked more than once,
-// or used in any other way (deferred, spawned, passed as an argument, stored).
+// or used in any other way (deferred, spawned, passed as an argument, stored,
+// called in another closure). See callsite.ClosureCalls.
 func closureInvocation(mc *ssa.MakeClosure) *ssa.Call {
-	var found *ssa.Call
-	for _, r := range *mc.Referrers() {
-		call, ok := r.(*ssa.Call)
-		if !ok || call.Call.Value != ssa.Value(mc) {
-			// A non-call referrer (store, defer, go, arg) makes the invocation
-			// site ambiguous; bail out to the safe (no-site) behavior.
-			return nil
-		}
-		if found != nil {
-			return nil // more than one call site
-		}
-		found = call
+	if calls := callsite.ClosureCalls(mc); len(calls) == 1 {
+		return calls[0]
 	}
-	return found
+	return nil
 }
 
 // closureInvocationPos returns the position of call, the single invocation of

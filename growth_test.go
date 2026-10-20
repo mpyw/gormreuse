@@ -352,6 +352,40 @@ var growthCases = []growthCase{
 		b.WriteString("}\n")
 		return []string{b.String()}
 	}},
+	// A closure made on each iteration, called on n exclusive cases (#306):
+	// no site reaches another without making the closure again, so every
+	// site is labelled.
+	{name: "loopclosurecases", limit: growthNearLinear, shape: func(n int) []string {
+		var b strings.Builder
+		b.WriteString("func f(db *gorm.DB, ids []int) {\n\tfor _, id := range ids {\n\t\tq := db.Where(\"x\")\n\t\tg := func() { q.Find(nil) }\n\t\tswitch id {\n")
+		for i := range n {
+			fmt.Fprintf(&b, "\t\tcase %d:\n\t\t\tg()\n", i)
+		}
+		b.WriteString("\t\t}\n\t}\n}\n")
+		return []string{b.String()}
+	}},
+	// A chain of n closures, each calling the one before it through a
+	// captured variable, the last one called twice (#305).
+	{name: "closurechain", limit: growthLinear, shape: func(n int) []string {
+		var b strings.Builder
+		b.WriteString("func f(db *gorm.DB) {\n\tq := db.Where(\"x\")\n\tf0 := func() { q.Find(nil) }\n")
+		for i := 1; i < n; i++ {
+			fmt.Fprintf(&b, "\tf%d := func() { f%d() }\n", i, i-1)
+		}
+		fmt.Fprintf(&b, "\tf%d()\n\tf%d()\n}\n", n-1, n-1)
+		return []string{b.String()}
+	}},
+	// One closure called once in each of n closures, each called once on an
+	// exclusive case (#305).
+	{name: "closurecallers", limit: growthLinear, shape: func(n int) []string {
+		var b strings.Builder
+		b.WriteString("func f(db *gorm.DB, k int) {\n\tq := db.Where(\"x\")\n\tg := func() { q.Find(nil) }\n\tswitch k {\n")
+		for i := range n {
+			fmt.Fprintf(&b, "\tcase %d:\n\t\tfunc() { g() }()\n", i)
+		}
+		b.WriteString("\t}\n}\n")
+		return []string{b.String()}
+	}},
 	// Closures nested n/4 deep, use at the bottom.
 	{name: "nestclosures", limit: growthQuadratic, shape: func(n int) []string {
 		var b strings.Builder
