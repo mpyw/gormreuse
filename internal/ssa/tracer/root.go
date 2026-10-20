@@ -222,7 +222,7 @@ func (t *RootTracer) FindAllMutableRoots(v ssa.Value, loopInfo *cfg.LoopInfo) []
 	if roots, ok := t.allRoots[key]; ok {
 		return roots
 	}
-	roots := slices.Clip(t.traceAll(v, make(map[ssa.Value]bool), loopInfo))
+	roots := slices.Clip(t.traceAll(v, newAllRootsSearch(make(map[ssa.Value]bool)), loopInfo))
 	t.allRoots[key] = roots
 	return roots
 }
@@ -364,10 +364,12 @@ func (t *RootTracer) trace(v ssa.Value, visited map[ssa.Value]bool, loopInfo *cf
 func (t *RootTracer) traceCall(call *ssa.Call, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) ssa.Value {
 	site := t.Site(call)
 
-	// The result of a pure function may be its argument (#188).
+	// The result of a pure function may be its argument (#188). The argument
+	// shares visited with the other edges: a value its search reached and left
+	// without a root has none from any other edge either (#297).
 	if args := t.pureReturnedArgs(site); len(args) > 0 {
 		for _, arg := range args {
-			if root := t.trace(arg, maps.Clone(visited), loopInfo); root != nil {
+			if root := t.trace(arg, visited, loopInfo); root != nil {
 				return root
 			}
 		}
@@ -558,13 +560,48 @@ func (t *RootTracer) internFieldRoot(r *FieldRoot) ssa.Value {
 //	q.Find(nil)            // Phi has edges from both branches
 //	                       // Need to check pollution of BOTH roots
 //
+// A value already visited in the search adds nothing: either it is still
+// being traced (a cycle), or its roots are in the result already.
+//
 //declscope:shared // field.go, freevar.go and store.go trace the values they resolve with it
-func (t *RootTracer) traceAll(v ssa.Value, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) []ssa.Value {
-	if v == nil || visited[v] {
+func (t *RootTracer) traceAll(v ssa.Value, search *allRootsSearch, loopInfo *cfg.LoopInfo) []ssa.Value {
+	if v == nil || search.visited[v] {
 		return nil
 	}
-	visited[v] = true
+	search.visited[v] = true
+	roots := t.traceAllUnvisited(v, search, loopInfo)
+	if _, ok := search.rooted[v]; !ok {
+		search.rooted[v] = len(roots) > 0
+	}
+	return roots
+}
 
+// allRootsSearch is the state of one traceAll search.
+//
+//declscope:shared // closure.go, field.go, freevar.go, phi.go, pure.go and store.go pass it along traceAll
+type allRootsSearch struct {
+	// visited holds the values the search has entered.
+	visited map[ssa.Value]bool
+
+	// rooted holds the values the search has finished, and whether each has a
+	// root in the result. A value in visited but not here is still being
+	// traced.
+	//
+	//declscope:private
+	rooted map[ssa.Value]bool
+}
+
+// newAllRootsSearch starts a traceAll search that treats the values in visited
+// as already traced.
+//
+//declscope:shared // closure.go and pure.go start their own searches
+func newAllRootsSearch(visited map[ssa.Value]bool) *allRootsSearch {
+	return &allRootsSearch{visited: visited, rooted: make(map[ssa.Value]bool)}
+}
+
+// traceAllUnvisited is traceAll for a value the search enters for the first
+// time.
+func (t *RootTracer) traceAllUnvisited(v ssa.Value, search *allRootsSearch, loopInfo *cfg.LoopInfo) []ssa.Value {
 	// A *gorm.DB parameter is a mutable root by default (Phase 1b, #61), except
 	// the exempt cases; keep this consistent with trace()/FindMutableRoot so
 	// Phi-based pollution checks see it too.
@@ -631,7 +668,7 @@ func (t *RootTracer) traceAll(v ssa.Value, visited map[ssa.Value]bool, loopInfo 
 		if loopHeaderPhis := loopSwapPhis(val, loopInfo); loopHeaderPhis != nil {
 			// Loop variable swap detected:
 			// Return initial edges (to check pre-loop pollution) + swap-phi itself
-			return t.collectInitialPhiEdgeRoots(loopHeaderPhis, val, visited, loopInfo)
+			return t.collectInitialPhiEdgeRoots(loopHeaderPhis, val, search, loopInfo)
 		}
 
 		// =====================================================================
@@ -648,24 +685,24 @@ func (t *RootTracer) traceAll(v ssa.Value, visited map[ssa.Value]bool, loopInfo 
 		//   - Reassignment in one branch: if { q = q.Where(...) }
 		//   - Conditional swaps outside loops
 		//
-		return t.traceAllPhiEdges(val, visited, loopInfo)
+		return t.traceAllPhiEdges(val, search, loopInfo)
 
 	case *ssa.UnOp:
 		if val.Op == token.MUL {
-			return t.traceAllPointerLoads(val, visited, loopInfo)
+			return t.traceAllPointerLoads(val, search, loopInfo)
 		}
-		return t.traceAll(val.X, visited, loopInfo)
+		return t.traceAll(val.X, search, loopInfo)
 
 	case *ssa.Alloc:
-		return t.traceAllAllocStores(val, nil, visited, loopInfo)
+		return t.traceAllAllocStores(val, nil, search, loopInfo)
 
 	case *ssa.FreeVar:
-		return t.traceAllFreeVar(val, visited, loopInfo)
+		return t.traceAllFreeVar(val, search, loopInfo)
 
 	case *ssa.Field:
 		var roots []ssa.Value
 		for _, stored := range fieldValueStoredValues(val) {
-			roots = append(roots, t.traceAll(stored, visited, loopInfo)...)
+			roots = append(roots, t.traceAll(stored, search, loopInfo)...)
 		}
 		return roots
 
@@ -673,21 +710,35 @@ func (t *RootTracer) traceAll(v ssa.Value, visited map[ssa.Value]bool, loopInfo 
 		// The result of a pure function may be any argument it returns (#188).
 		// Like a Session result, a call that trace() finds immutable may stay
 		// in this list: nothing branches it, so it is never polluted.
+		//
+		// The arguments share the search. An argument the search has already
+		// finished with a root adds nothing, since its roots are in the result,
+		// and the call is not a root of its own. Tracing each argument in a copy
+		// of visited instead walked the same values again from every other
+		// edge of a Phi, which doubled the work at each merge (#297).
 		site := t.Site(val)
 		var argRoots []ssa.Value
+		rooted := false
 		for _, arg := range t.pureReturnedArgs(site) {
-			argRoots = append(argRoots, t.traceAll(arg, maps.Clone(visited), loopInfo)...)
+			if search.rooted[arg] {
+				rooted = true
+				continue
+			}
+			argRoots = append(argRoots, t.traceAll(arg, search, loopInfo)...)
 		}
-		if len(argRoots) > 0 {
+		if rooted {
+			search.rooted[val] = true
+		}
+		if len(argRoots) > 0 || rooted {
 			return argRoots
 		}
 		// Handle closure calls (IIFE) - collect ALL roots from all returns. A
 		// call through a method value is a call of its own (see traceCall).
 		if site.Kind == callsite.SiteClosure {
-			if roots := t.traceAllClosureReturns(site.Callee, visited, loopInfo); len(roots) > 0 {
+			if roots := t.traceAllClosureReturns(site.Callee, search, loopInfo); len(roots) > 0 {
 				// If closure result is stored, or each call builds a fresh
 				// chain (#251), treat call itself as root
-				if t.isClosureResultStored(val) || t.closureCallOwnsRoots(val, roots, visited, loopInfo) {
+				if t.isClosureResultStored(val) || t.closureCallOwnsRoots(val, roots, search.visited, loopInfo) {
 					return []ssa.Value{val}
 				}
 				return roots
@@ -703,7 +754,7 @@ func (t *RootTracer) traceAll(v ssa.Value, visited map[ssa.Value]bool, loopInfo 
 		// For non-special cases (ChangeType, Extract, etc.), delegate to single-root trace.
 		// Clone visited and remove v to allow trace() to process it.
 		// This is safe because trace() doesn't call back to traceAll(), so no cycle risk.
-		freshVisited := maps.Clone(visited)
+		freshVisited := maps.Clone(search.visited)
 		delete(freshVisited, v)
 		if root := t.trace(v, freshVisited, loopInfo); root != nil {
 			return []ssa.Value{root}
@@ -712,30 +763,30 @@ func (t *RootTracer) traceAll(v ssa.Value, visited map[ssa.Value]bool, loopInfo 
 	}
 }
 
-func (t *RootTracer) traceAllPointerLoads(load *ssa.UnOp, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) []ssa.Value {
+func (t *RootTracer) traceAllPointerLoads(load *ssa.UnOp, search *allRootsSearch, loopInfo *cfg.LoopInfo) []ssa.Value {
 	switch p := load.X.(type) {
 	case *ssa.Alloc:
-		return t.traceAllAllocStores(p, load, visited, loopInfo)
+		return t.traceAllAllocStores(p, load, search, loopInfo)
 	case *ssa.FreeVar:
-		return t.traceAllFreeVarLoads(p, load, visited, loopInfo)
+		return t.traceAllFreeVarLoads(p, load, search, loopInfo)
 	case *ssa.FieldAddr:
-		return t.traceAllFieldStores(p, load, visited, loopInfo)
+		return t.traceAllFieldStores(p, load, search, loopInfo)
 	case *ssa.Global:
 		var roots []ssa.Value
 		for _, v := range globalStoredValues(p, load) {
-			roots = append(roots, t.traceAll(v, visited, loopInfo)...)
+			roots = append(roots, t.traceAll(v, search, loopInfo)...)
 		}
 		return roots
 	case *ssa.Phi:
 		// Check for loop variable swap pattern
 		if loopHeaderPhis := loopSwapPhis(p, loopInfo); loopHeaderPhis != nil {
-			return t.collectInitialPhiEdgeRoots(loopHeaderPhis, p, visited, loopInfo)
+			return t.collectInitialPhiEdgeRoots(loopHeaderPhis, p, search, loopInfo)
 		}
 
 		// Regular Phi - traverse all edges
-		return t.traceAllPhiEdges(p, visited, loopInfo)
+		return t.traceAllPhiEdges(p, search, loopInfo)
 	default:
-		return t.traceAll(p, visited, loopInfo)
+		return t.traceAll(p, search, loopInfo)
 	}
 }
 

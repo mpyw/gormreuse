@@ -196,10 +196,10 @@ func SameField(a, b *ssa.FieldAddr) bool {
 //	h.db.Find(nil)  // Need to check BOTH q1 and q2
 //
 //declscope:shared // root.go's traceAllPointerLoads sends field loads here
-func (t *RootTracer) traceAllFieldStores(fa *ssa.FieldAddr, load *ssa.UnOp, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) []ssa.Value {
+func (t *RootTracer) traceAllFieldStores(fa *ssa.FieldAddr, load *ssa.UnOp, search *allRootsSearch, loopInfo *cfg.LoopInfo) []ssa.Value {
 	var roots []ssa.Value
 	for _, v := range FieldStoredValues(fa, load) {
-		roots = append(roots, t.traceAll(v, visited, loopInfo)...)
+		roots = append(roots, t.traceAll(v, search, loopInfo)...)
 	}
 	return roots
 }

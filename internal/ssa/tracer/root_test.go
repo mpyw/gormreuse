@@ -5,6 +5,7 @@ import (
 
 	"golang.org/x/tools/go/ssa"
 
+	"github.com/mpyw/gormreuse/internal/directive"
 	"github.com/mpyw/gormreuse/internal/ssa/cfg"
 )
 
@@ -121,5 +122,57 @@ func TestRootBlock(t *testing.T) {
 	}
 	if got := RootBlock(&ssa.Parameter{}); got != nil {
 		t.Errorf("RootBlock(param without a function) = %v, want nil", got)
+	}
+}
+
+// TestFindAllMutableRootsPureArgumentAlreadyTraced checks that a pure call
+// whose argument the search has already traced stands for the argument's
+// roots, and is not a root of its own (#297). In helperSelfReassignment,
+// `if c { q = mergeHelper(q) }` merges q with mergeHelper(q), and the search
+// reaches q before the call.
+func TestFindAllMutableRootsPureArgumentAlreadyTraced(t *testing.T) {
+	t.Parallel()
+	fixtures, _ := loadFixtureProgram(t)
+	fn := fixtures["helperSelfReassignment"]
+	helper := fixtures["mergeHelper"]
+	if fn == nil || helper == nil {
+		t.Fatal("required fixtures missing")
+	}
+	// Trust mergeHelper as a pure function that returns its argument.
+	pureFuncs := directive.NewPureFuncSet(nil, nil)
+	pureFuncs.Infer(helper)
+	verdicts := &PureVerdicts{Returned: map[*ssa.Function][]int{helper: {0}}}
+	tr := NewRootTracer(pureFuncs, nil, nil, verdicts, nil, nil, nil)
+
+	var where, merged ssa.Value
+	for _, b := range fn.Blocks {
+		for _, instr := range b.Instrs {
+			call, ok := instr.(*ssa.Call)
+			if !ok {
+				continue
+			}
+			switch callee := call.Common().StaticCallee(); {
+			case callee != nil && callee.Name() == "Where" && where == nil:
+				where = call
+			case callee == helper && merged == nil:
+				merged = call
+			}
+		}
+	}
+	if where == nil || merged == nil {
+		t.Fatal("fixture shape changed")
+	}
+	var phi *ssa.Phi
+	for _, ref := range *merged.Referrers() {
+		if p, ok := ref.(*ssa.Phi); ok {
+			phi = p
+		}
+	}
+	if phi == nil || len(phi.Edges) != 2 || phi.Edges[0] != where || phi.Edges[1] != merged {
+		t.Fatalf("want a Phi of [q, mergeHelper(q)], got %v", phi)
+	}
+	roots := tr.FindAllMutableRoots(phi, cfg.NewAnalyzer().DetectLoops(fn))
+	if len(roots) != 1 || roots[0] != where {
+		t.Errorf("want the roots of q only, got %v", roots)
 	}
 }

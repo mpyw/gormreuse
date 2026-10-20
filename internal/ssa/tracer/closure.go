@@ -194,7 +194,7 @@ func (t *RootTracer) traceClosureReturns(fn *ssa.Function, visited map[ssa.Value
 // It collects roots from ALL return statements in the closure.
 //
 //declscope:shared // root.go's traceAll sends IIFEs here
-func (t *RootTracer) traceAllClosureReturns(fn *ssa.Function, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) []ssa.Value {
+func (t *RootTracer) traceAllClosureReturns(fn *ssa.Function, search *allRootsSearch, loopInfo *cfg.LoopInfo) []ssa.Value {
 	if fn.Signature == nil {
 		return nil
 	}
@@ -210,8 +210,8 @@ func (t *RootTracer) traceAllClosureReturns(fn *ssa.Function, visited map[ssa.Va
 			if !ok || len(ret.Results) == 0 {
 				continue
 			}
-			retVisited := maps.Clone(visited)
-			roots := t.traceAll(ret.Results[0], retVisited, loopInfo)
+			retSearch := newAllRootsSearch(maps.Clone(search.visited))
+			roots := t.traceAll(ret.Results[0], retSearch, loopInfo)
 			allRoots = append(allRoots, roots...)
 		}
 	}
@@ -318,7 +318,7 @@ func (t *RootTracer) closureChainIsFresh(c *ssa.Call, fn *ssa.Function, visited 
 		if !typeutil.IsGormDB(op.Type()) {
 			continue
 		}
-		for _, root := range t.traceAll(op, maps.Clone(visited), loopInfo) {
+		for _, root := range t.traceAll(op, newAllRootsSearch(maps.Clone(visited)), loopInfo) {
 			if t.IsImmutableCall(root) {
 				continue
 			}

@@ -490,14 +490,14 @@ func (t *RootTracer) tracePhi(phi *ssa.Phi, visited map[ssa.Value]bool, loopInfo
 //   - Treat the swap-phi as a separate entity for FindMutableRoot()
 //
 //declscope:shared // root.go's traceAll and traceAllPointerLoads send loop variable swaps here
-func (t *RootTracer) collectInitialPhiEdgeRoots(loopHeaderPhis []*ssa.Phi, swapPhi ssa.Value, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) []ssa.Value {
+func (t *RootTracer) collectInitialPhiEdgeRoots(loopHeaderPhis []*ssa.Phi, swapPhi ssa.Value, search *allRootsSearch, loopInfo *cfg.LoopInfo) []ssa.Value {
 	var roots []ssa.Value
 	for _, loopPhi := range loopHeaderPhis {
 		// Get the initial edge (first edge, not back-edge)
 		if len(loopPhi.Edges) > 0 {
 			initialEdge := loopPhi.Edges[0]
-			if !isNilPhiEdge(initialEdge) && !visited[initialEdge] {
-				roots = append(roots, t.traceAll(initialEdge, visited, loopInfo)...)
+			if !isNilPhiEdge(initialEdge) && !search.visited[initialEdge] {
+				roots = append(roots, t.traceAll(initialEdge, search, loopInfo)...)
 			}
 		}
 	}
@@ -511,13 +511,13 @@ func (t *RootTracer) collectInitialPhiEdgeRoots(loopHeaderPhis []*ssa.Phi, swapP
 // the Phi cases of traceAll and traceAllPointerLoads.
 //
 //declscope:shared // root.go's traceAll and traceAllPointerLoads send the other Phis here
-func (t *RootTracer) traceAllPhiEdges(phi *ssa.Phi, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) []ssa.Value {
+func (t *RootTracer) traceAllPhiEdges(phi *ssa.Phi, search *allRootsSearch, loopInfo *cfg.LoopInfo) []ssa.Value {
 	var roots []ssa.Value
 	for _, edge := range phi.Edges {
-		if isNilPhiEdge(edge) || visited[edge] {
+		if isNilPhiEdge(edge) || search.visited[edge] {
 			continue
 		}
-		roots = append(roots, t.traceAll(edge, visited, loopInfo)...)
+		roots = append(roots, t.traceAll(edge, search, loopInfo)...)
 	}
 	return roots
 }
