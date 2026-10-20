@@ -11,6 +11,7 @@ import (
 // The runtime premises of testdata/src/gormreuse/state_methods.go (#307).
 // AddError, DB, Get, InstanceGet and Callback touch no clause of a clone==0
 // receiver, so a later query of it runs the same SQL whether or not they ran.
+// So do Commit and Rollback (#375), which return the receiver itself.
 // AddError sets db.Error, which a later chain of the same value inherits.
 // ToSQL builds its SQL from a copy of the receiver's Statement, so it reads
 // the receiver without changing it. Migrator keeps a copy that shares the
@@ -141,4 +142,41 @@ func TestStateMethods_MigratorSharesStatement(t *testing.T) {
 		}
 	}
 	t.Errorf("a later condition should leak into the Migrator's queries: %q", rowSQL)
+}
+
+// TestStateMethods_CommitRollbackTouchNoClause: Commit and Rollback of a
+// clone==0 transaction handle pass the result of ending the transaction to
+// AddError, touch no clause and return the handle itself (#375). So a later
+// query of the handle builds the same SQL as with no call before it. The
+// query then fails, as the transaction has ended, but its SQL is built
+// first.
+func TestStateMethods_CommitRollbackTouchNoClause(t *testing.T) {
+	calls := map[string]func(q *gorm.DB) *gorm.DB{
+		"Commit":   (*gorm.DB).Commit,
+		"Rollback": (*gorm.DB).Rollback,
+	}
+	for name, call := range calls {
+		t.Run(name, func(t *testing.T) {
+			db, captured, mock := setupDBWithMock(t, false)
+			mock.ExpectBegin()
+			mock.ExpectCommit()
+			mock.ExpectRollback()
+			tx := db.Begin()
+			if tx.Error != nil {
+				t.Fatalf("Begin: %v", tx.Error)
+			}
+			q := tx.Model(&User{}).Where("x = ?", 1) // clone==0
+			if got := call(q); got != q {
+				t.Errorf("%s returned %p, want its receiver %p", name, got, q)
+			}
+			if q.Error != nil {
+				t.Errorf("%s: %v", name, q.Error)
+			}
+			before := len(*captured)
+			q.Where("a = ?", 1).Find(&[]User{})
+			if got := (*captured)[before:]; len(got) != 1 || got[0] != stateMethodsBaseline {
+				t.Errorf("later query = %q, want [%q]", got, stateMethodsBaseline)
+			}
+		})
+	}
 }

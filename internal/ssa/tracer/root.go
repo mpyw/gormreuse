@@ -492,7 +492,7 @@ func (t *RootTracer) traceCall(call *ssa.Call, visited map[ssa.Value]bool, loopI
 				return root
 			}
 		}
-		if t.pureReturnsOnlyParams(site.Declared) {
+		if pureReturnsReceiver(site) || t.pureReturnsOnlyParams(site.Declared) {
 			return nil
 		}
 	}
@@ -867,7 +867,7 @@ func (t *RootTracer) traceAllUnvisited(v ssa.Value, search *allRootsSearch, loop
 		if rooted {
 			search.rooted[val] = true
 		}
-		if len(argRoots) > 0 || rooted {
+		if len(argRoots) > 0 || rooted || pureReturnsReceiver(site) {
 			return argRoots
 		}
 		// An inferred getter returns what its argument holds (#342).

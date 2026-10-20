@@ -12,11 +12,12 @@ func fixCompileAddError(db *gorm.DB, err error) {
 	q.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
-// fixCompileCommit: Commit is a finisher, so it is not reassigned.
+// fixCompileCommit: Commit is a finisher, so its result is not reassigned.
+// Commit itself is not a use (#375), so the reuse is the Find on its result.
 func fixCompileCommit(db *gorm.DB) {
 	q := db.Begin().Where("x")
 	q.Where("a").Find(nil)
-	q.Commit() // want `\*gorm\.DB reused: second branch from mutable root`
+	q.Commit().Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // fixCompileShadow: the parameter gorm shadows the import at the Session.

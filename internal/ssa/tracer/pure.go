@@ -109,10 +109,16 @@ func (t *RootTracer) IsPureFunction(fn *ssa.Function) bool {
 // *gorm.DB elements share the call as their root, so they are traced to the
 // returned arguments together.
 //
+// Commit and Rollback return their receiver, so the receiver is returned for
+// them, and nothing else (pureReturnsReceiver, #375).
+//
 //declscope:shared // root.go's traceCall and traceAll follow a pure call to its arguments with it
 func (t *RootTracer) pureReturnedArgs(site callsite.Site) []ssa.Value {
 	if !typeutil.HasGormDBResult(site.Instr.(*ssa.Call).Type()) {
 		return nil
+	}
+	if pureReturnsReceiver(site) {
+		return []ssa.Value{site.Recv}
 	}
 	// Most calls are not to a pure function that returns an argument: answer
 	// them before building the argument list, since traceAll asks at every
@@ -127,6 +133,15 @@ func (t *RootTracer) pureReturnedArgs(site callsite.Site) []ssa.Value {
 		args = append([]ssa.Value{site.Recv}, args...)
 	}
 	return t.pure.ReturnedArgs(site.Declared, args)
+}
+
+// pureReturnsReceiver reports whether site calls a *gorm.DB method that returns
+// its receiver and touches no clause, Commit or Rollback (#375). Its result is
+// the receiver, so it has the receiver's roots and no root of its own.
+//
+//declscope:shared // root.go's traceCall and traceAll stop at it when the receiver has no root
+func pureReturnsReceiver(site callsite.Site) bool {
+	return site.Recv != nil && site.IsGormMethod() && typeutil.ReturnsReceiver(site.Method())
 }
 
 // PureReturnsOnlyParams reports whether every mutable root of the values fn

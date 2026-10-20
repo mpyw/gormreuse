@@ -368,7 +368,7 @@ Please [open an issue](https://github.com/mpyw/gormreuse/issues) with the code. 
 gormreuse reports when a **mutable [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) branches into multiple code paths**:
 
 1. **Immutable-returning methods** ([`Session`](https://pkg.go.dev/gorm.io/gorm#DB.Session), [`WithContext`](https://pkg.go.dev/gorm.io/gorm#DB.WithContext), [`Debug`](https://pkg.go.dev/gorm.io/gorm#DB.Debug), etc.) return an **immutable** instance that can branch freely.
-2. **State-only methods** ([`AddError`](https://pkg.go.dev/gorm.io/gorm#DB.AddError), [`DB`](https://pkg.go.dev/gorm.io/gorm#DB.DB), [`Get`](https://pkg.go.dev/gorm.io/gorm#DB.Get), [`InstanceGet`](https://pkg.go.dev/gorm.io/gorm#DB.InstanceGet), [`Callback`](https://pkg.go.dev/gorm.io/gorm#DB.Callback)) touch no clause. A call of one does not count at all.
+2. **State-only methods** ([`AddError`](https://pkg.go.dev/gorm.io/gorm#DB.AddError), [`DB`](https://pkg.go.dev/gorm.io/gorm#DB.DB), [`Get`](https://pkg.go.dev/gorm.io/gorm#DB.Get), [`InstanceGet`](https://pkg.go.dev/gorm.io/gorm#DB.InstanceGet), [`Callback`](https://pkg.go.dev/gorm.io/gorm#DB.Callback), [`Commit`](https://pkg.go.dev/gorm.io/gorm#DB.Commit), [`Rollback`](https://pkg.go.dev/gorm.io/gorm#DB.Rollback)) touch no clause. A call of one does not count at all.
 3. **All other methods** on a mutable instance create a **branch** that consumes the instance.
 4. A **second branch** from the same mutable root is a **violation**.
 5. A **`Session`/`Debug` copy** of a mutable instance still reads that instance's `Statement`. So using the copy **after the instance changed** is a **violation** (see [Session and Debug copies](#session-and-debug-copies)).
@@ -384,7 +384,7 @@ gormreuse reports when a **mutable [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#
 | Immutable-returning | `Session`, `WithContext`, `Debug`, [`Open`](https://pkg.go.dev/gorm.io/gorm#Open), [`Begin`](https://pkg.go.dev/gorm.io/gorm#DB.Begin) | Return a new immutable instance (`clone > 0`). They read the receiver but do not branch it. `Session` and `Debug` have exceptions: see [Session and Debug copies](#session-and-debug-copies) |
 | Transaction | [`Transaction`](https://pkg.go.dev/gorm.io/gorm#DB.Transaction) | Returns an `error`. Like `Begin`, it reads the receiver but does not branch it. Its callback gets a fresh `tx` (see [Parameters are mutable](#parameters-are-mutable)) |
 | ToSQL | [`ToSQL`](https://pkg.go.dev/gorm.io/gorm#DB.ToSQL) | Returns a `string`. It builds SQL from a copy of the receiver's Statement, so it reads the receiver but does not branch it. A branch before it is reported |
-| State-only | `AddError`, `DB`, `Get`, `InstanceGet`, `Callback` | Touch no clause, so they neither read nor branch the receiver. `AddError` sets `db.Error`, which a later chain of the same value inherits and stops at. That is what `AddError` is for, so it is not reported |
+| State-only | `AddError`, `DB`, `Get`, `InstanceGet`, `Callback`, `Commit`, `Rollback` | Touch no clause, so they neither read nor branch the receiver. `AddError` sets `db.Error`, which a later chain of the same value inherits and stops at. That is what `AddError` is for, so it is not reported. `Commit` and `Rollback` end the transaction and pass its error to `AddError`. They return the receiver itself, so a chain on their result is a branch of the receiver |
 | All others | [`Where`](https://pkg.go.dev/gorm.io/gorm#DB.Where), [`Find`](https://pkg.go.dev/gorm.io/gorm#DB.Find), [`Count`](https://pkg.go.dev/gorm.io/gorm#DB.Count), [`Order`](https://pkg.go.dev/gorm.io/gorm#DB.Order), etc. | Create a branch from the receiver |
 
 ### Automatic Pollution Sources
@@ -600,6 +600,23 @@ q.Count(&count)
 <tr><td>
 
 ```go
+q := db.Where("x")
+if condition {
+    // OK: only one of the two runs
+    defer q.Find(&users)
+} else {
+    defer q.Count(&count)
+}
+```
+
+</td><td>No</td><td>
+
+A deferred call conflicts only with uses that may run in the same call of the function. Uses on exclusive branches do not.
+
+</td></tr>
+<tr><td>
+
+```go
 q := b
 if condition {
     q = a
@@ -725,6 +742,25 @@ for _, it := range items {
 </td><td>No</td><td>
 
 A closure made in the loop body is a new closure on each iteration.
+
+</td></tr>
+<tr><td>
+
+```go
+for _, it := range items {
+    q := s.Model(&User{}).Where("id = ?", it.ID)
+    if it.Skip {
+        // OK: one query per iteration
+        q.Delete(&User{})
+        continue
+    }
+    q.Update("name", "x")
+}
+```
+
+</td><td>No</td><td>
+
+A root built in the loop body is a new root on each iteration. Uses on exclusive branches never share one. Uses that both run in one iteration are still reported, and so is a root built before the loop. This holds when each use names the variable itself. A use through another variable, or inside a closure, may see the root of an earlier iteration, so it is checked as before.
 
 </td></tr>
 <tr><td>

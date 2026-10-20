@@ -692,6 +692,7 @@ The results do not change. The goldens, and `-json` and `-fix -diff` over `e2e/i
 | Nested loops (#252) | Each loop has its own block set. A definition runs as often as a use only when they are in the same loop. So `for … { q := …; for … { q.Find(nil) } }` and a use in a later loop are reported |
 | `for cond` loops (#252) | Back-edges are found by block index, and go/ssa puts the header of `for cond { … }` after its body. So the edge from the header to the body looks like a back-edge, with the body as its header. The walk from a header keeps to the blocks that the header reaches |
 | Range-over-func bodies (#177) | See below |
+| A root defined in the loop body (#375) | Two uses of it on exclusive branches are not a reuse. See below |
 
 **Range-over-func loops (#177).** SSA compiles the body of `for v := range seq` (Go 1.23+) into a synthetic closure. The iterator calls it once per element. go/ssa marks it with `Synthetic == "range-over-func yield"`. The closure has no back-edge, so `DetectLoops` treats every block of it as in a loop.
 
@@ -701,6 +702,27 @@ The results do not change. The goldens, and `-json` and `-fix -diff` over `e2e/i
 - A closure nested inside the body (an IIFE, a `defer`) runs once per run of the body, so it repeats as the body does.
 - A store in the body is a store at the loop (#341). The iterator calls the body only while the loop statement runs. So a read after the loop sees the body's stores. It also sees the value before the loop, since the body may run no time. That is what the loop-header Phi of a plain loop gives ([Captured variables](#captured-variables)).
 - For the same reason, a read in the body sees only the stores that reach the loop, not those after it.
+
+**A root defined in the loop body (#375).** Each run of a call defines a new root. Take `for … { q := s.Where(…); if c { q.Delete(…); continue }; q.Update(…) }`. The only path from one use to the other goes through the back-edge, and that path runs `s.Where` again. So the two uses never share a root. `Tracker.reaches` asks for a path, from either use to the other, that does not enter the block of the root's call (`cfg.Analyzer.CanReachAvoiding`). It asks only when all of these hold:
+
+| Condition | Why |
+| --- | --- |
+| The root is a `*ssa.Call` | A Phi, a parameter or a loaded field is the same value on every path |
+| Both uses are direct (`UsageInfo.Direct`): the operand is the root, or a chain of `*gorm.DB` method calls on it, and the site names its function | Such a use sees the root of the latest run of the call. A value that a merge, a variable, a field, a method value or a closure holds may be the root of an earlier iteration. `prev := q` on one iteration and `prev.Find(nil)` on the next is a reuse (`exclusiveLoopPrevious`) |
+| Both uses are in the function that defines the root | A closure use has a block of another function |
+| The plain reachability holds | So the rule only removes reports |
+
+Uses that run in one iteration are still reported (`exclusiveLoopSameIteration`), and so is a root defined before the loop (`exclusiveRootOutsideLoop`). A root assigned on some iterations only is held by a Phi, so its uses are not direct (`exclusiveLoopKept`). The loop-carried check of #182 keeps the plain reachability: its use is the call itself, so every path to it runs the call.
+
+<details><summary>Decisions (#375)</summary>
+
+- **A call is taken to return a new value on each run.** The loop rules take it so already: one use of a root defined in the loop body is not a reuse. A helper that returns the same mutable `*gorm.DB` on each call is missed in both cases.
+- **Both directions are asked.** A use may run before another one that comes earlier in the source, as through a `goto`. The pair is still checked only when the earlier use reaches the later one, as before.
+- **The block of the call is avoided, not the call itself.** A direct use is dominated by the call. So a use in that block comes after the call, and a path that enters the block runs the call before it reaches the use.
+- **Rejected: avoid the definition for every use.** It missed `exclusiveLoopPrevious`, where one branch uses a variable that holds the root of the previous iteration.
+- **A defer is checked against the uses that may run in the same run of the function.** A deferred call runs when the function returns, so it runs after every use on the path that registered it, and after none on an exclusive path. Before, every recorded use counted, so `if c { defer q.Find(&us) } else { defer q.Count(&n) }` was reported.
+
+</details>
 
 <details><summary>Before #252 and #341</summary>
 
@@ -1411,8 +1433,11 @@ The handler turns each instruction into uses of roots. `pollution.Tracker` recor
 | `DB` | Returns the `*sql.DB` behind the connection pool of the Statement or the `Config` | State only |
 | `Get`, `InstanceGet` | Read `Statement.Settings` | State only |
 | `Callback` | Returns the callback manager of the `Config` | State only |
+| `Commit`, `Rollback` | Pass the error of the connection pool's `Commit` or `Rollback` (or GORM's invalid-transaction error) to `AddError`, and return the receiver itself. Touch no clause (#375) | State only, returning the receiver |
 
 A read is `siteUse.read`, as for `Session`: a branch of the root that reaches the call is reported. A state-only call is skipped by `handleReceiver` before anything is recorded. `IsImmutableReturningBuiltin` covers both, so the `pure` validator, the immutable-return check and the fixes treat them as not branching too.
+
+`Commit` and `Rollback` return their receiver, so `IsImmutableReturningBuiltin` leaves them out: their result is as mutable as the receiver. `typeutil.ReturnsReceiver` makes the tracer follow the result to the receiver's roots, as for a `pure` function that returns its argument. So `tx.Where("a").Find(nil); tx.Commit().Where("b").Find(nil)` is still a reuse (`stateMethodsChainAfterCommit`). The `pure` validator does not count a call of them as a branch (`IsStateOnlyMethod`, `stateMethodsPure`). `SavePoint` and `RollbackTo` stay branches. They hand the receiver to the dialector, which runs SQL on it, and `SavePoint` writes `Statement.ConnPool`.
 
 <details><summary>Decisions, and the test that keeps the table in line</summary>
 
@@ -1423,13 +1448,15 @@ Decisions:
 - **`Migrator` and `AutoMigrate` stay branches.** `Migrator` runs the receiver's pending scopes in place. The `Migrator` it returns holds a `Session` copy that shares the receiver's Statement. A condition added to the receiver after the call leaks into the queries the `Migrator` runs (`TestStateMethods_MigratorSharesStatement`). The copy cannot be followed through the `Migrator` interface. `Association`, `Connection`, `Row`, `Rows`, `ScanRows`, `SetupJoinTable` and `Use` stay branches too. `gormNonChainBranches` in `e2e/internal/gorm_stub_test.go` gives the reason for each.
 - **Methods promoted from `*gorm.Config` are not in the table.** `Name`, `Explain`, `Apply` and the other dialector methods are calls on the embedded `Config` in SSA. They are not calls on the `*gorm.DB`. They were never uses.
 
-`TestGormReceiverUsesMatchGorm` keeps the table in line with GORM. Every method declared on the real `*gorm.DB` that returns no `*gorm.DB` must be in `receiverUses` or in `gormNonChainBranches`. Every name in either must still be a method of it.
+`TestGormReceiverUsesMatchGorm` keeps the table in line with GORM. Every method declared on the real `*gorm.DB` that returns no `*gorm.DB` must be in `receiverUses` or in `gormNonChainBranches`. Every name in either must still be a method of it. `TestGormStateOnlyChainsMatchGorm` covers the methods that return a `*gorm.DB` (#375). It reads their source in GORM's module. A method whose body uses its receiver only to call `AddError`, to read a field, or to return it must be a state-only entry that returns the receiver, and every such entry must have such a body.
 
 </details>
 
-<details><summary>Before #307</summary>
+<details><summary>Before #307 and #375</summary>
 
 Every gorm method branched its receiver unless it returns an immutable copy. So `sqlDB, _ := db.DB(); db.AutoMigrate(...)` on a parameter was reported. So was each `db.AddError(...)` after a branch in a GORM callback. In the gorm corpus (the root module of `go-gorm/gorm` at commit b3d3bf2), 83 of 149 reports were of this kind.
+
+Before #375 `Commit` and `Rollback` were branches. So `tx.Where("id = ?", 1).Update("name", "x"); tx.Rollback(); tx.Commit()` reported both. `TestGormReceiverUsesMatchGorm` checked only the methods that return no `*gorm.DB`.
 
 </details>
 
@@ -1495,7 +1522,7 @@ The mode (`Site.Mode`) decides only two things:
 | --- | --- | --- |
 | Plain call | Left to `DetectViolations`, which orders uses by position | A use |
 | `go` | The changes that reach its block (`IsPollutedAt`) | A branch use |
-| `defer` | Every change (`IsPollutedAnywhere`) | A branch use |
+| `defer` | The changes that may run in the same run of the function, before or after it (`IsPollutedAround`, #375) | A branch use |
 
 <details><summary>go/defer ordering and read-only varargs</summary>
 

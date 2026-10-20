@@ -427,7 +427,7 @@ func (v *Validator) checkCallPollution(call ssa.CallInstruction) []Violation {
 			return nil
 		}
 		// gorm chain method on a param-derived receiver pollutes the argument.
-		if v.paramDerived[site.Recv] && !typeutil.IsImmutableReturningBuiltin(site.Method()) {
+		if v.paramDerived[site.Recv] && !typeutil.IsImmutableReturningBuiltin(site.Method()) && !typeutil.IsStateOnlyMethod(site.Method()) {
 			return []Violation{{
 				Pos:        pos,
 				Message:    "pure function pollutes *gorm.DB argument by calling " + site.Method(),
@@ -528,7 +528,7 @@ func (v *Validator) closureReturnsDerived(f ssa.Value) bool {
 // the contract in its own body (IIFEs, go func() {...}(), stored closures).
 func (v *Validator) checkClosure(mc *ssa.MakeClosure) []Violation {
 	if site, ok := callsite.BoundSite(mc); ok && site.IsGormMethod() {
-		if v.paramDerived[site.Recv] && !typeutil.IsImmutableReturningBuiltin(site.Method()) {
+		if v.paramDerived[site.Recv] && !typeutil.IsImmutableReturningBuiltin(site.Method()) && !typeutil.IsStateOnlyMethod(site.Method()) {
 			return []Violation{{
 				Pos:        mc.Pos(),
 				Message:    "pure function pollutes *gorm.DB argument by taking method value " + site.Method(),
