@@ -448,18 +448,53 @@ func (t *Tracker) argumentMessage(root ssa.Value, changePos token.Pos) string {
 // earliest recorded use, then by SSA name, function, and instruction text. The
 // later keys only break ties between roots without a source position (such as
 // Phi nodes). It is generic so the aliasUses map sorts the same way.
+//
+// Each root's keys are computed once, and its names only when a tie needs
+// them. Computing them in the comparison made n log n copies of the uses and
+// of the names, which dominated a function with n loop-header Phi roots (#300).
 func sortedRoots[U any](t *Tracker, uses map[ssa.Value][]U) []ssa.Value {
-	roots := slices.Collect(maps.Keys(uses))
-	slices.SortFunc(roots, func(a, b ssa.Value) int {
+	keys := make([]rootOrder, 0, len(uses))
+	for root := range uses {
+		keys = append(keys, rootOrder{root: root, pos: root.Pos(), earliest: t.earliestUse(root)})
+	}
+	order := make([]*rootOrder, len(keys))
+	for i := range keys {
+		order[i] = &keys[i]
+	}
+	slices.SortFunc(order, func(a, b *rootOrder) int {
+		if c := cmp.Or(cmp.Compare(a.pos, b.pos), cmp.Compare(a.earliest, b.earliest)); c != 0 {
+			return c
+		}
+		a.name()
+		b.name()
 		return cmp.Or(
-			cmp.Compare(a.Pos(), b.Pos()),
-			cmp.Compare(t.earliestUse(a), t.earliestUse(b)),
-			strings.Compare(a.Name(), b.Name()),
-			strings.Compare(funcName(a), funcName(b)),
-			strings.Compare(a.String(), b.String()),
+			strings.Compare(a.ssaName, b.ssaName),
+			strings.Compare(a.funcName, b.funcName),
+			strings.Compare(a.text, b.text),
 		)
 	})
+	roots := make([]ssa.Value, len(order))
+	for i, k := range order {
+		roots[i] = k.root
+	}
 	return roots
+}
+
+// rootOrder is a root and the keys sortedRoots orders it by. The names are
+// empty until name fills them.
+type rootOrder struct {
+	root                    ssa.Value
+	pos, earliest           token.Pos
+	named                   bool
+	ssaName, funcName, text string
+}
+
+// name fills the names of the root once.
+func (k *rootOrder) name() {
+	if !k.named {
+		k.named = true
+		k.ssaName, k.funcName, k.text = k.root.Name(), funcName(k.root), k.root.String()
+	}
 }
 
 // earliestUse returns the smallest recorded use position of root.

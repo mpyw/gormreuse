@@ -1,6 +1,7 @@
 package tracer
 
 import (
+	"math"
 	"slices"
 
 	"golang.org/x/tools/go/ssa"
@@ -43,7 +44,7 @@ import (
 // own Statement.
 func (t *RootTracer) FindAliasedRoots(v ssa.Value, loopInfo *cfg.LoopInfo) []AliasedRoot {
 	var roots []AliasedRoot
-	t.collectAliasedRoots(v, loopInfo, true, make(map[aliasedRootVisit]bool), &roots)
+	t.collectAliasedRoots(v, rootsLoopInfo(loopInfo), true, make(map[aliasedRootVisit]bool), &roots)
 	return roots
 }
 
@@ -99,32 +100,79 @@ func (t *RootTracer) collectAliasedRoots(v ssa.Value, loopInfo *cfg.LoopInfo, co
 }
 
 // mayAlias reports whether collectAliasedRoots(v, loopInfo, copies, ...) may
-// add a root. The answer is computed once per search. A search that reaches
-// itself again through a loop is assumed to add one.
+// add a root. The answer is computed once per search.
+//
+// The searches form a graph: a search goes on to the receiver and the
+// read-only arguments of each call it steps through. A search may add a root
+// when it, or a search it reaches, adds one at its own step: the least fixed
+// point. A loop makes a cycle in this graph, and every search on a cycle
+// reaches every other, so they all get the same answer. mayAliasVisit finds
+// the cycles with Tarjan's algorithm and answers each one when it is complete,
+// so a cycle that adds nothing is answered false and skipped too (#300). Each
+// search is visited once, as before.
 func (t *RootTracer) mayAlias(v ssa.Value, loopInfo *cfg.LoopInfo, copies bool) bool {
-	key := aliasedRootsKey{v, loopInfo, copies}
+	may, _ := t.mayAliasVisit(aliasedRootsKey{v, loopInfo, copies}, &aliasCycles{index: make(map[aliasedRootsKey]int)})
+	return may
+}
+
+// aliasCycles is the state of one mayAlias computation: the searches on its
+// stack, in the order mayAliasVisit reached them, whose cycle is not complete
+// yet.
+type aliasCycles struct {
+	index map[aliasedRootsKey]int // Position of each search on the stack; an answered one is in RootTracer.aliases
+	stack []aliasedRootsKey
+	may   []bool // Whether each search on the stack adds a root itself or through what it has visited
+}
+
+// mayAliasVisit answers mayAlias for key, and returns the lowest stack
+// position key reaches, or math.MaxInt once key is answered. A search still
+// on the stack answers what it knows so far: false, unless it has found a
+// root. The first search of a cycle answers for all of it when it is done.
+func (t *RootTracer) mayAliasVisit(key aliasedRootsKey, s *aliasCycles) (bool, int) {
 	if may, ok := t.aliases[key]; ok {
+		return may, math.MaxInt
+	}
+	if i, ok := s.index[key]; ok {
+		return s.may[i], i
+	}
+	at := len(s.stack)
+	s.index[key] = at
+	s.stack = append(s.stack, key)
+	s.may = append(s.may, false)
+	low := at
+	visit := func(next aliasedRootsKey) bool {
+		may, reached := t.mayAliasVisit(next, s)
+		low = min(low, reached)
 		return may
 	}
-	t.aliases[key] = true
-	may := slices.ContainsFunc(t.FindAllMutableRoots(v, loopInfo), func(candidate ssa.Value) bool {
+	may := slices.ContainsFunc(t.FindAllMutableRoots(key.v, key.loopInfo), func(candidate ssa.Value) bool {
 		_, site, ok := t.aliasStep(candidate)
 		if !ok {
 			return false
 		}
-		isCopy := copies && t.aliasSharesStatement(site)
-		if isCopy && t.FindMutableRoot(site.Recv, loopInfo) != nil {
+		isCopy := key.copies && t.aliasSharesStatement(site)
+		if isCopy && t.FindMutableRoot(site.Recv, key.loopInfo) != nil {
 			return true
 		}
 		for _, arg := range pollutionsource.ReadOnlyGormArgs(site) {
-			if t.FindMutableRoot(arg, loopInfo) != nil || t.mayAlias(arg, loopInfo, true) {
+			if t.FindMutableRoot(arg, key.loopInfo) != nil || visit(aliasedRootsKey{arg, key.loopInfo, true}) {
 				return true
 			}
 		}
-		return t.mayAlias(site.Recv, loopInfo, isCopy)
+		return visit(aliasedRootsKey{site.Recv, key.loopInfo, isCopy})
 	})
-	t.aliases[key] = may
-	return may
+	s.may[at] = may
+	if low < at {
+		return may, low
+	}
+	// key is the first search of its cycle on the stack, and the cycle is
+	// complete: the searches above it are the rest of it.
+	may = slices.Contains(s.may[at:], true)
+	for _, member := range s.stack[at:] {
+		t.aliases[member] = may
+	}
+	s.stack, s.may = s.stack[:at], s.may[:at]
+	return may, math.MaxInt
 }
 
 // aliasStep returns the gorm method call that collectAliasedRoots goes

@@ -1,6 +1,7 @@
 package tracer
 
 import (
+	"strings"
 	"testing"
 
 	"golang.org/x/tools/go/ssa"
@@ -175,5 +176,100 @@ func TestFindAllMutableRootsPureArgumentAlreadyTraced(t *testing.T) {
 	roots := tr.FindAllMutableRoots(phi, cfg.NewAnalyzer().DetectLoops(fn))
 	if len(roots) != 1 || roots[0] != where {
 		t.Errorf("want the roots of q only, got %v", roots)
+	}
+}
+
+// rootLoopShapes are the shapes the root memo tests need: a receiver with
+// more roots than rootSetMinLen, and a closure without loops in a function
+// with one.
+var rootLoopShapes = `package shape
+
+import "gorm.io/gorm"
+
+func manyLoops(db *gorm.DB, xs []string) {
+	q := db.Model(nil)
+` + strings.Repeat(`	for _, x := range xs {
+		q = q.Where(x)
+	}
+`, rootSetMinLen) + `	q.Find(nil)
+}
+
+func closureInLoop(db *gorm.DB, xs []string) {
+	q := db.Model(nil)
+	for _, x := range xs {
+		q = q.Where(x)
+	}
+	func() {
+		q.Find(nil)
+	}()
+}
+`
+
+// TestHasMutableRoot checks HasMutableRoot against the list it stands for,
+// on a list long enough to be kept as a set and on a short one (#300).
+func TestHasMutableRoot(t *testing.T) {
+	t.Parallel()
+	fixtures, _ := loadFixtureProgram(t)
+	shapes := loadFixtureSource(t, rootLoopShapes)
+	loops := cfg.NewAnalyzer()
+
+	for _, c := range []struct {
+		fn  *ssa.Function
+		set bool
+	}{
+		{shapes["manyLoops"], true},
+		{fixtures["loopSelfReassignment"], false},
+	} {
+		tr := NewRootTracer(nil, nil, nil, nil, nil, nil, callsite.FuncVars{})
+		loopInfo := loops.DetectLoops(c.fn)
+		recv := fixtureGormCallReceiver(c.fn, "Find")
+		roots := tr.FindAllMutableRoots(recv, loopInfo)
+		for _, r := range roots {
+			if !tr.HasMutableRoot(recv, loopInfo, r) {
+				t.Errorf("%s: root %v not found", c.fn.Name(), r)
+			}
+		}
+		if tr.HasMutableRoot(recv, loopInfo, recv) {
+			t.Errorf("%s: the receiver Phi is not one of its roots", c.fn.Name())
+		}
+		if _, ok := tr.rootSets[allRootsKey{recv, loopInfo}]; ok != c.set {
+			t.Errorf("%s: %d roots kept as a set = %t, want %t", c.fn.Name(), len(roots), ok, c.set)
+		}
+	}
+}
+
+// TestFindAllMutableRootsLoopInfoKey checks that a loopInfo without a loop
+// header shares the entry of nil, and one with headers keeps its own (#300).
+func TestFindAllMutableRootsLoopInfoKey(t *testing.T) {
+	t.Parallel()
+	shapes := loadFixtureSource(t, rootLoopShapes)
+	loops := cfg.NewAnalyzer()
+	parent := shapes["closureInLoop"]
+	closure := parent.AnonFuncs[0]
+	closureLoops := loops.DetectLoops(closure)
+	if closureLoops.HasLoopHeaders() {
+		t.Fatal("the closure has no loop")
+	}
+	if rootsLoopInfo(closureLoops) != nil {
+		t.Error("a loopInfo without headers should key as nil")
+	}
+	parentLoops := loops.DetectLoops(parent)
+	if rootsLoopInfo(parentLoops) != parentLoops {
+		t.Error("a loopInfo with headers should key as itself")
+	}
+
+	tr := NewRootTracer(nil, nil, nil, nil, nil, nil, callsite.FuncVars{})
+	q := fixtureGormCallReceiver(closure, "Find")
+	want := tr.FindAllMutableRoots(q, nil)
+	got := tr.FindAllMutableRoots(q, closureLoops)
+	if len(got) == 0 || &got[0] != &want[0] {
+		t.Errorf("the closure's query was traced again: %v, want the entry %v", got, want)
+	}
+	if len(tr.allRoots) != 1 {
+		t.Errorf("%d entries, want 1", len(tr.allRoots))
+	}
+	tr.FindAllMutableRoots(q, parentLoops)
+	if len(tr.allRoots) != 2 {
+		t.Errorf("%d entries, want 2", len(tr.allRoots))
 	}
 }

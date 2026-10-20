@@ -114,17 +114,19 @@ func (t *RootTracer) pureReturnedArgs(site callsite.Site) []ssa.Value {
 	if !typeutil.HasGormDBResult(site.Instr.(*ssa.Call).Type()) {
 		return nil
 	}
+	// Most calls are not to a pure function that returns an argument: answer
+	// them before building the argument list, since traceAll asks at every
+	// call it passes (#300). With no verdicts, no argument is returned.
+	if t.pure == nil || !t.IsPureFunction(site.Declared) {
+		return nil
+	}
 	// A call through a method value passes its receiver as a binding, not
 	// as an argument; put it back so a pure method returning it is followed.
 	args := site.Args
 	if site.Recv != nil {
 		args = append([]ssa.Value{site.Recv}, args...)
 	}
-	args = t.pure.ReturnedArgs(site.Declared, args)
-	if len(args) == 0 || !t.IsPureFunction(site.Declared) {
-		return nil
-	}
-	return args
+	return t.pure.ReturnedArgs(site.Declared, args)
 }
 
 // PureReturnsOnlyParams reports whether every mutable root of the values fn

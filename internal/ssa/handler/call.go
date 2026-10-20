@@ -156,7 +156,7 @@ func isAssignment(call *ssa.Call, root ssa.Value, ctx *Context) bool {
 					next = u
 				}
 			}
-			if merge != nil && slices.Contains(ctx.RootTracer.FindAllMutableRoots(merge, ctx.LoopInfo), root) {
+			if merge != nil && ctx.RootTracer.HasMutableRoot(merge, ctx.LoopInfo, root) {
 				return true
 			}
 			if next != nil && !visited[next] {
