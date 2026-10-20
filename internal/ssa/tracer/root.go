@@ -540,7 +540,7 @@ func (t *RootTracer) traceNonCall(v ssa.Value, visited map[ssa.Value]bool, loopI
 		// Field: a field of a struct held in a register, as promoted methods
 		// of an embedded *gorm.DB read it (#181)
 		if vals := t.stores.fieldValueStoredValues(val); len(vals) > 0 {
-			return t.trace(vals[0], visited, loopInfo)
+			return t.traceStores(vals, visited, loopInfo)
 		}
 		return nil
 
@@ -570,10 +570,10 @@ func (t *RootTracer) tracePointerLoad(load *ssa.UnOp, visited map[ssa.Value]bool
 	case *ssa.FieldAddr:
 		return t.traceFieldStore(p, load, visited, loopInfo)
 	case *ssa.Global:
-		// Single-root: trace the first value stored into the global that
-		// reaches the load.
+		// Single-root: the first value stored into the global that reaches
+		// the load and has a root (#340).
 		if vals := t.stores.globalStoredValues(p, load); len(vals) > 0 {
-			return t.trace(vals[0], visited, loopInfo)
+			return t.traceStores(vals, visited, loopInfo)
 		}
 		return nil
 	default:

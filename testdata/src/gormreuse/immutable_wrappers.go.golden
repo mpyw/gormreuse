@@ -307,10 +307,10 @@ func iwClosureCapturedChain(db *gorm.DB) {
 func iwClosureCapturedReassigned(db *gorm.DB, c bool) {
 	conn := db.Session(&gorm.Session{})
 	if c {
-		conn = conn.Where("x")
+		conn = conn.Where("x").Session(&gorm.Session{})
 	}
 	get := func() *gorm.DB { return conn }
-	d := get().Session(&gorm.Session{})
+	d := get()
 	d.Find(nil)
 	d.Count(nil) // want `second branch from mutable root`
 }

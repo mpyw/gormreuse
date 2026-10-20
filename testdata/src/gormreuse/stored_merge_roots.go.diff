@@ -1,0 +1,201 @@
+--- stored_merge_roots.go	1970-01-01 00:00:00
++++ stored_merge_roots.go.golden	1970-01-01 00:00:00
+@@ -1,189 +1,189 @@
+ package internal
+ 
+ import (
+ 	"context"
+ 	"sync"
+ 
+ 	"gorm.io/gorm"
+ )
+ 
+ // =============================================================================
+ // ROOTS OF VARIABLES IN MEMORY (#340)
+ //
+ // A variable that a closure captures, a struct field and a global live in
+ // memory, so a read sees every store that reaches it rather than one Phi. As
+ // for the edges of a Phi, the read has the root of the first stored value that
+ // has one. An immutable first store, such as WithContext before a conditional
+ // Where, must not hide the mutable value of a later store.
+ // =============================================================================
+ 
+ // smrGroup runs each function in its own goroutine, as errgroup.Group does.
+ type smrGroup struct{ wg sync.WaitGroup }
+ 
+ func (g *smrGroup) Go(f func() error) {
+ 	g.wg.Add(1)
+ 	go func() { defer g.wg.Done(); _ = f() }()
+ }
+ 
+ func (g *smrGroup) Wait() error { g.wg.Wait(); return nil }
+ 
+ type smrHolder struct{ q *gorm.DB }
+ 
+ var smrGlobal *gorm.DB
+ 
+ //gormreuse:immutable-param
+ func smrCountAndList(db *gorm.DB) {
+ 	db.Count(nil)
+ 	db.Find(nil)
+ }
+ 
+ // =============================================================================
+ // SHOULD REPORT
+ // =============================================================================
+ 
+ // smrErrgroupCountFind: the pagination query of the issue. Both goroutines
+ // read q, which holds the Where chain when name is set.
+ func smrErrgroupCountFind(ctx context.Context, db *gorm.DB, name string) error {
+ 	q := db.WithContext(ctx)
+ 	if name != "" {
+-		q = q.Where("name LIKE ?", name)
++		q = q.Where("name LIKE ?", name).Session(&gorm.Session{})
+ 	}
+ 	var g smrGroup
+ 	g.Go(func() error { return q.Model(nil).Count(nil).Error })
+ 	g.Go(func() error { return q.Limit(10).Find(nil).Error }) // want `\*gorm\.DB reused: second branch from mutable root`
+ 	return g.Wait()
+ }
+ 
+ // smrDeferCapture: only a deferred closure captures q, which moves q to memory.
+ func smrDeferCapture(ctx context.Context, db *gorm.DB, name string) {
+ 	q := db.WithContext(ctx)
+ 	if name != "" {
+ 		q = q.Where("name LIKE ?", name)
+ 	}
+ 	defer func() { _ = q.Statement }()
+ 	q.Model(nil).Count(nil)
+ 	q.Limit(10).Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // smrIIFECapture: an immediately called closure uses q first.
+ func smrIIFECapture(ctx context.Context, db *gorm.DB, name string) {
+ 	q := db.WithContext(ctx)
+ 	if name != "" {
+-		q = q.Where("name LIKE ?", name)
++		q = q.Where("name LIKE ?", name).Session(&gorm.Session{})
+ 	}
+ 	func() { q.Model(nil).Count(nil) }()
+ 	q.Limit(10).Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // smrStructField: the same variable as a struct field.
+ func smrStructField(ctx context.Context, db *gorm.DB, name string) {
+ 	s := &smrHolder{q: db.WithContext(ctx)}
+ 	if name != "" {
+-		s.q = s.q.Where("name LIKE ?", name)
++		s.q = s.q.Where("name LIKE ?", name).Session(&gorm.Session{})
+ 	}
+ 	s.q.Model(nil).Count(nil)
+ 	s.q.Limit(10).Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // smrGlobalVar: the same variable as a global.
+ func smrGlobalVar(db *gorm.DB, name string) {
+ 	db = db.Session(&gorm.Session{})
+ 	smrGlobal = db.Session(&gorm.Session{})
+ 	if name != "" {
+-		smrGlobal = db.Where("name LIKE ?", name)
++		smrGlobal = db.Where("name LIKE ?", name).Session(&gorm.Session{})
+ 	}
+ 	smrGlobal.Find(nil)
+ 	smrGlobal.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // smrImmutableParamCaptured: the immutable-param contract of the callee holds
+ // the captured q to the same check as a plain local.
+ func smrImmutableParamCaptured(db *gorm.DB, name string) {
+ 	db = db.Session(&gorm.Session{})
+ 	q := db
+ 	if name != "" {
+ 		q = q.Where("name LIKE ?", name)
+ 	}
+ 	defer func() { _ = q }()
+-	smrCountAndList(q) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of smrCountAndList`
++	smrCountAndList(q.Session(&gorm.Session{})) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of smrCountAndList`
+ }
+ 
+ // smrSpawnLoopThenRebuild: the goroutines may run after q is rebuilt, and all
+ // of them then read the same Where chain.
+ func smrSpawnLoopThenRebuild(db *gorm.DB) {
+ 	q := db.Session(&gorm.Session{})
+ 	var g smrGroup
+ 	for range 3 {
+ 		g.Go(func() error { return q.Find(nil).Error }) // want `\*gorm\.DB reused: second branch from mutable root`
+ 	}
+-	q = q.Where("a = 1")
++	q = q.Where("a = 1").Session(&gorm.Session{})
+ 	_ = g.Wait()
+ }
+ 
+ // smrSpawnTwiceThenRebuild: two goroutines, then one rebuild.
+ func smrSpawnTwiceThenRebuild(db *gorm.DB) {
+ 	q := db.Session(&gorm.Session{})
+ 	var g smrGroup
+ 	g.Go(func() error { return q.Find(nil).Error })
+ 	g.Go(func() error { return q.Count(nil).Error }) // want `\*gorm\.DB reused: second branch from mutable root`
+-	q = q.Where("a = 1")
++	q = q.Where("a = 1").Session(&gorm.Session{})
+ 	_ = g.Wait()
+ }
+ 
+ // smrSpawnThenRebuildAndUse: one goroutine, then a rebuild that the main
+ // goroutine uses too.
+ func smrSpawnThenRebuildAndUse(db *gorm.DB) {
+ 	q := db.Session(&gorm.Session{})
+ 	var g smrGroup
+ 	g.Go(func() error { return q.Find(nil).Error })
+-	q = q.Where("a = 1")
++	q = q.Where("a = 1").Session(&gorm.Session{})
+ 	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ 	_ = g.Wait()
+ }
+ 
+ // smrGoLoopThenRebuild: go statements in a loop, then one rebuild.
+ func smrGoLoopThenRebuild(db *gorm.DB) {
+ 	q := db.Session(&gorm.Session{})
+ 	for range 3 {
+ 		go func() { q.Find(nil) }() // want `\*gorm\.DB reused: second branch from mutable root`
+ 	}
+-	q = q.Where("a = 1")
++	q = q.Where("a = 1").Session(&gorm.Session{})
+ }
+ 
+ // =============================================================================
+ // SHOULD NOT REPORT
+ // =============================================================================
+ 
+ // smrErrgroupIsolated: every value q may hold is immutable.
+ func smrErrgroupIsolated(ctx context.Context, db *gorm.DB, name string) error {
+ 	q := db.WithContext(ctx)
+ 	if name != "" {
+ 		q = q.Where("name LIKE ?", name).Session(&gorm.Session{})
+ 	}
+ 	var g smrGroup
+ 	g.Go(func() error { return q.Model(nil).Count(nil).Error })
+ 	g.Go(func() error { return q.Limit(10).Find(nil).Error })
+ 	return g.Wait()
+ }
+ 
+ // smrStructFieldIsolated: the same for a struct field.
+ func smrStructFieldIsolated(ctx context.Context, db *gorm.DB, name string) {
+ 	s := &smrHolder{q: db.WithContext(ctx)}
+ 	if name != "" {
+ 		s.q = s.q.Where("name LIKE ?", name).Session(&gorm.Session{})
+ 	}
+ 	s.q.Model(nil).Count(nil)
+ 	s.q.Limit(10).Find(nil)
+ }
+ 
+ // smrSpawnAfterRebuild: the goroutines start after the last store, which is
+ // immutable.
+ func smrSpawnAfterRebuild(db *gorm.DB) {
+ 	q := db.Session(&gorm.Session{})
+ 	q = q.Where("a = 1").Session(&gorm.Session{})
+ 	var g smrGroup
+ 	for range 3 {
+ 		g.Go(func() error { return q.Find(nil).Error })
+ 	}
+ 	_ = g.Wait()
+ }

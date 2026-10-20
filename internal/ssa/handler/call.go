@@ -299,6 +299,13 @@ func (u siteUse) call() *ssa.Call {
 // roots returns the mutable roots that v may hold: first the one it resolves
 // to (FindMutableRoot), then the others that FindAllMutableRoots finds through
 // a merge. It is nil when v has no mutable root.
+//
+// It is also nil when FindMutableRoot finds no root but FindAllMutableRoots
+// does. That list holds what a merge may hold, immutable values included, and
+// the roots inside a closure that an immutable-return directive vouches for,
+// which FindMutableRoot trusts. So FindMutableRoot decides whether v is
+// mutable; it tries every value a merge or a variable in memory may hold
+// (#340).
 func (u siteUse) roots(v ssa.Value) []ssa.Value {
 	root := u.ctx.RootTracer.FindMutableRoot(v, u.ctx.LoopInfo)
 	if root == nil {

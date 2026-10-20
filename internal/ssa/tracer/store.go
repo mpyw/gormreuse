@@ -24,9 +24,9 @@ import (
 //
 //declscope:shared // root.go's traceNonCall and tracePointerLoad, and freevar.go's traceFreeVarLoad, send local variables here
 func (t *RootTracer) traceAllocStore(alloc *ssa.Alloc, load ssa.Instruction, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) ssa.Value {
-	// Single-root: trace the first value stored into the Alloc.
+	// Single-root: the first stored value that has a root (#340).
 	if vals := t.stores.allocReachingStoreValues(alloc, load); len(vals) > 0 {
-		return t.trace(vals[0], visited, loopInfo)
+		return t.traceStores(vals, visited, loopInfo)
 	}
 	return nil
 }
@@ -678,4 +678,20 @@ func (t *RootTracer) traceAllAllocStores(alloc *ssa.Alloc, load ssa.Instruction,
 		roots = append(roots, t.traceAll(v, search, loopInfo)...)
 	}
 	return roots
+}
+
+// traceStores returns the root of the first of vals that has one, as tracePhi
+// does for the edges of a merge. vals are the values a variable in memory may
+// hold: the stores that reach a read of it. Stopping at the first store lost
+// every root after an immutable one, such as WithContext before a conditional
+// Where (#340).
+//
+//declscope:shared // root.go and field.go trace the stores of fields and globals with it too
+func (t *RootTracer) traceStores(vals []ssa.Value, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) ssa.Value {
+	for _, v := range vals {
+		if root := t.trace(v, visited, loopInfo); root != nil {
+			return root
+		}
+	}
+	return nil
 }
