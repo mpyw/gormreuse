@@ -165,7 +165,7 @@ func (t *RootTracer) pureReturnsOnlyParams(fn *ssa.Function) bool {
 				if !typeutil.IsGormDB(res.Type()) {
 					continue
 				}
-				for _, root := range t.traceAll(res, make(map[ssa.Value]bool), nil) {
+				for _, root := range t.traceAll(res, newAllRootsSearch(make(map[ssa.Value]bool)), nil) {
 					if p, isParam := root.(*ssa.Parameter); !isParam || p.Parent() != fn {
 						only = false
 					}

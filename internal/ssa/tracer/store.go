@@ -398,10 +398,10 @@ func globalStoredValues(g *ssa.Global, load ssa.Instruction) []ssa.Value {
 // traceAllAllocStores is traceAllocStore for every value that can reach load.
 //
 //declscope:shared // root.go's traceAll and traceAllPointerLoads, and freevar.go's traceAllFreeVarLoads, send local variables here
-func (t *RootTracer) traceAllAllocStores(alloc *ssa.Alloc, load ssa.Instruction, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) []ssa.Value {
+func (t *RootTracer) traceAllAllocStores(alloc *ssa.Alloc, load ssa.Instruction, search *allRootsSearch, loopInfo *cfg.LoopInfo) []ssa.Value {
 	var roots []ssa.Value
 	for _, v := range allocReachingStoreValues(alloc, load) {
-		roots = append(roots, t.traceAll(v, visited, loopInfo)...)
+		roots = append(roots, t.traceAll(v, search, loopInfo)...)
 	}
 	return roots
 }

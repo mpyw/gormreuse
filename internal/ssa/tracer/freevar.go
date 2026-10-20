@@ -88,11 +88,11 @@ func (t *RootTracer) traceFreeVarLoad(fv *ssa.FreeVar, load ssa.Instruction, vis
 // traceAllFreeVarLoads is traceFreeVarLoad for every root.
 //
 //declscope:shared // root.go's traceAllPointerLoads sends reads of captured variables here
-func (t *RootTracer) traceAllFreeVarLoads(fv *ssa.FreeVar, load ssa.Instruction, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) []ssa.Value {
+func (t *RootTracer) traceAllFreeVarLoads(fv *ssa.FreeVar, load ssa.Instruction, search *allRootsSearch, loopInfo *cfg.LoopInfo) []ssa.Value {
 	if alloc, ok := FreeVarBinding(fv).(*ssa.Alloc); ok {
-		return t.traceAllAllocStores(alloc, load, visited, loopInfo)
+		return t.traceAllAllocStores(alloc, load, search, loopInfo)
 	}
-	return t.traceAllFreeVar(fv, visited, loopInfo)
+	return t.traceAllFreeVar(fv, search, loopInfo)
 }
 
 // traceAllFreeVar finds ALL possible roots from a captured closure variable.
@@ -111,9 +111,9 @@ func (t *RootTracer) traceAllFreeVarLoads(fv *ssa.FreeVar, load ssa.Instruction,
 //	fn()  // Need to check BOTH q1 and q2
 //
 //declscope:shared // root.go's traceAll sends captured variables here
-func (t *RootTracer) traceAllFreeVar(fv *ssa.FreeVar, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) []ssa.Value {
+func (t *RootTracer) traceAllFreeVar(fv *ssa.FreeVar, search *allRootsSearch, loopInfo *cfg.LoopInfo) []ssa.Value {
 	if binding := FreeVarBinding(fv); binding != nil {
-		return t.traceAll(binding, visited, loopInfo)
+		return t.traceAll(binding, search, loopInfo)
 	}
 	return nil
 }
