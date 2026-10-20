@@ -23,17 +23,26 @@ func FreeVarBinding(fv *ssa.FreeVar) ssa.Value {
 }
 
 // FreeVarMakeClosure returns the MakeClosure that creates fn's closure in its
-// enclosing function, or nil when fn is not a closure.
+// enclosing function, or nil when fn is not a closure. It reads the referrers
+// of fn, not every instruction of the enclosing function, so a function that
+// declares n closures is not scanned n times (#350). A MakeClosure in a block
+// that SSA removed as unreachable is not one.
 func FreeVarMakeClosure(fn *ssa.Function) *ssa.MakeClosure {
 	parent := fn.Parent()
 	if parent == nil {
 		return nil
 	}
-	for _, block := range parent.Blocks {
-		for _, instr := range block.Instrs {
-			if mc, ok := instr.(*ssa.MakeClosure); ok && mc.Fn == ssa.Value(fn) {
-				return mc
-			}
+	refs := fn.Referrers()
+	if refs == nil {
+		return nil
+	}
+	for _, ref := range *refs {
+		mc, ok := ref.(*ssa.MakeClosure)
+		if !ok || mc.Fn != ssa.Value(fn) {
+			continue
+		}
+		if b := mc.Block(); b != nil && b.Parent() == parent && b.Index < len(parent.Blocks) && parent.Blocks[b.Index] == b {
+			return mc
 		}
 	}
 	return nil

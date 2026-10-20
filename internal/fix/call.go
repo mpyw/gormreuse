@@ -17,17 +17,26 @@ import (
 //declscope:shared // virtual.go's virtualRootEndsImmutable walks the calls of a file with it
 var callExprNodeTypes = []ast.Node{(*ast.CallExpr)(nil)}
 
-// findCallAtLparen returns the call under cur whose Lparen is pos, which is
-// where SSA places a call and so where a use is recorded.
+// callAtLparen returns the call in file whose Lparen is pos, which is where
+// SSA places a call and so where a use is recorded. The calls of a file are
+// indexed by Lparen on first use, so finding the call of each of n uses does
+// not walk the file n times (#350).
 //
 //declscope:shared // generator.go, reassign.go and session.go find a use's call with it
-func findCallAtLparen(cur inspector.Cursor, pos token.Pos) *ast.CallExpr {
-	for c := range cur.Preorder(callExprNodeTypes...) {
-		if call := c.Node().(*ast.CallExpr); call.Lparen == pos {
-			return call
+func (g *Generator) callAtLparen(file *ast.File, pos token.Pos) *ast.CallExpr {
+	calls, ok := g.calls[file]
+	if !ok {
+		calls = make(map[token.Pos]*ast.CallExpr)
+		for c := range g.fileCursor(file).Preorder(callExprNodeTypes...) {
+			call := c.Node().(*ast.CallExpr)
+			calls[call.Lparen] = call
 		}
+		if g.calls == nil {
+			g.calls = make(map[*ast.File]map[token.Pos]*ast.CallExpr)
+		}
+		g.calls[file] = calls
 	}
-	return nil
+	return calls[pos]
 }
 
 // calledOnlyDirectly reports whether every caller of fn is a call in this

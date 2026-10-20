@@ -197,7 +197,7 @@ func (g *Generator) sessionEndAfterCall(pos token.Pos) token.Pos {
 	if file == nil {
 		return token.NoPos
 	}
-	call := findCallAtLparen(g.fileCursor(file), pos)
+	call := g.callAtLparen(file, pos)
 	if call == nil || !typeutil.IsGormDB(g.pass.TypesInfo.TypeOf(call)) {
 		return token.NoPos
 	}

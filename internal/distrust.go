@@ -75,8 +75,8 @@ type distrustSources struct {
 // worklist: when a function becomes distrusted, the functions that call or
 // refer to it, or that create a callback it exempts, are checked again. The
 // sets only grow, and a larger set only fails more checks, so this ends, at
-// the same sets in any order. Each function is checked again at most once per
-// function it depends on that becomes distrusted.
+// the same sets in any order. A function outside a cycle of dependents is
+// checked again at most once (see distrustGroups).
 //
 //declscope:shared // run.go computes what the facts leave out
 func distrustContracts(src distrustSources, guard *panicGuard) distrustedContracts {
@@ -145,28 +145,102 @@ func distrustContracts(src distrustSources, guard *panicGuard) distrustedContrac
 		return failedReturn || failedInput
 	}
 
-	var queue []*ssa.Function
-	queued := make(map[*ssa.Function]bool)
-	enqueue := func(fn *ssa.Function) {
+	// The functions are checked again one group of mutually dependent ones
+	// at a time, each group after every group it depends on (#350). A
+	// function outside a cycle is then checked again at most once, after all
+	// the functions it depends on are settled, not once per one of them that
+	// becomes distrusted. Inside a group the worklist runs as before.
+	dirty := make(map[*ssa.Function]bool)
+	for _, fn := range seeds {
 		for _, dep := range dependents[fn] {
-			if !queued[dep] {
-				queued[dep] = true
-				queue = append(queue, dep)
-			}
+			dirty[dep] = true
 		}
 	}
-	for _, fn := range seeds {
-		enqueue(fn)
+	for _, group := range distrustGroups(seeds, dependents) {
+		recheckDistrustGroup(group, dependents, dirty, recheck)
+	}
+	return d
+}
+
+// recheckDistrustGroup runs the worklist of distrustContracts on group, one
+// of distrustGroups: it checks again each function of group that dirty holds,
+// and marks dirty the dependents of each one that recheck distrusts. A
+// dependent in group is checked again in turn.
+func recheckDistrustGroup(group []*ssa.Function, dependents map[*ssa.Function][]*ssa.Function, dirty map[*ssa.Function]bool, recheck func(*ssa.Function) bool) {
+	inGroup := make(map[*ssa.Function]bool, len(group))
+	for _, fn := range group {
+		inGroup[fn] = true
+	}
+	var queue []*ssa.Function
+	queued := make(map[*ssa.Function]bool)
+	for _, fn := range group {
+		if dirty[fn] {
+			queued[fn] = true
+			queue = append(queue, fn)
+		}
 	}
 	for len(queue) > 0 {
 		fn := queue[0]
 		queue = queue[1:]
 		queued[fn] = false
-		if recheck(fn) {
-			enqueue(fn)
+		if !recheck(fn) {
+			continue
+		}
+		for _, dep := range dependents[fn] {
+			dirty[dep] = true
+			if inGroup[dep] && !queued[dep] {
+				queued[dep] = true
+				queue = append(queue, dep)
+			}
 		}
 	}
-	return d
+}
+
+// distrustGroups returns the functions that the seeds' distrust may reach
+// through dependents, as the strongly connected components of that graph, in
+// topological order: each group comes after every group that a function in
+// it depends on. It uses Tarjan's algorithm, which completes a group after
+// every group reachable from it, so the groups are reversed at the end. The
+// order is deterministic, given the order of seeds and of each dependents
+// list.
+func distrustGroups(seeds []*ssa.Function, dependents map[*ssa.Function][]*ssa.Function) [][]*ssa.Function {
+	index := make(map[*ssa.Function]int)
+	low := make(map[*ssa.Function]int)
+	onStack := make(map[*ssa.Function]bool)
+	var stack []*ssa.Function
+	var groups [][]*ssa.Function
+	var visit func(fn *ssa.Function)
+	visit = func(fn *ssa.Function) {
+		index[fn] = len(index)
+		low[fn] = index[fn]
+		stack = append(stack, fn)
+		onStack[fn] = true
+		for _, dep := range dependents[fn] {
+			if _, ok := index[dep]; !ok {
+				visit(dep)
+				low[fn] = min(low[fn], low[dep])
+			} else if onStack[dep] {
+				low[fn] = min(low[fn], index[dep])
+			}
+		}
+		if low[fn] != index[fn] {
+			return
+		}
+		at := slices.Index(stack, fn)
+		group := slices.Clone(stack[at:])
+		for _, member := range group {
+			onStack[member] = false
+		}
+		stack = stack[:at]
+		groups = append(groups, group)
+	}
+	for _, fn := range seeds {
+		if _, ok := index[fn]; !ok {
+			visit(fn)
+		}
+	}
+	slices.Reverse(groups)
+	return groups
 }
 
 // distrustDependents maps each function to the targets whose check may

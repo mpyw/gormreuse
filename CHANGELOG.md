@@ -956,7 +956,18 @@ These are wall times with the command, the median of five runs on one machine:
 | A chain of 400 `pure` functions | 0.8 s | 0.8 s |
 | 800 closures with `//gormreuse:pure` in one function (#301) | 81 s | 0.8 s |
 
-With facts, the drivers also run gormreuse on every dependency. gormreuse builds SSA only for the packages that reach `gorm.io/gorm`, so this adds little. A test fails when the analyzer's allocations on a generated shape, such as the worst cases above, grow faster than the shape allows (#260, #302).
+With facts, the drivers also run gormreuse on every dependency. gormreuse builds SSA only for the packages that reach `gorm.io/gorm`, so this adds little. A test fails when the analyzer's allocations on a generated shape, such as the worst cases above, grow faster than the shape allows (#260, #302). It also counts the steps of the analyzer's searches, so a slow search that allocates nothing fails it too (#350).
+
+#350 removed the repeated scans that made these shapes quadratic. The times are those of the analyzer's run on one package, without loading, at `n = 800`, the best of three:
+
+| Code | Before #350 | After |
+| --- | --- | --- |
+| `n` roots, each used once and in a `defer` | 0.33 s | 0.02 s |
+| `n` unconditional reassignments `q = q.Where(...)` | 0.06 s | 0.003 s |
+| `n` chained `Scopes` calls | 0.08 s | 0.008 s |
+| A chain of `n` broken `immutable-return` functions, and a function that calls each of them | 0.22 s | 0.03 s |
+| `n` getters of a field that `n` methods assign | 0.10 s | 0.01 s |
+| A chain of `n` closures, each calling the one before it | 0.012 s | 0.005 s |
 
 </details>
 

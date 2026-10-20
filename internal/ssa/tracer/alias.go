@@ -6,6 +6,7 @@ import (
 
 	"golang.org/x/tools/go/ssa"
 
+	"github.com/mpyw/gormreuse/internal/effort"
 	"github.com/mpyw/gormreuse/internal/ssa/callsite"
 	"github.com/mpyw/gormreuse/internal/ssa/cfg"
 	"github.com/mpyw/gormreuse/internal/ssa/pollutionsource"
@@ -151,33 +152,25 @@ func (t *RootTracer) mayAliasVisit(key aliasedRootsKey, s *aliasCycles) (bool, i
 	if i, ok := s.index[key]; ok {
 		return s.may[i], i
 	}
+	effort.Step()
 	at := len(s.stack)
 	s.index[key] = at
 	s.stack = append(s.stack, key)
 	s.may = append(s.may, false)
 	low := at
-	visit := func(next aliasedRootsKey) bool {
-		may, reached := t.mayAliasVisit(next, s)
-		low = min(low, reached)
-		return may
-	}
 	may := slices.ContainsFunc(t.FindAllMutableRoots(key.v, key.loopInfo), func(candidate ssa.Value) bool {
-		_, site, ok := t.aliasStep(candidate)
-		if !ok {
-			return false
+		ckey := aliasedRootsKey{candidate, key.loopInfo, key.copies}
+		if may, ok := t.aliasSteps[ckey]; ok {
+			return may
 		}
-		isCopy := key.copies && t.aliasSharesStatement(site)
-		// aliasedRootsOf has a root exactly when FindMutableRoot does, so
-		// the first root answers for all of them.
-		if isCopy && t.FindMutableRoot(site.Recv, key.loopInfo) != nil {
-			return true
+		may, reached := t.mayAliasStep(ckey, s)
+		low = min(low, reached)
+		// An answer that relies on a search still on the stack may change
+		// once its cycle is complete, unless it is true.
+		if may || reached == math.MaxInt {
+			t.aliasSteps[ckey] = may
 		}
-		for _, arg := range pollutionsource.ReadOnlyGormArgs(site) {
-			if t.FindMutableRoot(arg, key.loopInfo) != nil || visit(aliasedRootsKey{arg, key.loopInfo, true}) {
-				return true
-			}
-		}
-		return visit(aliasedRootsKey{site.Recv, key.loopInfo, isCopy})
+		return may
 	})
 	s.may[at] = may
 	if low < at {
@@ -191,6 +184,38 @@ func (t *RootTracer) mayAliasVisit(key aliasedRootsKey, s *aliasCycles) (bool, i
 	}
 	s.stack, s.may = s.stack[:at], s.may[:at]
 	return may, math.MaxInt
+}
+
+// mayAliasStep reports whether the step of a search at key.v, one of the
+// candidate roots of the search, may add a root, and returns the lowest stack
+// position it reaches, as mayAliasVisit does. The answer depends only on the
+// candidate, not on the search it is a candidate of, so mayAliasVisit keeps it
+// once it is final: n reads that each have the same n candidates, such as
+// the spawned reads of a field reassigned n times, step through each one once
+// (#350).
+func (t *RootTracer) mayAliasStep(key aliasedRootsKey, s *aliasCycles) (bool, int) {
+	low := math.MaxInt
+	visit := func(next aliasedRootsKey) bool {
+		may, reached := t.mayAliasVisit(next, s)
+		low = min(low, reached)
+		return may
+	}
+	_, site, ok := t.aliasStep(key.v)
+	if !ok {
+		return false, low
+	}
+	isCopy := key.copies && t.aliasSharesStatement(site)
+	// aliasedRootsOf has a root exactly when FindMutableRoot does, so the
+	// first root answers for all of them.
+	if isCopy && t.FindMutableRoot(site.Recv, key.loopInfo) != nil {
+		return true, low
+	}
+	for _, arg := range pollutionsource.ReadOnlyGormArgs(site) {
+		if t.FindMutableRoot(arg, key.loopInfo) != nil || visit(aliasedRootsKey{arg, key.loopInfo, true}) {
+			return true, low
+		}
+	}
+	return visit(aliasedRootsKey{site.Recv, key.loopInfo, isCopy}), low
 }
 
 // aliasStep returns the gorm method call that collectAliasedRoots goes

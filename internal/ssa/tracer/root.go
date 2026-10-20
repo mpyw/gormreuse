@@ -74,6 +74,7 @@ import (
 	"golang.org/x/tools/go/ssa"
 
 	"github.com/mpyw/gormreuse/internal/directive"
+	"github.com/mpyw/gormreuse/internal/effort"
 	"github.com/mpyw/gormreuse/internal/ssa/callsite"
 	"github.com/mpyw/gormreuse/internal/ssa/cfg"
 	"github.com/mpyw/gormreuse/internal/ssa/origin"
@@ -112,6 +113,7 @@ type RootTracer struct {
 	scopesCallbacks      map[*ssa.Function]bool             // Scopes/Preload callbacks (params are mutable roots)
 	immutableCallbacks   map[*ssa.Function]bool             // Transaction/FindInBatches callbacks (fresh tx)
 	fieldRoots           map[fieldRootKey]*FieldRoot        // Interned FieldRoots (one per call and field path)
+	roots                map[allRootsKey]ssa.Value          // Memo of FindMutableRoot
 	allRoots             map[allRootsKey][]ssa.Value        // Memo of FindAllMutableRoots
 	rootSets             map[allRootsKey]map[ssa.Value]bool // Memo of HasMutableRoot, for long root lists
 	funcVars             callsite.FuncVars                  // Package-level variables that hold one function (#183)
@@ -126,6 +128,8 @@ type RootTracer struct {
 	onlyParams map[*ssa.Function]bool // Memo of pureReturnsOnlyParams
 	//declscope:shared // alias.go's mayAlias fills it
 	aliases map[aliasedRootsKey]bool // Memo of mayAlias
+	//declscope:shared // alias.go's mayAliasVisit fills it
+	aliasSteps map[aliasedRootsKey]bool // Memo of mayAliasStep, keyed by candidate root (#350)
 	//declscope:shared // store.go and field.go resolve loads through it
 	stores *storeMemo // Memo of the stores that reads see (#325)
 	//declscope:shared // closure.go's closureRunsRepeatedly asks it
@@ -166,9 +170,11 @@ func NewRootTracer(pureFuncs, immutableReturnFuncs, immutableParamFuncs *directi
 		funcVars:             funcVars,
 		onlyParams:           make(map[*ssa.Function]bool),
 		fieldRoots:           make(map[fieldRootKey]*FieldRoot),
+		roots:                make(map[allRootsKey]ssa.Value),
 		allRoots:             make(map[allRootsKey][]ssa.Value),
 		rootSets:             make(map[allRootsKey]map[ssa.Value]bool),
 		aliases:              make(map[aliasedRootsKey]bool),
+		aliasSteps:           make(map[aliasedRootsKey]bool),
 		stores:               newStoreMemo(),
 		cfgs:                 cfg.NewAnalyzer(),
 		immutableClosures:    make(map[*ssa.Function]bool),
@@ -220,8 +226,19 @@ type aliasedRootsKey struct {
 //
 //	q := db.Where("x")        // q is root
 //	q.Find(nil)               // receiver=q → trace → root=q's defining call
+//
+// Like FindAllMutableRoots, the result depends only on recv and loopInfo, so
+// it is computed once per pair (#350): the handlers, the alias search and the
+// fixes each ask for the root of the same receivers, and a read of a field
+// reassigned n times walks its n stores each time.
 func (t *RootTracer) FindMutableRoot(recv ssa.Value, loopInfo *cfg.LoopInfo) ssa.Value {
-	return t.trace(recv, make(map[ssa.Value]bool), loopInfo)
+	key := allRootsKey{recv, loopInfo}
+	if root, ok := t.roots[key]; ok {
+		return root
+	}
+	root := t.trace(recv, make(map[ssa.Value]bool), loopInfo)
+	t.roots[key] = root
+	return root
 }
 
 // MutableRoots returns the mutable roots that v may hold: first the one it
@@ -419,6 +436,7 @@ func (t *RootTracer) trace(v ssa.Value, visited map[ssa.Value]bool, loopInfo *cf
 		return nil
 	}
 	visited[v] = true
+	effort.Step()
 
 	// Under Phase 1b a *gorm.DB parameter is a mutable root by default (a caller
 	// may pass a mid-chain clone==0 value that this function then branches). This
@@ -688,6 +706,7 @@ func (t *RootTracer) traceAll(v ssa.Value, search *allRootsSearch, loopInfo *cfg
 		return nil
 	}
 	search.visited[v] = true
+	effort.Step()
 	roots := t.traceAllUnvisited(v, search, loopInfo)
 	if _, ok := search.rooted[v]; !ok {
 		search.rooted[v] = len(roots) > 0

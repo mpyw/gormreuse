@@ -43,6 +43,8 @@ import (
 	"strings"
 
 	"golang.org/x/tools/go/ssa"
+
+	"github.com/mpyw/gormreuse/internal/effort"
 )
 
 // Violation represents a detected reuse violation.
@@ -521,11 +523,20 @@ func funcName(v ssa.Value) string {
 // its root. The uses are read here, after tracking has finished, and not when
 // the violation is added: a loop violation is added while its use is tracked,
 // before the uses after it in the loop body are recorded. A fix built from
-// that snapshot never sees them (#199).
+// that snapshot never sees them (#199). The violations of one root share its
+// uses, which nothing changes, so a root reused n times costs one list, not
+// n (#350).
 func (t *Tracker) CollectViolations() []Violation {
+	shared := make(map[ssa.Value][]UsageInfo)
 	for i := range t.violations {
 		if root := t.violations[i].Root; root != nil {
-			t.violations[i].AllUses = t.violationUses(t.violations[i])
+			uses, ok := shared[root]
+			if !ok {
+				uses = t.getAllUses(root)
+				uses = slices.Clip(uses)
+				shared[root] = uses
+			}
+			t.violations[i].AllUses = t.violationUses(t.violations[i], uses)
 			t.violations[i].HiddenUses = len(t.branchUses[root]) > 0 || len(t.aliasUses[root]) > 0 || len(t.loopCarriedUses[root]) > 0 || len(t.mayUses[root]) > 0
 		}
 	}
@@ -538,12 +549,12 @@ func (t *Tracker) CollectViolations() []Violation {
 // loop iteration, so without it the fix of a root whose only use is such a
 // branch had no use to give a Session to (#306). A root used only in go and
 // defer statements, as in `go q.Count(nil); go q.Find(nil)`, has only its
-// branch uses, so the fix sees those (#309).
-func (t *Tracker) violationUses(v Violation) []UsageInfo {
-	uses := t.getAllUses(v.Root)
+// branch uses, so the fix sees those (#309). uses are the root's own, shared
+// by its violations.
+func (t *Tracker) violationUses(v Violation, uses []UsageInfo) []UsageInfo {
 	for _, use := range t.mayUses[v.Root] {
 		if use.Pos == v.Pos && !slices.ContainsFunc(uses, func(u UsageInfo) bool { return u.Pos == use.Pos }) {
-			uses = append(uses, use.UsageInfo)
+			uses = append(uses, use.UsageInfo) // a full slice: appending copies it
 		}
 	}
 	if len(uses) == 0 {
@@ -700,6 +711,7 @@ func (t *Tracker) getAllUses(root ssa.Value) []UsageInfo {
 func (t *Tracker) checkViolationsBetween(targets, sources []UsageInfo, root ssa.Value) {
 	for _, target := range targets {
 		for _, src := range sources {
+			effort.Step()
 			// Skip self-comparison for same-list checks
 			if src.Pos == target.Pos && src.Block == target.Block {
 				continue

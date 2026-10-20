@@ -153,7 +153,7 @@ gormreuse/
 ├── determinism_test.go          # TestDeterministicDiagnostics: same output on every run
 ├── limitation_test.go           # Known Limitations lists every [LIMITATION] fixture, here and in the README
 ├── docs_test.go                 # These notes name only code that exists; the README pins name the latest release
-├── growth_test.go               # TestAllocationGrowth: allocation growth on generated shapes (#302)
+├── growth_test.go               # TestAllocationGrowth: allocation and search-step growth on generated shapes (#302, #350)
 ├── cmd/gormreuse/
 │   ├── main.go                  # CLI entry point (singlechecker)
 │   └── *_test.go                # Build the command and run it (go vet, //line, facts, inspector paths)
@@ -169,6 +169,7 @@ gormreuse/
 │   ├── fact.go                  # exportFacts: the facts importing packages read
 │   ├── distrust.go              # distrustContracts: contracts that rely on a broken one stay out of the facts (#314)
 │   ├── guard.go                 # panicGuard: one function's panic does not abort the package
+│   ├── effort/effort.go         # Step, Count: the steps of the searches, which the growth gate counts (#350)
 │   ├── directive/               # Comment directives
 │   │   ├── directive.go         # readDirective, FindDirectiveProblems
 │   │   ├── ignore.go            # //gormreuse:ignore scopes (Ignores), unused tracking
@@ -1353,8 +1354,10 @@ Every gorm call asks `FindAliasedRoots` about its receiver, and each step down t
 | `mayAlias` least fixed point (#300) | `mayAliasVisit` finds the cycles of the search graph with Tarjan's algorithm, and answers each one when it is complete |
 | One tracer per pass (#325) | `run.go` shares one `RootTracer` across every function |
 | `HasMutableRoot` | A list of 16 or more roots is kept as a set |
+| `FindMutableRoot` result (#350) | Kept per value and `LoopInfo`, for the same reason as `FindAllMutableRoots`. The handlers, the alias search and the fixes ask for the root of the same receivers |
+| `mayAliasStep` (#350) | Kept per candidate root: whether the step through it may add a root. `n` spawned reads of a field reassigned `n` times share their `n` candidates. An answer that relies on a search still on the Tarjan stack is kept only when it is true |
 
-`TestAllocationGrowth` in `growth_test.go` holds these shapes (`filters`, `sessfilters`, `purechain`) to quadratic growth, and `loops` to linear growth ([Allocation-growth gate](#allocation-growth-gate)).
+`TestAllocationGrowth` in `growth_test.go` holds these shapes (`filters`, `sessfilters`, `purechain`) to quadratic growth, and `loops` to near-linear growth in allocations and quadratic growth in steps ([Allocation-growth gate](#allocation-growth-gate)).
 
 </details>
 
@@ -2077,7 +2080,7 @@ A callback's parameter stays exempt only while every function that calls it as a
 - the functions that call it or refer to it, in their body or in a closure inside it;
 - the functions that create or are a callback it calls.
 
-The sets only grow, and a larger set only fails more checks, so this ends at the same sets in any order. Each function is checked again at most once per function it depends on that becomes distrusted. A package where no contract breaks skips it. `TestAllocationGrowth` (`distrustreturn`, `distrustinput`) holds a chain of `n` directive functions whose last breaks its contract to linear growth. Each function is in a file of its own there, since a directive lookup scans the comments of its file (#301).
+The sets only grow, and a larger set only fails more checks, so this ends at the same sets in any order. `distrustGroups` splits the functions into the strongly connected components of the dependents graph, in topological order, and the worklist runs one group at a time (#350). So a function outside a cycle is checked again at most once, after every function it depends on is settled. Before #350 it was checked again once per function it depends on that became distrusted, with a cold tracer each time: a hub that calls each of a chain of `n` such functions took 0.22 s at `n = 800` (`distrusthub`, now 0.03 s). A package where no contract breaks skips it. `TestAllocationGrowth` (`distrustreturn`, `distrustinput`) holds a chain of `n` directive functions whose last breaks its contract to linear growth. Each function is in a file of its own there, since a directive lookup scans the comments of its file (#301).
 
 Decisions and limitations:
 
@@ -2421,10 +2424,12 @@ The #199 rule covers a discarded statement written on the root's variable. Other
 | Case | Example | How it is found |
 | --- | --- | --- |
 | The root is handed to other code, and a later use may see the change | `applyTenant(q)`, `apply(q)` for a closure, `_ = withTenant(q)`, `qs := []*gorm.DB{q}`, `m["q"] = q`, `ch <- q` | `UsageInfo.Escapes`, set by `Tracker.MarkPolluted` (a call argument, slice or map store, send) and by `q = helper(q)`. `changeSeenAfterEscape` decides whether a later use exists |
-| The `Error`, `RowsAffected` or `Statement` field is read from the root, or from a chain on it that runs no query | `return q.Error`, `if err := q.Where("a").Error; ...`, `q.Where("a").Limit(1).Statement` | A `FieldAddr` in the root's function or its closures, whose operand `carriesRootChanges` walks down a chain of non-finisher, non-Session-family `*gorm.DB` methods to the root |
-| A go statement hands the root to a call | `go applyTenant(q)`, `go q.Where("a")` | An `*ssa.Go` whose argument traces to the root (`statementRootChange`). The goroutine may change it while the uses after the statement run |
-| A defer statement changes the root in place, and another deferred call may see it (#309) | `defer q.Find(nil); defer q.Where("a")`, `defer applyTenant(q); defer q.Find(nil)`, `for … { defer applyTenant(q) }` | An `*ssa.Defer` that `statementRootChange` says changes the root, when another `*ssa.Defer` uses the root, or the statement repeats (`useRepeatsAfter`). Deferred calls run after every other use, so only a deferred call sees the change. Their run order is not followed, so any other one is taken to |
+| The `Error`, `RowsAffected` or `Statement` field is read from the root, or from a chain on it that runs no query | `return q.Error`, `if err := q.Where("a").Error; ...`, `q.Where("a").Limit(1).Statement` | A `FieldAddr` in the root's function or its closures, whose operand `changeCarryingRoots` walks down a chain of non-finisher, non-Session-family `*gorm.DB` methods to the root |
+| A go statement hands the root to a call | `go applyTenant(q)`, `go q.Where("a")` | An `*ssa.Go` whose argument traces to the root (`statementRootChanges`). The goroutine may change it while the uses after the statement run |
+| A defer statement changes the root in place, and another deferred call may see it (#309) | `defer q.Find(nil); defer q.Where("a")`, `defer applyTenant(q); defer q.Find(nil)`, `for … { defer applyTenant(q) }` | An `*ssa.Defer` that `statementRootChanges` says changes the root, when another `*ssa.Defer` uses the root, or the statement repeats (`useRepeatsAfter`). Deferred calls run after every other use, so only a deferred call sees the change. Their run order is not followed, so any other one is taken to |
 | The root is stored in a struct field that other code reaches (#310) | `s := &Svc{db: q}; s.apply()`, `applyP(params{db: q})`, `p.db = q; helper(&p)` | `holderChangesRoot`, over the stores that `holderStores` finds ([Struct stores](#struct-stores)) |
+
+The state reads and the go and defer statements of a function are indexed by root once (`changeStatementsOf`), and so are the calls of a file by Lparen (`callAtLparen`), the variables that calls are assigned to (`reassignLHS`), and the variables that each function's closures capture (`closureCaptures`). Before #350, each was scanned again for every root, so `n` roots, each used in a deferred call, took 0.33 s at `n = 800` (`rootsdefer`, now 0.02 s).
 
 #### Helpers that only run queries
 
@@ -2818,7 +2823,10 @@ A fixture of `testdata/src/gormreuse` whose fixes must also converge is listed i
 | `growthLinear` | n, 2n | 2.5 | Many small functions, or one function whose work is linear |
 | `growthNearLinear` | n, 2n | 3.0 | Shapes that grow a little faster than n (about 2.3x, 2.5x with the race detector), such as one large function |
 | `growthQuadratic` | n, 2n | 4.5 | Shapes that are quadratic today |
+| `growthCubic` | n, 2n | 9.0 | The steps of a shape whose code grows as n² (`inferexp2`) |
 | `growthExponential` | n, n+4 | 2.0 | Shapes that used to double their work per statement (about 16x) |
+
+The test counts the steps of the analyzer's searches too (#350): a value traced, a CFG block visited, a referrer that `isAssignment` or the Scopes chain check reads, a block that a store search walks back through, a pair of uses compared, and a `mayAlias` search. `internal/effort` counts them, only once a test has called `effort.Count`. The steps are held to the case's limit, or to its `steps` limit when its searches repeat work that allocates nothing. Each such case says why.
 
 <details><summary>How it measures, and the rejected time limit</summary>
 
@@ -2833,7 +2841,8 @@ How it measures:
 
 Limitations:
 
-- Work that allocates nothing, such as a linear search repeated in a loop, is not counted. The race detector's `sync.Pool` drops make some of it visible. `switchuse` grows about 2.3x without the race detector and about 3x with it, so it has the quadratic limit.
+- Work that allocates nothing is counted only where a search counts its steps. The race detector's `sync.Pool` drops make some of the rest visible. `switchuse` grows about 2.3x without the race detector and about 3x with it, so it has the quadratic limit.
+- A ratio does not show a constant factor. `spawnedfields` is quadratic in its output, since each of its `n` reads may hold each of `n` roots, so a doubled constant passes its limit.
 - A case whose issue is still open has `after: "#NNN"` and is skipped. Its fix removes the field. Every later performance fix adds its shape with a limit it meets.
 
 ### Testdata organization

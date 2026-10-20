@@ -14,6 +14,7 @@ import (
 	"golang.org/x/tools/go/packages"
 
 	"github.com/mpyw/gormreuse"
+	"github.com/mpyw/gormreuse/internal/effort"
 )
 
 // Growth limits: how many times more heap allocations the analyzer may make
@@ -22,13 +23,15 @@ import (
 // it; fixed costs per package pull both ratios down. growthNearLinear is for
 // shapes that grow a little faster than n (about 2.3x, 2.5x with the race
 // detector) and vary a few percent with map order from run to run; it still
-// fails a quadratic shape. growthExponential is for cases compared at n and
+// fails a quadratic shape. growthCubic is for the steps of a case whose code
+// grows as n^2. growthExponential is for cases compared at n and
 // n+4, where linear growth is under 1.3x and a shape that doubles its work
 // per statement gives about 16x.
 const (
 	growthLinear      = 2.5
 	growthNearLinear  = 3.0
 	growthQuadratic   = 4.5
+	growthCubic       = 9.0
 	growthExponential = 2.0
 )
 
@@ -46,6 +49,10 @@ type growthCase struct {
 	// 2n, or n+plus when plus is set.
 	n, plus int
 	limit   float64
+	// steps is the limit for the steps of the analyzer's searches (see
+	// effort), when it differs from limit: for a case whose searches repeat
+	// work that allocates nothing.
+	steps float64
 	// after names the open issue whose fix brings the case under limit.
 	// Until it is fixed the case is skipped; the fix removes this field.
 	after string
@@ -61,9 +68,10 @@ type growthCase struct {
 // without the race detector and coverage, while wall time under them varied
 // by a factor of 25 and made a time limit either flaky or blind.
 //
-// The count misses work that allocates nothing, such as a linear search
-// repeated in a loop. A case whose slow path is of that kind needs a size at
-// which the allocations show it too.
+// The allocation count misses work that allocates nothing, such as a linear
+// search repeated in a loop. So the test also counts the steps of the
+// analyzer's searches (see effort), which no detector or map order changes,
+// and holds them to the same limit, or to the case's steps limit (#350).
 //
 // Each performance fix adds its shape here. The cases come from the
 // performance audit of #297-#301; the ones that are still too slow on main
@@ -105,26 +113,47 @@ func TestAllocationGrowth(t *testing.T) {
 		pairs[c.name] = pair
 	}
 
-	allocs := growthMeasure(t, gopath, patterns)
+	counts := growthMeasure(t, gopath, patterns)
 	for _, c := range growthCases {
 		t.Run(c.name, func(t *testing.T) {
 			if c.after != "" {
 				t.Skip("enforced after " + c.after)
 			}
 			pair := pairs[c.name]
-			small, large := allocs[pair[0].pkg], allocs[pair[1].pkg]
-			if small == 0 {
+			small, large := counts[pair[0].pkg], counts[pair[1].pkg]
+			if small.allocs == 0 {
 				t.Fatalf("%s: the analyzer did not run", pair[0].pkg)
 			}
-			ratio := float64(large) / float64(small)
-			t.Logf("n=%d: %d allocations, n=%d: %d allocations, ratio %.2f (limit %.1f)",
-				pair[0].size, small, pair[1].size, large, ratio, c.limit)
-			if ratio > c.limit {
-				t.Errorf("allocations grew %.2fx from n=%d to n=%d, want at most %.1fx",
-					ratio, pair[0].size, pair[1].size, c.limit)
+			stepLimit := c.limit
+			if c.steps != 0 {
+				stepLimit = c.steps
+			}
+			for _, m := range []struct {
+				what         string
+				small, large uint64
+				limit        float64
+			}{
+				{"allocations", small.allocs, large.allocs, c.limit},
+				{"search steps", small.steps, large.steps, stepLimit},
+			} {
+				if m.small == 0 && m.large == 0 {
+					continue // a case with no search, such as one of comments only
+				}
+				ratio := float64(m.large) / float64(max(m.small, 1))
+				t.Logf("n=%d: %d %s, n=%d: %d %s, ratio %.2f (limit %.1f)",
+					pair[0].size, m.small, m.what, pair[1].size, m.large, m.what, ratio, m.limit)
+				if ratio > m.limit {
+					t.Errorf("%s grew %.2fx from n=%d to n=%d, want at most %.1fx",
+						m.what, ratio, pair[0].size, pair[1].size, m.limit)
+				}
 			}
 		})
 	}
+}
+
+// growthCount is what growthMeasure counts for one package.
+type growthCount struct {
+	allocs, steps uint64
 }
 
 // growthWritePackage writes one generated package.
@@ -142,10 +171,12 @@ func growthWritePackage(t *testing.T, dir, pkg string, bodies []string) {
 }
 
 // growthMeasure loads the packages in one go and runs the analyzer on them
-// one at a time, returning the heap allocations its Run made on each. Loading
-// and building SSA happen outside Run, so they are not counted. The count is
-// process-wide, so the packages run in sequence and the test is not parallel.
-func growthMeasure(t *testing.T, gopath string, patterns []string) map[string]uint64 {
+// one at a time, returning the heap allocations and the search steps its Run
+// made on each. Loading and building SSA happen outside Run, so they are not
+// counted. The counts are process-wide, so the packages run in sequence and
+// the test is not parallel. Each count is the smallest of the runs: the
+// steps vary a little with map order too.
+func growthMeasure(t *testing.T, gopath string, patterns []string) map[string]growthCount {
 	t.Helper()
 	pkgs, err := packages.Load(&packages.Config{
 		Mode: packages.LoadAllSyntax,
@@ -158,17 +189,24 @@ func growthMeasure(t *testing.T, gopath string, patterns []string) map[string]ui
 	if packages.PrintErrors(pkgs) > 0 {
 		t.Fatal("the generated packages do not compile")
 	}
-	allocs := map[string]uint64{}
+	counts := map[string]growthCount{}
 	counted := *gormreuse.Analyzer
 	counted.Run = func(pass *analysis.Pass) (any, error) {
 		var before, after runtime.MemStats
 		runtime.ReadMemStats(&before)
+		stepsBefore := effort.Count()
 		result, err := gormreuse.Analyzer.Run(pass)
+		steps := effort.Count() - stepsBefore
 		runtime.ReadMemStats(&after)
-		count := after.Mallocs - before.Mallocs
-		if old, ok := allocs[pass.Pkg.Path()]; !ok || count < old {
-			allocs[pass.Pkg.Path()] = count
+		allocs := after.Mallocs - before.Mallocs
+		old, ok := counts[pass.Pkg.Path()]
+		if !ok || allocs < old.allocs {
+			old.allocs = allocs
 		}
+		if !ok || steps < old.steps {
+			old.steps = steps
+		}
+		counts[pass.Pkg.Path()] = old
 		return result, err
 	}
 	for range growthRepeats {
@@ -176,7 +214,7 @@ func growthMeasure(t *testing.T, gopath string, patterns []string) map[string]ui
 			t.Fatalf("analyze: %v", err)
 		}
 	}
-	return allocs
+	return counts
 }
 
 // growthTabs returns k tabs.
@@ -197,7 +235,9 @@ var growthCases = []growthCase{
 	}},
 	// n optional filters, each merge used twice: n reused roots, and each
 	// one's chains run on through the merges after it (#344).
-	{name: "phiroots", limit: growthNearLinear, shape: func(n int) []string {
+	// Its steps are quadratic: Each merge's search walks back through the merges
+	// before it, which allocates nothing (#350).
+	{name: "phiroots", limit: growthNearLinear, steps: growthQuadratic, shape: func(n int) []string {
 		var b strings.Builder
 		b.WriteString("func f(db *gorm.DB, c []bool) {\n\tq := db.Model(nil)\n")
 		for i := range n {
@@ -209,7 +249,9 @@ var growthCases = []growthCase{
 	// n/2 optional filters on a parameter, each followed by a loop of
 	// filters, then two uses. The fix follows the Phis back from the last
 	// filter through every loop-header Phi (#343).
-	{name: "filterloops", limit: growthNearLinear, shape: func(n int) []string {
+	// Its steps are quadratic: Each Phi's search walks back through the Phis
+	// before it, which allocates nothing (#350).
+	{name: "filterloops", limit: growthNearLinear, steps: growthQuadratic, shape: func(n int) []string {
 		var b strings.Builder
 		b.WriteString("func f(db *gorm.DB, c []bool, xs []int) {\n")
 		for i := range n / 2 {
@@ -362,7 +404,10 @@ var growthCases = []growthCase{
 	}},
 	// Closure called at n sites, closure has n/10 uses. What the loads of one
 	// closure see, and what reaches each block, are kept once (#325).
-	{name: "closurecallsuses", limit: growthLinear, shape: func(n int) []string {
+	// Its steps are quadratic: The stores each call site of the closure sees are
+	// searched back from its own block, through the blocks of the sites before
+	// it (#350).
+	{name: "closurecallsuses", limit: growthLinear, steps: growthQuadratic, shape: func(n int) []string {
 		var b strings.Builder
 		b.WriteString("func f(db *gorm.DB, c []bool) {\n\tq := db.Where(\"x\")\n\tg := func() {\n")
 		for i := range n/10 + 1 {
@@ -378,7 +423,9 @@ var growthCases = []growthCase{
 	// A closure made on each iteration, called on n exclusive cases (#306):
 	// no site reaches another without making the closure again, so every
 	// site is labelled.
-	{name: "loopclosurecases", limit: growthNearLinear, shape: func(n int) []string {
+	// Its steps are quadratic: Whether a site runs again is asked of every other
+	// site, which allocates nothing (#350).
+	{name: "loopclosurecases", limit: growthNearLinear, steps: growthQuadratic, shape: func(n int) []string {
 		var b strings.Builder
 		b.WriteString("func f(db *gorm.DB, ids []int) {\n\tfor _, id := range ids {\n\t\tq := db.Where(\"x\")\n\t\tg := func() { q.Find(nil) }\n\t\tswitch id {\n")
 		for i := range n {
@@ -477,8 +524,12 @@ var growthCases = []growthCase{
 		b.WriteString("}\n")
 		return []string{b.String()}
 	}},
-	// n sequential loops rebuilding one query, then two uses.
-	{name: "loops", limit: growthLinear, shape: func(n int) []string {
+	// n sequential loops rebuilding one query, then two uses. Each loop's
+	// receiver may hold the root of every loop before it, since a loop may
+	// run no time, so the root lists are quadratic in total: the steps grow
+	// so. They are found once per merge, so the allocations grow about
+	// 2.4x at these sizes, and 2.7x to 3x at n=400 to 1600 (#350).
+	{name: "loops", limit: growthNearLinear, steps: growthQuadratic, shape: func(n int) []string {
 		var b strings.Builder
 		b.WriteString("func f(db *gorm.DB, xs []string) {\n\tq := db.Model(nil)\n")
 		for range n {
@@ -953,7 +1004,10 @@ var growthCases = []growthCase{
 	// Each ci switches over every later cj. The analyzer's count does not show
 	// #298 on this shape; TestInferImmutableReturnsGrowth checks inference
 	// alone on it.
-	{name: "inferexp2", n: 16, limit: growthQuadratic, shape: func(n int) []string {
+	// The code grows as n^2, and each of its n functions of n blocks asks
+	// which blocks one reaches from each of them, so the steps grow as n^3
+	// (#350).
+	{name: "inferexp2", n: 16, limit: growthQuadratic, steps: growthCubic, shape: func(n int) []string {
 		var b strings.Builder
 		k := n
 		for i := range k {
@@ -1151,6 +1205,50 @@ var growthCases = []growthCase{
 			fmt.Fprintf(&b, "\ts%d := db.Where(\"d%d\")\n\tg.f%d = s%d\n\teach(func() {})\n\ts%d.Find(nil)\n\ts%d.Find(nil)\n", i, i, i, i, i, i)
 		}
 		b.WriteString("}\n")
+		return []string{b.String()}
+	}},
+	// n roots, each used once and in a deferred call: the go and defer
+	// statements and the state reads of the function are indexed by root
+	// once, not scanned once per root (#350).
+	{name: "rootsdefer", limit: growthLinear, shape: func(n int) []string {
+		var b strings.Builder
+		b.WriteString("func f(db *gorm.DB) {\n")
+		for i := range n {
+			fmt.Fprintf(&b, "\tq%d := db.Where(\"c%d\")\n\tdefer q%d.Count(nil)\n\tq%d.Find(nil)\n", i, i, i, i)
+		}
+		b.WriteString("}\n")
+		return []string{b.String()}
+	}},
+	// A chain of n immutable-return functions whose last breaks the
+	// contract, and a hub that calls each of them on its own case without
+	// returning its result. Distrust reaches the chain one function at a
+	// time, and the hub is checked again once, after all of them (#350). Its
+	// steps are quadratic: the hub's parameter is used on n exclusive cases,
+	// and each use is checked against the others, as in usesbr.
+	{name: "distrusthub", limit: growthLinear, steps: growthQuadratic, shape: func(n int) []string {
+		files := make([]string, n+1)
+		var hub strings.Builder
+		hub.WriteString("//gormreuse:immutable-return\nfunc H(db *gorm.DB, k int) *gorm.DB {\n\tswitch k {\n")
+		for i := range n {
+			next := "db.Where(\"bad\")"
+			if i < n-1 {
+				next = fmt.Sprintf("R%d(db)", i+1)
+			}
+			files[i] = fmt.Sprintf("//gormreuse:immutable-return\nfunc R%d(db *gorm.DB) *gorm.DB {\n\treturn %s\n}\n", i, next)
+			fmt.Fprintf(&hub, "\tcase %d:\n\t\t_ = R%d(db)\n\t\treturn db.Session(&gorm.Session{})\n", i, i)
+		}
+		hub.WriteString("\t}\n\treturn nil\n}\n")
+		files[n] = hub.String()
+		return files
+	}},
+	// n getters of one field, which n methods assign: whether the package
+	// assigns the field a mutable value is decided once (#350).
+	{name: "getterfield", limit: growthLinear, shape: func(n int) []string {
+		var b strings.Builder
+		b.WriteString("type repo struct{ db *gorm.DB }\n\n")
+		for i := range n {
+			fmt.Fprintf(&b, "func (r *repo) g%d() *gorm.DB { return r.db }\n\nfunc (r *repo) s%d(db *gorm.DB) { r.db = db.Session(&gorm.Session{}) }\n\n", i, i)
+		}
 		return []string{b.String()}
 	}},
 }

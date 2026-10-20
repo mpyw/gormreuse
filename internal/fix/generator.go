@@ -79,6 +79,14 @@ type Generator struct {
 	handoffs handoffCache
 	//declscope:shared // handoff.go reads the finisher-only parameters of another package's functions with it
 	importedFinisherOnly func(*ssa.Function) []int // from the facts of other packages
+	//declscope:shared // change.go memoizes the go and defer statements of each function in it
+	statements map[*ssa.Function]*changeStatements
+	//declscope:shared // closure.go memoizes the variables each function's closures capture in it
+	captured map[inspector.Cursor]map[*types.Var]bool
+	//declscope:shared // call.go indexes the calls of each file by Lparen in it
+	calls map[*ast.File]map[token.Pos]*ast.CallExpr
+	//declscope:shared // reassign.go indexes the variables calls are assigned to in it
+	assigned map[*ast.File]map[token.Pos]ast.Expr
 
 	files   map[*token.File]*ast.File      // token.File -> ast.File mapping
 	cursors map[*ast.File]inspector.Cursor // file cursors in the pass inspector
@@ -321,7 +329,7 @@ func (g *Generator) GenerateIsolation(v pollution.Violation) []analysis.Suggeste
 	lparen := v.Call.Common().Pos()
 	var call *ast.CallExpr
 	if file := g.findFileContaining(lparen); file != nil {
-		call = findCallAtLparen(g.fileCursor(file), lparen)
+		call = g.callAtLparen(file, lparen)
 	}
 	// Param counts the parameters without a receiver, as the call's
 	// arguments do, except for a method expression (T.m(r, x)), whose

@@ -55,53 +55,117 @@ func (g *Generator) changedElsewhere(v pollution.Violation, noDiscarded bool) bo
 	}
 	deferUses, deferChanges, deferRepeats := 0, 0, false
 	for _, f := range withClosures(v.Root.Parent()) {
-		loopInfo := g.cfg.DetectLoops(f)
-		for _, block := range f.Blocks {
-			for _, instr := range block.Instrs {
-				switch instr := instr.(type) {
-				case *ssa.FieldAddr:
-					if isGormStateField(instr) && g.carriesRootChanges(v.Root, instr.X, loopInfo) {
-						return true
-					}
-				case *ssa.Go:
-					if _, changes := g.statementRootChange(instr, v.Root, loopInfo); changes {
-						return true
-					}
-				case *ssa.Defer:
-					uses, changes := g.statementRootChange(instr, v.Root, loopInfo)
-					if uses {
-						deferUses++
-					}
-					if changes {
-						deferChanges++
-						deferRepeats = deferRepeats || useRepeatsAfter(g.cfg, block, tracer.RootBlock(v.Root))
-					}
+		stmts := g.changeStatementsOf(f)
+		if stmts.stateReads[v.Root] {
+			return true
+		}
+		for _, stmt := range stmts.byRoot[v.Root] {
+			switch {
+			case stmt.isGo:
+				if stmt.changes {
+					return true
 				}
+			case stmt.changes:
+				deferUses++
+				deferChanges++
+				deferRepeats = deferRepeats || useRepeatsAfter(g.cfg, stmt.block, tracer.RootBlock(v.Root))
+			default:
+				deferUses++
 			}
 		}
 	}
 	return deferChanges > 0 && (deferUses > 1 || deferRepeats)
 }
 
-// statementRootChange reports whether instr, a go or defer statement, uses root, and
-// whether it hands root to code that may change it in place. The receiver of
-// a *gorm.DB finisher, as in `go q.Count(nil)`, is not handed over: the query
-// is a use of the root like any other, and runs on a copy once the root has a
-// Session, as with the closure form `go func() { q.Count(nil) }()` (#312).
-// Nor is that of a Session-family call, which copies it. The receiver of a
-// chain method, as in `go q.Where("a")`, is: the call adds the condition to
-// the root in place, and a go or defer statement cannot be reassigned to keep
-// it.
-func (g *Generator) statementRootChange(instr ssa.CallInstruction, root ssa.Value, loopInfo *cfg.LoopInfo) (uses, changes bool) {
-	site := g.tracer.Site(instr)
-	queryOrCopy := site.IsGormMethod() && (typeutil.IsFinisher(site.Method()) || typeutil.IsImmutableReturningBuiltin(site.Method()))
-	for i, arg := range instr.Common().Args {
-		if gormArg, ok := pollutionsource.UnwrapGormDB(arg); ok && g.tracer.FindMutableRoot(gormArg, loopInfo) == root {
-			uses = true
-			changes = changes || !queryOrCopy || site.ArgParam(i) >= 0
+// changeStatements is what changedElsewhere reads of one function for every
+// root at once: the roots whose state field the function reads, and the go
+// and defer statements that use each root. A function with n roots and n such
+// statements is scanned once, not once per root (#350).
+//
+//declscope:shared // generator.go's Generator memoizes it per function
+type changeStatements struct {
+	//declscope:private
+	stateReads map[ssa.Value]bool
+	//declscope:private
+	byRoot map[ssa.Value][]changeStatement
+}
+
+// changeStatement is a go or defer statement that uses a root, and whether it
+// may change the root in place (see statementRootChanges).
+type changeStatement struct {
+	block   *ssa.BasicBlock
+	isGo    bool
+	changes bool
+}
+
+// changeStatementsOf returns the go and defer statements and the state reads of
+// f, keyed by root, building them on first use.
+func (g *Generator) changeStatementsOf(f *ssa.Function) *changeStatements {
+	if stmts, ok := g.statements[f]; ok {
+		return stmts
+	}
+	stmts := &changeStatements{stateReads: make(map[ssa.Value]bool), byRoot: make(map[ssa.Value][]changeStatement)}
+	loopInfo := g.cfg.DetectLoops(f)
+	for _, block := range f.Blocks {
+		for _, instr := range block.Instrs {
+			switch instr := instr.(type) {
+			case *ssa.FieldAddr:
+				if isGormStateField(instr) {
+					for _, root := range g.changeCarryingRoots(instr.X, loopInfo) {
+						stmts.stateReads[root] = true
+					}
+				}
+			case *ssa.Go, *ssa.Defer:
+				_, isGo := instr.(*ssa.Go)
+				changes := g.statementRootChanges(instr.(ssa.CallInstruction), loopInfo)
+				for _, root := range changes.roots {
+					stmts.byRoot[root] = append(stmts.byRoot[root], changeStatement{block: block, isGo: isGo, changes: changes.changes[root]})
+				}
+			}
 		}
 	}
-	return uses, changes
+	if g.statements == nil {
+		g.statements = make(map[*ssa.Function]*changeStatements)
+	}
+	g.statements[f] = stmts
+	return stmts
+}
+
+// statementChanges are the roots a go or defer statement uses, in the order
+// of its arguments, and whether it may change each in place.
+type statementChanges struct {
+	roots   []ssa.Value
+	changes map[ssa.Value]bool
+}
+
+// statementRootChanges returns the roots instr, a go or defer statement,
+// uses, and whether it hands each to code that may change it in place. The
+// receiver of a *gorm.DB finisher, as in `go q.Count(nil)`, is not handed
+// over: the query is a use of the root like any other, and runs on a copy
+// once the root has a Session, as with the closure form
+// `go func() { q.Count(nil) }()` (#312). Nor is that of a Session-family
+// call, which copies it. The receiver of a chain method, as in
+// `go q.Where("a")`, is: the call adds the condition to the root in place,
+// and a go or defer statement cannot be reassigned to keep it.
+func (g *Generator) statementRootChanges(instr ssa.CallInstruction, loopInfo *cfg.LoopInfo) statementChanges {
+	site := g.tracer.Site(instr)
+	queryOrCopy := site.IsGormMethod() && (typeutil.IsFinisher(site.Method()) || typeutil.IsImmutableReturningBuiltin(site.Method()))
+	changes := statementChanges{changes: make(map[ssa.Value]bool)}
+	for i, arg := range instr.Common().Args {
+		gormArg, ok := pollutionsource.UnwrapGormDB(arg)
+		if !ok {
+			continue
+		}
+		root := g.tracer.FindMutableRoot(gormArg, loopInfo)
+		if root == nil {
+			continue
+		}
+		if _, seen := changes.changes[root]; !seen {
+			changes.roots = append(changes.roots, root)
+		}
+		changes.changes[root] = changes.changes[root] || !queryOrCopy || site.ArgParam(i) >= 0
+	}
+	return changes
 }
 
 // changeSeenAfterEscape reports whether code may see what escape, a use that
@@ -137,13 +201,6 @@ func changeSeenThroughResult(use pollution.UsageInfo, vars callsite.FuncVars) bo
 		return ok && call.Pos() == use.Pos && typeutil.HasGormDBResult(call.Type()) &&
 			!callsite.SiteOf(call, vars).IsGormMethod()
 	})
-}
-
-// carriesRootChanges reports whether x, a *gorm.DB whose state field is read,
-// is root or a chain on root of *gorm.DB methods that runs no query (see
-// changeCarryingRoots).
-func (g *Generator) carriesRootChanges(root, x ssa.Value, loopInfo *cfg.LoopInfo) bool {
-	return slices.Contains(g.changeCarryingRoots(x, loopInfo), root)
 }
 
 // changeCarryingRoots returns the roots whose in-place changes x, a *gorm.DB,
