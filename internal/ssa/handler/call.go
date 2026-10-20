@@ -345,18 +345,23 @@ func (u siteUse) roots(v ssa.Value) []ssa.Value {
 // DetectViolations, which orders the uses by position. Only the first root is
 // checked against the branches made through a merge that may hold it
 // (RecordMayBranch). It must run before the site's own uses are recorded:
-// they would count as the earlier change.
-func (u siteUse) checkRoots(roots []ssa.Value) {
+// they would count as the earlier change. A defer runs when the function
+// returns, so it checks the uses that may run in the same run of the
+// function, before or after it (#375).
+func (u siteUse) checkRoots(roots []ssa.Value, use pollution.UsageInfo) {
 	t := u.ctx.Tracker
 	for i, r := range roots {
 		if i == 0 && u.ordered() {
 			continue
 		}
+		if i > 0 {
+			use.Direct = false
+		}
 		var polluted bool
 		if u.site.Mode == callsite.SiteDefer {
-			polluted = t.IsPollutedAnywhere(r) || i == 0 && t.IsMayBranchedAnywhere(r)
+			polluted = t.IsPollutedAround(r, use) || i == 0 && t.IsMayBranchedAround(r, use)
 		} else {
-			polluted = t.IsPollutedAt(r, u.block) || i == 0 && t.IsMayBranchedAt(r, u.block)
+			polluted = t.IsPollutedAt(r, use) || i == 0 && t.IsMayBranchedAt(r, use)
 		}
 		if polluted {
 			t.AddViolationWithRoot(u.pos, r)
@@ -369,7 +374,8 @@ func (u siteUse) checkRoots(roots []ssa.Value) {
 // change to one of its roots before the site is reported.
 func (u siteUse) read(v ssa.Value, use pollution.UsageInfo) {
 	roots := u.roots(v)
-	u.checkRoots(roots)
+	use.Direct = u.direct(v, roots)
+	u.checkRoots(roots, use)
 	if len(roots) > 0 && u.ordered() {
 		u.ctx.Tracker.RecordPureUse(roots[0], use)
 	}
@@ -380,10 +386,12 @@ func (u siteUse) read(v ssa.Value, use pollution.UsageInfo) {
 // isAssignment). The first root gets the use itself, and the other roots get
 // a branch through a merge that may hold them (#252). A branch made on every
 // iteration of a loop that a root is defined outside of is reported at once,
-// for each of the roots.
+// for each of the roots. use.Direct holds for the first root only.
 func (u siteUse) branch(roots []ssa.Value, use pollution.UsageInfo, assigns func(root ssa.Value) bool) {
 	t := u.ctx.Tracker
-	u.checkRoots(roots)
+	u.checkRoots(roots, use)
+	may := use
+	may.Direct = false
 	for i, r := range roots {
 		switch {
 		case assigns(r):
@@ -393,7 +401,7 @@ func (u siteUse) branch(roots []ssa.Value, use pollution.UsageInfo, assigns func
 			}
 		case i > 0:
 			if u.definedBefore(r) {
-				t.RecordMayBranch(r, use, u.ordered())
+				t.RecordMayBranch(r, may, u.ordered())
 			}
 		case !u.ordered():
 			t.RecordBranchUse(r, use)
@@ -410,6 +418,29 @@ func (u siteUse) branch(roots []ssa.Value, use pollution.UsageInfo, assigns func
 			t.AddViolationWithRoot(u.pos, r)
 		}
 	}
+}
+
+// direct reports whether v, an operand of the site, is roots[0] itself or a
+// chain of *gorm.DB method calls on it, each made by name, and the site names
+// its function too (pollution.UsageInfo.Direct). A method value, a call
+// through a variable and a value that a merge, a variable or a closure holds
+// may run on the root of an earlier run of its definition, so none is direct.
+func (u siteUse) direct(v ssa.Value, roots []ssa.Value) bool {
+	if len(roots) == 0 || u.site.Kind != callsite.SiteStatic {
+		return false
+	}
+	for v != roots[0] {
+		call, ok := v.(*ssa.Call)
+		if !ok || call.Call.IsInvoke() || len(call.Call.Args) == 0 {
+			return false
+		}
+		callee := call.Call.StaticCallee()
+		if callee == nil || callee.Signature.Recv() == nil || !typeutil.IsGormDB(callee.Signature.Recv().Type()) {
+			return false
+		}
+		v = call.Call.Args[0]
+	}
+	return true
 }
 
 // definedBefore reports whether the value that may hold root holds the root
@@ -455,6 +486,7 @@ func (u siteUse) handleReceiver() {
 
 	call := u.call()
 	roots := u.roots(recv)
+	use.Direct = u.direct(recv, roots)
 	u.branch(roots, use, func(r ssa.Value) bool {
 		return call != nil && isAssignment(call, r, u.ctx)
 	})
@@ -562,7 +594,7 @@ func (u siteUse) handleArgs() {
 
 		// The function may change the argument in place, so even an
 		// assignment escapes it.
-		u.branch(roots, pollution.UsageInfo{Block: u.block, Pos: u.pos, Escapes: true}, assigns)
+		u.branch(roots, pollution.UsageInfo{Block: u.block, Pos: u.pos, Escapes: true, Direct: u.direct(gormArg, roots)}, assigns)
 	}
 
 	u.handleHolders()

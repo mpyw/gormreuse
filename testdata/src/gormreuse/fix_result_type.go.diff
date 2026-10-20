@@ -1,6 +1,6 @@
 --- fix_result_type.go	1970-01-01 00:00:00
 +++ fix_result_type.go.golden	1970-01-01 00:00:00
-@@ -1,79 +1,79 @@
+@@ -1,82 +1,82 @@
  package internal
  
  import "gorm.io/gorm"
@@ -56,20 +56,23 @@
  	q.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  }
  
- // fixResultTypeCommit: Commit ends the transaction, so it is a finisher.
+ // fixResultTypeCommit: Commit ends the transaction and touches no clause, so
+ // it is not a use (#375). It returns its receiver, so a chain on its result
+ // is a branch of q.
  func fixResultTypeCommit(db *gorm.DB) {
 -	q := db.Begin().Where("x")
 +	q := db.Begin().Where("x").Session(&gorm.Session{})
  	q.Where("a").Find(nil)
- 	q.Commit() // want `\*gorm\.DB reused: second branch from mutable root`
+ 	q.Commit().Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  }
  
- // fixResultTypeRollback: Rollback ends the transaction, so it is a finisher.
+ // fixResultTypeRollback: Rollback ends the transaction and touches no clause,
+ // so it is not a use (#375). A chain on its result is a branch of q.
  func fixResultTypeRollback(db *gorm.DB) {
 -	q := db.Begin().Where("x")
 +	q := db.Begin().Where("x").Session(&gorm.Session{})
  	q.Where("a").Find(nil)
- 	q.Rollback() // want `\*gorm\.DB reused: second branch from mutable root`
+ 	q.Rollback().Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  }
  
  // fixResultTypeFindInBatches: FindInBatches runs queries, so it is a finisher.

@@ -1,6 +1,6 @@
 --- state_methods.go	1970-01-01 00:00:00
 +++ state_methods.go.golden	1970-01-01 00:00:00
-@@ -1,98 +1,98 @@
+@@ -1,136 +1,136 @@
  package internal
  
  import "gorm.io/gorm"
@@ -10,7 +10,9 @@
  //
  // AddError, DB, Get, InstanceGet and Callback read or set only state that no
  // query is built from: db.Error, the connection pool, Statement.Settings and
- // the callback manager. A call of one is not a use of its receiver at all.
+ // the callback manager. So do Commit and Rollback, which end the transaction
+ // of the connection pool and return the receiver itself (#375). A call of one
+ // is not a use of its receiver at all.
  // ToSQL builds SQL from a copy of the receiver's Statement, so it reads the
  // receiver like Session does: an earlier branch changes what it reads.
  // e2e/internal/state_methods_test.go checks each claim with GORM.
@@ -72,7 +74,35 @@
  func stateMethodsPure(db *gorm.DB, err error) error {
  	_, _ = db.Get("k")
  	_ = db.ToSQL(func(tx *gorm.DB) *gorm.DB { return tx.Find(nil) })
+ 	_ = db.Rollback()
  	return db.AddError(err)
+ }
+ 
+ // stateMethodsCommitRollback: the issue's repro (#375). Neither ends a
+ // branch of tx.
+ func stateMethodsCommitRollback(db *gorm.DB) error {
+ 	tx := db.Begin().Model(nil)
+ 	if err := tx.Where("id = ?", 1).Update("name", "x").Error; err != nil {
+ 		tx.Rollback()
+ 		return err
+ 	}
+ 	return tx.Commit().Error
+ }
+ 
+ // stateMethodsCommitRollbackBoth: both in sequence, after a branch.
+ func stateMethodsCommitRollbackBoth(db *gorm.DB) {
+ 	tx := db.Begin().Model(nil)
+ 	tx.Where("id = ?", 1).Update("name", "x")
+ 	tx.Rollback()
+ 	tx.Commit()
+ }
+ 
+ // stateMethodsCommitOnSession: Commit returns its receiver, so the result of
+ // a Commit of an immutable value is immutable too.
+ func stateMethodsCommitOnSession(db *gorm.DB) {
+ 	tx := db.Begin()
+ 	tx.Commit().Where("a").Find(nil)
+ 	tx.Commit().Where("b").Find(nil)
  }
  
  // ===== SHOULD REPORT =====
@@ -101,4 +131,13 @@
 +	q := db.Where("x").Session(&gorm.Session{})
  	_ = q.Migrator()
  	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // stateMethodsChainAfterCommit: Commit returns its receiver, so a chain on
+ // its result is a branch of tx (#375).
+ func stateMethodsChainAfterCommit(db *gorm.DB) {
+-	tx := db.Begin().Model(nil)
++	tx := db.Begin().Model(nil).Session(&gorm.Session{})
+ 	tx.Where("a").Find(nil)
+ 	tx.Commit().Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  }

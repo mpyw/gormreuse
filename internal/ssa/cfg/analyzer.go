@@ -84,6 +84,11 @@ type analyzerGraph struct {
 	// nil until a block is asked about.
 	reach [][]uint64
 
+	// avoiding holds, for a source block and a block to avoid, the blocks
+	// that the source reaches without passing through that block
+	// (CanReachAvoiding), as a bitset like reach.
+	avoiding map[[2]int][]uint64
+
 	//declscope:shared // loop.go's DetectLoops fills it
 	loops *LoopInfo
 
@@ -171,6 +176,50 @@ func (a *Analyzer) reachSet(fn *ssa.Function, src *ssa.BasicBlock) []uint64 {
 	}
 	g.reach[src.Index] = set
 	return set
+}
+
+// CanReachAvoiding reports whether src can reach dst on a path that does not
+// enter avoid. The path starts at the end of src and ends at the start of
+// dst: src and dst may be avoid itself, and a block reaches itself. It is how
+// the tracker asks whether two uses of a root that a call in avoid defines
+// may see the same run of the call (#375).
+func (a *Analyzer) CanReachAvoiding(src, dst, avoid *ssa.BasicBlock) bool {
+	if src == nil || dst == nil {
+		return false
+	}
+	if src == dst {
+		return true
+	}
+	if dst == avoid {
+		return false
+	}
+	fn := src.Parent()
+	if avoid == nil || !indexedByAnalyzer(fn, src) || dst.Parent() != fn || !indexedByAnalyzer(fn, dst) || avoid.Parent() != fn || !indexedByAnalyzer(fn, avoid) {
+		return a.CanReach(src, dst)
+	}
+	g := a.graphOf(fn)
+	key := [2]int{src.Index, avoid.Index}
+	set, ok := g.avoiding[key]
+	if !ok {
+		set = make([]uint64, (len(fn.Blocks)+63)/64)
+		queue := make([]*ssa.BasicBlock, 1, len(fn.Blocks))
+		queue[0] = src
+		for i := 0; i < len(queue); i++ {
+			for _, succ := range queue[i].Succs {
+				effort.Step()
+				if succ == avoid || set[succ.Index/64]&(1<<(succ.Index%64)) != 0 {
+					continue
+				}
+				set[succ.Index/64] |= 1 << (succ.Index % 64)
+				queue = append(queue, succ)
+			}
+		}
+		if g.avoiding == nil {
+			g.avoiding = make(map[[2]int][]uint64)
+		}
+		g.avoiding[key] = set
+	}
+	return set[dst.Index/64]&(1<<(dst.Index%64)) != 0
 }
 
 // reachOutsideAnalyzer reports whether src reaches dst, by a breadth-first

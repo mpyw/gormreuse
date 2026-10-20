@@ -37,6 +37,48 @@ func TestCanReach(t *testing.T) {
 	}
 }
 
+// TestCanReachAvoiding covers #375: two exclusive branches of a loop body
+// reach each other only through the back-edge, which runs the body's first
+// block again.
+func TestCanReachAvoiding(t *testing.T) {
+	t.Parallel()
+	fn := buildFunc(t, "package p\nfunc f(n int, c bool) int {\n\tx := 0\n\tfor i := 0; i < n; i++ {\n\t\tif c {\n\t\t\tx++\n\t\t} else {\n\t\t\tx--\n\t\t}\n\t}\n\treturn x\n}", "f")
+	a := NewAnalyzer()
+	block := func(comment string) *ssa.BasicBlock {
+		t.Helper()
+		for _, b := range fn.Blocks {
+			if b.Comment == comment {
+				return b
+			}
+		}
+		t.Fatalf("no %s block", comment)
+		return nil
+	}
+	body, thenB, elseB := block("for.body"), block("if.then"), block("if.else")
+
+	if !a.CanReach(thenB, elseB) {
+		t.Fatal("the back-edge should let the branches reach each other")
+	}
+	if a.CanReachAvoiding(thenB, elseB, body) || a.CanReachAvoiding(elseB, thenB, body) {
+		t.Error("the branches must not reach each other without the loop body")
+	}
+	if a.CanReachAvoiding(thenB, body, body) {
+		t.Error("a path into the avoided block must not count")
+	}
+	if !a.CanReachAvoiding(body, thenB, body) || !a.CanReachAvoiding(thenB, thenB, body) {
+		t.Error("a path may start at the avoided block, and a block reaches itself")
+	}
+	if !a.CanReachAvoiding(thenB, elseB, fn.Blocks[0]) {
+		t.Error("avoiding a block outside the loop should keep the back-edge path")
+	}
+	if !a.CanReachAvoiding(thenB, elseB, nil) {
+		t.Error("avoiding no block is CanReach")
+	}
+	if a.CanReachAvoiding(nil, thenB, body) || a.CanReachAvoiding(thenB, nil, body) {
+		t.Error("nil blocks are never reachable")
+	}
+}
+
 // TestCanReachOutsideTheCache covers blocks that the reachability cache does
 // not index: blocks of two functions, and blocks built by hand with no
 // function, which are searched instead.

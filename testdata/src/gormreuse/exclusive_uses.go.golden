@@ -1,0 +1,238 @@
+package internal
+
+import "gorm.io/gorm"
+
+// =============================================================================
+// Uses that never run for the same root (#375)
+//
+// A root that a call defines in a loop body is a new value on each
+// iteration. Two uses of it on exclusive branches share a root only on a
+// path through the back-edge, which runs the call again. A defer runs when
+// the function returns, so it reuses a root only with a use that may run in
+// the same run of the function, not with one on an exclusive branch.
+// =============================================================================
+
+type exclusiveItem struct {
+	ID   uint
+	Skip bool
+}
+
+// ===== SHOULD NOT REPORT =====
+
+// exclusiveLoopContinue: the issue's repro. Each iteration runs one query on
+// a fresh root.
+func exclusiveLoopContinue(db *gorm.DB, items []exclusiveItem) {
+	s := db.Session(&gorm.Session{})
+	for _, it := range items {
+		q := s.Model(nil).Where("id = ?", it.ID)
+		if it.Skip {
+			q.Delete(nil)
+			continue
+		}
+		q.Update("name", "x")
+	}
+}
+
+// exclusiveLoopIfElse: the same with if/else.
+func exclusiveLoopIfElse(db *gorm.DB, items []exclusiveItem) {
+	s := db.Session(&gorm.Session{})
+	for _, it := range items {
+		q := s.Model(nil).Where("id = ?", it.ID)
+		if it.Skip {
+			q.Delete(nil)
+		} else {
+			q.Update("name", "x")
+		}
+	}
+}
+
+// exclusiveLoopChains: the uses are chains on the root.
+func exclusiveLoopChains(db *gorm.DB, n int) {
+	for i := range n {
+		q := db.Session(&gorm.Session{}).Where("i = ?", i)
+		if i%2 == 0 {
+			q.Where("even").Find(nil)
+		} else {
+			q.Order("id").Count(nil)
+		}
+	}
+}
+
+// exclusiveLoopGo: go statements on exclusive branches.
+func exclusiveLoopGo(db *gorm.DB, n int) {
+	for range n {
+		q := db.Session(&gorm.Session{}).Where("x")
+		if n%2 == 0 {
+			go q.Find(nil)
+		} else {
+			go q.Count(nil)
+		}
+	}
+}
+
+// exclusiveLoopDefer: defer statements on exclusive branches. Each deferred
+// call runs on the root of its own iteration.
+func exclusiveLoopDefer(db *gorm.DB, n int) {
+	for range n {
+		q := db.Session(&gorm.Session{}).Where("x")
+		if n%2 == 0 {
+			defer q.Find(nil)
+		} else {
+			defer q.Count(nil)
+		}
+	}
+}
+
+// exclusiveLoopHelper: a helper is handed the root on one branch.
+func exclusiveLoopHelper(db *gorm.DB, n int) {
+	for range n {
+		q := db.Session(&gorm.Session{}).Where("x")
+		if n%2 == 0 {
+			exclusiveHelper(q)
+		} else {
+			q.Count(nil)
+		}
+	}
+}
+
+func exclusiveHelper(q *gorm.DB) { q.Find(nil) }
+
+// exclusiveDefers: the issue's repro. One of the two defers runs.
+func exclusiveDefers(db *gorm.DB, c bool) {
+	q := db.Session(&gorm.Session{}).Where("x")
+	if c {
+		defer q.Find(nil)
+	} else {
+		defer q.Count(nil)
+	}
+}
+
+// exclusiveDeferAndUse: the defer and the use are exclusive.
+func exclusiveDeferAndUse(db *gorm.DB, c bool) {
+	q := db.Session(&gorm.Session{}).Where("x")
+	if c {
+		defer q.Find(nil)
+		return
+	}
+	q.Count(nil)
+}
+
+// exclusiveGo: go statements on exclusive branches, outside a loop.
+func exclusiveGo(db *gorm.DB, c bool) {
+	q := db.Session(&gorm.Session{}).Where("x")
+	if c {
+		go q.Find(nil)
+	} else {
+		go q.Count(nil)
+	}
+}
+
+// ===== SHOULD REPORT =====
+
+// exclusiveRootOutsideLoop: the root is defined before the loop, so each
+// iteration branches the same root.
+func exclusiveRootOutsideLoop(db *gorm.DB, items []exclusiveItem) {
+	q := db.Session(&gorm.Session{}).Model(nil).Where("active").Session(&gorm.Session{})
+	for _, it := range items {
+		if it.Skip {
+			q.Delete(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+			continue
+		}
+		q.Update("name", "x") // want `\*gorm\.DB reused: second branch from mutable root`
+	}
+}
+
+// exclusiveLoopSameIteration: both uses run in one iteration.
+func exclusiveLoopSameIteration(db *gorm.DB, items []exclusiveItem) {
+	s := db.Session(&gorm.Session{})
+	for _, it := range items {
+		q := s.Model(nil).Where("id = ?", it.ID).Session(&gorm.Session{})
+		if it.Skip {
+			q.Delete(nil)
+		}
+		q.Update("name", "x") // want `\*gorm\.DB reused: second branch from mutable root`
+	}
+}
+
+// exclusiveLoopSameBlock: both uses run one after the other.
+func exclusiveLoopSameBlock(db *gorm.DB, n int) {
+	for range n {
+		q := db.Session(&gorm.Session{}).Where("x").Session(&gorm.Session{})
+		q.Find(nil)
+		q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	}
+}
+
+// exclusiveLoopUseThenGo: the go statement runs after the use.
+func exclusiveLoopUseThenGo(db *gorm.DB, n int) {
+	for range n {
+		q := db.Session(&gorm.Session{}).Where("x").Session(&gorm.Session{})
+		q.Count(nil)
+		go q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	}
+}
+
+// exclusiveLoopKept: the root is defined only on some iterations, so the
+// variable keeps the root of an earlier one, and the later use branches it
+// again.
+func exclusiveLoopKept(db *gorm.DB, n int) {
+	var q *gorm.DB
+	for i := range n {
+		if i%3 == 0 {
+			q = db.Session(&gorm.Session{}).Where("x").Session(&gorm.Session{})
+		}
+		if i%2 == 0 {
+			q.Find(nil)
+		} else {
+			q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+		}
+	}
+}
+
+// exclusiveLoopPrevious: one branch uses the root of the previous
+// iteration, which the other branch used then.
+func exclusiveLoopPrevious(db *gorm.DB, n int) {
+	var prev *gorm.DB
+	for i := range n {
+		q := db.Session(&gorm.Session{}).Where("x").Session(&gorm.Session{})
+		if i%2 == 0 && prev != nil {
+			prev.Find(nil)
+		} else {
+			q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+		}
+		prev = q
+	}
+}
+
+// exclusiveLoopClosure: the closure runs on the root of the first iteration
+// on every iteration.
+func exclusiveLoopClosure(db *gorm.DB, n int) {
+	var f func()
+	for i := range n {
+		q := db.Session(&gorm.Session{}).Where("x").Session(&gorm.Session{})
+		if i == 0 {
+			f = func() { q.Find(nil) }
+		} else {
+			q.Count(nil)
+		}
+		f() // want `\*gorm\.DB reused: second branch from mutable root`
+	}
+}
+
+// exclusiveDeferThenUse: the use runs before the deferred call.
+func exclusiveDeferThenUse(db *gorm.DB, c bool) {
+	q := db.Session(&gorm.Session{}).Where("x").Session(&gorm.Session{})
+	if c {
+		defer q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	}
+	q.Count(nil)
+}
+
+// exclusiveTwoDefers: both defers run.
+func exclusiveTwoDefers(db *gorm.DB, c bool) {
+	q := db.Session(&gorm.Session{}).Where("x").Session(&gorm.Session{})
+	if c {
+		defer q.Find(nil)
+	}
+	defer q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}

@@ -89,6 +89,15 @@ type UsageInfo struct {
 	// slice or map, or a channel send. A Session at the root would make that
 	// code change a copy (#243).
 	Escapes bool
+
+	// Direct is set when the use's value is the root itself, or a chain of
+	// *gorm.DB method calls on it, with no merge, variable, field or closure
+	// in between, and the call names its function statically. Such a use
+	// sees the root of the latest run of the root's definition. Two direct
+	// uses of a root that a call defines reuse it only when one runs after
+	// the other with no run of that call in between (#375). Direct is only
+	// meaningful for the first root of the use's value.
+	Direct bool
 }
 
 // aliasUse is a use of a Session/Debug copy, with the position of the call
@@ -137,7 +146,7 @@ type Tracker struct {
 	// They are intentionally NOT scanned by DetectViolations: defer/go run at a
 	// different time than their textual position, so position-ordered detection
 	// would misfire. Violations among them are reported inline at record time via
-	// isPolluted/IsPollutedAt, which do consult this map.
+	// IsPollutedAt and IsPollutedAround, which do consult this map.
 	branchUses map[ssa.Value][]UsageInfo
 
 	// aliasUses maps roots to uses of a Session/Debug copy that shares the
@@ -189,6 +198,7 @@ type Tracker struct {
 // CFGAnalyzer interface for control flow analysis.
 type CFGAnalyzer interface {
 	CanReach(src, dst *ssa.BasicBlock) bool
+	CanReachAvoiding(src, dst, avoid *ssa.BasicBlock) bool
 }
 
 // New creates a new Tracker. fset is used to render source positions in reuse
@@ -269,22 +279,40 @@ func (t *Tracker) RecordMayBranch(root ssa.Value, use UsageInfo, ordered bool) {
 }
 
 // IsMayBranchedAt reports whether a branch recorded by RecordMayBranch can
-// reach the target block.
-func (t *Tracker) IsMayBranchedAt(root ssa.Value, targetBlock *ssa.BasicBlock) bool {
-	return slices.ContainsFunc(t.mayUses[root], func(use mayUse) bool { return t.isReachable(use.Block, targetBlock) })
+// reach target, a use of root (for go).
+func (t *Tracker) IsMayBranchedAt(root ssa.Value, target UsageInfo) bool {
+	return slices.ContainsFunc(t.mayUses[root], func(use mayUse) bool { return t.reaches(root, use.UsageInfo, target) })
 }
 
-// IsMayBranchedAnywhere reports whether RecordMayBranch recorded any branch
-// of root (for defer).
-func (t *Tracker) IsMayBranchedAnywhere(root ssa.Value) bool {
-	return len(t.mayUses[root]) > 0
+// IsMayBranchedAround reports whether a branch recorded by RecordMayBranch
+// may run in the same run of the function as target, a use of root, before
+// or after it (for defer).
+func (t *Tracker) IsMayBranchedAround(root ssa.Value, target UsageInfo) bool {
+	return slices.ContainsFunc(t.mayUses[root], func(use mayUse) bool { return t.runsWith(root, use.UsageInfo, target) })
 }
 
-// IsPollutedAt checks if a root has polluting usage that can reach the target block.
-// Includes deferred/goroutine branch uses (see isPolluted).
-func (t *Tracker) IsPollutedAt(root ssa.Value, targetBlock *ssa.BasicBlock) bool {
-	reaches := func(use UsageInfo) bool { return t.isReachable(use.Block, targetBlock) }
+// IsPollutedAt checks if a root has polluting usage that can reach target, a
+// use of root (for go). Includes deferred/goroutine branch uses (see the
+// branchUses field doc).
+func (t *Tracker) IsPollutedAt(root ssa.Value, target UsageInfo) bool {
+	reaches := func(use UsageInfo) bool { return t.reaches(root, use, target) }
 	return slices.ContainsFunc(t.pollutingUses[root], reaches) || slices.ContainsFunc(t.branchUses[root], reaches)
+}
+
+// IsPollutedAround reports whether a polluting use of root, deferred and
+// spawned ones included, may run in the same run of the function as target,
+// before or after it (for defer). A deferred call runs when the function
+// returns, so any use that may run in that run of the function comes before
+// it. A use on a branch exclusive with the defer statement does not (#375).
+func (t *Tracker) IsPollutedAround(root ssa.Value, target UsageInfo) bool {
+	with := func(use UsageInfo) bool { return t.runsWith(root, use, target) }
+	return slices.ContainsFunc(t.pollutingUses[root], with) || slices.ContainsFunc(t.branchUses[root], with)
+}
+
+// runsWith reports whether a and b, two uses of root, may both run in one run
+// of their function, in either order.
+func (t *Tracker) runsWith(root ssa.Value, a, b UsageInfo) bool {
+	return t.reaches(root, a, b) || t.reaches(root, b, a)
 }
 
 // MarkPolluted records a polluting usage that hands the root to other code
@@ -391,6 +419,8 @@ func (t *Tracker) DetectViolations() {
 	// Positions do not order them: the polluting use may come later in the
 	// loop body and still run before the next iteration's call.
 	for _, root := range sortedRoots(t, t.loopCarriedUses) {
+		// A loop-carried call is its own root, so the path to it always runs
+		// the call again: reaches would never hold.
 		for _, target := range t.loopCarriedUses[root] {
 			if slices.ContainsFunc(t.pollutingUses[root], func(src UsageInfo) bool { return t.isReachable(src.Block, target.Block) }) {
 				t.addViolationWithContext(target.Pos, root)
@@ -563,9 +593,35 @@ func (t *Tracker) violationUses(v Violation, uses []UsageInfo) []UsageInfo {
 	return uses
 }
 
-// IsPollutedAnywhere checks if root has any usage (for defer).
-func (t *Tracker) IsPollutedAnywhere(root ssa.Value) bool {
-	return t.isPolluted(root)
+// reaches reports whether src, a use of root, can reach the use dst with the
+// same root. That is so when isReachable holds, except for two direct uses of
+// a root that a call defines in their own function (UsageInfo.Direct). Each
+// run of that call defines a new root, so the two uses share one only on a
+// path, from either use to the other, that does not run the call again. In
+// `for … { q := s.Where(…); if c { q.Delete(…) } else { q.Update(…) } }` the
+// only path from one use to the other is through the back-edge, which
+// defines q again (#375). A root that a merge, a variable or a closure holds
+// may be one of an earlier run, so any path counts for it. A root that is
+// not a call, such as a Phi, a parameter or a loaded field, is the same
+// value on each path.
+//
+// The call is taken to return a new value on each run, as the loop rules
+// take it (cfg.Repeats). A call that returns the same mutable *gorm.DB each
+// time, such as a helper that hands out one shared handle, is missed here too.
+func (t *Tracker) reaches(root ssa.Value, src, dst UsageInfo) bool {
+	if !t.isReachable(src.Block, dst.Block) {
+		return false
+	}
+	def, ok := root.(*ssa.Call)
+	if !ok || !src.Direct || !dst.Direct || def.Block() == nil {
+		return true
+	}
+	fn := def.Parent()
+	if src.Block.Parent() != fn || dst.Block.Parent() != fn {
+		return true
+	}
+	return t.cfgAnalyzer.CanReachAvoiding(src.Block, dst.Block, def.Block()) ||
+		t.cfgAnalyzer.CanReachAvoiding(dst.Block, src.Block, def.Block())
 }
 
 // isReachable checks if pollution can reach the target block.
@@ -694,13 +750,6 @@ func (t *Tracker) firstBranchPos(root ssa.Value) token.Pos {
 	return best
 }
 
-// isPolluted checks if a root has been polluted (for defer).
-// Includes deferred/goroutine branch uses so multiple defers/goroutines that
-// reuse the same root (with no direct use) are detected.
-func (t *Tracker) isPolluted(root ssa.Value) bool {
-	return len(t.pollutingUses[root]) > 0 || len(t.branchUses[root]) > 0
-}
-
 // getAllUses returns all uses (pure + polluting + assignment) for a root.
 func (t *Tracker) getAllUses(root ssa.Value) []UsageInfo {
 	return slices.Concat(t.pureUses[root], t.pollutingUses[root], t.assignmentUses[root])
@@ -722,8 +771,9 @@ func (t *Tracker) checkViolationsBetween(targets, sources []UsageInfo, root ssa.
 				continue
 			}
 
-			// Check CFG reachability (across closures, at their invocation sites)
-			if t.isReachable(src.Block, target.Block) {
+			// Check CFG reachability (across closures, at their invocation
+			// sites), on a path that keeps the root of src (#375)
+			if t.reaches(root, src, target) {
 				t.addViolationWithContext(target.Pos, root)
 				break
 			}

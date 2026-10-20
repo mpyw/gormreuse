@@ -170,14 +170,19 @@ const (
 	// receiver's Statement. It reads or sets only state that no query is built
 	// from (#307).
 	receiverStateOnly
+	// receiverStateOnlySelf: as receiverStateOnly, but the call returns the
+	// receiver itself, so its result is as mutable as the receiver (#375).
+	receiverStateOnlySelf
 )
 
 // receiverUses lists the methods and functions whose call does not branch
 // its receiver. Every other gorm method branches it. design/implementation.md
 // ("Methods that do not branch", #307) has the GORM source behind each entry,
-// and e2e/internal/state_methods_test.go checks this table against the real
+// and e2e/internal/gorm_stub_test.go checks this table against the real
 // *gorm.DB: every method of it that returns no *gorm.DB is either listed here
-// or listed there as a branch, with the reason.
+// or listed there as a branch, with the reason. A method that returns a
+// *gorm.DB and uses its receiver only for AddError, field reads and returning
+// it must be listed here as receiverStateOnlySelf (#375).
 //
 // Reads. All but Transaction and ToSQL return a new immutable *gorm.DB
 // instance (clone > 0):
@@ -194,6 +199,9 @@ const (
 //   - DB returns the *sql.DB behind the connection pool.
 //   - Get and InstanceGet read Statement.Settings.
 //   - Callback returns the callback manager of the Config.
+//   - Commit and Rollback end the transaction of the connection pool and pass
+//     its error to AddError. They return the receiver itself, so a chain on
+//     the result is a chain on the receiver (#375).
 //
 // This map is unexported to prevent external modification.
 var receiverUses = map[string]receiverUse{
@@ -213,11 +221,15 @@ var receiverUses = map[string]receiverUse{
 	"Get":         receiverStateOnly,
 	"InstanceGet": receiverStateOnly,
 	"Callback":    receiverStateOnly,
+	// State only, returning the receiver
+	"Commit":   receiverStateOnlySelf,
+	"Rollback": receiverStateOnlySelf,
 }
 
 // IsImmutableReturningBuiltin reports whether a call of the gorm method or
-// function name reads its receiver without branching it: name is in
-// receiverUses. Session, WithContext, Debug, Open and Begin return a new
+// function name reads its receiver without branching it, and returns no
+// mutable *gorm.DB: name is in receiverUses, and is not Commit or Rollback,
+// which return the receiver itself. Session, WithContext, Debug, Open and Begin return a new
 // immutable instance that can be branched freely. The others return no
 // *gorm.DB: Transaction and ToSQL read the receiver's Statement, and the
 // state-only methods (IsStateOnlyMethod) touch no clause of it.
@@ -225,15 +237,24 @@ var receiverUses = map[string]receiverUse{
 // Note: This is different from user-defined pure functions (//gormreuse:pure),
 // which only guarantee no argument pollution - they may return mutable values.
 func IsImmutableReturningBuiltin(name string) bool {
-	_, ok := receiverUses[name]
-	return ok
+	use, ok := receiverUses[name]
+	return ok && use != receiverStateOnlySelf
 }
 
 // IsStateOnlyMethod reports whether the gorm method name neither reads nor
 // changes a clause of its receiver's Statement, such as AddError or Get
-// (#307). A call of one is not a use of the receiver at all.
+// (#307), or Commit and Rollback (#375). A call of one is not a use of the
+// receiver at all.
 func IsStateOnlyMethod(name string) bool {
-	return receiverUses[name] == receiverStateOnly
+	use := receiverUses[name]
+	return use == receiverStateOnly || use == receiverStateOnlySelf
+}
+
+// ReturnsReceiver reports whether the gorm method name returns its receiver
+// itself and touches no clause of it: Commit and Rollback (#375). Its result
+// is as mutable as the receiver.
+func ReturnsReceiver(name string) bool {
+	return receiverUses[name] == receiverStateOnlySelf
 }
 
 // finishers are the gorm methods that run a query or end a transaction.

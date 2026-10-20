@@ -12,6 +12,14 @@ These notes say what changes for users in each release, and what to do about it.
 | A `pure` function that returns its argument inside a struct, a pointer, an interface or a closure (#376) | `return S{DB: db}`, `return &S{DB: db}`, `return func() *gorm.DB { return db }`. Message: `pure function leaks *gorm.DB argument via return of ...` | Return the `*gorm.DB` itself, or remove `pure`. Callers no longer trust the function, so `s := Wrap(q); s.DB.Where("a"); q.Where("b")` is reported |
 | A `pure` function that pollutes its argument through an interface (#376) | `var x any = db; x.(*gorm.DB).Where("x")`, `var i wherer = db; i.Where("x")` | Fix the function, or remove `pure`. A method called through an interface that is not the boxed argument itself, such as `x.(wherer).Where("x")`, is a warning: `pure function passes *gorm.DB argument to interface method Where` |
 
+### Fewer false reports
+
+| No longer reported | Example |
+| --- | --- |
+| A root built in a loop body and used on exclusive branches (#375). Each iteration builds a new root. Uses that both run in one iteration, and a root built before the loop, are still reported | `for … { q := s.Where("id = ?", id); if skip { q.Delete(&u); continue }; q.Update("name", "x") }` |
+| `defer` statements on exclusive branches (#375). A deferred call now conflicts only with uses that may run in the same call of the function | `if c { defer q.Find(&us) } else { defer q.Count(&n) }` |
+| `Commit` and `Rollback` as branches (#375). They touch no clause. They return their receiver, so a chain on the result is still a branch of it | `tx.Where("id = ?", 1).Update("name", "x"); tx.Rollback(); tx.Commit()` |
+
 ## 0.23.0 (2026-10-20)
 
 gormreuse now follows a `*gorm.DB` through far more code. It also reads directives across packages. It infers `immutable-return` for most connection helpers, and `immutable-param` and `immutable-input` for most helpers that only get fresh handles. It no longer counts methods such as `AddError` as a branch. `-fix` offers fewer fixes, but each one compiles and keeps every condition.
