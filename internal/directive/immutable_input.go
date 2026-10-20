@@ -310,11 +310,18 @@ func lookupImmutableInputParam(ft *ast.FuncType, name string) (int, *ast.Field) 
 }
 
 // buildFuncKey produces a FuncKey for a function declaration matching what the
-// tracer/analyzer use for SSA functions.
+// tracer/analyzer use for SSA functions. The receiver is named by its type, so
+// a method declared through an alias, as `func (r *R) With` with `type R =
+// repo`, gets the key of repo's method, which funcKeyOf gives (#348).
 func (s *ImmutableInputSet) buildFuncKey(fd *ast.FuncDecl, pkgPath string) FuncKey {
 	key := FuncKey{PkgPath: pkgPath, FuncName: fd.Name.Name}
 	if fd.Recv != nil && len(fd.Recv.List) > 0 {
 		key.ReceiverType = receiverTypeStringFromExpr(fd.Recv.List[0].Type)
+		if s.typesInfo != nil {
+			if obj, ok := s.typesInfo.Defs[fd.Name].(*types.Func); ok {
+				key.ReceiverType = receiverTypeString(obj.Signature().Recv().Type())
+			}
+		}
 	}
 	return key
 }

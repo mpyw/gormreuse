@@ -3,6 +3,8 @@ package internal
 
 import (
 	"cmp"
+	"go/ast"
+	"go/build"
 	"go/token"
 	"os"
 	"path/filepath"
@@ -57,9 +59,13 @@ func reportUnusedImmutableInputs(set *directive.ImmutableInputSet, report report
 
 // reportUnusedIgnores reports the ignore directives that suppressed nothing.
 // No ignore suppresses these. The fix deletes an ignore when removable
-// reports that it may.
-func reportUnusedIgnores(removals *directive.Removals, ignores *directive.Ignores, removable func(token.Pos) bool) {
+// reports that it may. An ignore that leftToTests reports is not reported:
+// the test variant of the package reports it if it is unused there too.
+func reportUnusedIgnores(removals *directive.Removals, ignores *directive.Ignores, removable, leftToTests func(token.Pos) bool) {
 	for _, pos := range ignores.UnusedIgnores() {
+		if leftToTests(pos) {
+			continue
+		}
 		if removable(pos) {
 			removals.Report(pos, "unused gormreuse:ignore directive", directive.RemovalTarget{Comment: pos, Part: "ignore"})
 		} else {
@@ -80,6 +86,37 @@ func reportIgnoreRemovable(pass *analysis.Pass, internalError bool) func(token.P
 		return func(token.Pos) bool { return false }
 	}
 	return reportSeesWholePackage(pass)
+}
+
+// reportIgnoresLeftToTests returns whether the unused ignore at a position is
+// left to the test variant of the package to report (#348). It is in a file
+// other than a test file, pass is the variant without the test files, and the
+// package has test files of its own, so a test variant analyzes the file too.
+// Test files can add stores, calls and Scopes calls, so the test variant may
+// report a reuse that this variant does not, and need the ignore. Reporting
+// it unused here too would leave no clean state: drivers such as the
+// standalone command run both variants, while go vet and golangci-lint run
+// only the test variant. External test files, of package x_test, do not make
+// a test variant, so they count only for their own package.
+func reportIgnoresLeftToTests(pass *analysis.Pass) func(token.Pos) bool {
+	if slices.ContainsFunc(pass.Files, func(f *ast.File) bool {
+		return strings.HasSuffix(pass.Fset.PositionFor(f.Pos(), false).Filename, "_test.go")
+	}) {
+		return func(token.Pos) bool { return false }
+	}
+	hasTests := make(map[string]bool) // By directory
+	return func(pos token.Pos) bool {
+		dir := filepath.Dir(pass.Fset.PositionFor(pos, false).Filename)
+		has, seen := hasTests[dir]
+		if !seen {
+			// The files the build would include, as go list sees them. A
+			// directory that cannot be read has no tests to leave it to.
+			p, _ := build.ImportDir(dir, 0)
+			has = p != nil && len(p.TestGoFiles) > 0
+			hasTests[dir] = has
+		}
+		return has
+	}
 }
 
 // reportSeesWholePackage returns whether pass sees every file of the package that

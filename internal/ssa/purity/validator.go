@@ -470,6 +470,12 @@ func (v *Validator) checkLeak(instr ssa.Instruction) []Violation {
 	if kind == pollutionsource.KindNone || !v.paramDerived[val] {
 		return nil
 	}
+	// Packing the variadic arguments of a call passes them to the callee,
+	// which the call's check judges: `logv("x", db)` with `args ...any` is
+	// the same as `one(db)` with `arg any` (#348).
+	if store, ok := instr.(*ssa.Store); ok && v.isVarargsPack(store.Addr.(*ssa.IndexAddr).X) {
+		return nil
+	}
 
 	var via string
 	switch kind {
@@ -542,7 +548,65 @@ func (v *Validator) isDerivedArg(arg ssa.Value) bool {
 	if gormArg, ok := pollutionsource.UnwrapGormDB(arg); ok {
 		return v.paramDerived[gormArg]
 	}
+	if slice, ok := arg.(*ssa.Slice); ok && v.isVarargsPack(slice.X) && v.packsLeakedDerived(slice.X) {
+		return true
+	}
 	return v.paramDerived[arg] && v.holdsGormDB(arg.Type())
+}
+
+// isVarargsPack reports whether array is only filled with elements and passed,
+// sliced, as the variadic argument of calls, as Go packs the arguments of
+// `f(a, b)` for `func f(args ...any)`.
+func (v *Validator) isVarargsPack(array ssa.Value) bool {
+	alloc, ok := array.(*ssa.Alloc)
+	if !ok {
+		return false
+	}
+	passed := false
+	for _, ref := range *alloc.Referrers() {
+		switch r := ref.(type) {
+		case *ssa.IndexAddr:
+			for _, ir := range *r.Referrers() {
+				if store, ok := ir.(*ssa.Store); !ok || store.Addr != r {
+					return false
+				}
+			}
+		case *ssa.Slice:
+			for _, sr := range *r.Referrers() {
+				call, ok := sr.(ssa.CallInstruction)
+				if !ok {
+					return false
+				}
+				common := call.Common()
+				// The slice is the last argument, and no other.
+				if !common.Signature().Variadic() || slices.Index(common.Args, ssa.Value(r)) != len(common.Args)-1 {
+					return false
+				}
+				passed = true
+			}
+		default:
+			return false
+		}
+	}
+	return passed
+}
+
+// packsLeakedDerived reports whether a parameter-derived *gorm.DB is stored
+// into the variadic pack array in a way pollutionsource.Leak counts, so not
+// into the arguments of a read-only call such as fmt.Println.
+func (v *Validator) packsLeakedDerived(array ssa.Value) bool {
+	for _, ref := range *array.Referrers() {
+		idx, ok := ref.(*ssa.IndexAddr)
+		if !ok {
+			continue
+		}
+		for _, ir := range *idx.Referrers() {
+			if val, kind := pollutionsource.Leak(ir, v.funcVars); kind == pollutionsource.KindSliceStore && v.paramDerived[val] {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // isTrustedPure reports whether callee is marked pure and has not failed
