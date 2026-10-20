@@ -493,6 +493,28 @@ var growthCases = []growthCase{
 		b.WriteString("}\n")
 		return []string{b.String()}
 	}},
+	// n optional filters on a captured query, each followed by a goroutine
+	// that reads it: every read sees the stores before and after it (#303), so
+	// it has up to n roots, as in capturedre.
+	{name: "spawnedre", limit: growthQuadratic, after: "#325", shape: func(n int) []string {
+		var b strings.Builder
+		b.WriteString("func f(db *gorm.DB, c []bool) {\n\tq := db.Model(nil)\n")
+		for i := range n {
+			fmt.Fprintf(&b, "\tif c[%d] {\n\t\tq = q.Where(\"c%d\")\n\t}\n\tgo func() { q.Find(nil) }()\n", i, i)
+		}
+		b.WriteString("}\n")
+		return []string{b.String()}
+	}},
+	// The same through a field of a captured pointer (#303).
+	{name: "spawnedfields", limit: growthQuadratic, after: "#325", shape: func(n int) []string {
+		var b strings.Builder
+		b.WriteString("type S struct{ db *gorm.DB }\n\nfunc f(db *gorm.DB, c []bool) {\n\ts := &S{db: db.Model(nil)}\n")
+		for i := range n {
+			fmt.Fprintf(&b, "\tif c[%d] {\n\t\ts.db = s.db.Where(\"c%d\")\n\t}\n\tgo func() { s.db.Find(nil) }()\n", i, i)
+		}
+		b.WriteString("}\n")
+		return []string{b.String()}
+	}},
 	// n roots captured by one closure that runs twice.
 	{name: "capturemany", limit: growthNearLinear, shape: func(n int) []string {
 		var b strings.Builder

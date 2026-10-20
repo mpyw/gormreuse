@@ -667,7 +667,16 @@ db.Find(&users)
 func() { db.Count(&count) }() // OK - reads the WithContext result
 ```
 
-A deferred, spawned, stored or passed-on closure may run at any point, so it may read any value the variable held.
+A closure that is deferred, run with `go`, stored, passed on (errgroup's `Go`, a `Transaction` callback) or used as a range-over-func body may run at any point after it is created. It reads the value the variable held when the closure was created, or any value stored later:
+
+```go
+db = db.WithContext(ctx)
+for _, id := range ids {
+    g.Go(func() error { return db.First(&User{}, id).Error }) // OK - reads the WithContext result
+}
+```
+
+The same applies to a field read through a captured pointer, such as `d := &deps{db: db}; d.db = d.db.WithContext(ctx)`.
 
 A closure that builds a new chain from an immutable value on each call is a factory. Each call is its own root, whether it is called twice or in a loop:
 
@@ -1117,6 +1126,7 @@ gormreuse reports a reuse only when it can follow the value. These cases are kno
 | --- | --- |
 | `a, b := pair(db)`, where `pair` returns two new chains, then `a.Find(nil); b.Find(nil)` | Both results of one call share the call as their root |
 | `G = db.Where("x"); if c { G = G.Where("a") }; G.Find(nil)` for a global or a field `G` | A store is not a merge point, so `Where("a")` counts as a branch of the stored root |
+| `p := mk(s); go func() { p.db.Find(nil) }(); p = mk(s); p.db.Count(nil)`, where `mk` returns a new struct | A pointer variable that a closure captures and that is reassigned may point to either struct, so the last read is matched to the first one too |
 | A recursive helper whose every path ends in `Session(...)`, branched twice | A function that returns its own result is never [inferred](#inferred-immutable-return) `immutable-return`. Add the directive |
 
 **Wrong position:** a use inside a deferred closure runs at function exit. gormreuse orders it by its source position. So `defer func() { q.Count(nil) }(); q.Find(nil)` is reported at `q.Find`, which runs first.

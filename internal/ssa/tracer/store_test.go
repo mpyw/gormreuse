@@ -96,3 +96,46 @@ func TestFieldStoredValuesReachingLoad(t *testing.T) {
 		t.Errorf("without a load every store should be seen, got %v", got)
 	}
 }
+
+// TestObservedFieldStoresUnrelatedLoad pins the fallback of #303: a load that
+// no MakeClosure in the function leads to sees every store, as a nil load does.
+func TestObservedFieldStoresUnrelatedLoad(t *testing.T) {
+	t.Parallel()
+	fixtures, _ := loadFixtureProgram(t)
+	fn, other := fixtures["cosErrgroupTwo"], fixtures["cosSession"]
+	if fn == nil || other == nil {
+		t.Fatal("cosErrgroupTwo or cosSession fixture missing")
+	}
+	var alloc *ssa.Alloc
+	for _, instr := range fn.Blocks[0].Instrs {
+		if a, ok := instr.(*ssa.Alloc); ok && a.Comment == "db" {
+			alloc = a
+		}
+	}
+	if alloc == nil {
+		t.Fatal("no Alloc for db in cosErrgroupTwo")
+	}
+	got, open := observedFieldStores(fn, storeTarget{root: alloc}, nil, other.Blocks[0].Instrs[0])
+	if len(got) != 2 || !open {
+		t.Errorf("an unrelated load should see both stores of db, got %v (open %v)", got, open)
+	}
+}
+
+// TestMakeClosureInStoreFuncNested pins #303's nesting: a closure nested in a
+// spawned one is read at the outer closure's MakeClosure.
+func TestMakeClosureInStoreFuncNested(t *testing.T) {
+	t.Parallel()
+	fixtures, _ := loadFixtureProgram(t)
+	fn := fixtures["cosFieldNested"]
+	if fn == nil || len(fn.AnonFuncs) != 1 || len(fn.AnonFuncs[0].AnonFuncs) != 1 {
+		t.Fatal("cosFieldNested fixture missing or reshaped")
+	}
+	outer := fn.AnonFuncs[0]
+	want := callsite.FreeVarMakeClosure(outer)
+	if got := makeClosureInStoreFunc(fn, outer.AnonFuncs[0]); got == nil || got != want {
+		t.Errorf("makeClosureInStoreFunc = %v, want %v", got, want)
+	}
+	if got := makeClosureInStoreFunc(fixtures["cosSession"], outer.AnonFuncs[0]); got != nil {
+		t.Errorf("a closure not nested in the function should give nil, got %v", got)
+	}
+}

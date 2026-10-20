@@ -99,13 +99,14 @@ func cfvFactory(db *gorm.DB) {
 	func() { base().Find(nil) }()
 }
 
-// cfvFactoryReassigned: a stored closure reads every store of a captured,
-// reassigned variable (#251), so base's chain may start from the parameter.
+// cfvFactoryReassigned: a closure that is also captured reads the stores that
+// reach its creation or run after it (#303), so base's chain starts from the
+// Session, not the parameter, and each call builds a new chain.
 func cfvFactoryReassigned(db *gorm.DB) {
 	db = db.Session(&gorm.Session{})
-	base := func() *gorm.DB { return db.Model(nil) } // want `\*gorm\.DB reused: second branch from mutable root`
+	base := func() *gorm.DB { return db.Model(nil) }
 	base().Where("c").Find(nil)
-	base().Where("d").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	base().Where("d").Find(nil) // OK: a new Statement on each call
 	func() { base().Find(nil) }()
 }
 
