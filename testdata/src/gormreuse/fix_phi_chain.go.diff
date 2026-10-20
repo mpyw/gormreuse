@@ -66,7 +66,7 @@
 +		q = q.Where("name = ?", name).Session(&gorm.Session{})
  	}
 -	q.Where("deleted_at IS NULL").Limit(10)
-+	q = q.Where("deleted_at IS NULL").Limit(10)
++	q = q.Where("deleted_at IS NULL").Limit(10).Session(&gorm.Session{})
  	for _, id := range ids {
 -		q = q.Where("id <> ?", id) // want `\*gorm\.DB reused: second branch from mutable root`
 +		q = q.Where("id <> ?", id).Session(&gorm.Session{}) // want `\*gorm\.DB reused: second branch from mutable root`

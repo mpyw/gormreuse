@@ -229,6 +229,13 @@ func (g *Generator) Generate(v pollution.Violation) []analysis.SuggestedFix {
 		return fallback
 	}
 
+	// A discarded statement on a value merged with the root, which the uses
+	// of another edge list, would change a copy once a Session makes that
+	// value immutable. It is reassigned too, or there is no fix (#373).
+	if !g.reassignMergedChains(root, allUses, target, reassigned) {
+		return fallback
+	}
+
 	// Code that changes the root in place, other than a discarded statement on
 	// its variable, would change a copy once the root gets a Session (#243).
 	if g.changedElsewhere(v, len(reassigned) == 0) {
@@ -245,14 +252,18 @@ func (g *Generator) Generate(v pollution.Violation) []analysis.SuggestedFix {
 	// A discarded statement on a parameter also changes the caller's value,
 	// and the caller may rely on that. Reassigning it would change only the
 	// parameter, unless the function returns a *gorm.DB that can carry the
-	// change back (#243), and every caller reads that result (#312).
-	if isParam && len(reassigned) > 0 && (!typeutil.HasGormDBResult(p.Parent().Signature.Results()) || !g.everyCallUsesResult(origin.Declared(p.Parent()))) {
+	// change back (#243), and every caller reads that result (#312). So does
+	// one on a value the parameter's variable holds, such as a Where merged
+	// with the parameter in `if admin { q = q.Where("admin") }`: a mutable
+	// Where returns the caller's value itself (#373).
+	if len(reassigned) > 0 && g.paramReassignmentsDropChanges(root, target) {
 		return fallback
 	}
 
 	// Phase 2: Simulate reassignments and find roots needing Session
 	virtualUses := g.simulateVirtualRoots(root, allUses, reassigned)
 	rootsNeedingSession := g.findRootsNeedingSession(virtualUses, reassigned, usesOrdered(v))
+	rootsNeedingSession = g.mergedReassignmentsNeedingSession(root, virtualUses, rootsNeedingSession)
 	if reassignsInClosure(root, allUses, reassigned) && !slices.ContainsFunc(rootsNeedingSession, func(vr virtualRootKey) bool { return vr.isOriginal }) {
 		rootsNeedingSession = append(rootsNeedingSession, virtualRootKey{isOriginal: true, pos: root.Pos()})
 	}
@@ -339,6 +350,17 @@ func (g *Generator) rootSessionSites(root ssa.Value, roots []virtualRootKey, all
 		case !g.virtualRootEndsImmutable(vr):
 			sites = append(sites, sessionSite{pos: vr.end})
 		}
+	}
+	// A reassignment that takes the root's place on the edge of a Phi used
+	// twice needs the Phi's other edges isolated too, as the root does (#373).
+	if !isParam && !slices.ContainsFunc(roots, func(vr virtualRootKey) bool { return vr.isOriginal }) &&
+		slices.ContainsFunc(roots, func(vr virtualRootKey) bool { return g.mergeReassignmentReachesTwice(root, vr) }) {
+		for _, pos := range g.mergedSessionPositions(root, allUses) {
+			sites = append(sites, sessionSite{pos: pos})
+		}
+		paramEdits, paramSites := g.mergedParamFixes(root, allUses)
+		edits = append(edits, paramEdits...)
+		sites = append(sites, paramSites...)
 	}
 	return edits, sites
 }

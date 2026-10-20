@@ -2,6 +2,7 @@ package fix
 
 import (
 	"go/ast"
+	"go/types"
 	"slices"
 	"strings"
 
@@ -90,6 +91,39 @@ func (g *Generator) paramDiscardsChain(uses []pollution.UsageInfo) bool {
 		_, _, ok := g.discardedChainToReassign(use)
 		return ok
 	})
+}
+
+// paramReassignmentsDropChanges reports whether reassigning the discarded
+// statements of root's fix to target would keep their changes from the
+// caller: root is a parameter, or target is a parameter's variable, and the
+// function returns no *gorm.DB that every caller reads (see
+// everyCallUsesResult). A mutable value that the parameter's variable holds,
+// such as q.Where("admin") in `if admin { q = q.Where("admin") }`, is the
+// caller's value itself (#312, #373).
+//
+//declscope:shared // generator.go's Generate withholds the reassignments with it
+func (g *Generator) paramReassignmentsDropChanges(root ssa.Value, target *types.Var) bool {
+	p, ok := root.(*ssa.Parameter)
+	if !ok {
+		p = paramOfVar(root.Parent(), target)
+	}
+	if p == nil {
+		return false
+	}
+	return !typeutil.HasGormDBResult(p.Parent().Signature.Results()) || !g.everyCallUsesResult(origin.Declared(p.Parent()))
+}
+
+// paramOfVar returns the parameter of fn whose variable is v, or nil.
+func paramOfVar(fn *ssa.Function, v *types.Var) *ssa.Parameter {
+	if fn == nil || v == nil {
+		return nil
+	}
+	for _, p := range fn.Params {
+		if p.Object() == v {
+			return p
+		}
+	}
+	return nil
 }
 
 // generateImmutableParamFix suggests annotating the enclosing function with

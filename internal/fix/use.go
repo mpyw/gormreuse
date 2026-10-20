@@ -75,6 +75,8 @@ func runOrderedUses(uses []pollution.UsageInfo) []pollution.UsageInfo {
 // useRunIndex returns the index in block of the instruction at pos, the
 // position of a use, or -1 when there is none, as for a use recorded at a
 // closure's call site. Such uses keep their position order.
+//
+//declscope:shared // virtual.go places the reassignments of the fix in their blocks with it
 func useRunIndex(block *ssa.BasicBlock, pos token.Pos) int {
 	return slices.IndexFunc(block.Instrs, func(instr ssa.Instruction) bool { return instr.Pos() == pos })
 }

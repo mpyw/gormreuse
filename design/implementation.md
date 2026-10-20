@@ -2486,6 +2486,22 @@ Fixtures: `testdata/src/converge/phi_chain.go` has 2, 3 and 5 filters on a local
 
 </details>
 
+<details><summary>Uses of a Phi filed under another edge (#373)</summary>
+
+The tracker files a use of a Phi under one of its edges. So the fix of another edge does not list it, and a Session on that edge could make it change a copy, or leave it reusing a value in the next pass:
+
+| Case | Example | Change |
+| --- | --- | --- |
+| A discarded statement on the Phi | `for … { if c { q = q.Where("a") } else { q.Find(&us) }; q.Where("b") }`. The fix of the `Where("a")` gave it a Session, and `q.Where("b")` changed a copy | `reassignMergedChains` reassigns each discarded chain on the root, a Phi that takes it, or an edge of such a Phi (`mergedDiscardedChains`). One it cannot reassign withholds the fix |
+| The same on a parameter's variable | The same loop with `q` a parameter. The parameter got its body Session from the `Where("a")`'s fix (`mergedParamFixes`) | The #312 rule holds for the reassignments of any root held by a parameter's variable (`paramOfVar`), not only for the parameter itself. A mutable `Where` returns the caller's value, so its statements change the caller's value too |
+| A Phi used once by a use that repeats | `for … { q = q.Where("b") }; for i := range 2 { q.Where("i = ?", i).Find(&us) }` | `mergeUsedTwice` counts a use that `cfg.Repeats` runs again |
+| A reassignment that takes the root's place on a Phi's edge | `if c { q.Where("a") } else { q.Find(&us) }; for … { q = q.Where("b") }; for … { q.Find(&us) }` | `mergedReassignmentsNeedingSession` gives a Session to each reassignment that reaches a Phi used twice, other than the one it reads (`mergeReassignmentReachesTwice`). `rootSessionSites` then isolates the Phi's other edges, as for the root |
+| A use that reads the root through a back edge | `for … { q.Where("o"); for … { q.Where("x").Find(&us); if c { q = q.Where("r") } } }`. The reassignment of `q.Where("o")` dominates `q.Where("x")`, which still reads the `Where("r")` of the iteration before | `virtualOriginalReaches` adds the use to the root's uses when a path from the root's definition reaches it without passing a reassignment |
+
+Fixtures: `testdata/src/converge/merged_one_pass.go` holds the local roots, each fixed in one pass. `testdata/src/gormreuse/fix_merged_param.go` holds the parameters, which get no fix. `TestFixMergedParamPreservesQueries` in `e2e/internal/merged_param_test.go` runs `fixsql/before/merged_param.go` against real GORM. `TestFixMergedParamDetectsOldFixes` and `TestFixMergedLaterLoopOnePass` check that the fixes suggested before lose a condition or leak one.
+
+</details>
+
 Limitations:
 
 - The rules follow the CFG of one function, not the run-time order of deferred calls or closures. Those roots get the conservative Sessions above, some of them redundant.
@@ -2545,6 +2561,7 @@ A parameter root has no call to append a Session to. `Generate` in `internal/fix
 - `everyCallUsesResult` checks each call in the analysed functions and the package `init` (#346). Its result, or a `*gorm.DB` element of its tuple, must have a referrer. A go or defer call has none.
 - `canFixParam` already requires `calledOnlyDirectly` for such a function, and the pass must see every file of the package, as for `paramCallersIsolate`. So no call is missed, and both variants agree.
 - A caller may read the result but go on using its argument, as in `r := applyTenant(q); q.Find(&a); r.Find(&b)`. That is not checked: only the result carries the change.
+- The rule holds for the root of any value that the parameter's variable holds, such as a `Where` merged with the parameter in `if admin { q = q.Where("admin") }`. On a mutable parameter the `Where` returns the caller's value itself (#373).
 
 `TestFixHelperResultPreservesQueries` in `e2e/internal/fix_helper_result_test.go` runs the cases of `fixsql/before/helper_result.go` against real GORM: a caller that discards the result and one that reads it. `TestFixHelperResultDetectsReassignment` checks that the fix suggested before drops the discarding caller's tenant filter.
 
