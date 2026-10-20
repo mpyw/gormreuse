@@ -528,6 +528,28 @@ var growthCases = []growthCase{
 		b.WriteString("}\n")
 		return []string{b.String()}
 	}},
+	// Captured var: n stores of immutable values, each followed by a read.
+	// A read tries the stores that reach it until one has a root (#340), so
+	// each one tries them all, as FindAllMutableRoots does in storereads.
+	{name: "storeimmut", limit: growthQuadratic, shape: func(n int) []string {
+		var b strings.Builder
+		b.WriteString("func f(db *gorm.DB, c []bool) {\n\tq := db.Session(nil)\n\t_ = func() { _ = q }\n")
+		for i := range n {
+			fmt.Fprintf(&b, "\tif c[%d] {\n\t\tq = db.Session(nil)\n\t}\n\tq.Find(nil)\n", i)
+		}
+		b.WriteString("\tq = q.Where(\"x\")\n\tq.Find(nil)\n\tq.Find(nil)\n}\n")
+		return []string{b.String()}
+	}},
+	// The same through a field (#340).
+	{name: "fieldimmut", limit: growthQuadratic, shape: func(n int) []string {
+		var b strings.Builder
+		b.WriteString("type S struct{ db *gorm.DB }\n\nfunc f(db *gorm.DB, c []bool) {\n\ts := &S{db: db.Session(nil)}\n")
+		for i := range n {
+			fmt.Fprintf(&b, "\tif c[%d] {\n\t\ts.db = db.Session(nil)\n\t}\n\ts.db.Find(nil)\n", i)
+		}
+		b.WriteString("\ts.db = s.db.Where(\"x\")\n\ts.db.Find(nil)\n\ts.db.Find(nil)\n}\n")
+		return []string{b.String()}
+	}},
 	// n optional filters on a captured query, each followed by a goroutine
 	// that reads it: every read sees the stores before and after it (#303), so
 	// it has up to n roots, as in capturedre.
