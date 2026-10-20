@@ -180,7 +180,11 @@ func TestApplyFixesSeveralEdits(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(filepath.Dir(srcPath), "q.go"), []byte("package p\n\nvar c = \"old\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	_, fixed, err := ApplyFixes(testdata, "p", srcPath, replaceOld)
+	run, err := Analyze(testdata, "p", replaceOld)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, fixed, err := run.ApplyFixes(srcPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -215,7 +219,11 @@ func TestApplyFixesSharedEdit(t *testing.T) {
 		},
 	}
 	testdata, srcPath := writeFixturePackage(t, "package p\n\nvar a int\n\nvar b int\n")
-	_, fixed, err := ApplyFixes(testdata, "p", srcPath, commentEach)
+	run, err := Analyze(testdata, "p", commentEach)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, fixed, err := run.ApplyFixes(srcPath)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -97,17 +97,6 @@ func Analyze(testdata, pkg string, a *analysis.Analyzer) (*Analysis, error) {
 	return &Analysis{results: results}, nil
 }
 
-// ApplyFixes runs analyzer a over pkg (loaded from testdata) and returns
-// srcPath's original bytes together with the content produced by applying every
-// suggested-fix text edit targeting srcPath (see Analysis.ApplyFixes).
-func ApplyFixes(testdata, pkg, srcPath string, a *analysis.Analyzer) (original, fixed []byte, err error) {
-	run, err := Analyze(testdata, pkg, a)
-	if err != nil {
-		return nil, nil, err
-	}
-	return run.ApplyFixes(srcPath)
-}
-
 // ApplyFixes returns srcPath's original bytes together with the content
 // produced by applying every suggested-fix text edit of the run that targets
 // srcPath. Edits are matched to the file by their own position and applied
