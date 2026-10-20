@@ -1098,6 +1098,42 @@ var growthCases = []growthCase{
 		b.WriteString("}\n")
 		return []string{b.String()}
 	}},
+	// h0 gets a Session, and each hi forwards its parameter to h(i+1), also
+	// from a closure: immutable-param inference proves one per round (#349).
+	// The functions are written last first, so the first round proves h0 only.
+	{name: "inferparam", limit: growthLinear, shape: func(n int) []string {
+		var b strings.Builder
+		fmt.Fprintf(&b, "func h%d(db *gorm.DB) {\n\tdb.Find(nil)\n\tdb.Find(nil)\n}\n\n", n)
+		for i := n - 1; i >= 0; i-- {
+			fmt.Fprintf(&b, "func h%d(db *gorm.DB) {\n\th%d(db)\n\tfunc() { h%d(db) }()\n}\n\n", i, i+1, i+1)
+		}
+		b.WriteString("func caller(db *gorm.DB) { h0(db.Session(&gorm.Session{})) }\n")
+		return []string{b.String()}
+	}},
+	// Each wi forwards its callback to w(i+1), and the last to Transaction:
+	// immutable-input inference proves one per step (#349).
+	{name: "inferinput", limit: growthLinear, shape: func(n int) []string {
+		var b strings.Builder
+		fmt.Fprintf(&b, "func w%d(db *gorm.DB, fn func(*gorm.DB) error) error { return db.Transaction(fn) }\n\n", n)
+		for i := n - 1; i >= 0; i-- {
+			fmt.Fprintf(&b, "func w%d(db *gorm.DB, fn func(*gorm.DB) error) error { return w%d(db, fn) }\n\n", i, i+1)
+		}
+		b.WriteString("func caller(db *gorm.DB) error {\n\treturn w0(db, func(tx *gorm.DB) error {\n\t\ttx.Find(nil)\n\t\treturn tx.Find(nil).Error\n\t})\n}\n")
+		return []string{b.String()}
+	}},
+	// Each wi calls its callback with the tx of a closure it hands to w(i+1).
+	// That tx is immutable only once w(i+1) is inferred and the callbacks are
+	// collected again, so each wi takes a collection of its own: quadratic
+	// (#349).
+	{name: "inferinputnest", limit: growthQuadratic, shape: func(n int) []string {
+		var b strings.Builder
+		fmt.Fprintf(&b, "func w%d(db *gorm.DB, fn func(*gorm.DB)) error {\n\treturn db.Transaction(func(tx *gorm.DB) error { fn(tx); return nil })\n}\n\n", n)
+		for i := n - 1; i >= 0; i-- {
+			fmt.Fprintf(&b, "func w%d(db *gorm.DB, fn func(*gorm.DB)) error {\n\treturn w%d(db, func(tx *gorm.DB) { fn(tx) })\n}\n\n", i, i+1)
+		}
+		b.WriteString("func caller(db *gorm.DB) error {\n\treturn w0(db, func(tx *gorm.DB) {\n\t\ttx.Find(nil)\n\t\ttx.Find(nil)\n\t})\n}\n")
+		return []string{b.String()}
+	}},
 	// Discarded conditional chains (virtual roots).
 	{name: "discarded", limit: growthQuadratic, shape: func(n int) []string {
 		var b strings.Builder

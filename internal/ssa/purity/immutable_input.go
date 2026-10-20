@@ -50,30 +50,9 @@ func ValidateImmutableInputs(fn *ssa.Function, set *directive.ImmutableInputSet,
 		return nil
 	}
 
-	// ssa.Function.Params lists the receiver first for methods, while
-	// ImmutableInputCallback.ParamIdx counts from the first non-receiver
-	// parameter, so shift by one when the function has a receiver.
-	hasReceiver := fn.Signature != nil && fn.Signature.Recv() != nil
 	var violations []Violation
 	for _, cb := range callbacks {
-		idx := cb.ParamIdx
-		if hasReceiver {
-			idx++
-		}
-		if idx < 0 || idx >= len(fn.Params) {
-			continue
-		}
-		flow := &immutableInputFlow{
-			set:        set,
-			distrusted: distrusted,
-			rt:         rt,
-			name:       cb.ParamName,
-			param:      fn.Params[idx],
-			derived:    make(map[ssa.Value]bool),
-			funcCache:  make(map[types.Type]bool),
-			gorm:       NewValidator(fn, nil, nil, nil, callsite.FuncVars{}),
-		}
-		violations = append(violations, flow.check()...)
+		violations = append(violations, checkImmutableInputCallback(fn, cb, set, rt, distrusted)...)
 	}
 
 	// A call that passes the callback twice reports at the same position.
@@ -85,6 +64,41 @@ func ValidateImmutableInputs(fn *ssa.Function, set *directive.ImmutableInputSet,
 		seen[viol] = true
 		return false
 	})
+}
+
+// ProvesImmutableInput reports whether fn keeps the immutable-input contract
+// for cb without declaring it: every call of cb that fn makes gets immutable
+// values, and cb does not escape (#349). The callbacks of fn in set are not
+// read, so a function that hands cb to itself is not proved by assuming what
+// is being proved.
+func ProvesImmutableInput(fn *ssa.Function, cb directive.ImmutableInputCallback, set *directive.ImmutableInputSet, rt *tracer.RootTracer) bool {
+	return len(checkImmutableInputCallback(fn, cb, set, rt, nil)) == 0
+}
+
+// checkImmutableInputCallback follows the callback parameter cb of fn and
+// returns the violations of the contract.
+func checkImmutableInputCallback(fn *ssa.Function, cb directive.ImmutableInputCallback, set *directive.ImmutableInputSet, rt *tracer.RootTracer, distrusted func(*ssa.Function) bool) []Violation {
+	// ssa.Function.Params lists the receiver first for methods, while
+	// ImmutableInputCallback.ParamIdx counts from the first non-receiver
+	// parameter, so shift by one when the function has a receiver.
+	idx := cb.ParamIdx
+	if fn.Signature != nil && fn.Signature.Recv() != nil {
+		idx++
+	}
+	if idx < 0 || idx >= len(fn.Params) {
+		return nil
+	}
+	flow := &immutableInputFlow{
+		set:        set,
+		distrusted: distrusted,
+		rt:         rt,
+		name:       cb.ParamName,
+		param:      fn.Params[idx],
+		derived:    make(map[ssa.Value]bool),
+		funcCache:  make(map[types.Type]bool),
+		gorm:       NewValidator(fn, nil, nil, nil, callsite.FuncVars{}),
+	}
+	return flow.check()
 }
 
 // immutableInputFlow follows one immutable-input callback parameter through

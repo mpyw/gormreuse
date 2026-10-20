@@ -326,6 +326,8 @@ func writeFile(t *testing.T, path, content string) {
 
 // ignoreForm, pureForm and inputForm are the reproductions of issue #156. Each
 // has one directive comment, written as %s, above code that reuses a *gorm.DB.
+// WithFreshDB is exported, so its immutable-input(cb) is not inferred
+// (#349) when the directive is not read.
 const (
 	ignoreForm = `package p
 
@@ -359,13 +361,13 @@ func F(db *gorm.DB) {
 import "gorm.io/gorm"
 
 %s
-func withFreshDB(cb func(*gorm.DB) error, db *gorm.DB) error {
+func WithFreshDB(cb func(*gorm.DB) error, db *gorm.DB) error {
 	return cb(db.Session(&gorm.Session{}))
 }
 
 func F(db *gorm.DB) {
 	var n int64
-	_ = withFreshDB(func(q *gorm.DB) error {
+	_ = WithFreshDB(func(q *gorm.DB) error {
 		q.Find(nil)
 		q.Count(&n)
 		return nil

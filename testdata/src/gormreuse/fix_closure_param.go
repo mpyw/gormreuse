@@ -10,14 +10,15 @@ import (
 // immutable-param. TestFixesConverge re-lints the golden. The closures that
 // get no fix are in fix_param_root.go.
 
-// fixClosureWithTx is a Transaction wrapper, the most common shape in gorm's
-// own tests. Its callback's parameter is a mutable root.
-func fixClosureWithTx(db *gorm.DB, fn func(tx *gorm.DB) error) error {
+// FixClosureWithTx is a Transaction wrapper, the most common shape in gorm's
+// own tests. It is exported, so its immutable-input(fn) is not inferred
+// (#349), and its callback's parameter is a mutable root.
+func FixClosureWithTx(db *gorm.DB, fn func(tx *gorm.DB) error) error {
 	return db.Transaction(fn)
 }
 
 func fixClosureTxWrapper(db *gorm.DB) error {
-	return fixClosureWithTx(db, func(tx *gorm.DB) error {
+	return FixClosureWithTx(db, func(tx *gorm.DB) error {
 		tx.Where("a").Find(nil)
 		tx.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 		return nil
@@ -90,8 +91,8 @@ func fixClosureMerged(db *gorm.DB, name string) {
 
 // fixClosureNested is a closure in a closure.
 func fixClosureNested(db *gorm.DB) error {
-	return fixClosureWithTx(db, func(outer *gorm.DB) error {
-		return fixClosureWithTx(outer.Session(&gorm.Session{}), func(tx *gorm.DB) error {
+	return FixClosureWithTx(db, func(outer *gorm.DB) error {
+		return FixClosureWithTx(outer.Session(&gorm.Session{}), func(tx *gorm.DB) error {
 			tx.Where("a").Find(nil)
 			tx.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 			return nil

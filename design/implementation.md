@@ -166,6 +166,7 @@ gormreuse/
 │   ├── cgo.go                   # IsCgoOutput: the files of cmd/cgo's output, whose fixes are dropped (#346)
 │   ├── pure.go                  # validatePureFuncs: the pure functions' contracts, to a fixed point
 │   ├── immutable.go             # Inferring and checking immutable-return, and the need for immutable-param and its body rule
+│   ├── infer.go                 # Inferring immutable-param and immutable-input (#349)
 │   ├── fact.go                  # exportFacts: the facts importing packages read
 │   ├── distrust.go              # distrustContracts: contracts that rely on a broken one stay out of the facts (#314)
 │   ├── guard.go                 # panicGuard: one function's panic does not abort the package
@@ -257,7 +258,7 @@ The `plugin` package registers `Analyzer` with golangci-lint's module plugin sys
 | --- | --- |
 | 0 | Import facts, infer immutable-return functions (#261) |
 | 1 | Validate pure functions to a fixed point (`purity.Validator`) |
-| 2 | Collect Scopes and immutable callbacks (`callback` package) |
+| 2 | Collect Scopes and immutable callbacks (`callback` package), infer immutable-input and immutable-param functions (#349) |
 | 3 | Check immutable-input and immutable-return bodies |
 | 4 | Scopes Session warning (`scopeswarn`) |
 | 5 | For each function: detect violations (`ssa.Analyzer`: track uses, then `DetectViolations` by CFG reachability), add fixes |
@@ -277,7 +278,8 @@ The `plugin` package registers `Analyzer` with golangci-lint's module plugin sys
 │  Every report goes through directive.Ignores. Package-level passes:     │
 │    0. Import facts, infer immutable-return functions (#261)             │
 │    1. Validate pure functions to a fixed point (purity.Validator)       │
-│    2. Collect Scopes and immutable callbacks (callback package)         │
+│    2. Collect Scopes and immutable callbacks, infer immutable-input     │
+│       and immutable-param functions (#349)                              │
 │    3. Check immutable-input and immutable-return bodies                 │
 │    4. Scopes Session warning (scopeswarn)                               │
 │    5. For each function: detect violations (ssa.Analyzer), add fixes    │
@@ -313,7 +315,7 @@ Shared state per pass:
 | Object | Made in | Shared by |
 | --- | --- | --- |
 | `cfg.Analyzer` (#299) | `run.go`, once per pass | The checker (the tracker and handler context of every function) and `fix.Generator`. The tracer keeps its own for `closureRunsRepeatedly` |
-| `RootTracer` (#325) | `run.go`, once for the reuse analysis of every function | Every function of the pass. `computeNeedsImmutableParam` makes one for its counterfactual analyses |
+| `RootTracer` (#325) | `run.go`, once for the reuse analysis of every function | Every function of the pass. `computeNeedsImmutableParam` makes one for its counterfactual analyses. `inferImmutableInputs` and `inferImmutableParams` make one per step, since their sets grow (#349) |
 
 An `Analyzer` is not safe for concurrent use. A pass runs on one goroutine.
 
@@ -1993,6 +1995,56 @@ The arguments the callback receives:
 
 </details>
 
+### Inferred immutable-param and immutable-input
+
+Helpers that only ever receive fresh handles were the main false positives left in real code after #308 (#349). Two inferences in `internal/infer.go` remove them. Both run after the immutable callbacks are collected and before any pass reads the parameters, so every later pass sees them through `DirectiveFuncSet.Contains` and `ImmutableInputSet.Callbacks`.
+
+| | `inferImmutableInputs` | `inferImmutableParams` |
+| --- | --- | --- |
+| Adds | `ImmutableInputSet.Infer` for one callback parameter | `DirectiveFuncSet.Infer` on the immutable-param set |
+| Candidates | A function or method with an unexported name, or a closure, with no declared `immutable-input`. The callback has a `*gorm.DB` parameter, is not variadic, and the body uses it | A function or method with an unexported name and a `*gorm.DB` parameter, without the directive, that does not change a parameter in place (`inferChangesParamInPlace`) |
+| Proof | `purity.ProvesImmutableInput`: the body check of the directive, without the function's own callbacks in the set | `inferCallersPassImmutable`: for every call, `handler.BreaksImmutableParam` holds for no `*gorm.DB` parameter, as the caller-side check asks |
+| Callers | Not needed: the promise is about the body | Every reference is the function of a call (instances included). A bound or thunk wrapper, a store or an argument turns it off. For a method, no interface call in the package has its name. The package initializer counts. At least one call |
+
+<details><summary>The fixed points, decisions and limitations</summary>
+
+**Least fixed points.** A larger set only proves more, so each worklist ends at the least fixed point, whatever the order of `funcs`.
+
+- `inferImmutableInputs` proves the candidates with one tracer. A proof that fails only on a call to a candidate waits on it: once that candidate is added, the candidates that call it (`dependents`) are proved again. A callback of an inferred function is immutable too. So when a pass added something, the immutable callbacks are collected again, with `CollectImmutableCallbacks`, `CollectImmutableInputCallbacks` and `DropReachableCallbacks` as in `RunSSA`, and the unproved candidates are proved again with a new tracer. The callbacks collected last are the ones every later pass uses.
+- `inferImmutableParams` proves the candidates in rounds. A tracer remembers what it traced with the set it had, so each round has a new one. After a round, only the candidates that a newly inferred function calls, also from its closures, are proved again. A stale answer within a round is only ever "mutable", and the candidate is proved again in the next round.
+- A function is never proved by assuming itself. So `rec(tx, n-1)` inside `rec`, or a wrapper that hands `cb` to itself, is not inferred, as for [inferred immutable-return](#inferred-immutable-return).
+
+`TestAllocationGrowth` holds `inferparam` (a chain of forwarding helpers, written last first) and `inferinput` (a chain of forwarding wrappers) to linear growth. `inferinputnest`, where each wrapper calls its callback from the callback it hands to the next one, takes one collection per wrapper, and is held to quadratic growth.
+
+Decisions:
+
+- **Exported functions are never inferred.** Another package may call an exported `immutable-param` function, and its calls are not seen. An inferred function exports no fact, so another package treats it as unmarked.
+- **What detection reads as immutable, inference accepts.** The proof of an argument is the caller-side check of the directive, so a field read through a parameter or a package-level variable that the function only reads counts, as it does in detection.
+- **A discarded chain on the parameter turns `immutable-param` off.** `tx.Where("t = 1"); tx.Find(&a)` relies on changing the caller's value in place. On an immutable value the `Where` does nothing, so the function would run without its filter. `inferChangesParamInPlace` follows a chain from a parameter, or a free variable bound to one, through single uses, and refuses one that is discarded without a finisher.
+- **Test variants.** The variant of a package without its test files cannot see a caller in a test file, so it may infer a function that the test variant does not. The diagnostics of the two variants are reported together, and the test variant sees every caller, so the reuse is still reported. The [parameter-root fix](#parameter-root-fix) keeps the stricter rule of `reportSeesWholePackage`, so the fixes of the two variants agree. `TestInferredParamVariants` checks each variant on `testdata/src/paramvariants`.
+- **No caller check, no redundancy report.** `computeNeedsImmutableParam` and `reportRedundantImmutableParam` skip an inferred function: every call passes an immutable value, and there is no directive to report. The body check of `immutable-input` skips an inferred function too, since a report would say "declared".
+- **A callback the body never uses is not inferred.** It would hand the callback nothing, and the inference would only change what its callers' callbacks mean.
+- **A panic keeps what was proved.** Each inferred function was proved before the panic. After a panic in `inferImmutableInputs` the callbacks are collected again, so the functions inferred so far count.
+
+Limitations:
+
+- **One direction between the two.** `inferImmutableInputs` runs first. A callback called with the parameter of an inferred `immutable-param` function is not proved by it.
+- **Declared `immutable-param` parameters do not prove a call.** A declared function that does not branch its parameter is redundant and its callers are not checked, so its parameter may hold a mid-chain value.
+- **The parameter-root fix is reachable less often.** Its directive case needs every caller to pass an isolated value, so such a function is now inferred and not reported, unless it changes its parameter in place.
+
+Measured with the command (#349), before and after:
+
+| Module | Before | After | Removed reports |
+| --- | --- | --- | --- |
+| gorm root | 69 | 65 | 4, in the callbacks of gorm's callMethod helper, which calls them with a `Session(&gorm.Session{NewDB: true})` result |
+| gorm `tests` | 14 | 7 | 7, in the callbacks of a local transaction wrapper in a nested-transaction test |
+| new-api | 31 | 19 | 7 on the parameter of a test helper that every caller passes `gorm.Open`'s result. 5 on helpers that get a `Transaction` `tx` or a package-level variable assigned `gorm.Open`'s result |
+| gin-vue-admin | 32 | 29 | 3 in two import helpers of the export template service, whose only caller passes a `Transaction` `tx` |
+
+Each removed report branched a `clone > 0` handle. No report was added.
+
+</details>
+
 ### Directives across packages
 
 `exportFacts` in `internal/fact.go` exports a `facts.Func` object fact for every exported function and method with a directive or a finisher-only parameter, after every pass has run (#195). A caller reads it through `facts.Table`, which `RunSSA` plugs into each consumer. A function of another package has no syntax in the SSA program, so a consumer asks the table only for a function without syntax.
@@ -2345,7 +2397,7 @@ A parameter root has no call to append a Session to. `Generate` in `internal/fix
 | Check | Fix |
 | --- | --- |
 | `canFixParam` fails: a Scopes/Preload callback, a closure with a `*gorm.DB` result, or a function declaration with a `*gorm.DB` result that `calledOnlyDirectly` rejects | None |
-| `paramCallersIsolate` holds. The function is a declaration. The pass sees every file of the package (`reportSeesWholePackage`). `calledOnlyDirectly` holds. `handler.BreaksImmutableParam` holds for no argument of any call to the function in the analysed functions | `//gormreuse:immutable-param` |
+| `paramCallersIsolate` holds. The function is a declaration. The pass sees every file of the package (`reportSeesWholePackage`). `calledOnlyDirectly` holds. `handler.BreaksImmutableParam` holds for no argument of any call to the function in the analysed functions | `//gormreuse:immutable-param`. Such a function is [inferred](#inferred-immutable-param-and-immutable-input) and not reported, unless it changes its parameter in place (#349) |
 | Otherwise | `tx = tx.Session(&gorm.Session{})` before the body's first statement (`paramSessionSite`), then the rest of the local-root fix. It is written by `sessionEdits`, with the same gorm name resolution and import as every other Session |
 
 <details><summary>Callers, test variants, merged values, discarded statements, Scopes callbacks and closures</summary>

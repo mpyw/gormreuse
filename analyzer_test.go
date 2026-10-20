@@ -26,6 +26,7 @@ var wantSkipped = map[string]string{
 	"linedirectivedep": "a dependency of the linedirective fixtures, with no diagnostics of its own",
 	"panicguard":       "TestPanicInjection checks the diagnostics of each injected panic",
 	"ignoretests":      "a want comment cannot say which variant reports; TestIgnoreFixWithTestFiles checks each variant",
+	"paramvariants":    "a want comment cannot say which variant reports; TestInferredParamVariants checks each variant",
 }
 
 // TestAnalyzer checks the `// want` comments of every package directory of
@@ -128,10 +129,43 @@ func TestIgnoreFixWithTestFiles(t *testing.T) {
 	}
 }
 
+// TestInferredParamVariants checks that a helper whose only mid-chain caller
+// is in a test file is inferred immutable-param by the variant without the
+// test file, and reported by the test variant, which sees that caller
+// (#349). A want comment cannot say which variant reports, so the test runs
+// without them.
+func TestInferredParamVariants(t *testing.T) {
+	t.Parallel()
+	results := analysistest.Run(goldentest.NoopT{}, analysistest.TestData(), gormreuse.Analyzer, "paramvariants")
+	got := map[string][]string{} // By variant: "test" or "base"
+	for _, result := range results {
+		if result.Err != nil {
+			t.Fatalf("analyze: %v", result.Err)
+		}
+		variant := "base"
+		for _, f := range result.Pass.Files {
+			if strings.HasSuffix(result.Pass.Fset.Position(f.Pos()).Filename, "_test.go") {
+				variant = "test"
+			}
+		}
+		for _, diag := range result.Diagnostics {
+			at := result.Pass.Fset.Position(diag.Pos)
+			got[variant] = append(got[variant], fmt.Sprintf("%s:%d", filepath.Base(at.Filename), at.Line))
+		}
+	}
+	want := map[string][]string{"test": {"code.go:13"}}
+	for _, variant := range []string{"base", "test"} {
+		if !slices.Equal(got[variant], want[variant]) {
+			t.Errorf("%s variant: diagnostics = %q, want %q", variant, got[variant], want[variant])
+		}
+	}
+}
+
 // TestParamFixWithTestFiles checks that a parameter root declared outside the
 // test files of a package with test files gets the body Session in both
 // variants of the package, so their fixes agree, while one declared in a test
-// file may get immutable-param (#245). A discarded statement on a parameter
+// file may be inferred immutable-param, and is then not reported (#245,
+// #349). A discarded statement on a parameter
 // whose function returns a *gorm.DB gets no fix outside the test files: the
 // variant without them cannot see whether every caller reads the result
 // (#312).
@@ -151,8 +185,6 @@ func TestParamFixWithTestFiles(t *testing.T) {
 			}
 			got, want := text.String(), "tx = tx.Session(&gorm.Session{})"
 			switch {
-			case name == "code_test.go":
-				want = "//gormreuse:immutable-param"
 			case inParamTestsTenant(result.Pass.Files, diag.Pos):
 				if got != "" {
 					t.Errorf("%s: %s: fix inserts %q, want no fix", name, diag.Message, got)
@@ -165,9 +197,9 @@ func TestParamFixWithTestFiles(t *testing.T) {
 		}
 	}
 	// The variant without the test files and the test variant both report
-	// code.go.
-	if seen["code.go"] != 4 || seen["code_test.go"] != 1 {
-		t.Errorf("diagnostics by file = %v, want 4 in code.go and 1 in code_test.go", seen)
+	// code.go. The helper in code_test.go is inferred immutable-param.
+	if seen["code.go"] != 4 || seen["code_test.go"] != 0 {
+		t.Errorf("diagnostics by file = %v, want 4 in code.go and none in code_test.go", seen)
 	}
 }
 

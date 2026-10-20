@@ -46,3 +46,25 @@ func useEach(db *gorm.DB) {
 		tx.Where("b").Find(nil)
 	})
 }
+
+// inTx is inferred immutable-input(fn) (#349).
+func inTx(db *gorm.DB, fn func(*gorm.DB) error) error {
+	return db.Transaction(fn)
+}
+
+func useInTx(db *gorm.DB) error {
+	return inTx(db, func(tx *gorm.DB) error {
+		tx.Where("a").Find(nil)
+		return tx.Where("b").Find(nil).Error
+	})
+}
+
+// isolated is inferred immutable-param (#349).
+func isolated(tx *gorm.DB) {
+	tx.Where("a").Find(nil)
+	tx.Where("b").Find(nil)
+}
+
+func useIsolated(db *gorm.DB) {
+	isolated(db.Session(&gorm.Session{}))
+}

@@ -1,0 +1,291 @@
+package internal
+
+import (
+	"gorm.io/gorm"
+)
+
+// =============================================================================
+// Inferred immutable-param and immutable-input (#349)
+//
+// An unexported function that is only called directly, and whose every call
+// passes an immutable *gorm.DB, is treated as if it had
+// //gormreuse:immutable-param. An immutable value is a Session-family or
+// gorm.Open result, an immutable-return result, a Transaction callback's tx,
+// or the parameter of another inferred function.
+//
+// An unexported function whose body hands a callback only immutable values
+// is treated as if it had //gormreuse:immutable-input(cb): it forwards cb to
+// Transaction, FindInBatches or another immutable-input function, or calls it
+// with such a value.
+// =============================================================================
+
+// ===== immutable-param: SHOULD NOT REPORT =====
+
+// ipSessionOnly gets a Session result at every call.
+func ipSessionOnly(tx *gorm.DB) {
+	tx.Where("a").Find(nil)
+	tx.Where("b").Find(nil) // OK: every caller passes an immutable value
+}
+
+func ipCallsSessionOnly(db *gorm.DB) {
+	ipSessionOnly(db.Session(&gorm.Session{}))
+	ipSessionOnly(db.WithContext(nil))
+}
+
+type ipService struct{}
+
+// importBySQL is the gin-vue-admin shape: an unexported method whose only
+// caller passes a Transaction callback's tx.
+func (ipService) importBySQL(tx *gorm.DB, sql string) error {
+	if err := tx.Exec(sql).Error; err != nil {
+		return err
+	}
+	return tx.Exec(sql).Error // OK: the only caller passes a Transaction tx
+}
+
+func (s ipService) importAll(db *gorm.DB, sql string) error {
+	return db.Transaction(func(tx *gorm.DB) error {
+		return s.importBySQL(tx, sql)
+	})
+}
+
+// ipOpened is the new-api test shape: every caller passes gorm.Open's
+// result.
+func ipOpened(db *gorm.DB) {
+	db.Where("a").Find(nil)
+	db.Where("b").Find(nil) // OK: gorm.Open returns an immutable value
+}
+
+func ipCallsOpened() {
+	db, err := gorm.Open(nil)
+	if err != nil {
+		return
+	}
+	ipOpened(db)
+}
+
+// ipFresh is inferred immutable-return, so its result is immutable.
+func ipFresh(db *gorm.DB) *gorm.DB { return db.Session(&gorm.Session{}) }
+
+func ipReturnResult(tx *gorm.DB) {
+	tx.Where("a").Find(nil)
+	tx.Where("b").Find(nil) // OK: the caller passes an immutable-return result
+}
+
+func ipCallsReturnResult(db *gorm.DB) {
+	ipReturnResult(ipFresh(db))
+}
+
+// ipOuter forwards its parameter, and is inferred first. ipInner is then
+// inferred too, also through a closure of ipOuter.
+func ipOuter(tx *gorm.DB) {
+	ipInner(tx)
+	func() { ipInner(tx) }()
+}
+
+func ipInner(tx *gorm.DB) {
+	tx.Where("a").Find(nil)
+	tx.Where("b").Find(nil) // OK: ipOuter's parameter is inferred immutable
+}
+
+func ipCallsOuter(db *gorm.DB) {
+	ipOuter(db.Session(&gorm.Session{}))
+	defer ipOuter(db.Session(&gorm.Session{}))
+}
+
+// ===== immutable-param: SHOULD REPORT =====
+
+// ipOneMutableCaller has a caller that passes a mid-chain value.
+func ipOneMutableCaller(tx *gorm.DB) {
+	tx.Where("a").Find(nil)
+	tx.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+func ipCallsOneMutable(db *gorm.DB) {
+	ipOneMutableCaller(db.Session(&gorm.Session{}))
+	ipOneMutableCaller(db.Where("x"))
+}
+
+// IPExported can be called from another package, which is not seen.
+func IPExported(tx *gorm.DB) {
+	tx.Where("a").Find(nil)
+	tx.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+func ipCallsExported(db *gorm.DB) {
+	IPExported(db.Session(&gorm.Session{}))
+}
+
+// ipFuncValue is used as a value, so its callers are not known.
+func ipFuncValue(tx *gorm.DB) {
+	tx.Where("a").Find(nil)
+	tx.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+func ipCallsFuncValue(db *gorm.DB) {
+	ipFuncValue(db.Session(&gorm.Session{}))
+	f := ipFuncValue
+	f(db.Where("x"))
+}
+
+// ipNoCaller has no caller to prove anything.
+func ipNoCaller(tx *gorm.DB) {
+	tx.Where("a").Find(nil)
+	tx.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// ipRecursive passes its own parameter to itself. A least fixed point does
+// not assume what it proves, so it is not inferred.
+func ipRecursive(tx *gorm.DB, n int) {
+	tx.Where("a").Find(nil)
+	tx.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	if n > 0 {
+		ipRecursive(tx, n-1) // want `\*gorm\.DB reused: second branch from mutable root`
+	}
+}
+
+func ipCallsRecursive(db *gorm.DB) {
+	ipRecursive(db.Session(&gorm.Session{}), 3)
+}
+
+// ipInPlace changes its parameter in place. On an immutable value the change
+// is lost, so the function is not inferred.
+func ipInPlace(tx *gorm.DB) {
+	tx.Where("t = 1")
+	tx.Find(nil)  // want `\*gorm\.DB reused: second branch from mutable root`
+	tx.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+func ipCallsInPlace(db *gorm.DB) {
+	ipInPlace(db.Session(&gorm.Session{}))
+}
+
+// ipInit is called from a package-level initializer with a mid-chain value.
+func ipInit(tx *gorm.DB) int {
+	tx.Where("a").Find(nil)
+	tx.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	return 0
+}
+
+var ipDB *gorm.DB
+
+var _ = ipInit(ipDB.Where("x"))
+
+func ipCallsInit(db *gorm.DB) {
+	ipInit(db.Session(&gorm.Session{}))
+}
+
+type ipRunner interface{ run(tx *gorm.DB) }
+
+type ipImpl struct{}
+
+// run may be called through ipRunner, whose calls are not seen.
+func (ipImpl) run(tx *gorm.DB) {
+	tx.Where("a").Find(nil)
+	tx.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+func ipCallsRun(db *gorm.DB, r ipRunner) {
+	ipImpl{}.run(db.Session(&gorm.Session{}))
+	r.run(db.Where("x"))
+}
+
+// ===== immutable-input: SHOULD NOT REPORT =====
+
+// iiWithTx is the gorm tests shape: a wrapper that forwards its callback to
+// Transaction.
+func iiWithTx(db *gorm.DB, fn func(tx *gorm.DB) error) error {
+	return db.Transaction(fn)
+}
+
+func iiCallsWithTx(db *gorm.DB) error {
+	return iiWithTx(db, func(tx *gorm.DB) error {
+		tx.Where("a").Find(nil)
+		tx.Where("b").Find(nil) // OK: Transaction hands the callback a fresh tx
+		return nil
+	})
+}
+
+// iiCallInTx calls its callback with a Transaction callback's tx.
+func iiCallInTx(db *gorm.DB, fn func(tx *gorm.DB)) error {
+	return db.Transaction(func(tx *gorm.DB) error {
+		fn(tx)
+		return nil
+	})
+}
+
+// iiForward hands its callback to another inferred function.
+func iiForward(db *gorm.DB, fn func(tx *gorm.DB)) error {
+	return iiCallInTx(db, fn)
+}
+
+// iiNested calls its callback with the tx of a callback it hands to an
+// inferred function. That tx is immutable only once iiCallInTx is inferred.
+func iiNested(db *gorm.DB, fn func(tx *gorm.DB)) error {
+	return iiCallInTx(db, func(tx *gorm.DB) { fn(tx) })
+}
+
+func iiCallsInferred(db1, db2, db3 *gorm.DB) {
+	_ = iiCallInTx(db1, func(tx *gorm.DB) {
+		tx.Where("a").Find(nil)
+		tx.Where("b").Find(nil) // OK
+	})
+	_ = iiForward(db2, func(tx *gorm.DB) {
+		tx.Where("a").Find(nil)
+		tx.Where("b").Find(nil) // OK
+	})
+	_ = iiNested(db3, func(tx *gorm.DB) {
+		tx.Where("a").Find(nil)
+		tx.Where("b").Find(nil) // OK
+	})
+}
+
+// iiLocalWrapper is the gorm tests shape: a wrapper held in a local variable,
+// which calls its callback with a Transaction callback's tx.
+func iiLocalWrapper(db *gorm.DB) error {
+	transaction := func(db *gorm.DB, callback func(tx *gorm.DB) error) error {
+		return db.Transaction(func(tx *gorm.DB) error { return callback(tx) })
+	}
+	return transaction(db, func(tx *gorm.DB) error {
+		tx.Create(nil)
+		return tx.First(nil).Error // OK: the wrapper hands its callback a fresh tx
+	})
+}
+
+// ===== immutable-input: SHOULD REPORT =====
+
+// iiMutable hands its callback a mid-chain value.
+func iiMutable(db *gorm.DB, fn func(tx *gorm.DB)) {
+	fn(db.Where("x"))
+}
+
+// iiSelf hands its callback to itself. A least fixed point does not assume
+// what it proves, so it is not inferred.
+func iiSelf(db *gorm.DB, fn func(tx *gorm.DB), n int) {
+	if n > 0 {
+		iiSelf(db, fn, n-1)
+		return
+	}
+	fn(db.Session(&gorm.Session{}))
+}
+
+// IIExported can be called from another package.
+func IIExported(db *gorm.DB, fn func(tx *gorm.DB) error) error {
+	return db.Transaction(fn)
+}
+
+func iiCallsNotInferred(db1, db2, db3 *gorm.DB) {
+	iiMutable(db1, func(tx *gorm.DB) {
+		tx.Where("a").Find(nil)
+		tx.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	})
+	iiSelf(db2, func(tx *gorm.DB) {
+		tx.Where("a").Find(nil)
+		tx.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	}, 1)
+	_ = IIExported(db3, func(tx *gorm.DB) error {
+		tx.Where("a").Find(nil)
+		tx.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+		return nil
+	})
+}

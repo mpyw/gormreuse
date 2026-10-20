@@ -1,0 +1,18 @@
+// Package paramvariants has a test file that passes a mid-chain value to a
+// helper declared here. The variant of the package without the test file
+// sees only the isolated value passed here, so it infers immutable-param for
+// the helper. The test variant sees both calls, and reports the reuse
+// (#349). TestInferredParamVariants checks each variant.
+package paramvariants
+
+import "gorm.io/gorm"
+
+// helper gets an isolated value here and a mid-chain one in the test file.
+func helper(tx *gorm.DB) {
+	tx.Where("a").Find(nil)
+	tx.Where("b").Find(nil)
+}
+
+func code(db *gorm.DB) {
+	helper(db.Session(&gorm.Session{}))
+}
