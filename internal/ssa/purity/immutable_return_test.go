@@ -15,6 +15,7 @@ import (
 	"golang.org/x/tools/go/ssa/ssautil"
 
 	"github.com/mpyw/gormreuse/internal/directive"
+	"github.com/mpyw/gormreuse/internal/ssa/callsite"
 	"github.com/mpyw/gormreuse/internal/ssa/purity"
 	"github.com/mpyw/gormreuse/internal/ssa/tracer"
 )
@@ -40,7 +41,7 @@ func TestInferImmutableReturns(t *testing.T) {
 		"inferredBegin", "inferredBranches", "inferredDebug", "inferredEither", "inferredInner", "inferredMiddle",
 		"inferredOuter", "inferredSessionAfterChain", "openTestConnection", "setupDB", "viaBroken", "viaDeclared",
 	}
-	builtins := tracer.NewRootTracer(nil, nil, nil, nil, nil, nil, nil)
+	builtins := tracer.NewRootTracer(nil, nil, nil, nil, nil, nil, callsite.FuncVars{})
 	for i := range candidates {
 		// Every rotation, forwards and backwards.
 		order := append(slices.Clone(candidates[i:]), candidates[:i]...)
@@ -133,7 +134,7 @@ func immutableReturnInferenceAllocs(t *testing.T, src string) float64 {
 	// Callers first, as in the shape that grew exponentially.
 	slices.SortFunc(candidates, func(a, b *ssa.Function) int { return cmp.Compare(a.Pos(), b.Pos()) })
 	declared := directive.NewImmutableReturnFuncSet(nil, nil)
-	builtins := tracer.NewRootTracer(nil, nil, nil, nil, nil, nil, nil)
+	builtins := tracer.NewRootTracer(nil, nil, nil, nil, nil, nil, callsite.FuncVars{})
 	if got, want := len(purity.InferImmutableReturns(candidates, declared.Contains, builtins)), len(candidates); got != want {
 		t.Fatalf("inferred %d functions, want %d", got, want)
 	}

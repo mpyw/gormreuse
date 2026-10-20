@@ -1,10 +1,9 @@
 package tracer
 
 import (
-	"slices"
-
 	"golang.org/x/tools/go/ssa"
 
+	"github.com/mpyw/gormreuse/internal/ssa/callsite"
 	"github.com/mpyw/gormreuse/internal/ssa/cfg"
 )
 
@@ -24,50 +23,8 @@ import (
 //
 //declscope:shared // root.go's traceNonCall and tracePointerLoad send captured variables here
 func (t *RootTracer) traceFreeVar(fv *ssa.FreeVar, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) ssa.Value {
-	if binding := FreeVarBinding(fv); binding != nil {
+	if binding := callsite.FreeVarBinding(fv); binding != nil {
 		return t.trace(binding, visited, loopInfo)
-	}
-	return nil
-}
-
-// FreeVarBinding resolves the value captured by fv: it locates the MakeClosure
-// that creates fv's parent closure and returns the binding at fv's index in the
-// captured-variable list. Returns nil if the closure or binding can't be found.
-// Shared by traceFreeVar (single root), traceAllFreeVar (all roots), the Scopes
-// callback resolver, and scopeswarn.
-func FreeVarBinding(fv *ssa.FreeVar) ssa.Value {
-	fn := fv.Parent()
-	if fn == nil {
-		return nil
-	}
-
-	// Find the index of this FreeVar in the function's FreeVars list
-	idx := slices.Index(fn.FreeVars, fv)
-	if idx < 0 {
-		return nil
-	}
-
-	if mc := freeVarMakeClosure(fn); mc != nil && idx < len(mc.Bindings) {
-		return mc.Bindings[idx]
-	}
-	return nil
-}
-
-// freeVarMakeClosure returns the MakeClosure that creates fn's closure in its
-// enclosing function, or nil when fn is not a closure.
-//
-//declscope:shared // store.go finds the calls of the closure that reads a captured variable with it
-func freeVarMakeClosure(fn *ssa.Function) *ssa.MakeClosure {
-	parent := fn.Parent()
-	if parent == nil {
-		return nil
-	}
-	for _, block := range parent.Blocks {
-		for _, instr := range block.Instrs {
-			if mc, ok := instr.(*ssa.MakeClosure); ok && mc.Fn == ssa.Value(fn) {
-				return mc
-			}
-		}
 	}
 	return nil
 }
@@ -79,7 +36,7 @@ func freeVarMakeClosure(fn *ssa.Function) *ssa.MakeClosure {
 //
 //declscope:shared // root.go's tracePointerLoad sends reads of captured variables here
 func (t *RootTracer) traceFreeVarLoad(fv *ssa.FreeVar, load ssa.Instruction, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) ssa.Value {
-	if alloc, ok := FreeVarBinding(fv).(*ssa.Alloc); ok {
+	if alloc, ok := callsite.FreeVarBinding(fv).(*ssa.Alloc); ok {
 		return t.traceAllocStore(alloc, load, visited, loopInfo)
 	}
 	return t.traceFreeVar(fv, visited, loopInfo)
@@ -89,7 +46,7 @@ func (t *RootTracer) traceFreeVarLoad(fv *ssa.FreeVar, load ssa.Instruction, vis
 //
 //declscope:shared // root.go's traceAllPointerLoads sends reads of captured variables here
 func (t *RootTracer) traceAllFreeVarLoads(fv *ssa.FreeVar, load ssa.Instruction, search *allRootsSearch, loopInfo *cfg.LoopInfo) []ssa.Value {
-	if alloc, ok := FreeVarBinding(fv).(*ssa.Alloc); ok {
+	if alloc, ok := callsite.FreeVarBinding(fv).(*ssa.Alloc); ok {
 		return t.traceAllAllocStores(alloc, load, search, loopInfo)
 	}
 	return t.traceAllFreeVar(fv, search, loopInfo)
@@ -112,7 +69,7 @@ func (t *RootTracer) traceAllFreeVarLoads(fv *ssa.FreeVar, load ssa.Instruction,
 //
 //declscope:shared // root.go's traceAll sends captured variables here
 func (t *RootTracer) traceAllFreeVar(fv *ssa.FreeVar, search *allRootsSearch, loopInfo *cfg.LoopInfo) []ssa.Value {
-	if binding := FreeVarBinding(fv); binding != nil {
+	if binding := callsite.FreeVarBinding(fv); binding != nil {
 		return t.traceAll(binding, search, loopInfo)
 	}
 	return nil

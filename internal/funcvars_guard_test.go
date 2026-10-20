@@ -12,7 +12,7 @@ import (
 
 // TestNoSiteWithoutFuncVarsByAccident keeps every call-site read resolving
 // calls through package-level function variables (#183, #293). It fails on a
-// call to SiteOf or EachSite with a nil FuncVars literal in non-test code
+// call to SiteOf or EachSite with a zero FuncVars literal in non-test code
 // under internal/. A read that cannot reach the FuncVars says so by calling
 // callsite.SiteOfWithoutFuncVars, which is the only function allowed below.
 func TestNoSiteWithoutFuncVarsByAccident(t *testing.T) {
@@ -46,10 +46,10 @@ func TestNoSiteWithoutFuncVarsByAccident(t *testing.T) {
 				case *ast.SelectorExpr:
 					name = fun.Sel.Name
 				}
-				if arg, ok := call.Args[1].(*ast.Ident); !ok || arg.Name != "nil" || name != "SiteOf" && name != "EachSite" {
+				if !funcVarsGuardIsZero(call.Args[1]) || name != "SiteOf" && name != "EachSite" {
 					return true
 				}
-				t.Errorf("%s: %s in %s gets nil FuncVars; pass the package's FuncVars or call SiteOfWithoutFuncVars",
+				t.Errorf("%s: %s in %s gets the zero FuncVars; pass the package's FuncVars or call SiteOfWithoutFuncVars",
 					fset.PositionFor(call.Pos(), false), name, fd.Name.Name)
 				return true
 			})
@@ -59,4 +59,20 @@ func TestNoSiteWithoutFuncVarsByAccident(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+}
+
+// funcVarsGuardIsZero reports whether arg spells the zero FuncVars:
+// FuncVars{} or callsite.FuncVars{}.
+func funcVarsGuardIsZero(arg ast.Expr) bool {
+	lit, ok := arg.(*ast.CompositeLit)
+	if !ok || len(lit.Elts) > 0 {
+		return false
+	}
+	switch typ := lit.Type.(type) {
+	case *ast.Ident:
+		return typ.Name == "FuncVars"
+	case *ast.SelectorExpr:
+		return typ.Sel.Name == "FuncVars"
+	}
+	return false
 }

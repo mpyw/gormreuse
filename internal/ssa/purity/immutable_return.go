@@ -7,6 +7,7 @@ import (
 	"golang.org/x/tools/go/ssa"
 
 	"github.com/mpyw/gormreuse/internal/directive"
+	"github.com/mpyw/gormreuse/internal/ssa/callsite"
 	"github.com/mpyw/gormreuse/internal/ssa/origin"
 	"github.com/mpyw/gormreuse/internal/ssa/tracer"
 	"github.com/mpyw/gormreuse/internal/typeutil"
@@ -177,7 +178,7 @@ func (v *ImmutableReturnValidator) rootMutable(root ssa.Value, seen map[ssa.Valu
 		return site.Method() == "Session" && site.SessionSetsInitialized()
 	}
 	// A closure marked immutable-return is checked on its own.
-	if closure := immutableReturnClosure(call.Call.Value); closure != nil && !v.set.Contains(closure) {
+	if closure := immutableReturnClosure(call.Call.Value, v.rt.FuncVars()); closure != nil && !v.set.Contains(closure) {
 		return v.returnsMutable(closure, seen)
 	}
 	return false
@@ -266,59 +267,19 @@ func immutableReturnPackageFuncs(funcs []*ssa.Function, pkg *ssa.Package) []*ssa
 }
 
 // immutableReturnClosure returns the closure that a call through v runs: v is
-// the closure, a MakeClosure of it, or a load of a captured local assigned
-// only once. A named function is not returned, since its body is not part of
-// the caller.
-func immutableReturnClosure(v ssa.Value) *ssa.Function {
-	switch x := v.(type) {
+// the closure, a MakeClosure of it, or a load of a local assigned only once
+// that holds either (callsite.FuncVars.LocalValue). A named function is not
+// returned, since its body is not part of the caller.
+func immutableReturnClosure(v ssa.Value, vars callsite.FuncVars) *ssa.Function {
+	switch x := vars.LocalValue(v).(type) {
 	case *ssa.Function:
 		if x.Parent() != nil {
 			return x
 		}
 	case *ssa.MakeClosure:
-		return immutableReturnClosure(x.Fn)
-	case *ssa.UnOp:
-		if x.Op != token.MUL {
-			return nil
-		}
-		addr := x.X
-		if fv, ok := addr.(*ssa.FreeVar); ok {
-			addr = tracer.FreeVarBinding(fv)
-		}
-		if alloc, ok := addr.(*ssa.Alloc); ok {
-			if val := immutableReturnSoleStore(alloc); val != nil {
-				return immutableReturnClosure(val)
-			}
-		}
+		return immutableReturnClosure(x.Fn, vars)
 	}
 	return nil
-}
-
-// immutableReturnSoleStore returns the only value ever stored into the local
-// alloc, or nil when it is assigned more than once, assigned by a closure that
-// captures it, or its address is used another way.
-func immutableReturnSoleStore(alloc *ssa.Alloc) ssa.Value {
-	var val ssa.Value
-	for _, ref := range *alloc.Referrers() {
-		switch r := ref.(type) {
-		case *ssa.Store:
-			if r.Addr != alloc || val != nil {
-				return nil
-			}
-			val = r.Val
-		case *ssa.MakeClosure:
-			closure := r.Fn.(*ssa.Function)
-			for i, binding := range r.Bindings {
-				if binding == alloc && len(immutableReturnFreeVarStores(closure.FreeVars[i])) > 0 {
-					return nil
-				}
-			}
-		case *ssa.UnOp, *ssa.DebugRef:
-		default:
-			return nil
-		}
-	}
-	return val
 }
 
 // immutableReturnDeferredWrite is what deferred closures do to one named

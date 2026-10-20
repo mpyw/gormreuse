@@ -6,6 +6,7 @@ import (
 
 	"golang.org/x/tools/go/ssa"
 
+	"github.com/mpyw/gormreuse/internal/ssa/callsite"
 	"github.com/mpyw/gormreuse/internal/ssa/cfg"
 	"github.com/mpyw/gormreuse/internal/typeutil"
 )
@@ -17,7 +18,7 @@ func TestFieldRoot(t *testing.T) {
 	t.Parallel()
 	fixtures, _ := loadFixtureProgram(t)
 	loops := cfg.NewAnalyzer()
-	tr := NewRootTracer(nil, nil, nil, nil, nil, nil, nil)
+	tr := NewRootTracer(nil, nil, nil, nil, nil, nil, callsite.FuncVars{})
 
 	whereRoots := func(name string) []ssa.Value {
 		fn := fixtures[name]

@@ -10,6 +10,8 @@ import (
 	"golang.org/x/tools/go/packages"
 	"golang.org/x/tools/go/ssa"
 	"golang.org/x/tools/go/ssa/ssautil"
+
+	"github.com/mpyw/gormreuse/internal/ssa/callsite"
 )
 
 // loadCollectProgram builds SSA for the testdata/gormreuse fixture package (plus the
@@ -67,7 +69,7 @@ func TestCollectScopesCallbacks(t *testing.T) {
 	for _, fn := range fixtures {
 		srcFuncs = append(srcFuncs, fn)
 	}
-	set := CollectScopesCallbacks(srcFuncs, nil)
+	set := CollectScopesCallbacks(srcFuncs, callsite.FuncVars{})
 
 	// The named function passed to Scopes must be collected.
 	named := fixtures["namedScope"]
@@ -109,7 +111,7 @@ func TestCollectScopesOnlyCallbacks(t *testing.T) {
 			srcFuncs = append(srcFuncs, fn)
 		}
 	}
-	set := CollectScopesOnlyCallbacks(srcFuncs, nil)
+	set := CollectScopesOnlyCallbacks(srcFuncs, callsite.FuncVars{})
 	names := make(map[string]bool)
 	for fn := range set {
 		names[fn.String()] = true
@@ -148,7 +150,7 @@ func TestCollectScopesOnlyCallbacks(t *testing.T) {
 			preload = fn
 		}
 	}
-	if preload == nil || !CollectScopesCallbacks(srcFuncs, nil)[preload] {
+	if preload == nil || !CollectScopesCallbacks(srcFuncs, callsite.FuncVars{})[preload] {
 		t.Error("preloadCallbackSessionClean$1 should be in CollectScopesCallbacks")
 	}
 }
@@ -163,8 +165,8 @@ func TestCollectImmutableInputCallbacksNil(t *testing.T) {
 		srcFuncs = append(srcFuncs, fn)
 	}
 	into := make(map[*ssa.Function]bool)
-	CollectImmutableInputCallbacks(srcFuncs, nil, nil, into)
-	CollectImmutableInputCallbacks(srcFuncs, nil, nil, nil)
+	CollectImmutableInputCallbacks(srcFuncs, callsite.FuncVars{}, nil, into)
+	CollectImmutableInputCallbacks(srcFuncs, callsite.FuncVars{}, nil, nil)
 	if len(into) != 0 {
 		t.Errorf("want nothing collected, got %v", into)
 	}

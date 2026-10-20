@@ -6,6 +6,7 @@ import (
 
 	"golang.org/x/tools/go/ssa"
 
+	"github.com/mpyw/gormreuse/internal/ssa/callsite"
 	"github.com/mpyw/gormreuse/internal/ssa/cfg"
 )
 
@@ -52,7 +53,7 @@ func allocReachingStoreValues(alloc *ssa.Alloc, load ssa.Instruction) []ssa.Valu
 	reads := []ssa.Instruction{load}
 	if load.Parent() != fn {
 		reads = nil
-		if mc := freeVarMakeClosure(load.Parent()); mc != nil && mc.Parent() == fn {
+		if mc := callsite.FreeVarMakeClosure(load.Parent()); mc != nil && mc.Parent() == fn {
 			for _, call := range closureInvocationCalls(mc) {
 				reads = append(reads, call)
 			}

@@ -5,6 +5,7 @@ import (
 
 	"golang.org/x/tools/go/ssa"
 
+	"github.com/mpyw/gormreuse/internal/ssa/callsite"
 	"github.com/mpyw/gormreuse/internal/ssa/cfg"
 )
 
@@ -19,7 +20,7 @@ func TestFindMutableRootThroughStructField(t *testing.T) {
 	t.Parallel()
 	fixtures, _ := loadFixtureProgram(t)
 	loops := cfg.NewAnalyzer()
-	tr := NewRootTracer(nil, nil, nil, nil, nil, nil, nil)
+	tr := NewRootTracer(nil, nil, nil, nil, nil, nil, callsite.FuncVars{})
 
 	for _, name := range []string{
 		"go127PromotedFieldLiteral",

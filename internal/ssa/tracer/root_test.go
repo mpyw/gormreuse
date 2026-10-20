@@ -6,13 +6,14 @@ import (
 	"golang.org/x/tools/go/ssa"
 
 	"github.com/mpyw/gormreuse/internal/directive"
+	"github.com/mpyw/gormreuse/internal/ssa/callsite"
 	"github.com/mpyw/gormreuse/internal/ssa/cfg"
 )
 
 func TestIsImmutableReturningBuiltin(t *testing.T) {
 	t.Parallel()
 	fixtures, all := loadFixtureProgram(t)
-	tr := NewRootTracer(nil, nil, nil, nil, nil, nil, nil)
+	tr := NewRootTracer(nil, nil, nil, nil, nil, nil, callsite.FuncVars{})
 
 	session := fixtureGormMethod(all, "Session")
 	if session == nil {
@@ -50,7 +51,7 @@ func TestFindMutableRootScopesParam(t *testing.T) {
 	// With namedScope registered as a Scopes callback, its *gorm.DB parameter is
 	// a mutable root.
 	scopes := map[*ssa.Function]bool{named: true}
-	tr := NewRootTracer(nil, nil, nil, nil, scopes, nil, nil)
+	tr := NewRootTracer(nil, nil, nil, nil, scopes, nil, callsite.FuncVars{})
 
 	if !tr.IsScopesCallbackFunc(named) {
 		t.Error("namedScope should be recognized as a Scopes callback function")
@@ -73,14 +74,14 @@ func TestFindMutableRootScopesParam(t *testing.T) {
 	if root := tr.FindMutableRoot(ordParam, loops.DetectLoops(ordinary)); root != ordParam {
 		t.Errorf("Phase 1b: ordinary parameter should be a mutable root, got %v", root)
 	}
-	trPlain := NewRootTracer(nil, nil, nil, nil, nil, nil, nil)
+	trPlain := NewRootTracer(nil, nil, nil, nil, nil, nil, callsite.FuncVars{})
 	if root := trPlain.FindMutableRoot(namedParam, loops.DetectLoops(named)); root != namedParam {
 		t.Errorf("Phase 1b: unregistered parameter should be a mutable root, got %v", root)
 	}
 
 	// A Transaction callback's tx parameter is exempt (fresh forkable handle):
 	// registering the helper as a transaction callback makes its param immutable.
-	trTx := NewRootTracer(nil, nil, nil, nil, nil, map[*ssa.Function]bool{ordinary: true}, nil)
+	trTx := NewRootTracer(nil, nil, nil, nil, nil, map[*ssa.Function]bool{ordinary: true}, callsite.FuncVars{})
 	if root := trTx.FindMutableRoot(ordParam, loops.DetectLoops(ordinary)); root != nil {
 		t.Errorf("Transaction callback parameter should be immutable (nil root), got %v", root)
 	}
@@ -142,7 +143,7 @@ func TestFindAllMutableRootsPureArgumentAlreadyTraced(t *testing.T) {
 	pureFuncs := directive.NewPureFuncSet(nil, nil)
 	pureFuncs.Infer(helper)
 	verdicts := &PureVerdicts{Returned: map[*ssa.Function][]int{helper: {0}}}
-	tr := NewRootTracer(pureFuncs, nil, nil, verdicts, nil, nil, nil)
+	tr := NewRootTracer(pureFuncs, nil, nil, verdicts, nil, nil, callsite.FuncVars{})
 
 	var where, merged ssa.Value
 	for _, b := range fn.Blocks {
