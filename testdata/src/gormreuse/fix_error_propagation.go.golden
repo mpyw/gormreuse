@@ -7,7 +7,8 @@ import "gorm.io/gorm"
 // skips a query once Error is set. A Session at the root gives each query
 // its own copy. A query whose error nothing reads then no longer stops the
 // queries after it, and a later read of Error or RowsAffected changes. No
-// fix is offered for such a root.
+// fix is offered for such a root, and its diagnostic advises checking the
+// earlier error instead of a Session.
 
 // ===== NO FIX: an earlier query's error is seen later =====
 
@@ -16,14 +17,14 @@ import "gorm.io/gorm"
 func fixErrPropReturned(db *gorm.DB, id int) error {
 	q := db.Model(&User{})
 	q.Update("name", "new")
-	return q.Update("id", id).Error // want `\*gorm\.DB reused: second branch from mutable root`
+	return q.Update("id", id).Error // want `\*gorm\.DB reused: second branch from mutable root .*; a Session would let a later query run past an earlier query's unchecked error, so check that error first$`
 }
 
 // FixErrPropParam is fixErrPropReturned on a parameter. It is exported, so
 // its fix would be the body Session.
 func FixErrPropParam(q *gorm.DB, id int) error { // want FixErrPropParam:`gormreuse finisher-only\[0\]`
 	q.Update("name", "new")
-	return q.Update("id", id).Error // want `\*gorm\.DB reused: second branch from mutable root`
+	return q.Update("id", id).Error // want `\*gorm\.DB reused: .*; a Session would let a later query run past an earlier query's unchecked error`
 }
 
 // fixErrPropRowsAffected: RowsAffected is not the query's error, so the
@@ -117,7 +118,7 @@ func fixErrPropChecked(db *gorm.DB, id int) error {
 	if err := q.Update("name", "new").Error; err != nil {
 		return err
 	}
-	return q.Update("id", id).Error // want `\*gorm\.DB reused: second branch from mutable root`
+	return q.Update("id", id).Error // want `\*gorm\.DB reused: .*; make the root immutable with \.Session\(&gorm\.Session\{\}\)$`
 }
 
 // fixErrPropNothingRead: no query's result is read.

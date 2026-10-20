@@ -116,6 +116,14 @@ func (g *Generator) finisherErrorChanges(v pollution.Violation) bool {
 	return changes
 }
 
+// SessionChangesErrors reports whether Generate found that a Session at root
+// would change which errors its queries return (see finisherErrorChanges),
+// so its diagnostic does not advise one. It holds only once Generate has
+// asked about root.
+func (g *Generator) SessionChangesErrors(root ssa.Value) bool {
+	return g.errorChanges[root]
+}
+
 // computeFinisherErrorChanges is finisherErrorChanges without the memo: the
 // violations of one root share their uses, so a root reused n times is
 // checked once, not n times (#350).

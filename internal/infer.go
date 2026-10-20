@@ -9,6 +9,7 @@ import (
 	"golang.org/x/tools/go/ssa"
 
 	"github.com/mpyw/gormreuse/internal/directive"
+	"github.com/mpyw/gormreuse/internal/fix"
 	"github.com/mpyw/gormreuse/internal/ssa/callsite"
 	"github.com/mpyw/gormreuse/internal/ssa/origin"
 	"github.com/mpyw/gormreuse/internal/ssa/purity"
@@ -148,8 +149,10 @@ func inferImmutableInputs(
 // there. A function that changes its parameter in place, with a discarded
 // chain statement such as tx.Where("a"), or through a helper or a closure
 // that does, is not inferred (inferChangesInPlace): the change would be lost
-// on an immutable value. finisherOnly returns the finisher-only parameters
-// of a function of another package, from its fact. globals holds the
+// on an immutable value. Those functions are returned, for the fix to ask
+// too (#387). A panic returns none, and the fix then takes every function
+// to change one. finisherOnly returns the finisher-only parameters of a
+// function of another package, from its fact. globals holds the
 // package-level variables a proof may read.
 //
 // newTracer builds a tracer with the current set. A larger set only proves
@@ -167,7 +170,7 @@ func inferImmutableParams(
 	finisherOnly func(*ssa.Function) []int,
 	globals tracer.ProvenGlobals,
 	skip func(*ssa.Function) bool,
-) {
+) map[*ssa.Function]bool {
 	changes := inferChangesInPlace(funcs, finisherOnly)
 	candidates := make(map[*ssa.Function]bool)
 	var order []*ssa.Function
@@ -178,7 +181,7 @@ func inferImmutableParams(
 		}
 	}
 	if len(order) == 0 {
-		return
+		return changes
 	}
 
 	sites := inferDirectCalls(append(slices.Clone(funcs), init), candidates)
@@ -221,6 +224,23 @@ func inferImmutableParams(
 		}
 		slices.SortFunc(queue, func(a, b *ssa.Function) int { return index[a] - index[b] })
 		queue = slices.Compact(queue)
+	}
+	return changes
+}
+
+// inferImmutableParamRule returns the rules of inferImmutableParams that the
+// directive fix must meet too (#387): the function changes no parameter in
+// place (changes, from inferChangesInPlace), and each call passes values
+// proved immutable with the inferred set. changes is nil after a panic in
+// the inference, and then every function may change one.
+//
+//declscope:shared // run.go hands it to the fix
+func inferImmutableParamRule(changes map[*ssa.Function]bool, rt *tracer.RootTracer, set *directive.DirectiveFuncSet, globals tracer.ProvenGlobals) fix.ImmutableParamRule {
+	return fix.ImmutableParamRule{
+		ChangesInPlace: func(fn *ssa.Function) bool { return changes == nil || changes[fn] },
+		ProvesArgs: func(fn *ssa.Function, call ssa.CallInstruction) bool {
+			return rt.ProvesImmutableArgs(fn, call, set.Inferred, globals)
+		},
 	}
 }
 
@@ -294,22 +314,14 @@ func inferHasGormDBParam(fn *ssa.Function) bool {
 
 // inferCallersPassImmutable reports whether each call in calls passes fn
 // values proved immutable at its *gorm.DB parameters
-// (tracer.RootTracer.ProvesImmutable). The parameter of a function proves a
-// call only when set inferred it. A declared immutable-param function's
+// (tracer.RootTracer.ProvesImmutableArgs). The parameter of a function proves
+// a call only when set inferred it. A declared immutable-param function's
 // callers are checked only while it branches the parameter, and it would
 // stop branching once its helpers are inferred (#371).
 func inferCallersPassImmutable(fn *ssa.Function, calls []ssa.CallInstruction, rt *tracer.RootTracer, set *directive.DirectiveFuncSet, globals tracer.ProvenGlobals) bool {
-	params := fn.Signature.Params()
 	for _, call := range calls {
-		site := rt.Site(call)
-		for i, arg := range call.Common().Args {
-			p := site.ArgParam(i)
-			if p < 0 || p >= params.Len() || !typeutil.IsGormDB(params.At(p).Type()) {
-				continue
-			}
-			if !rt.ProvesImmutable(arg, set.Inferred, globals) {
-				return false
-			}
+		if !rt.ProvesImmutableArgs(fn, call, set.Inferred, globals) {
+			return false
 		}
 	}
 	return true
@@ -334,6 +346,8 @@ func inferCallersPassImmutable(fn *ssa.Function, calls []ssa.CallInstruction, rt
 //
 // A parameter captured by a closure, or held in a local variable, is followed
 // through the variable, and a closure called with it gets it as its own.
+// finisherOnly returns the finisher-only parameters of a function of another
+// package, from its fact.
 func inferChangesInPlace(funcs []*ssa.Function, finisherOnly func(*ssa.Function) []int) map[*ssa.Function]bool {
 	declared := make(map[*ssa.Function]bool)
 	for _, fn := range funcs {

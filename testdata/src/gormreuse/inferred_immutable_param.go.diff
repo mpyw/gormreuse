@@ -1,6 +1,6 @@
 --- inferred_immutable_param.go	1970-01-01 00:00:00
 +++ inferred_immutable_param.go.golden	1970-01-01 00:00:00
-@@ -1,492 +1,517 @@
+@@ -1,493 +1,516 @@
  package internal
  
  import (
@@ -122,8 +122,8 @@
  	ipChainDB = db.Where("x")
  }
  
-+//gormreuse:immutable-param
  func ipFromChainGlobal(tx *gorm.DB) {
++	tx = tx.Session(&gorm.Session{})
  	tx.Where("a").Find(nil)
  	tx.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  }
@@ -270,8 +270,8 @@
  	tx.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  }
  
-+//gormreuse:immutable-param
  func ipCtxValue(tx *gorm.DB) {
++	tx = tx.Session(&gorm.Session{})
  	tx.Where("a").Find(nil)
  	tx.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  }
@@ -282,8 +282,8 @@
  	tx.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  }
  
-+//gormreuse:immutable-param
  func ipClosureStore(tx *gorm.DB) {
++	tx = tx.Session(&gorm.Session{})
  	tx.Where("a").Find(nil)
  	tx.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  }
@@ -320,8 +320,8 @@
  // callers are checked only while the function branches it, so it may hold a
  // mid-chain value. ipDeclaredEntry does not branch it itself, so its
  // directive changes nothing: ipFromDeclared is reported either way.
-+//gormreuse:immutable-param
  func ipFromDeclared(tx *gorm.DB) {
++	tx = tx.Session(&gorm.Session{})
  	tx.Where("a").Find(nil)
  	tx.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  }
@@ -336,12 +336,12 @@
  }
  
  // A helper that changes its parameter in place makes its caller change it
- // too, as does a closure (#371). Neither caller is inferred.
+ // too, as does a closure (#371). Neither caller is inferred, and -fix does
+ // not declare one immutable-param either (#387).
  func ipApplyTenant(tx *gorm.DB) {
  	tx.Where("tenant = 1")
  }
  
-+//gormreuse:immutable-param
  func ipListViaHelper(tx *gorm.DB) {
  	ipApplyTenant(tx)
  	tx.Find(nil)  // want `\*gorm\.DB reused: second branch from mutable root`
@@ -356,7 +356,6 @@
  
  // ipListViaFuncValue hands its parameter to a func value, which may change
  // it in place too.
-+//gormreuse:immutable-param
  func ipListViaFuncValue(tx *gorm.DB, apply func(*gorm.DB)) {
  	apply(tx)
  	tx.Find(nil)  // want `\*gorm\.DB reused: second branch from mutable root`

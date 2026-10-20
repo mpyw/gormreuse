@@ -704,11 +704,23 @@ func (t *Tracker) reuseMessage(root ssa.Value) string {
 }
 
 // reuseSessionAdvice ends a reuse diagnostic. reuseStateAdvice replaces it
-// for a root whose Statement may carry state that a Session drops (#344).
+// for a root whose Statement may carry state that a Session drops (#344),
+// and reuseErrorAdvice for a root on which a Session would let a later query
+// run past an earlier query's error (#372).
 const (
 	reuseSessionAdvice = "; make the root immutable with .Session(&gorm.Session{})"
 	reuseStateAdvice   = "; a Session would drop its Attrs, Assign or InstanceSet, so build each branch from a fresh chain instead"
+	reuseErrorAdvice   = "; a Session would let a later query run past an earlier query's unchecked error, so check that error first"
 )
+
+// AdviseCheckingErrors rewrites the advice of v, a reuse violation, for a
+// root on which a Session would change which errors the queries return
+// (#372). Other advice, such as that of AdviseWithoutSession, is kept.
+func (v *Violation) AdviseCheckingErrors() {
+	if msg, ok := strings.CutSuffix(v.Message, reuseSessionAdvice); ok {
+		v.Message = msg + reuseErrorAdvice
+	}
+}
 
 // AdviseWithoutSession rewrites the advice of v, a reuse violation, for a
 // root that a Session cannot make immutable without dropping state its
