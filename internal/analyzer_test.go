@@ -17,6 +17,7 @@ import (
 	"github.com/mpyw/gormreuse/internal/directive"
 	ssautil "github.com/mpyw/gormreuse/internal/ssa"
 	"github.com/mpyw/gormreuse/internal/ssa/callsite"
+	"github.com/mpyw/gormreuse/internal/ssa/tracer"
 )
 
 // TestPanicGuard verifies that a panic in per-function analysis is contained
@@ -130,7 +131,7 @@ func TestNewAnalyzer(t *testing.T) {
 	pureFuncs := directive.NewPureFuncSet(nil, nil)
 	pureFuncs.Add(directive.FuncKey{PkgPath: "test", FuncName: "Pure"})
 	immutableReturnFuncs := directive.NewImmutableReturnFuncSet(nil, nil)
-	analyzer := ssautil.NewAnalyzer(nil, pureFuncs, immutableReturnFuncs, nil, nil, nil, nil, nil, callsite.FuncVars{}, nil)
+	analyzer := ssautil.NewAnalyzer(nil, tracer.NewRootTracer(pureFuncs, immutableReturnFuncs, nil, nil, nil, nil, callsite.FuncVars{}), nil, nil)
 
 	if analyzer == nil {
 		t.Error("Expected analyzer to be initialized")
@@ -145,7 +146,7 @@ func TestNewChecker(t *testing.T) {
 	immutableReturnFuncs := directive.NewImmutableReturnFuncSet(nil, nil)
 	reported := make(map[reportKey]bool)
 
-	chk := newChecker(nil, ignores, pureFuncs, immutableReturnFuncs, nil, nil, nil, nil, nil, callsite.FuncVars{}, reported, nil, nil)
+	chk := newChecker(nil, ignores, tracer.NewRootTracer(pureFuncs, immutableReturnFuncs, nil, nil, nil, nil, callsite.FuncVars{}), nil, reported, nil, nil)
 
 	if chk == nil {
 		t.Error("Expected checker to be initialized")
@@ -155,7 +156,7 @@ func TestNewChecker(t *testing.T) {
 func TestAnalyzer_Analyze_NilFunction(t *testing.T) {
 	t.Parallel()
 
-	analyzer := ssautil.NewAnalyzer(nil, nil, nil, nil, nil, nil, nil, nil, callsite.FuncVars{}, nil)
+	analyzer := ssautil.NewAnalyzer(nil, nil, nil, nil)
 
 	// Should not panic with nil function
 	violations := analyzer.Analyze()
@@ -168,7 +169,7 @@ func TestAnalyzer_Analyze_EmptyFunction(t *testing.T) {
 	t.Parallel()
 
 	fn := &ssa.Function{}
-	analyzer := ssautil.NewAnalyzer(fn, nil, nil, nil, nil, nil, nil, nil, callsite.FuncVars{}, nil)
+	analyzer := ssautil.NewAnalyzer(fn, nil, nil, nil)
 
 	violations := analyzer.Analyze()
 	if len(violations) != 0 {

@@ -226,13 +226,18 @@ func RunSSA(
 		return needsImmutableParam[fn] || table.Of(fn).BranchesImmutableParam
 	}
 
-	// PASS 2: run SSA reuse analysis.
+	// PASS 2: run SSA reuse analysis. Every function shares one tracer: the
+	// analysis of a closure traces the values of the function that declares it
+	// again, so a tracer per function traced a parent's values once per closure
+	// (#325). Its memos depend only on the values asked about, since the sets it
+	// holds are final by now.
+	checkTracer := tracer.NewRootTracer(pureFuncs, immutableReturnFuncs, immutableParamFuncs, pureVerdicts, scopesCallbacks, immutableCallbacks, funcVars)
 	for _, fn := range funcs {
 		if skip(fn) {
 			continue
 		}
 
-		chk := newChecker(pass, ignores, pureFuncs, immutableReturnFuncs, immutableParamFuncs, pureVerdicts, scopesCallbacks, immutableCallbacks, branchesImmutableParam, funcVars, globalReported, fixGen, cfgs)
+		chk := newChecker(pass, ignores, checkTracer, branchesImmutableParam, globalReported, fixGen, cfgs)
 		guard.run(fn, func() { chk.checkFunction(fn) })
 	}
 

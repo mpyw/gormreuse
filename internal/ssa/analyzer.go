@@ -39,7 +39,6 @@ import (
 
 	"golang.org/x/tools/go/ssa"
 
-	"github.com/mpyw/gormreuse/internal/directive"
 	"github.com/mpyw/gormreuse/internal/ssa/callsite"
 	"github.com/mpyw/gormreuse/internal/ssa/cfg"
 	"github.com/mpyw/gormreuse/internal/ssa/handler"
@@ -76,27 +75,25 @@ type Analyzer struct {
 //
 // Parameters:
 //   - fn: The SSA function to analyze (can be nil, will return no violations)
-//   - pureFuncs: Set of functions marked with //gormreuse:pure directive
-//   - immutableReturnFuncs: Set of functions marked with //gormreuse:immutable-return directive
-//   - pure: What validating the pure functions found (the failed ones are not trusted
-//     as pure; the result of a trusted one may be its argument)
-//   - scopesCallbacks: Scopes/Preload callbacks whose *gorm.DB param is a mutable root
-//   - immutableParamFuncs: Functions marked //gormreuse:immutable-param (params opt out of Phase 1b)
-//   - immutableCallbacks: Transaction callbacks whose tx param is forkable (immutable)
+//   - rootTracer: The tracer of the pass, which holds the directive sets, the
+//     pure verdicts and the callbacks the analysis trusts. Its memos depend only
+//     on the values they are asked about, so every function of the pass shares
+//     them (#325). When nil, the analyzer makes one that trusts no directive
 //   - needsImmutableParam: reports the immutable-param functions that actually branch a param,
 //     so a caller passing a mutable value to them violates the contract (Phase 1b stage 2b).
 //     It may be nil
-//   - funcVars: Package-level variables that hold one function, so a call through one
-//     honours that function's directives (#183)
 //   - cfgs: The CFG cache of the pass, shared with the suggested fixes (#299). When
 //     nil, the analyzer makes its own
-func NewAnalyzer(fn *ssa.Function, pureFuncs, immutableReturnFuncs, immutableParamFuncs *directive.DirectiveFuncSet, pure *tracer.PureVerdicts, scopesCallbacks, immutableCallbacks map[*ssa.Function]bool, needsImmutableParam func(*ssa.Function) bool, funcVars callsite.FuncVars, cfgs *cfg.Analyzer) *Analyzer {
+func NewAnalyzer(fn *ssa.Function, rootTracer *tracer.RootTracer, needsImmutableParam func(*ssa.Function) bool, cfgs *cfg.Analyzer) *Analyzer {
+	if rootTracer == nil {
+		rootTracer = tracer.NewRootTracer(nil, nil, nil, nil, nil, nil, callsite.FuncVars{})
+	}
 	if cfgs == nil {
 		cfgs = cfg.NewAnalyzer()
 	}
 	return &Analyzer{
 		fn:                  fn,
-		rootTracer:          tracer.NewRootTracer(pureFuncs, immutableReturnFuncs, immutableParamFuncs, pure, scopesCallbacks, immutableCallbacks, funcVars),
+		rootTracer:          rootTracer,
 		cfgAnalyzer:         cfgs,
 		needsImmutableParam: needsImmutableParam,
 	}

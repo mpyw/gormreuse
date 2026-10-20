@@ -125,6 +125,9 @@ func computeNeedsImmutableParam(
 	if immutableParamFuncs == nil {
 		return needs
 	}
+	// The counterfactual treats every parameter as mutable, so it has a tracer
+	// of its own, shared by the functions it checks.
+	counterfactual := tracer.NewRootTracer(pureFuncs, immutableReturnFuncs, nil, pureVerdicts, scopesCallbacks, immutableCallbacks, funcVars)
 	for _, fn := range funcs {
 		if skip(fn) || !immutableParamFuncs.Contains(fn) {
 			continue
@@ -137,7 +140,7 @@ func computeNeedsImmutableParam(
 		}
 		guard.run(fn, func() {
 			// Counterfactual: analyze fn with its parameters treated as mutable.
-			cf := ssautil.NewAnalyzer(fn, pureFuncs, immutableReturnFuncs, nil, pureVerdicts, scopesCallbacks, immutableCallbacks, nil, funcVars, cfgs)
+			cf := ssautil.NewAnalyzer(fn, counterfactual, nil, cfgs)
 			if slices.ContainsFunc(cf.Analyze(), func(v pollution.Violation) bool {
 				p, ok := v.Root.(*ssa.Parameter)
 				return ok && p.Parent() == fn
