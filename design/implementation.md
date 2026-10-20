@@ -2030,7 +2030,7 @@ Limitations:
 
 - **One direction between the two.** `inferImmutableInputs` runs first. A callback called with the parameter of an inferred `immutable-param` function is not proved by it.
 - **Declared `immutable-param` parameters do not prove a call.** A declared function that does not branch its parameter is redundant and its callers are not checked, so its parameter may hold a mid-chain value.
-- **The parameter-root fix is reachable less often.** Its directive case needs every caller to pass an isolated value, so such a function is now inferred and not reported, unless it changes its parameter in place.
+- **The parameter-root fix is reachable less often.** Its directive case needs every caller to pass an isolated value, so such a function is now inferred and not reported. A function that changes its parameter in place is not inferred, and the fix does not declare it either (`paramDiscardsChain`): the directive would make the discarded chain do nothing, and the body check would report it (#346). It gets no fix, as the [discarded statements on a parameter](#parameter-root-fix) rule says.
 
 Measured with the command (#349), before and after:
 
@@ -2397,7 +2397,7 @@ A parameter root has no call to append a Session to. `Generate` in `internal/fix
 | Check | Fix |
 | --- | --- |
 | `canFixParam` fails: a Scopes/Preload callback, a closure with a `*gorm.DB` result, or a function declaration with a `*gorm.DB` result that `calledOnlyDirectly` rejects | None |
-| `paramCallersIsolate` holds. The function is a declaration. The pass sees every file of the package (`reportSeesWholePackage`). `calledOnlyDirectly` holds. `handler.BreaksImmutableParam` holds for no argument of any call to the function in the analysed functions | `//gormreuse:immutable-param`. Such a function is [inferred](#inferred-immutable-param-and-immutable-input) and not reported, unless it changes its parameter in place (#349) |
+| `paramCallersIsolate` holds. The function is a declaration. The pass sees every file of the package (`reportSeesWholePackage`). `calledOnlyDirectly` holds. `handler.BreaksImmutableParam` holds for no argument of any call to the function in the analysed functions | `//gormreuse:immutable-param`. Such a function is [inferred](#inferred-immutable-param-and-immutable-input) and not reported (#349). A use of the parameter that is a discarded chain (`paramDiscardsChain`) withholds the directive, since the immutable-param body check would report the chain (#346) |
 | Otherwise | `tx = tx.Session(&gorm.Session{})` before the body's first statement (`paramSessionSite`), then the rest of the local-root fix. It is written by `sessionEdits`, with the same gorm name resolution and import as every other Session |
 
 <details><summary>Callers, test variants, merged values, discarded statements, Scopes callbacks and closures</summary>

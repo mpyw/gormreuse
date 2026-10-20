@@ -308,7 +308,8 @@ func inferCallersPassImmutable(fn *ssa.Function, calls []ssa.CallInstruction, rt
 // chain that starts at one of fn's *gorm.DB parameters and does not end in a
 // finisher, such as tx.Where("a") or tx.Where("a").Order("b"). On a mutable
 // value that changes the caller's value in place; on an immutable one it does
-// nothing.
+// nothing. The chain is read as the immutable-param discard report reads it
+// (immutableParamDiscardedChain, #346).
 func inferChangesParamInPlace(fn *ssa.Function) bool {
 	held := make(map[ssa.Value]bool)
 	for _, p := range fn.Params {
@@ -330,46 +331,10 @@ func inferChangesParamInPlace(fn *ssa.Function) bool {
 				}
 			}
 		case *ssa.Call:
-			if !changes && len(instr.Call.Args) > 0 && held[instr.Call.Args[0]] && inferGormChainCall(instr) != "" {
-				changes = inferDiscardsChain(instr)
+			if !changes && len(instr.Call.Args) > 0 && held[instr.Call.Args[0]] {
+				_, changes = immutableParamDiscardedChain(instr, instr.Call.Args[0])
 			}
 		}
 	})
 	return changes
-}
-
-// inferDiscardsChain reports whether the chain that starts with call is discarded
-// without a finisher at its end.
-func inferDiscardsChain(call *ssa.Call) bool {
-	for {
-		name := inferGormChainCall(call)
-		if typeutil.IsFinisher(name) || typeutil.IsImmutableReturningBuiltin(name) {
-			return false
-		}
-		var next *ssa.Call
-		for _, ref := range *call.Referrers() {
-			if _, ok := ref.(*ssa.DebugRef); ok {
-				continue
-			}
-			c, ok := ref.(*ssa.Call)
-			if !ok || next != nil || len(c.Call.Args) == 0 || c.Call.Args[0] != call || inferGormChainCall(c) == "" {
-				return false
-			}
-			next = c
-		}
-		if next == nil {
-			return true
-		}
-		call = next
-	}
-}
-
-// inferGormChainCall returns the name of the *gorm.DB method that call calls
-// statically and that returns a *gorm.DB, or "".
-func inferGormChainCall(call *ssa.Call) string {
-	callee := call.Call.StaticCallee()
-	if callee == nil || callee.Signature.Recv() == nil || !typeutil.IsGormDB(callee.Signature.Recv().Type()) || !typeutil.IsGormDB(call.Type()) {
-		return ""
-	}
-	return callee.Name()
 }

@@ -107,7 +107,7 @@ func ipCallsOneMutable(db *gorm.DB) {
 }
 
 // IPExported can be called from another package, which is not seen.
-func IPExported(tx *gorm.DB) {
+func IPExported(tx *gorm.DB) { // want IPExported:`gormreuse finisher-only\[0\]`
 	tx.Where("a").Find(nil)
 	tx.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
@@ -149,7 +149,9 @@ func ipCallsRecursive(db *gorm.DB) {
 }
 
 // ipInPlace changes its parameter in place. On an immutable value the change
-// is lost, so the function is not inferred.
+// is lost, so the function is not inferred. -fix does not declare it
+// immutable-param either, though every caller passes an isolated value: the
+// body check would then report the discarded Where (#346, #349).
 func ipInPlace(tx *gorm.DB) {
 	tx.Where("t = 1")
 	tx.Find(nil)  // want `\*gorm\.DB reused: second branch from mutable root`

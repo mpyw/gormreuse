@@ -299,6 +299,8 @@ func reportImmutableParamDiscards(
 // chain is a *gorm.DB method that returns a *gorm.DB and is neither a
 // finisher nor a Session-family or state-only method (see
 // typeutil.IsImmutableReturningBuiltin).
+//
+//declscope:shared // infer.go refuses to infer immutable-param for a function with such a chain
 func immutableParamDiscardedChain(call *ssa.Call, v ssa.Value) (*ssa.Call, bool) {
 	for recv := v; ; {
 		if !immutableParamChainCall(call, recv) {

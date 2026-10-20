@@ -1,6 +1,6 @@
 --- inferred_immutable_param.go	1970-01-01 00:00:00
 +++ inferred_immutable_param.go.golden	1970-01-01 00:00:00
-@@ -1,291 +1,302 @@
+@@ -1,293 +1,303 @@
  package internal
  
  import (
@@ -111,7 +111,7 @@
  }
  
  // IPExported can be called from another package, which is not seen.
- func IPExported(tx *gorm.DB) {
+ func IPExported(tx *gorm.DB) { // want IPExported:`gormreuse finisher-only\[0\]`
 +	tx = tx.Session(&gorm.Session{})
  	tx.Where("a").Find(nil)
  	tx.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
@@ -157,8 +157,9 @@
  }
  
  // ipInPlace changes its parameter in place. On an immutable value the change
- // is lost, so the function is not inferred.
-+//gormreuse:immutable-param
+ // is lost, so the function is not inferred. -fix does not declare it
+ // immutable-param either, though every caller passes an isolated value: the
+ // body check would then report the discarded Where (#346, #349).
  func ipInPlace(tx *gorm.DB) {
  	tx.Where("t = 1")
  	tx.Find(nil)  // want `\*gorm\.DB reused: second branch from mutable root`
@@ -170,8 +171,8 @@
  }
  
  // ipInit is called from a package-level initializer with a mid-chain value.
-+//gormreuse:immutable-param
  func ipInit(tx *gorm.DB) int {
++	tx = tx.Session(&gorm.Session{})
  	tx.Where("a").Find(nil)
  	tx.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  	return 0

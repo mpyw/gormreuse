@@ -94,7 +94,7 @@ func callsUnknownPartOfPureList(db *gorm.DB) {
 // immutable-input(cb) is not inferred (#349).
 //
 //gormreuse:imutable-input(cb) // want `^unknown directive gormreuse:imutable-input\(cb\) `
-func UnknownImmutableInput(cb func(*gorm.DB), db *gorm.DB) {
+func UnknownImmutableInput(cb func(*gorm.DB), db *gorm.DB) { // want UnknownImmutableInput:`gormreuse finisher-only\[1\]`
 	cb(db.Session(&gorm.Session{}))
 }
 
@@ -111,7 +111,7 @@ func callsUnknownImmutableInput(db *gorm.DB) {
 // =============================================================================
 
 //gormreuse:immutable-input(cb // want `^malformed gormreuse:immutable-input\(cb directive: write it as immutable-input\(name\)$`
-func UnclosedImmutableInput(cb func(*gorm.DB), db *gorm.DB) {
+func UnclosedImmutableInput(cb func(*gorm.DB), db *gorm.DB) { // want UnclosedImmutableInput:`gormreuse finisher-only\[1\]`
 	cb(db.Session(&gorm.Session{}))
 }
 

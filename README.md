@@ -620,7 +620,7 @@ Every one of these holds:
 
 Add [`//gormreuse:immutable-param`](#gormreuseimmutable-param). The caller-side check keeps the callers isolated.
 
-Such a function is usually [inferred `immutable-param`](#inferred-immutable-param) and not reported. Only one that inference refuses, because it changes its parameter in place, still gets the directive.
+Such a function is usually [inferred `immutable-param`](#inferred-immutable-param) and not reported. One with a discarded statement on the parameter (`tx.Where("a")`) is not inferred, and does not get the directive either: under it the statement would do nothing, which the [body check](#gormreuseimmutable-param) reports. See the last row.
 
 </td></tr>
 <tr><td>

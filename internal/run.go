@@ -198,28 +198,23 @@ func RunSSA(
 		callback.DropReachableCallbacks(funcs, funcVars, immutableInputSet, callbacks)
 		return callbacks
 	}
+	// A function is then treated as immutable-input(cb) when its body hands
+	// cb only immutable values (#349), and its callbacks join the set. After
+	// a panic there the functions inferred so far are kept, each proved, and
+	// the callbacks are collected again.
 	var immutableCallbacks map[*ssa.Function]bool
 	if !guard.runPackage("immutable callbacks", func() {
 		immutableCallbacks = collectImmutableCallbacks()
 	}) {
 		immutableCallbacks = nil
-	}
-
-	// Treat a function as immutable-input(cb) when its body hands cb only
-	// immutable values (#349). Its callbacks then join immutableCallbacks.
-	// After a panic the functions inferred so far are kept, each proved, and
-	// the callbacks are collected again.
-	if immutableCallbacks != nil {
-		inputTracer := func(callbacks map[*ssa.Function]bool) *tracer.RootTracer {
+	} else if !guard.runPackage("immutable-input inference", func() {
+		immutableCallbacks = inferImmutableInputs(funcs, funcVars, immutableInputSet, immutableCallbacks, collectImmutableCallbacks, func(callbacks map[*ssa.Function]bool) *tracer.RootTracer {
 			return tracer.NewRootTracer(pureFuncs, immutableReturnFuncs, immutableParamFuncs, pureVerdicts, mutableCallbacks, callbacks, funcVars)
-		}
-		if !guard.runPackage("immutable-input inference", func() {
-			immutableCallbacks = inferImmutableInputs(funcs, funcVars, immutableInputSet, immutableCallbacks, collectImmutableCallbacks, inputTracer, skip)
-		}) && !guard.runPackage("immutable callbacks", func() {
-			immutableCallbacks = collectImmutableCallbacks()
-		}) {
-			immutableCallbacks = nil
-		}
+		}, skip)
+	}) && !guard.runPackage("immutable callbacks", func() {
+		immutableCallbacks = collectImmutableCallbacks()
+	}) {
+		immutableCallbacks = nil
 	}
 
 	// Treat a function as immutable-param when every caller passes it
