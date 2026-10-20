@@ -120,55 +120,114 @@ func TestGoldenFilesCompile(t *testing.T) {
 }
 
 // TestGoldenFilesE2E applies the suggested fixes to the E2E fixture package
-// e2e/internal/fixsql/before and checks that e2e/internal/fixsql/after/after.go
-// holds the result. The E2E tests run both packages against real GORM and
+// e2e/internal/fixsql/before and checks that each of its files other than
+// doc.go has a counterpart in e2e/internal/fixsql/after (see
+// e2eGeneratedName) holding the result. The E2E tests run both packages against real GORM and
 // compare the SQL they emit, so they check the fixes gormreuse suggests now
-// (#199). Its name matches goldentest.UpdateCommand, which rewrites the file
-// like the other fixtures.
+// (#199). A topic's cases go in a file of their own, so fixtures added
+// together do not conflict. Its name matches goldentest.UpdateCommand, which
+// rewrites the files like the other fixtures, and deletes a generated file
+// whose source is gone.
 func TestGoldenFilesE2E(t *testing.T) {
 	t.Parallel()
-	const header = "// Code generated from ../before/before.go by TestGoldenFilesE2E in the main module. DO NOT EDIT.\n\n"
-	srcPath := filepath.Join("e2e", "internal", "fixsql", "before", "before.go")
-	afterPath := filepath.Join("e2e", "internal", "fixsql", "after", "after.go")
-
-	src, err := os.ReadFile(srcPath)
+	beforeDir := filepath.Join("e2e", "internal", "fixsql", "before")
+	afterDir := filepath.Join("e2e", "internal", "fixsql", "after")
+	names, err := e2eFixtureNames(beforeDir)
 	if err != nil {
-		t.Fatalf("read fixture: %v", err)
+		t.Fatalf("list fixtures: %v", err)
 	}
-	// The fixture imports gorm.io/gorm, which the analysis loads from the stub
-	// in testdata.
+
+	// The fixtures import gorm.io/gorm, which the analysis loads from the stub
+	// in testdata. The package is analyzed once, with every file.
 	gopath := t.TempDir()
 	if err := os.CopyFS(filepath.Join(gopath, "src", "gorm.io", "gorm"),
 		os.DirFS(filepath.Join(analysistest.TestData(), "src", "gorm.io", "gorm"))); err != nil {
 		t.Fatalf("copy gorm stub: %v", err)
 	}
-	pkgPath := filepath.Join(gopath, "src", "before", "before.go")
-	if err := os.MkdirAll(filepath.Dir(pkgPath), 0o755); err != nil {
+	pkgDir := filepath.Join(gopath, "src", "before")
+	if err := os.MkdirAll(pkgDir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	if err := os.WriteFile(pkgPath, src, 0o644); err != nil {
-		t.Fatalf("write fixture: %v", err)
-	}
-
-	_, fixed, err := goldentest.ApplyFixes(gopath, "before", pkgPath, gormreuse.Analyzer)
-	if err != nil {
-		t.Fatalf("apply fixes: %v", err)
-	}
-	if bytes.Equal(src, fixed) {
-		t.Fatalf("the suggested fixes did not change %s", srcPath)
-	}
-	want := append([]byte(header), bytes.Replace(fixed, []byte("package before"), []byte("package after"), 1)...)
-
-	if goldentest.Updating() {
-		if err := os.WriteFile(afterPath, want, 0o644); err != nil {
-			t.Fatalf("write %s: %v", afterPath, err)
+	for _, name := range names {
+		src, err := os.ReadFile(filepath.Join(beforeDir, name))
+		if err != nil {
+			t.Fatalf("read fixture: %v", err)
 		}
-		return
+		if err := os.WriteFile(filepath.Join(pkgDir, name), src, 0o644); err != nil {
+			t.Fatalf("write fixture: %v", err)
+		}
 	}
-	got, err := os.ReadFile(afterPath)
-	if err != nil || !bytes.Equal(got, want) {
-		t.Errorf("%s is missing or out of date.\nRun: %s\nThen review and commit the changes.", afterPath, goldentest.UpdateCommand)
+	run, err := goldentest.Analyze(gopath, "before", gormreuse.Analyzer)
+	if err != nil {
+		t.Fatalf("analyze: %v", err)
 	}
+
+	for _, name := range names {
+		src, fixed, err := run.ApplyFixes(filepath.Join(pkgDir, name))
+		if err != nil {
+			t.Fatalf("apply fixes to %s: %v", name, err)
+		}
+		if bytes.Equal(src, fixed) {
+			t.Errorf("the suggested fixes did not change %s", name)
+		}
+		header := "// Code generated from ../before/" + name + " by TestGoldenFilesE2E in the main module. DO NOT EDIT.\n\n"
+		want := append([]byte(header), bytes.Replace(fixed, []byte("package before"), []byte("package after"), 1)...)
+		afterPath := filepath.Join(afterDir, e2eGeneratedName(name))
+		if goldentest.Updating() {
+			if err := os.WriteFile(afterPath, want, 0o644); err != nil {
+				t.Fatalf("write %s: %v", afterPath, err)
+			}
+			continue
+		}
+		got, err := os.ReadFile(afterPath)
+		if err != nil || !bytes.Equal(got, want) {
+			t.Errorf("%s is missing or out of date.\nRun: %s\nThen review and commit the changes.", afterPath, goldentest.UpdateCommand)
+		}
+	}
+
+	generated, err := e2eFixtureNames(afterDir)
+	if err != nil {
+		t.Fatalf("list generated files: %v", err)
+	}
+	for _, name := range generated {
+		if slices.ContainsFunc(names, func(src string) bool { return e2eGeneratedName(src) == name }) {
+			continue
+		}
+		afterPath := filepath.Join(afterDir, name)
+		if !goldentest.Updating() {
+			t.Errorf("%s has no source in %s.\nRun: %s\nThen review and commit the changes.", afterPath, beforeDir, goldentest.UpdateCommand)
+			continue
+		}
+		if err := os.Remove(afterPath); err != nil {
+			t.Fatalf("remove %s: %v", afterPath, err)
+		}
+	}
+}
+
+// e2eGeneratedName is the name in fixsql/after of the file generated from
+// the file name of fixsql/before: after.go for before.go, the same name for
+// any other.
+func e2eGeneratedName(name string) string {
+	if name == "before.go" {
+		return "after.go"
+	}
+	return name
+}
+
+// e2eFixtureNames returns the base names of the .go files in dir other than
+// doc.go, which holds only the package comment.
+func e2eFixtureNames(dir string) ([]string, error) {
+	matches, err := filepath.Glob(filepath.Join(dir, "*.go"))
+	if err != nil {
+		return nil, err
+	}
+	var names []string
+	for _, m := range matches {
+		if name := filepath.Base(m); name != "doc.go" && !strings.HasSuffix(name, "_test.go") {
+			names = append(names, name)
+		}
+	}
+	return names, nil
 }
 
 // TestEachFixCompiles applies the suggested fix of each diagnostic in the

@@ -71,6 +71,7 @@ func callbackDeferImmutableInput(db *gorm.DB) {
 // Connection hands its callback a clone==0 value (#173), under defer too.
 func callbackDeferConnection(db *gorm.DB) {
 	defer db.Connection(func(tx *gorm.DB) error {
+		tx = tx.Session(&gorm.Session{})
 		tx.Find(nil)
 		tx.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 		return nil

@@ -1021,8 +1021,8 @@ A parameter root has no call to append a Session to. `Generate` used to declare 
 
 | Check | Fix |
 | --- | --- |
-| `canFixParam` fails: a Scopes/Preload callback, a closure, or a function with a `*gorm.DB` result that `calledOnlyDirectly` rejects | None |
-| `paramCallersIsolate`: the pass sees every file of the package (`reportSeesWholePackage`), `calledOnlyDirectly`, and `handler.BreaksImmutableParam` holds for no argument of any call to the function in the analysed functions | `//gormreuse:immutable-param` |
+| `canFixParam` fails: a Scopes/Preload callback, a closure with a `*gorm.DB` result, or a function declaration with a `*gorm.DB` result that `calledOnlyDirectly` rejects | None |
+| `paramCallersIsolate`: the function is a declaration, the pass sees every file of the package (`reportSeesWholePackage`), `calledOnlyDirectly`, and `handler.BreaksImmutableParam` holds for no argument of any call to the function in the analysed functions | `//gormreuse:immutable-param` |
 | Otherwise | `tx = tx.Session(&gorm.Session{})` before the body's first statement (`paramSessionSite`, written by `sessionEdits` with the same gorm name resolution and import as every other Session), then the rest of the local-root fix |
 
 `paramCallersIsolate` checks every argument of each call with the caller-side check's own predicate, not only the argument of the reused parameter: declaring the function covers all its `*gorm.DB` parameters. It scans the analysed functions (`runFuncs`), so a caller in a package-level closure counts (#183, #245).
@@ -1037,12 +1037,13 @@ A discarded statement on a parameter also changes the caller's value, and a help
 
 A function that returns a `*gorm.DB` and may be called by unknown code may be a Scopes callback. A Session result returned from one leaks gorm's transaction (go-gorm/gorm#7592), and the fix does not tell which results are Session results. It gets no fix.
 
+A closure parameter gets the body Session under the same rules (#313). In gorm's own `tests/` module, 8 of the 9 diagnostics without a fix were closure parameters: callbacks of Transaction wrappers and of `Connection`. Four of them now get the body Session, and the fixed tests compile, re-lint clean of them and log the same SQL. The other four belong to one root, a callback parameter handed to another wrapper call and used after it, which [#243](#in-place-changes-outside-the-variable-243) still withholds. A closure has no name, so `calledOnlyDirectly` cannot hold, and one with a `*gorm.DB` result may be a Scopes callback: it gets no fix, as an exported function with one does. A closure never gets `immutable-param`. Placing a directive on a literal is left to the user, and its callers, such as the function a callback is passed to, are not calls the caller-side check can see. The body Session needs only the closure's own body, so it fits a callback, an IIFE, a `go func(tx *gorm.DB) { ... }(q)`, a local closure and a package-level one alike. In a Transaction callback, the Session keeps the Statement's connection, which is the transaction (`TestClosureParamSessionKeepsTransaction`).
+
 Limitations:
 
 - The body Session also stops the function from changing the caller's Statement in place, as `tx.Where("a").Find(nil)` does on a mid-chain value. That change is the reuse being fixed.
-- A closure parameter still gets no fix.
 
-`TestParamSessionIsolatesBranches` in `e2e/internal/param_session_test.go` checks the body Session at runtime, and `testdata/src/converge/fix_param_root.go` checks that one pass converges. `testdata/src/gormreuse/fix_later_loop_merge.go` holds the merged parameters and the reassignments read in a later loop, and its golden is re-linted by `TestFixesConverge`. `TestLaterLoopMergeStopsLeaks` in `e2e/internal/later_loop_merge_test.go` runs them against real GORM and checks that the fixes of the first pass before #311 still leak.
+`TestParamSessionIsolatesBranches` in `e2e/internal/param_session_test.go` checks the body Session at runtime, and `testdata/src/converge/fix_param_root.go` checks that one pass converges. `testdata/src/gormreuse/fix_later_loop_merge.go` holds the merged parameters and the reassignments read in a later loop, and its golden is re-linted by `TestFixesConverge`. `TestLaterLoopMergeStopsLeaks` in `e2e/internal/later_loop_merge_test.go` runs them against real GORM and checks that the fixes of the first pass before #311 still leak. `testdata/src/gormreuse/fix_closure_param.go` holds the closure parameters, re-linted by `TestFixesConverge`, and `fix_param_root.go` the closures without a fix. `e2e/internal/closure_param_test.go` runs the `ClosureParam` cases of `fixsql/before/closure_param.go` against real GORM.
 
 ### Phi edges
 
@@ -1064,7 +1065,7 @@ Two more changes make the reassignment see every statement:
 - **Loop violations read their uses late.** A loop violation is added while its use is tracked (`handler/call.go`), before the uses after it in the loop body are recorded. `Violation.AllUses` used to be a snapshot taken then, so the fix never saw a discarded statement after the loop's query. `CollectViolations` now fills `AllUses` after tracking has finished.
 - **A reassignment in a loop gets a Session.** The simulation orders uses by position, so it cannot see the next iteration's use of a value reassigned in the loop body. `findRootsNeedingSession` gives such a virtual root a Session whenever its block is in a CFG cycle.
 
-`UsageInfo` carries the method name and the call's own position for this. `TestFixPreservesQueries` in `e2e/internal/fixsql_test.go` runs `e2e/internal/fixsql/before` and `fixsql/after` against real GORM and compares the SQL of each query. `TestGoldenFilesE2E` in the main module regenerates `after` from `before` with the current fixes, so the comparison always checks the fixes gormreuse suggests now. `TestFixPreservesQueriesDetectsSessionOnly` checks that the comparison fails for the old Session-only fixes.
+`UsageInfo` carries the method name and the call's own position for this. `TestFixPreservesQueries` in `e2e/internal/fixsql_test.go` runs `e2e/internal/fixsql/before` and `fixsql/after` against real GORM and compares the SQL of each query. `TestGoldenFilesE2E` in the main module regenerates each file of `after` from its file in `before` (`after.go` from `before.go`) with the current fixes, so the comparison always checks the fixes gormreuse suggests now. `TestFixPreservesQueriesDetectsSessionOnly` checks that the comparison fails for the old Session-only fixes.
 
 Limitations:
 
