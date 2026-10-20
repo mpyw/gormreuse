@@ -57,6 +57,14 @@ func scopesCallbackUnrelatedSessionWarns(db, other *gorm.DB) {
 	})
 }
 
+// A captured Session result is read through the closure's FreeVar.
+func scopesCallbackCapturedSessionWarns(db, other *gorm.DB) {
+	s := other.Session(&gorm.Session{}) // want `Session\(\) result returned from Scopes callback causes transaction leak`
+	db.Scopes(func(*gorm.DB) *gorm.DB {
+		return s
+	})
+}
+
 // Only one branch returns the Session result.
 func scopesCallbackConditionalSessionWarns(db *gorm.DB, debug bool) {
 	db.Scopes(func(q *gorm.DB) *gorm.DB {

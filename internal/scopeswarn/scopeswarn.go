@@ -166,8 +166,6 @@ func (t *returnTracer) value(f *frame, v ssa.Value) {
 		if i := slices.Index(f.fn.Params, x); i >= 0 && i < len(f.args) {
 			t.value(f.caller, f.args[i])
 		}
-	case *ssa.FreeVar:
-		t.value(f.enclosing(x), callsite.FreeVarBinding(x))
 	case *ssa.UnOp:
 		if x.Op == token.MUL {
 			t.load(f, x.X)

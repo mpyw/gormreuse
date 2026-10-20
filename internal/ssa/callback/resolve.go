@@ -117,8 +117,6 @@ func (r *funcResolver) addSliceElems(v ssa.Value) {
 				r.addSliceElems(sv)
 			}
 		}
-	case *ssa.FreeVar:
-		r.addSliceElems(callsite.FreeVarBinding(x))
 	case *ssa.ChangeType:
 		r.addSliceElems(x.X)
 	}
@@ -170,8 +168,6 @@ func (r *funcResolver) addFunc(v ssa.Value) {
 				r.addFunc(sv)
 			}
 		}
-	case *ssa.FreeVar:
-		r.addFunc(callsite.FreeVarBinding(x))
 	}
 }
 
