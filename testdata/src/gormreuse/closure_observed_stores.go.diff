@@ -1,0 +1,176 @@
+--- closure_observed_stores.go	1970-01-01 00:00:00
++++ closure_observed_stores.go.golden	1970-01-01 00:00:00
+@@ -1,167 +1,167 @@
+ package internal
+ 
+ import (
+ 	"context"
+ 	"slices"
+ 
+ 	"gorm.io/gorm"
+ )
+ 
+ // =============================================================================
+ // Stores a closure observes (#303)
+ //
+ // A closure that is deferred, spawned, passed on, stored or used as a
+ // range-over-func body runs at some point after its MakeClosure. A captured,
+ // reassigned variable read there sees the stores that reach the MakeClosure
+ // and every store that can run after it. The same holds for a field read
+ // through a captured pointer.
+ // =============================================================================
+ 
+ type cosUser struct{ ID int }
+ 
+ // cosGroup stands in for errgroup.Group.
+ type cosGroup struct{}
+ 
+ func (g *cosGroup) Go(f func() error) {}
+ func (g *cosGroup) Wait() error       { return nil }
+ 
+ type cosDeps struct{ db *gorm.DB }
+ 
+ // ===== SHOULD NOT REPORT =====
+ 
+ // cosErrgroup: every path rebinds db before the closures are created, so each
+ // spawned closure reads the WithContext result, not the parameter.
+ func cosErrgroup(ctx context.Context, db *gorm.DB, ids []int) error {
+ 	db = db.WithContext(ctx)
+ 	var g cosGroup
+ 	for _, id := range ids {
+ 		g.Go(func() error { return db.First(&cosUser{}, id).Error })
+ 	}
+ 	return g.Wait()
+ }
+ 
+ // cosErrgroupTwo: the same with two spawned closures.
+ func cosErrgroupTwo(ctx context.Context, db *gorm.DB) error {
+ 	db = db.WithContext(ctx)
+ 	var g cosGroup
+ 	g.Go(func() error { return db.Where("a = 1").Find(nil).Error })
+ 	g.Go(func() error { return db.Where("b = 2").Find(nil).Error })
+ 	return g.Wait()
+ }
+ 
+ // cosRangeFunc: the body of a range-over-func loop is a closure the iterator
+ // calls.
+ func cosRangeFunc(ctx context.Context, db *gorm.DB, us []cosUser) {
+ 	db = db.WithContext(ctx)
+ 	for _, u := range slices.All(us) {
+ 		db.Model(&u).Update("org", 1)
+ 	}
+ }
+ 
+ // cosTransaction: a callback passed to Transaction.
+ func cosTransaction(ctx context.Context, db *gorm.DB) error {
+ 	db = db.WithContext(ctx)
+ 	return db.Transaction(func(tx *gorm.DB) error {
+ 		db.Where("a = 1").Find(nil)
+ 		return db.Where("b = 2").Find(nil).Error
+ 	})
+ }
+ 
+ // cosSession: a Session taken the same way is not a second copy.
+ func cosSession(db *gorm.DB) error {
+ 	db = db.Session(&gorm.Session{})
+ 	var g cosGroup
+ 	g.Go(func() error { return db.Where("a = 1").Find(nil).Error })
+ 	g.Go(func() error { return db.Where("b = 2").Find(nil).Error })
+ 	return g.Wait()
+ }
+ 
+ // cosDeferred: deferred closures created after the rebind.
+ func cosDeferred(ctx context.Context, db *gorm.DB) {
+ 	db = db.WithContext(ctx)
+ 	defer func() { db.Where("a = 1").Find(nil) }()
+ 	defer func() { db.Where("b = 2").Find(nil) }()
+ }
+ 
+ // cosNested: a closure nested in a spawned one observes what the outer one
+ // does.
+ func cosNested(ctx context.Context, db *gorm.DB) {
+ 	db = db.WithContext(ctx)
+ 	go func() {
+ 		defer func() { db.Where("a = 1").Find(nil) }()
+ 		db.Where("b = 2").Find(nil)
+ 	}()
+ }
+ 
+ // cosFieldCalled: a field read through a captured pointer, in a closure that
+ // is only called, sees the stores that reach the calls.
+ func cosFieldCalled(ctx context.Context, db *gorm.DB) {
+ 	d := &cosDeps{db: db}
+ 	d.db = d.db.WithContext(ctx)
+ 	f := func(c string) { d.db.Where(c).Find(&[]cosUser{}) }
+ 	f("a = 1")
+ 	f("b = 2")
+ }
+ 
+ // cosFieldSpawned: the same in spawned closures.
+ func cosFieldSpawned(ctx context.Context, db *gorm.DB) error {
+ 	d := &cosDeps{db: db}
+ 	d.db = d.db.WithContext(ctx)
+ 	var g cosGroup
+ 	g.Go(func() error { return d.db.Where("a = 1").Find(nil).Error })
+ 	g.Go(func() error { return d.db.Where("b = 2").Find(nil).Error })
+ 	return g.Wait()
+ }
+ 
+ // cosFieldCapturedOuterRead: a pointer variable a closure captures lives in an
+ // Alloc, so d.db = ... stores through a load of it. The function's own reads
+ // see that store.
+ func cosFieldCapturedOuterRead(ctx context.Context, db *gorm.DB) {
+ 	d := &cosDeps{db: db}
+ 	d.db = d.db.WithContext(ctx)
+ 	d.db.Where("a = 1").Find(nil)
+ 	d.db.Where("b = 2").Find(nil)
+ 	go func() { d.db.Where("c = 3").Find(nil) }()
+ }
+ 
+ // ===== SHOULD REPORT =====
+ 
+ // cosStoreAfterSpawn: the goroutine may run after q is rebound to m, which is
+ // also used here.
+ func cosStoreAfterSpawn(db, other *gorm.DB) {
+ 	q := other.Where("y")
+-	m := db.Where("x")
++	m := db.Where("x").Session(&gorm.Session{})
+ 	go func() { q.Find(nil) }()
+ 	q = m
+ 	m.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // cosStoreInLoop: a store later in the loop body runs before the next
+ // iteration's closure is created, and maybe before this one runs.
+ func cosStoreInLoop(db, other *gorm.DB, ids []int) {
+-	q := other.Where("y")
+-	m := db.Where("x")
++	q := other.Where("y").Session(&gorm.Session{})
++	m := db.Where("x").Session(&gorm.Session{})
+ 	m.Find(nil)
+ 	var g cosGroup
+ 	for range ids {
+ 		g.Go(func() error { return q.Find(nil).Error }) // want `\*gorm\.DB reused: second branch from mutable root`
+ 		q = m
+ 	}
+ }
+ 
+ // cosStoreBeforeSpawn: the stores that reach the closure still count.
+ func cosStoreBeforeSpawn(db *gorm.DB) {
+-	q := db.Where("x")
+-	q = q.Where("y")
++	q := db.Where("x").Session(&gorm.Session{})
++	q = q.Where("y").Session(&gorm.Session{})
+ 	go func() { q.Find(nil) }()
+ 	go func() { q.Count(nil) }() // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // cosFieldStoreAfterSpawn: a field store after the closure is seen too.
+ func cosFieldStoreAfterSpawn(db, other *gorm.DB) {
+ 	d := &cosDeps{db: other.Where("y")}
+-	m := db.Where("x")
++	m := db.Where("x").Session(&gorm.Session{})
+ 	go func() { d.db.Find(nil) }()
+ 	d.db = m
+ 	m.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }

@@ -667,7 +667,16 @@ db.Find(&users)
 func() { db.Count(&count) }() // OK - reads the WithContext result
 ```
 
-A deferred, spawned, stored or passed-on closure may run at any point, so it may read any value the variable held.
+A closure that is deferred, run with `go`, stored, passed on (errgroup's `Go`, a `Transaction` callback) or used as a range-over-func body may run at any point after it is created. It reads the value the variable held when the closure was created, or any value stored later:
+
+```go
+db = db.WithContext(ctx)
+for _, id := range ids {
+    g.Go(func() error { return db.First(&User{}, id).Error }) // OK - reads the WithContext result
+}
+```
+
+The same applies to a field read through a captured pointer, such as `d := &deps{db: db}; d.db = d.db.WithContext(ctx)`.
 
 A closure that builds a new chain from an immutable value on each call is a factory. Each call is its own root, whether it is called twice or in a loop:
 

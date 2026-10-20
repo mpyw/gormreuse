@@ -39,48 +39,131 @@ func (t *RootTracer) traceAllocStore(alloc *ssa.Alloc, load ssa.Instruction, vis
 //	db.Find(nil)               // sees the WithContext store only
 //	func() { db.Count(nil) }() // so does this read, at the IIFE's call
 //
-// A load in alloc's own function sees the stores that reach it, as a field
-// load does (#182). A load in a closure declared there sees the stores that
-// reach the closure's calls, when plain calls there are its only uses. A
-// closure that is deferred, spawned, stored, passed on or nested deeper may run
-// at any point, so its loads, like a nil load, see every store. A store made
-// inside a closure is not seen, as before.
+// The stores a read sees are those of observedFieldStores with an empty path.
+// A nil load sees all of them. A store made inside a closure is not seen, as
+// before.
 func allocReachingStoreValues(alloc *ssa.Alloc, load ssa.Instruction) []ssa.Value {
 	fn := alloc.Parent()
-	if load == nil || fn == nil {
-		return AllocStoredValues(alloc)
+	if fn == nil {
+		return nil
 	}
-	reads := []ssa.Instruction{load}
-	if load.Parent() != fn {
-		reads = nil
-		if mc := callsite.FreeVarMakeClosure(load.Parent()); mc != nil && mc.Parent() == fn {
-			for _, call := range closureInvocationCalls(mc) {
-				reads = append(reads, call)
-			}
-		}
-		if len(reads) == 0 {
-			return AllocStoredValues(alloc)
+	stores, _ := observedFieldStores(fn, storeTarget{root: alloc}, nil, load)
+	vals := make([]ssa.Value, 0, len(stores))
+	for _, store := range stores {
+		vals = append(vals, store.Val)
+	}
+	return vals
+}
+
+// observedFieldStores is reachingFieldStores for a read at load, in fn or in a
+// closure that fn creates, of an address that fn defines (#251, #303).
+//
+// A load in fn sees the stores that reach it. A load in a closure declared in
+// fn whose only uses are plain calls sees the stores that reach those calls.
+// Any other closure, deferred, spawned, stored, passed on, used as a
+// range-over-func body, or nested deeper, runs at some point after the
+// MakeClosure that fn runs for it, so it sees the stores that reach that
+// MakeClosure and every store that can run after it:
+//
+//	db = db.WithContext(ctx)                // reaches the MakeClosure
+//	g.Go(func() error { return db.... })    // sees WithContext, not the parameter
+//	db = db.Where("x")                      // runs after it: seen too
+//
+// A load that no MakeClosure in fn leads to sees every store, as a nil load
+// does.
+func observedFieldStores(fn *ssa.Function, target storeTarget, path []int, load ssa.Instruction) (stores []*ssa.Store, open bool) {
+	if load == nil || load.Parent() == fn {
+		return reachingFieldStores(fn, target, path, load)
+	}
+	mc := makeClosureInStoreFunc(fn, load.Parent())
+	if mc == nil {
+		return reachingFieldStores(fn, target, path, nil)
+	}
+	var reads []ssa.Instruction
+	if mc.Fn == ssa.Value(load.Parent()) {
+		for _, call := range closureInvocationCalls(mc) {
+			reads = append(reads, call)
 		}
 	}
-	var stores []*ssa.Store
+	if len(reads) == 0 {
+		reads = []ssa.Instruction{mc}
+		stores = fieldStoresAfter(target, path, mc)
+	}
 	for _, read := range reads {
-		for _, store := range fieldStores(fn, alloc, nil, read) {
+		reaching, readOpen := reachingFieldStores(fn, target, path, read)
+		open = open || readOpen
+		for _, store := range reaching {
 			if !slices.Contains(stores, store) {
 				stores = append(stores, store)
 			}
 		}
 	}
+	stores = slices.Compact(sortStoresInProgramOrder(stores))
+	return stores, open
+}
+
+// makeClosureInStoreFunc returns the MakeClosure in fn that creates closure, or
+// the closure that encloses it, or nil when closure is not nested in fn.
+func makeClosureInStoreFunc(fn, closure *ssa.Function) *ssa.MakeClosure {
+	for {
+		mc := callsite.FreeVarMakeClosure(closure)
+		if mc == nil || mc.Parent() == fn {
+			return mc
+		}
+		closure = mc.Parent()
+	}
+}
+
+// fieldStoresAfter returns the stores that write the field that path selects
+// from target and can run after from: on some CFG path that leaves from. As in
+// reachingFieldStores, a path ends at the call that defines the root, since a
+// store past it writes the struct of a later iteration.
+func fieldStoresAfter(target storeTarget, path []int, from ssa.Instruction) []*ssa.Store {
+	def, _ := target.root.(*ssa.Call)
+	var found []*ssa.Store
+	// scan collects the stores in instrs and reports whether def ends the path.
+	scan := func(instrs []ssa.Instruction) bool {
+		for _, instr := range instrs {
+			if def != nil && instr == ssa.Instruction(def) {
+				return true
+			}
+			if store, ok := instr.(*ssa.Store); ok && storeWritesFieldPath(store, target, path) && !slices.Contains(found, store) {
+				found = append(found, store)
+			}
+		}
+		return false
+	}
+	start := from.Block()
+	if scan(start.Instrs[slices.Index(start.Instrs, from)+1:]) {
+		return found
+	}
+	// The start block is scanned in full when a loop leads back to it, since
+	// its stores before from then run after it.
+	visitedBlocks := make(map[*ssa.BasicBlock]bool)
+	work := slices.Clone(start.Succs)
+	for len(work) > 0 {
+		block := work[len(work)-1]
+		work = work[:len(work)-1]
+		if visitedBlocks[block] {
+			continue
+		}
+		visitedBlocks[block] = true
+		if !scan(block.Instrs) {
+			work = append(work, block.Succs...)
+		}
+	}
+	return found
+}
+
+// sortStoresInProgramOrder sorts stores by block, then by position in it.
+func sortStoresInProgramOrder(stores []*ssa.Store) []*ssa.Store {
 	slices.SortFunc(stores, func(a, b *ssa.Store) int {
 		if a.Block() != b.Block() {
 			return a.Block().Index - b.Block().Index
 		}
 		return slices.Index(a.Block().Instrs, ssa.Instruction(a)) - slices.Index(b.Block().Instrs, ssa.Instruction(b))
 	})
-	vals := make([]ssa.Value, 0, len(stores))
-	for _, store := range stores {
-		vals = append(vals, store.Val)
-	}
-	return vals
+	return stores
 }
 
 // AllocStoredValues returns, in program order, the values stored into alloc.
@@ -170,20 +253,18 @@ func structFieldStoredValues(x ssa.Value, path []int, seen map[ssa.Value]bool) [
 // fieldStoredValuesAt returns the values stored into the field that path
 // selects from root, as read by load in fn. Each address root may stand for
 // (see fieldBaseAddrs) is searched in the function that defines it, or in fn
-// for one without a function, such as a global. Only the stores that reach load
-// are returned when the address is defined in fn. Stores in an enclosing
-// function have no CFG path to a load in a closure, so all of them are returned.
+// for one without a function, such as a global. The stores returned are those
+// that load observes (see observedFieldStores): a load in a closure of the
+// defining function, reached through a captured pointer, sees the stores that
+// reach the closure's calls or creation and those that run after it (#303).
 func fieldStoredValuesAt(fn *ssa.Function, root ssa.Value, path []int, load ssa.Instruction) []ssa.Value {
 	var vals []ssa.Value
 	for _, base := range fieldBaseAddrs(root, make(map[ssa.Value]bool)) {
-		baseFn, baseLoad := base.Parent(), load
+		baseFn := base.Parent()
 		if baseFn == nil {
 			baseFn = fn
 		}
-		if baseFn != fn {
-			baseLoad = nil
-		}
-		vals = append(vals, fieldStoredValuesFrom(baseFn, base, path, baseLoad, make(map[storedFieldRef]bool))...)
+		vals = append(vals, fieldStoredValuesFrom(baseFn, base, path, load, make(map[storedFieldRef]bool))...)
 	}
 	return vals
 }
@@ -222,7 +303,8 @@ func fieldStoredValuesFrom(fn *ssa.Function, root ssa.Value, path []int, load ss
 	}
 	seen[ref] = true
 
-	stores, open := reachingFieldStores(fn, root, path, load)
+	target := newStoreTarget(root)
+	stores, open := observedFieldStores(fn, target, path, load)
 	var vals []ssa.Value
 	if call, ok := root.(*ssa.Call); ok && open {
 		// A field reached through a pointer that a call returned holds what
@@ -231,7 +313,7 @@ func fieldStoredValuesFrom(fn *ssa.Function, root ssa.Value, path []int, load ss
 		vals = append(vals, &FieldRoot{Call: call, Path: slices.Clone(path)})
 	}
 	for _, store := range stores {
-		storePath, _ := fieldStorePath(store, root)
+		storePath, _ := fieldStorePath(store, target)
 		if len(storePath) == len(path) {
 			vals = append(vals, store.Val)
 			continue
@@ -252,22 +334,81 @@ func fieldStoredValuesFrom(fn *ssa.Function, root ssa.Value, path []int, load ss
 	return vals
 }
 
-// fieldStorePath returns the field path that store writes below root. ok is
-// false when it writes somewhere else. A store to root itself has an empty
+// storeTarget is the address whose stores a search matches: root, and, when
+// root is the only pointer ever stored into the local variable slot, every
+// load of slot (#303). A pointer variable that a closure captures lives in an
+// Alloc, so each access through it loads it afresh:
+//
+//	t0 = new *deps (d)       // slot: d := &deps{db: db}, captured
+//	t1 = new deps (complit)  // root
+//	*t0 = t1
+//	t3 = *t0
+//	t8 = &t3.db
+//	*t8 = t7                 // d.db = ...: writes root's db
+//
+// With more than one store in slot, a load of it may hold another pointer, so
+// a store through it is not matched, as before.
+type storeTarget struct {
+	root ssa.Value
+	slot *ssa.Alloc
+}
+
+// newStoreTarget returns the storeTarget of root.
+func newStoreTarget(root ssa.Value) storeTarget {
+	target := storeTarget{root: root}
+	refs := root.Referrers()
+	if refs == nil {
+		return target
+	}
+	for _, ref := range *refs {
+		store, ok := ref.(*ssa.Store)
+		if !ok || store.Val != root {
+			continue
+		}
+		if slot, ok := store.Addr.(*ssa.Alloc); ok && allocHasOneStore(slot) {
+			target.slot = slot
+			break
+		}
+	}
+	return target
+}
+
+// allocHasOneStore reports whether exactly one store writes alloc.
+func allocHasOneStore(alloc *ssa.Alloc) bool {
+	n := 0
+	for _, ref := range *alloc.Referrers() {
+		if store, ok := ref.(*ssa.Store); ok && store.Addr == ssa.Value(alloc) {
+			n++
+		}
+	}
+	return n == 1
+}
+
+// holds reports whether addr is target's root.
+func (target storeTarget) holds(addr ssa.Value) bool {
+	if addr == target.root {
+		return true
+	}
+	load, ok := addr.(*ssa.UnOp)
+	return ok && target.slot != nil && load.Op == token.MUL && load.X == ssa.Value(target.slot)
+}
+
+// fieldStorePath returns the field path that store writes below target. ok is
+// false when it writes somewhere else. A store to the root itself has an empty
 // path.
-func fieldStorePath(store *ssa.Store, root ssa.Value) (path []int, ok bool) {
+func fieldStorePath(store *ssa.Store, target storeTarget) (path []int, ok bool) {
 	storeRoot := store.Addr
 	if storeFA, isFA := store.Addr.(*ssa.FieldAddr); isFA {
 		storeRoot, path = fieldAddrPath(storeFA)
 	}
-	return path, storeRoot == root
+	return path, target.holds(storeRoot)
 }
 
 // storeWritesFieldPath reports whether store writes the field that path selects
-// from root: either that field itself, or a whole aggregate over a prefix of
+// from target: either that field itself, or a whole aggregate over a prefix of
 // path.
-func storeWritesFieldPath(store *ssa.Store, root ssa.Value, path []int) bool {
-	storePath, ok := fieldStorePath(store, root)
+func storeWritesFieldPath(store *ssa.Store, target storeTarget, path []int) bool {
+	storePath, ok := fieldStorePath(store, target)
 	return ok && len(storePath) <= len(path) && slices.Equal(storePath, path[:len(storePath)])
 }
 
@@ -289,8 +430,8 @@ func storeWritesFieldPath(store *ssa.Store, root ssa.Value, path []int) bool {
 // result. Only stores to the same (root, field path) are seen. A write through
 // another pointer or inside a callee neither reaches the load nor replaces a
 // store, as before.
-func fieldStores(fn *ssa.Function, root ssa.Value, path []int, load ssa.Instruction) []*ssa.Store {
-	stores, _ := reachingFieldStores(fn, root, path, load)
+func fieldStores(fn *ssa.Function, target storeTarget, path []int, load ssa.Instruction) []*ssa.Store {
+	stores, _ := reachingFieldStores(fn, target, path, load)
 	return stores
 }
 
@@ -300,12 +441,12 @@ func fieldStores(fn *ssa.Function, root ssa.Value, path []int, load ssa.Instruct
 //
 // When root is a call, which defines the address, the walk stops at the call:
 // a store above it on a loop path wrote the struct of an earlier iteration.
-func reachingFieldStores(fn *ssa.Function, root ssa.Value, path []int, load ssa.Instruction) (stores []*ssa.Store, open bool) {
+func reachingFieldStores(fn *ssa.Function, target storeTarget, path []int, load ssa.Instruction) (stores []*ssa.Store, open bool) {
 	if load == nil {
 		var all []*ssa.Store
 		for _, block := range fn.Blocks {
 			for _, instr := range block.Instrs {
-				if store, ok := instr.(*ssa.Store); ok && storeWritesFieldPath(store, root, path) {
+				if store, ok := instr.(*ssa.Store); ok && storeWritesFieldPath(store, target, path) {
 					all = append(all, store)
 				}
 			}
@@ -316,15 +457,15 @@ func reachingFieldStores(fn *ssa.Function, root ssa.Value, path []int, load ssa.
 	// lastIn returns the last store in instrs that writes the field.
 	lastIn := func(instrs []ssa.Instruction) *ssa.Store {
 		for _, instr := range slices.Backward(instrs) {
-			if store, ok := instr.(*ssa.Store); ok && storeWritesFieldPath(store, root, path) {
+			if store, ok := instr.(*ssa.Store); ok && storeWritesFieldPath(store, target, path) {
 				return store
 			}
 		}
 		return nil
 	}
 
-	// def is the call that defines root, and the walk ends there.
-	def, _ := root.(*ssa.Call)
+	// def is the call that defines the root, and the walk ends there.
+	def, _ := target.root.(*ssa.Call)
 	// afterDef returns the instructions of block that can write root's field
 	// before control leaves it, and whether def is among them.
 	afterDef := func(instrs []ssa.Instruction) ([]ssa.Instruction, bool) {
@@ -390,7 +531,7 @@ func reachingFieldStores(fn *ssa.Function, root ssa.Value, path []int, load ssa.
 //declscope:shared // root.go's tracePointerLoad and traceAllPointerLoads resolve a global load with it
 func globalStoredValues(g *ssa.Global, load ssa.Instruction) []ssa.Value {
 	var vals []ssa.Value
-	for _, store := range fieldStores(load.Parent(), g, nil, load) {
+	for _, store := range fieldStores(load.Parent(), storeTarget{root: g}, nil, load) {
 		vals = append(vals, store.Val)
 	}
 	return vals
