@@ -89,7 +89,7 @@ func exprGormMethodOnSession(db *gorm.DB) {
 
 // exprBranchMutable: branch needs an isolated value.
 func exprBranchMutable(db *gorm.DB) {
-	exprRepo.branch(exprRepo{}, db.Session(&gorm.Session{}).Where("x").Session(&gorm.Session{})) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of branch`
+	exprRepo.branch(exprRepo{}, db.Session(&gorm.Session{}).Where("x").Session(&gorm.Session{})) // want `mutable \*gorm\.DB passed to branch, which has a gormreuse:immutable-param directive`
 }
 
 // exprSameReturnsArg: same returns its argument, so the result shares q.
@@ -136,7 +136,7 @@ func exprPureGormMethod(db *gorm.DB) {
 
 // exprDeferBranchMutable: the contract is checked under defer too.
 func exprDeferBranchMutable(db *gorm.DB) {
-	defer exprRepo.branch(exprRepo{}, db.Where("x").Session(&gorm.Session{})) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of branch`
+	defer exprRepo.branch(exprRepo{}, db.Where("x").Session(&gorm.Session{})) // want `mutable \*gorm\.DB passed to branch, which has a gormreuse:immutable-param directive`
 }
 
 //gormreuse:pure
@@ -152,7 +152,7 @@ func exprPureSession(db *gorm.DB) {
 // exprFuncValue: a method expression held in a variable is the same call.
 func exprFuncValue(db *gorm.DB) {
 	f := exprRepo.branch
-	f(exprRepo{}, db.Where("x").Session(&gorm.Session{})) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of branch`
+	f(exprRepo{}, db.Where("x").Session(&gorm.Session{})) // want `mutable \*gorm\.DB passed to branch, which has a gormreuse:immutable-param directive`
 }
 
 // exprEmbedded embeds *gorm.DB, so exprEmbedded.Find is gorm's Find.
@@ -199,5 +199,5 @@ var exprBranchVar = exprRepo.branch
 // exprPackageVarBranchMutable: the call through the variable is the same call.
 // The fix isolates the *gorm.DB argument, not the receiver (#293).
 func exprPackageVarBranchMutable(db *gorm.DB) {
-	exprBranchVar(exprRepo{}, db.Where("x").Session(&gorm.Session{})) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of branch`
+	exprBranchVar(exprRepo{}, db.Where("x").Session(&gorm.Session{})) // want `mutable \*gorm\.DB passed to branch, which has a gormreuse:immutable-param directive`
 }

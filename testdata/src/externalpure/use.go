@@ -147,7 +147,7 @@ func wrapsBadPure(db *gorm.DB) {
 // ApplyFilters branches its parameter, so it needs an isolated value.
 func immutableParamMutableArg(db *gorm.DB) {
 	q := db.Where("x = ?", 1)
-	purelib.ApplyFilters(q) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of ApplyFilters`
+	purelib.ApplyFilters(q) // want `mutable \*gorm\.DB passed to ApplyFilters, which has a gormreuse:immutable-param directive`
 }
 
 func immutableParamIsolatedArg(db *gorm.DB) {
@@ -156,7 +156,7 @@ func immutableParamIsolatedArg(db *gorm.DB) {
 
 func immutableParamUnderDefer(db *gorm.DB) {
 	q := db.Where("x = ?", 1)
-	defer purelib.ApplyFilters(q) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of ApplyFilters`
+	defer purelib.ApplyFilters(q) // want `mutable \*gorm\.DB passed to ApplyFilters, which has a gormreuse:immutable-param directive`
 }
 
 // WithFresh hands cb an isolated value, so tx may be reused.
@@ -260,7 +260,7 @@ func boundImmutableParamIsolated(r purelib.Repo, db *gorm.DB) {
 // A mutable argument is reported at the call through the method value.
 func boundImmutableParamMutable(r purelib.Repo, db *gorm.DB) {
 	f := r.Branch
-	f(db.Where("x = ?", 1)) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of Branch`
+	f(db.Where("x = ?", 1)) // want `mutable \*gorm\.DB passed to Branch, which has a gormreuse:immutable-param directive`
 }
 
 func exprImmutableParamIsolated(r purelib.Repo, db *gorm.DB) {
@@ -268,7 +268,7 @@ func exprImmutableParamIsolated(r purelib.Repo, db *gorm.DB) {
 }
 
 func exprImmutableParamMutable(r purelib.Repo, db *gorm.DB) {
-	purelib.Repo.Branch(r, db.Where("x = ?", 1)) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of Branch`
+	purelib.Repo.Branch(r, db.Where("x = ?", 1)) // want `mutable \*gorm\.DB passed to Branch, which has a gormreuse:immutable-param directive`
 }
 
 func exprPure(r purelib.Repo, db *gorm.DB) {

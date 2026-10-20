@@ -44,7 +44,7 @@ var drBranches = func(q *gorm.DB) {
 
 // drCallBranches: the immutable-param callee is named by its variable.
 func drCallBranches(db *gorm.DB) {
-	drBranches(db.Where("x").Session(&gorm.Session{})) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of drBranches;`
+	drBranches(db.Where("x").Session(&gorm.Session{})) // want `mutable \*gorm\.DB passed to drBranches, which has a gormreuse:immutable-param directive;`
 }
 
 // drSink takes a callback it may call with anything.

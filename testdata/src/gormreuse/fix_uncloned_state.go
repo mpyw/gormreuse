@@ -90,7 +90,7 @@ func ucsFindTwice(tx *gorm.DB) {
 
 // ucsIsolateAssign: a Session after the argument would drop its Assign.
 func ucsIsolateAssign(db *gorm.DB) {
-	ucsFindTwice(db.Model(&User{}).Assign(User{Age: 77})) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of ucsFindTwice; a Session would drop its Attrs, Assign or InstanceSet, so pass a value built for this call instead`
+	ucsFindTwice(db.Model(&User{}).Assign(User{Age: 77})) // want `mutable \*gorm\.DB passed to ucsFindTwice, which has a gormreuse:immutable-param directive; a Session would drop its Attrs, Assign or InstanceSet, so pass a value built for this call instead`
 }
 
 // ===== FIX: no state reaches the Session =====

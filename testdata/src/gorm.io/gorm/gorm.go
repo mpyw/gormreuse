@@ -26,6 +26,7 @@ type Session struct {
 	DisableNestedTransaction bool
 	AllowGlobalUpdate        bool
 	FullSaveAssociations     bool
+	PropagateUnscoped        bool
 	QueryFields              bool
 	CreateBatchSize          int
 	Context                  context.Context

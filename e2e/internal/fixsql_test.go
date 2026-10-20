@@ -1,16 +1,19 @@
 package internal
 
 import (
+	"flag"
 	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"os"
 	"path/filepath"
 	"reflect"
 	"regexp"
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"gorm.io/gorm"
@@ -71,12 +74,55 @@ var fixsqlCases = []fixsqlCase{
 var fixsqlTopicCases []fixsqlCase
 
 // registerFixsqlCases adds lists to the cases TestFixsqlCasesCoverBefore
-// counts. Call it from a package-level var declaration of the topic's file.
+// counts and TestMain requires to run. Call it from a package-level var
+// declaration of the topic's file.
 func registerFixsqlCases(lists ...[]fixsqlCase) bool {
 	for _, list := range lists {
 		fixsqlTopicCases = append(fixsqlTopicCases, list...)
 	}
 	return true
+}
+
+// allFixsqlCases returns every case: the lists of this file and the other
+// fix tests, and those registered with registerFixsqlCases.
+func allFixsqlCases() []fixsqlCase {
+	return slices.Concat(fixsqlCases, fixPathsCases, fixEscapeCases, laterLoopCases, paginateCases, fixStructEscapeCases, fixsqlTopicCases)
+}
+
+// fixsqlRan holds the name of each function that fixsqlRun has run.
+var fixsqlRan sync.Map
+
+// fixsqlFuncName returns the package-qualified name of fn, such as
+// "after.Loop".
+func fixsqlFuncName(fn func(*gorm.DB)) string {
+	full := runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
+	return full[strings.LastIndex(full, "/")+1:]
+}
+
+// fixsqlRun runs fn on db and records that it ran. fixsqlQueries and
+// laterLoopQueries, which every case's test runs it through, call it.
+func fixsqlRun(db *gorm.DB, fn func(*gorm.DB)) {
+	fixsqlRan.Store(fixsqlFuncName(fn), true)
+	fn(db)
+}
+
+// TestMain fails a full run of the tests in which the fixed function of a
+// case never ran (#351). Being counted by TestFixsqlCasesCoverBefore does not
+// mean that a test runs the case: a test could range over an empty list, or
+// over a list that no test ranges over. A run with -run or -skip leaves out
+// tests, so it is not checked.
+func TestMain(m *testing.M) {
+	flag.Parse()
+	code := m.Run()
+	if code == 0 && flag.Lookup("test.run").Value.String() == "" && flag.Lookup("test.skip").Value.String() == "" {
+		for _, tc := range allFixsqlCases() {
+			if _, ok := fixsqlRan.Load("after." + tc.name); !ok {
+				fmt.Fprintf(os.Stderr, "FAIL: no test ran after.%s, the fixed code of a fixsql case\n", tc.name)
+				code = 1
+			}
+		}
+	}
+	os.Exit(code)
 }
 
 // TestFixsqlCasesCoverBefore checks that every exported function of
@@ -105,10 +151,9 @@ func TestFixsqlCasesCoverBefore(t *testing.T) {
 	}
 
 	var got []string
-	for _, tc := range slices.Concat(fixsqlCases, fixPathsCases, fixEscapeCases, laterLoopCases, paginateCases, fixStructEscapeCases, fixsqlTopicCases) {
+	for _, tc := range allFixsqlCases() {
 		for pkg, fn := range map[string]func(*gorm.DB){"before": tc.before, "after": tc.after} {
-			full := runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
-			if name := full[strings.LastIndex(full, "/")+1:]; name != pkg+"."+tc.name {
+			if name := fixsqlFuncName(fn); name != pkg+"."+tc.name {
 				t.Errorf("case %s runs %s, want %s.%s", tc.name, name, pkg, tc.name)
 			}
 		}
@@ -183,7 +228,7 @@ func fixsqlQueries(t *testing.T, fn func(*gorm.DB)) [][]string {
 	}); err != nil {
 		t.Fatalf("register callback: %v", err)
 	}
-	fn(db)
+	fixsqlRun(db, fn)
 	if len(queries) == 0 {
 		t.Fatal("no query ran")
 	}

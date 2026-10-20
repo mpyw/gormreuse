@@ -117,7 +117,7 @@ func laterLoopQueries(t *testing.T, fn func(*gorm.DB)) []laterLoopQuery {
 	}); err != nil {
 		t.Fatalf("register callback: %v", err)
 	}
-	fn(db)
+	fixsqlRun(db, fn)
 	return queries
 }
 

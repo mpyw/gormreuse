@@ -202,5 +202,5 @@ func dgPureFailsParam(db *gorm.DB) {
 
 func dgUsePureFailsParam(db *gorm.DB) {
 	q := db.Where("x")
-	dgPureFailsParam(q) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of dgPureFailsParam`
+	dgPureFailsParam(q) // want `mutable \*gorm\.DB passed to dgPureFailsParam, which has a gormreuse:immutable-param directive`
 }

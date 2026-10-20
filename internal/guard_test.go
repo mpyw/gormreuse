@@ -11,13 +11,15 @@ import (
 	"golang.org/x/tools/go/ssa"
 )
 
-// InjectGuardPanic makes the work of stage panic, for the function named fn,
-// or for the work that reads the whole package when fn is "". restore removes
-// the panic. It is for TestPanicInjection in guard_injection_test.go, which
-// must not run in parallel with another analysis.
-func InjectGuardPanic(stage, fn string) (restore func()) {
+// InjectGuardPanic makes the work of each stage of panics panic, for the
+// function it maps the stage to, or for the work that reads the whole package
+// when that is "". restore removes the panics. It is for TestPanicInjection in
+// guard_injection_test.go, which must not run in parallel with another
+// analysis.
+func InjectGuardPanic(panics map[string]string) (restore func()) {
 	guardPanicInjection = func(s string, f *ssa.Function) {
-		if s != stage {
+		fn, ok := panics[s]
+		if !ok {
 			return
 		}
 		if f == nil && fn == "" || f != nil && f.Name() == fn {

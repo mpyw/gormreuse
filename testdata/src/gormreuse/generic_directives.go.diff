@@ -132,14 +132,14 @@
  
  // genPassMutable: the caller-side contract is checked for the instance.
  func genPassMutable(root *gorm.DB) {
--	genBranch[int](root.Session(&gorm.Session{}).Where("x")) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of genBranch`
-+	genBranch[int](root.Session(&gorm.Session{}).Where("x").Session(&gorm.Session{})) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of genBranch`
+-	genBranch[int](root.Session(&gorm.Session{}).Where("x")) // want `mutable \*gorm\.DB passed to genBranch, which has a gormreuse:immutable-param directive`
++	genBranch[int](root.Session(&gorm.Session{}).Where("x").Session(&gorm.Session{})) // want `mutable \*gorm\.DB passed to genBranch, which has a gormreuse:immutable-param directive`
  }
  
  // genDeferMutable: the same under defer (#192).
  func genDeferMutable(root *gorm.DB) {
--	defer genBranch[int](root.Session(&gorm.Session{}).Where("x")) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of genBranch`
-+	defer genBranch[int](root.Session(&gorm.Session{}).Where("x").Session(&gorm.Session{})) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of genBranch`
+-	defer genBranch[int](root.Session(&gorm.Session{}).Where("x")) // want `mutable \*gorm\.DB passed to genBranch, which has a gormreuse:immutable-param directive`
++	defer genBranch[int](root.Session(&gorm.Session{}).Where("x").Session(&gorm.Session{})) // want `mutable \*gorm\.DB passed to genBranch, which has a gormreuse:immutable-param directive`
  }
  
  // genPassIsolated: an isolated value satisfies the contract.
@@ -155,16 +155,16 @@
  
  // genPassMutableMethod: the same for a generic method.
  func genPassMutableMethod(root *gorm.DB) {
--	genRepo{}.branch[int](root.Session(&gorm.Session{}).Where("x")) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of branch`
-+	genRepo{}.branch[int](root.Session(&gorm.Session{}).Where("x").Session(&gorm.Session{})) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of branch`
+-	genRepo{}.branch[int](root.Session(&gorm.Session{}).Where("x")) // want `mutable \*gorm\.DB passed to branch, which has a gormreuse:immutable-param directive`
++	genRepo{}.branch[int](root.Session(&gorm.Session{}).Where("x").Session(&gorm.Session{})) // want `mutable \*gorm\.DB passed to branch, which has a gormreuse:immutable-param directive`
  }
  
  // genPassMutableMethodValue: through a method value, the first argument is
  // the parameter, not the receiver.
  func genPassMutableMethodValue(root *gorm.DB) {
  	f := genRepo{}.branch[int]
--	f(root.Session(&gorm.Session{}).Where("x")) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of branch`
-+	f(root.Session(&gorm.Session{}).Where("x").Session(&gorm.Session{})) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of branch`
+-	f(root.Session(&gorm.Session{}).Where("x")) // want `mutable \*gorm\.DB passed to branch, which has a gormreuse:immutable-param directive`
++	f(root.Session(&gorm.Session{}).Where("x").Session(&gorm.Session{})) // want `mutable \*gorm\.DB passed to branch, which has a gormreuse:immutable-param directive`
  }
  
  // ===== immutable-input =====

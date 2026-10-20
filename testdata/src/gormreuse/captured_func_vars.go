@@ -118,7 +118,7 @@ func cfvImmutableParam(db *gorm.DB) {
 		q.Where("a").Find(nil)
 		q.Where("b").Find(nil)
 	}
-	branch(db.Where("x")) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter`
+	branch(db.Where("x")) // want `mutable \*gorm\.DB passed to \S+, which has a gormreuse:immutable-param directive`
 	func() { branch(nil) }()
 }
 
@@ -129,7 +129,7 @@ func cfvImmutableParamInClosure(db *gorm.DB) {
 		q.Where("b").Find(nil)
 	}
 	func() {
-		branch(db.Where("x")) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter`
+		branch(db.Where("x")) // want `mutable \*gorm\.DB passed to \S+, which has a gormreuse:immutable-param directive`
 	}()
 }
 
@@ -143,7 +143,7 @@ func cfvImmutableParamFuncValue(db *gorm.DB) {
 	f := cfvApply
 	q := db.Where("x")
 	func() {
-		f(q) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter`
+		f(q) // want `mutable \*gorm\.DB passed to \S+, which has a gormreuse:immutable-param directive`
 	}()
 }
 

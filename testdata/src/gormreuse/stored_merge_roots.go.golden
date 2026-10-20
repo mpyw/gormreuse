@@ -105,7 +105,7 @@ func smrImmutableParamCaptured(db *gorm.DB, name string) {
 		q = q.Where("name LIKE ?", name)
 	}
 	defer func() { _ = q }()
-	smrCountAndList(q.Session(&gorm.Session{})) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of smrCountAndList`
+	smrCountAndList(q.Session(&gorm.Session{})) // want `mutable \*gorm\.DB passed to smrCountAndList, which has a gormreuse:immutable-param directive`
 }
 
 // smrSpawnLoopThenRebuild: the goroutines may run after q is rebuilt, and all

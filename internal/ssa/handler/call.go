@@ -577,11 +577,12 @@ func BreaksImmutableParam(site callsite.Site, i int, rt *tracer.RootTracer, loop
 }
 
 // immutableParamContractMessage builds the diagnostic for passing a mutable
-// *gorm.DB to a //gormreuse:immutable-param parameter of the function named
-// name. When a Session would drop state the argument carries (dropsState,
-// see tracer.RootTracer.SessionDropsState), it does not advise one (#344).
+// *gorm.DB to a parameter of the function named name, which has a
+// gormreuse:immutable-param directive. When a Session would drop state the
+// argument carries (dropsState, see tracer.RootTracer.SessionDropsState), it
+// does not advise one (#344).
 func immutableParamContractMessage(name string, dropsState bool) string {
-	msg := "mutable *gorm.DB passed to //gormreuse:immutable-param parameter of " + name
+	msg := "mutable *gorm.DB passed to " + name + ", which has a gormreuse:immutable-param directive"
 	if dropsState {
 		return msg + "; a Session would drop its Attrs, Assign or InstanceSet, so pass a value built for this call instead"
 	}

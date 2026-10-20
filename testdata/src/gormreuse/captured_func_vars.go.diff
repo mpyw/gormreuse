@@ -123,8 +123,8 @@
  		q.Where("a").Find(nil)
  		q.Where("b").Find(nil)
  	}
--	branch(db.Where("x")) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter`
-+	branch(db.Where("x").Session(&gorm.Session{})) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter`
+-	branch(db.Where("x")) // want `mutable \*gorm\.DB passed to \S+, which has a gormreuse:immutable-param directive`
++	branch(db.Where("x").Session(&gorm.Session{})) // want `mutable \*gorm\.DB passed to \S+, which has a gormreuse:immutable-param directive`
  	func() { branch(nil) }()
  }
  
@@ -135,8 +135,8 @@
  		q.Where("b").Find(nil)
  	}
  	func() {
--		branch(db.Where("x")) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter`
-+		branch(db.Where("x").Session(&gorm.Session{})) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter`
+-		branch(db.Where("x")) // want `mutable \*gorm\.DB passed to \S+, which has a gormreuse:immutable-param directive`
++		branch(db.Where("x").Session(&gorm.Session{})) // want `mutable \*gorm\.DB passed to \S+, which has a gormreuse:immutable-param directive`
  	}()
  }
  
@@ -150,8 +150,8 @@
  	f := cfvApply
  	q := db.Where("x")
  	func() {
--		f(q) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter`
-+		f(q.Session(&gorm.Session{})) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter`
+-		f(q) // want `mutable \*gorm\.DB passed to \S+, which has a gormreuse:immutable-param directive`
++		f(q.Session(&gorm.Session{})) // want `mutable \*gorm\.DB passed to \S+, which has a gormreuse:immutable-param directive`
  	}()
  }
  

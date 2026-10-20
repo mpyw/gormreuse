@@ -281,7 +281,7 @@ On Windows, download `gormreuse_${VERSION}_windows_${ARCH}.zip` and extract `gor
 gormreuse is not bundled with golangci-lint. But it ships a [module plugin](https://golangci-lint.run/plugins/module-plugins/), so you can build a golangci-lint binary that holds it. Write `.custom-gcl.yml`:
 
 ```yaml
-version: v2.13.1  # the golangci-lint release to build
+version: v2.15.0  # the golangci-lint release to build
 plugins:
   - module: github.com/mpyw/gormreuse
     import: github.com/mpyw/gormreuse/plugin
@@ -2160,7 +2160,7 @@ gormreuse reports a reuse only when it can follow the value. These cases are kno
 
 <table>
 <tr><th>Code</th><th>Why it is missed</th></tr>
-<tr><td>
+<tr><td><!-- fixtures: closureModifiesCaptured -->
 
 A closure assigns a captured variable:
 
@@ -2170,7 +2170,7 @@ f()
 ```
 
 </td><td>The assignment inside the closure is not followed</td></tr>
-<tr><td>
+<tr><td><!-- fixtures: siteDeferSessionCopyBranchAfterDefer -->
 
 ```go
 c := q.Session(&gorm.Session{})
@@ -2179,12 +2179,12 @@ q.Where("a").Find(nil)
 ```
 
 </td><td>The use of the copy is ordered at the <code>defer</code> statement, before the change</td></tr>
-<tr><td>
+<tr><td><!-- fixtures: deferInsideGoroutine, nestedDeferGoroutineDefer -->
 
 `defer` inside a `go` closure, or `defer` → `go` → `defer`, with the other use after the statement
 
 </td><td>These nested calls are not followed</td></tr>
-<tr><td>
+<tr><td><!-- fixtures: methodValueConditional, methodValuePhiWithNil -->
 
 A method value that a branch picks:
 
@@ -2197,7 +2197,7 @@ if c {
 ```
 
 </td><td>A method value merged from branches is not traced to <code>q</code></td></tr>
-<tr><td>
+<tr><td><!-- fixtures: repeatsClosurePassedToRepeater -->
 
 A closure passed once to a function that calls it many times:
 
@@ -2209,7 +2209,7 @@ slices.SortFunc(s, func(a, b T) int {
 ```
 
 </td><td>Only the call sites in your code are counted. A closure passed to another function outside a loop is taken to run once</td></tr>
-<tr><td>
+<tr><td><!-- fixtures: repeatsClosureCalledThroughSlice, repeatsClosureCalledThroughField -->
 
 A closure called twice through a slice or a struct field:
 
@@ -2220,7 +2220,7 @@ fs[0]()
 ```
 
 </td><td>A call through the container is not a call site of the closure</td></tr>
-<tr><td>
+<tr><td><!-- fixtures: fsoLocalLoopCarried -->
 
 A variable reassigned and used in a loop:
 
@@ -2232,7 +2232,7 @@ for … {
 ```
 
 </td><td>The reassignment is not a branch, and the next iteration's <code>Where</code> is not checked against <code>Find</code></td></tr>
-<tr><td>
+<tr><td><!-- fixtures: derivedThenMergedBack -->
 
 ```go
 if c { q2 = q.Where("a") }
@@ -2241,7 +2241,7 @@ q.Count(nil)
 ```
 
 </td><td><code>q2</code> can flow back into <code>q</code>, so <code>Where("a")</code> is treated as an assignment of <code>q</code></td></tr>
-<tr><td>
+<tr><td><!-- fixtures: fsoLoopRebuildOfAliasedValue -->
 
 A field rebuilt in a loop after it was copied:
 
@@ -2252,27 +2252,27 @@ q.Find(nil)
 ```
 
 </td><td>In a loop, the rebuild is an assignment, so its first read of <code>q</code> is not a branch</td></tr>
-<tr><td>
+<tr><td><!-- fixtures: paCopyHidden -->
 
 A pure function that returns `db.Session(...)` of its argument
 
 </td><td>The copy is not the argument, so the shared <code>Statement</code> is hidden from the caller</td></tr>
-<tr><td>
+<tr><td><!-- fixtures: pvInitializedAtPackageLevel, pvStoreInClosure -->
 
 A package-level `*gorm.DB` that another function, a closure or the initializer assigned
 
 </td><td>Only the stores in the same function are followed. A global that the function only reads is immutable</td></tr>
-<tr><td>
+<tr><td><!-- fixtures: fieldOfStructParam -->
 
 A struct field read through a parameter or a receiver (`s.db`, `r.db`), or a getter of it (`r.DB()`)
 
 </td><td>The field is not a mutable root. Only the stores to it in the same function are followed, and for a getter, also the stores in its package</td></tr>
-<tr><td>
+<tr><td><!-- fixtures: contractInterface -->
 
 `immutable-param` called through an interface or a func-typed parameter
 
 </td><td>The callee is unknown, so the caller contract is not checked</td></tr>
-<tr><td>
+<tr><td><!-- fixtures: exprPromoted -->
 
 A method expression of a method promoted through an embedded `*gorm.DB`: `W.Find(w, nil)`
 
@@ -2288,7 +2288,7 @@ A method expression of a method promoted through an embedded `*gorm.DB`: `W.Find
 
 <table>
 <tr><th>Code</th><th>Why it is reported</th></tr>
-<tr><td>
+<tr><td><!-- fixtures: opaqueTuplePairShared -->
 
 `pair` returns two new chains:
 
@@ -2299,7 +2299,7 @@ b.Find(nil)
 ```
 
 </td><td>Both results of one call share the call as their root</td></tr>
-<tr><td>
+<tr><td><!-- fixtures: pvConditionalRebuildOfStore -->
 
 For a global or a field `G`:
 
@@ -2310,7 +2310,7 @@ G.Find(nil)
 ```
 
 </td><td>A store is not a merge point, so <code>Where("a")</code> counts as a branch of the stored root</td></tr>
-<tr><td>
+<tr><td><!-- fixtures: cosReturnedReassigned -->
 
 `mk` returns a new struct:
 
@@ -2322,7 +2322,7 @@ p.db.Count(nil)
 ```
 
 </td><td>A pointer variable that a closure captures and that is reassigned may point to either struct. So the last read is matched to the first one too</td></tr>
-<tr><td>
+<tr><td><!-- fixtures: notInferredRecursive -->
 
 A recursive helper whose every path ends in `Session(...)`, branched twice
 
@@ -2331,7 +2331,7 @@ A recursive helper whose every path ends in `Session(...)`, branched twice
 A function that returns its own result is never [inferred](#inferred-immutable-return) `immutable-return`. Add the directive
 
 </td></tr>
-<tr><td>
+<tr><td><!-- fixtures: rcsExclusiveAcrossClosures -->
 
 A closure called on exclusive branches, once directly and once inside another closure, where `run` calls `f`:
 

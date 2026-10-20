@@ -1,5 +1,5 @@
 // Package purelib declares gormreuse directives that the externalpure package
-// relies on from another package (TestCrossPackageDirectives). Its own
+// relies on from another package (TestAnalyzer checks both). Its own
 // diagnostics are checked too, so every directive here must be valid and used,
 // or carry an expectation. The analysis exports a fact for each exported
 // function with a directive (#195), and each fact is checked with a
