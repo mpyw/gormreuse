@@ -53,14 +53,33 @@ func (g *Generator) changedElsewhere(v pollution.Violation) bool {
 						return true
 					}
 				case *ssa.Go:
-					if slices.ContainsFunc(instr.Call.Args, func(arg ssa.Value) bool {
-						gormArg, ok := pollutionsource.UnwrapGormDB(arg)
-						return ok && g.tracer.FindMutableRoot(gormArg, loopInfo) == v.Root
-					}) {
+					if g.goChangesRoot(instr, v.Root, loopInfo) {
 						return true
 					}
 				}
 			}
+		}
+	}
+	return false
+}
+
+// goChangesRoot reports whether instr, a go statement, hands root to code
+// that may change it in place. The receiver of a *gorm.DB finisher, as in
+// `go q.Count(nil)`, is not handed over: the query is a use of the root like
+// any other, and runs on a copy once the root has a Session, as with the
+// closure form `go func() { q.Count(nil) }()` (#312). Nor is that of a
+// Session-family call, which copies it. The receiver of a chain
+// method, as in `go q.Where("a")`, is: the goroutine adds the condition to
+// the root in place, and a go statement cannot be reassigned to keep it.
+func (g *Generator) goChangesRoot(instr *ssa.Go, root ssa.Value, loopInfo *cfg.LoopInfo) bool {
+	site := g.tracer.Site(instr)
+	queryOrCopy := site.IsGormMethod() && (isGormFinisher(site.Method()) || typeutil.IsImmutableReturningBuiltin(site.Method()))
+	for i, arg := range instr.Call.Args {
+		if queryOrCopy && site.ArgParam(i) < 0 {
+			continue
+		}
+		if gormArg, ok := pollutionsource.UnwrapGormDB(arg); ok && g.tracer.FindMutableRoot(gormArg, loopInfo) == root {
+			return true
 		}
 	}
 	return false

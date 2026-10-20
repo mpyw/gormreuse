@@ -144,6 +144,16 @@ func unused() {}
 		{20, true, "the declaration line of an ignored function"},
 		{3, false, "a line no ignore covers"},
 	}
+	// Covers answers as Ignore does and marks nothing used (#312).
+	for _, tt := range tests {
+		if got := ig.Covers(at(tt.line)); got != tt.want {
+			t.Errorf("line %d (%s): Covers = %v, want %v", tt.line, tt.why, got, tt.want)
+		}
+	}
+	if unused := ig.UnusedIgnores(); len(unused) != 6 {
+		t.Errorf("Covers marked ignores used: %d unused, want all 6", len(unused))
+	}
+
 	for _, tt := range tests {
 		if got := ig.Ignore(at(tt.line)); got != tt.want {
 			t.Errorf("line %d (%s): Ignore = %v, want %v", tt.line, tt.why, got, tt.want)

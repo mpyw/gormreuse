@@ -1,6 +1,8 @@
 package gormreuse_test
 
 import (
+	"go/ast"
+	"go/token"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -48,7 +50,10 @@ func TestIgnoreFixWithTestFiles(t *testing.T) {
 // TestParamFixWithTestFiles checks that a parameter root declared outside the
 // test files of a package with test files gets the body Session in both
 // variants of the package, so their fixes agree, while one declared in a test
-// file may get immutable-param (#245).
+// file may get immutable-param (#245). A discarded statement on a parameter
+// whose function returns a *gorm.DB gets no fix outside the test files: the
+// variant without them cannot see whether every caller reads the result
+// (#312).
 func TestParamFixWithTestFiles(t *testing.T) {
 	t.Parallel()
 	results := analysistest.Run(t, analysistest.TestData(), gormreuse.Analyzer, "paramtests")
@@ -64,8 +69,14 @@ func TestParamFixWithTestFiles(t *testing.T) {
 				}
 			}
 			got, want := text.String(), "tx = tx.Session(&gorm.Session{})"
-			if name == "code_test.go" {
+			switch {
+			case name == "code_test.go":
 				want = "//gormreuse:immutable-param"
+			case inParamTestsTenant(result.Pass.Files, diag.Pos):
+				if got != "" {
+					t.Errorf("%s: %s: fix inserts %q, want no fix", name, diag.Message, got)
+				}
+				continue
 			}
 			if !strings.Contains(got, want) {
 				t.Errorf("%s: %s: fix inserts %q, want %q", name, diag.Message, got, want)
@@ -74,9 +85,22 @@ func TestParamFixWithTestFiles(t *testing.T) {
 	}
 	// The variant without the test files and the test variant both report
 	// code.go.
-	if seen["code.go"] != 2 || seen["code_test.go"] != 1 {
-		t.Errorf("diagnostics by file = %v, want 2 in code.go and 1 in code_test.go", seen)
+	if seen["code.go"] != 4 || seen["code_test.go"] != 1 {
+		t.Errorf("diagnostics by file = %v, want 4 in code.go and 1 in code_test.go", seen)
 	}
+}
+
+// inParamTestsTenant reports whether pos is in the declaration of
+// paramTestsTenant, whose diagnostic has no fix (see TestParamFixWithTestFiles).
+func inParamTestsTenant(files []*ast.File, pos token.Pos) bool {
+	for _, f := range files {
+		for _, decl := range f.Decls {
+			if fd, ok := decl.(*ast.FuncDecl); ok && fd.Name.Name == "paramTestsTenant" && fd.Pos() <= pos && pos < fd.End() {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // TestLineDirective verifies that //line directives do not move ignore and

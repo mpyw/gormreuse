@@ -15,3 +15,17 @@ func paramTestsHelper(tx *gorm.DB) {
 func paramTestsCode(db *gorm.DB) {
 	paramTestsHelper(db.Session(&gorm.Session{}))
 }
+
+// paramTestsTenant changes tx in place and returns it. The caller here reads
+// the result, but the variant without the test file cannot tell that every
+// caller does, so its discarded statement gets no fix in either variant
+// (#312).
+func paramTestsTenant(tx *gorm.DB) *gorm.DB {
+	tx.Where("a").Find(nil)
+	tx.Where("tenant") // want `\*gorm\.DB reused: second branch from mutable root`
+	return tx
+}
+
+func paramTestsCallsTenant(db *gorm.DB) {
+	paramTestsTenant(db.Where("x")).Find(nil)
+}

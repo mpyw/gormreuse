@@ -1,0 +1,53 @@
+--- fix_ignored_root.go	1970-01-01 00:00:00
++++ fix_ignored_root.go.golden	1970-01-01 00:00:00
+@@ -1,49 +1,49 @@
+ package internal
+ 
+ import "gorm.io/gorm"
+ 
+ // Fixtures for issue #312: a root with a diagnostic that an ignore directive
+ // suppresses gets no fix. The ignore says that reuse is meant, and the fix
+ // would isolate the root, so the next run would report the ignore as unused.
+ 
+ // ===== NO FIX =====
+ 
+ // fixIgnoredRootSecond: the first reuse of q is ignored, so the second
+ // carries no fix.
+ func fixIgnoredRootSecond(db *gorm.DB) {
+ 	q := db.Where("x")
+ 	q.Find(nil)
+ 	q.Count(nil) //gormreuse:ignore
+ 	q.First(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // fixIgnoredRootDiscarded: the ignored reuse is the one the fix would
+ // reassign.
+ func fixIgnoredRootDiscarded(db *gorm.DB) {
+ 	q := db.Where("x")
+ 	q.Find(nil)
+ 	q.Where("a") //gormreuse:ignore
+ 	q.First(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // fixIgnoredRootNextLine: an ignore on the line above covers the statement.
+ func fixIgnoredRootNextLine(db *gorm.DB) {
+ 	q := db.Where("x")
+ 	q.Find(nil)
+ 	q.First(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ 	//gormreuse:ignore
+ 	q.Count(nil)
+ }
+ 
+ // ===== FIXED =====
+ 
+ // fixIgnoredRootOther: the ignore covers r's reuse, not q's, so q keeps its
+ // fix.
+ func fixIgnoredRootOther(db, other *gorm.DB) {
+-	q := db.Where("x")
++	q := db.Where("x").Session(&gorm.Session{})
+ 	r := other.Where("y")
+ 	q.Find(nil)
+ 	r.Find(nil)
+ 	r.Count(nil) //gormreuse:ignore
+ 	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }

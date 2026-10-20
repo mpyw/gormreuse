@@ -7,6 +7,9 @@ import (
 	"golang.org/x/tools/go/ast/edge"
 	"golang.org/x/tools/go/ast/inspector"
 	"golang.org/x/tools/go/ssa"
+
+	"github.com/mpyw/gormreuse/internal/ssa/origin"
+	"github.com/mpyw/gormreuse/internal/typeutil"
 )
 
 // callExprNodeTypes contains CallExpr for inspector filtering.
@@ -48,6 +51,52 @@ func (g *Generator) calledOnlyDirectly(fn *ssa.Function) bool {
 		}
 	}
 	return true
+}
+
+// everyCallUsesResult reports whether each call of fn in the analysed
+// functions uses the *gorm.DB that fn returns (#312). A call whose result is
+// discarded, as in `applyTenant(q, out)`, relies on fn changing its argument
+// in place, so a fix must not move that change to fn's result. A go or
+// defer statement discards the result too. fn must be called only directly
+// (see calledOnlyDirectly), and the pass must see every caller (see
+// NewGenerator), so no call is missed.
+//
+//declscope:shared // generator.go's Generate reassigns a parameter's discarded statements only when it holds
+func (g *Generator) everyCallUsesResult(fn *ssa.Function) bool {
+	if !g.seesAllCallers(fn.Pos()) {
+		return false
+	}
+	for _, caller := range g.funcs {
+		for _, block := range caller.Blocks {
+			for _, instr := range block.Instrs {
+				call, ok := instr.(ssa.CallInstruction)
+				if !ok || origin.Declared(g.tracer.Site(call).Callee) != fn {
+					continue
+				}
+				if result := call.Value(); result == nil || !callResultUsed(result) {
+					return false
+				}
+			}
+		}
+	}
+	return true
+}
+
+// callResultUsed reports whether code reads the *gorm.DB that v, the result
+// of a call, holds: v itself, or, for a tuple, an element of type *gorm.DB.
+func callResultUsed(v ssa.Value) bool {
+	for _, ref := range *v.Referrers() {
+		switch ref := ref.(type) {
+		case *ssa.DebugRef:
+		case *ssa.Extract:
+			if typeutil.IsGormDB(ref.Type()) && callResultUsed(ref) {
+				return true
+			}
+		default:
+			return true
+		}
+	}
+	return false
 }
 
 // isCalledFunc reports whether cur, an identifier, is the function of a call,

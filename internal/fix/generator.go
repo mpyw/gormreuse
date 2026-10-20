@@ -50,6 +50,7 @@ import (
 
 	"github.com/mpyw/gormreuse/internal/ssa/callsite"
 	"github.com/mpyw/gormreuse/internal/ssa/cfg"
+	"github.com/mpyw/gormreuse/internal/ssa/origin"
 	"github.com/mpyw/gormreuse/internal/ssa/pollution"
 	"github.com/mpyw/gormreuse/internal/ssa/tracer"
 	"github.com/mpyw/gormreuse/internal/typeutil"
@@ -189,8 +190,8 @@ func (g *Generator) Generate(v pollution.Violation) []analysis.SuggestedFix {
 	// A discarded statement on a parameter also changes the caller's value,
 	// and the caller may rely on that. Reassigning it would change only the
 	// parameter, unless the function returns a *gorm.DB that can carry the
-	// change back (#243).
-	if isParam && len(reassigned) > 0 && !typeutil.HasGormDBResult(p.Parent().Signature.Results()) {
+	// change back (#243), and every caller reads that result (#312).
+	if isParam && len(reassigned) > 0 && (!typeutil.HasGormDBResult(p.Parent().Signature.Results()) || !g.everyCallUsesResult(origin.Declared(p.Parent()))) {
 		return fallback
 	}
 

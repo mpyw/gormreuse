@@ -293,9 +293,9 @@ func TestEachFixCompiles(t *testing.T) {
 }
 
 // TestEveryDiagnosticCarriesFix requires every diagnostic in
-// fix_every_diagnostic.go to carry the fix of its root, the same fix on each,
-// including the diagnostic after an ignored one. An editor offers a quick fix
-// only on the diagnostic that carries it (#246).
+// fix_every_diagnostic.go to carry the fix of its root, the same fix on each.
+// An editor offers a quick fix only on the diagnostic that carries it (#246).
+// A root with an ignored diagnostic gets no fix (#312).
 func TestEveryDiagnosticCarriesFix(t *testing.T) {
 	t.Parallel()
 	results := analysistest.Run(goldentest.NoopT{}, analysistest.TestData(), gormreuse.Analyzer, "gormreuse")
@@ -320,7 +320,7 @@ func TestEveryDiagnosticCarriesFix(t *testing.T) {
 		fn := enclosingFuncName(results[0].Pass.Files, diag.Pos)
 		fixes[fn] = append(fixes[fn], b.String())
 	}
-	want := map[string]int{"fixFirstReuseIgnored": 1, "fixEveryReuse": 2}
+	want := map[string]int{"fixEveryReuse": 2}
 	for fn, n := range want {
 		got := fixes[fn]
 		if len(got) != n {
