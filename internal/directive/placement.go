@@ -5,13 +5,17 @@ import (
 	"go/token"
 	"slices"
 
-	"golang.org/x/tools/go/ast/astutil"
 	"golang.org/x/tools/go/ast/inspector"
 )
 
 // placement finds the function a directive comment is written on: the
 // declaration whose doc comment or opening brace holds it, or the function
 // literal on its line or the line below.
+//
+// addFile places every directive comment of a file once, so a lookup is a
+// map read. Before #301 each lookup scanned every comment of the file, and a
+// closure's walked its statement and the whole file again, so n functions
+// with directives took O(n²).
 //
 //declscope:shared // funcset.go embeds it in DirectiveFuncSet
 type placement struct {
@@ -29,21 +33,32 @@ type placement struct {
 	//
 	//declscope:private
 	cursors map[*ast.File]inspector.Cursor
-	// codeBeforeCommentCache caches hasCodeBeforeComment, to avoid
-	// O(comments * nodes) complexity.
+	// indexes are the directive comments of each file added with addFile,
+	// and the functions they are written on.
 	//
 	//declscope:private
-	codeBeforeCommentCache map[*ast.File]map[token.Pos]bool
-	// funcLitLinesCache caches the lines of each file that hold a function
-	// literal, to avoid an O(nodes) lookup per line check.
-	//
-	//declscope:private
-	funcLitLinesCache map[*ast.File]map[int]bool
-	// funcLitDirectiveCache caches findDirectiveForFuncLit. A closure called
-	// at n sites is asked n times, and each answer walks its statement (#304).
-	//
-	//declscope:private
-	funcLitDirectiveCache map[*ast.FuncLit]token.Pos
+	indexes map[*ast.File]*placementIndex
+}
+
+// placementIndex is the directive comments of one file and the functions
+// they are written on.
+type placementIndex struct {
+	// groups are the comment groups that hold the directive, in file order.
+	groups []placementGroup
+	// byStartLine and byEndLine index groups by the line a group starts and
+	// ends on.
+	byStartLine, byEndLine map[int][]int
+	// lits is the directive comment of each closure that has one.
+	lits map[*ast.FuncLit]token.Pos
+}
+
+// placementGroup is a comment group that holds the directive.
+type placementGroup struct {
+	// directives are its comments that are the directive, in order.
+	directives []*ast.Comment
+	// startLine and startColumn are where the group starts, and endLine is
+	// the line it ends on.
+	startLine, startColumn, endLine int
 }
 
 // newPlacement is a placement of the directive isDirective tells, in the
@@ -52,18 +67,17 @@ type placement struct {
 //declscope:shared // funcset.go makes one for each set
 func newPlacement(fset *token.FileSet, isDirective directiveChecker) placement {
 	return placement{
-		fset:                   fset,
-		files:                  make(map[string]*ast.File),
-		isDirective:            isDirective,
-		cursors:                make(map[*ast.File]inspector.Cursor),
-		codeBeforeCommentCache: make(map[*ast.File]map[token.Pos]bool),
-		funcLitLinesCache:      make(map[*ast.File]map[int]bool),
-		funcLitDirectiveCache:  make(map[*ast.FuncLit]token.Pos),
+		fset:        fset,
+		files:       make(map[string]*ast.File),
+		isDirective: isDirective,
+		cursors:     make(map[*ast.File]inspector.Cursor),
+		indexes:     make(map[*ast.File]*placementIndex),
 	}
 }
 
 // addFile records the file cur is the cursor of, so that its directives are
-// looked for. It reports false when there is nothing to record.
+// looked for, and places its directive comments. It reports false when there
+// is nothing to record.
 //
 //declscope:shared // funcset.go adds the files of the pass
 func (p *placement) addFile(cur inspector.Cursor) (*ast.File, bool) {
@@ -76,6 +90,7 @@ func (p *placement) addFile(cur inspector.Cursor) (*ast.File, bool) {
 	if filename != "" {
 		p.files[filename] = file
 	}
+	p.indexes[file] = p.buildIndex(file)
 	return file, true
 }
 
@@ -87,37 +102,164 @@ func (p *placement) fileCursor(file *ast.File) inspector.Cursor {
 	return p.cursors[file]
 }
 
-// hasMatchingDirective finds a directive comment in the file that satisfies the given predicate.
+// directivesIn returns the directive comments of a file added with addFile,
+// in file order.
 //
-// This is a common helper for directive detection. It:
-//  1. Gets the file containing the node
-//  2. Loops through all comments in the file
-//  3. For each comment that has the directive, applies the predicate
-//
-// The predicate receives the file (for nested AST inspection) and the comment group.
-//
-// findMatchingDirective finds a directive comment matching the predicate and returns its position.
-// Returns token.NoPos if no matching directive is found.
-func (p *placement) findMatchingDirective(node ast.Node, predicate func(file *ast.File, cg *ast.CommentGroup) bool) token.Pos {
-	file := p.getFileForNode(node)
-	if file == nil {
-		return token.NoPos
-	}
-	for _, cg := range file.Comments {
-		if p.commentGroupHasDirective(cg) && predicate(file, cg) {
-			// Return the position of the first directive comment in the group
-			for _, c := range cg.List {
-				if p.isDirective(c.Text) {
-					return c.Pos()
-				}
-			}
+//declscope:shared // funcset.go reports the ones attached to no function
+func (p *placement) directivesIn(file *ast.File) []*ast.Comment {
+	var out []*ast.Comment
+	if idx := p.indexes[file]; idx != nil {
+		for _, g := range idx.groups {
+			out = append(out, g.directives...)
 		}
 	}
-	return token.NoPos
+	return out
 }
 
-// hasDirectiveAfterFuncDeclBrace checks if a FuncDecl has a directive comment
-// after its opening brace on the same line (same-line pattern).
+// indexFor returns the index of the file added with addFile that contains
+// node, or nil. A node without a position has no file name, and addFile
+// records no file under an empty one.
+func (p *placement) indexFor(node ast.Node) *placementIndex {
+	file := p.files[p.fset.PositionFor(node.Pos(), false).Filename]
+	if file == nil {
+		return nil
+	}
+	return p.indexes[file]
+}
+
+// buildIndex places the directive comments of file. A file without one is
+// not walked.
+func (p *placement) buildIndex(file *ast.File) *placementIndex {
+	idx := &placementIndex{
+		byStartLine: make(map[int][]int),
+		byEndLine:   make(map[int][]int),
+		lits:        make(map[*ast.FuncLit]token.Pos),
+	}
+	for _, cg := range file.Comments {
+		var directives []*ast.Comment
+		for _, c := range cg.List {
+			if p.isDirective(c.Text) {
+				directives = append(directives, c)
+			}
+		}
+		if directives == nil {
+			continue
+		}
+		start := p.fset.PositionFor(cg.Pos(), false)
+		g := placementGroup{
+			directives:  directives,
+			startLine:   start.Line,
+			startColumn: start.Column,
+			endLine:     p.fset.PositionFor(cg.End(), false).Line,
+		}
+		idx.byStartLine[g.startLine] = append(idx.byStartLine[g.startLine], len(idx.groups))
+		idx.byEndLine[g.endLine] = append(idx.byEndLine[g.endLine], len(idx.groups))
+		idx.groups = append(idx.groups, g)
+	}
+	if len(idx.groups) == 0 {
+		return idx
+	}
+	w := p.walkFile(file)
+	for _, lit := range w.lits {
+		if pos := p.placeFuncLit(idx, w, lit); pos.IsValid() {
+			idx.lits[lit.lit] = pos
+		}
+	}
+	return idx
+}
+
+// placementWalk is what placing closure directives needs from one walk of a
+// file.
+type placementWalk struct {
+	// codeEndColumns is the smallest column at which a syntax node ends on
+	// each line. A comment that starts after it has code before it.
+	codeEndColumns map[int]int
+	// stmtColumns is the smallest column at which a statement starts on each
+	// line.
+	stmtColumns map[int]int
+	// litLines are the lines a closure starts on.
+	litLines map[int]bool
+	// litBraces are the closures whose opening brace is on each line.
+	litBraces map[int][]placementLitBrace
+	// lits are the closures of the file, in source order.
+	lits []placementLit
+}
+
+// placementLitBrace is a closure and the column of its opening brace.
+type placementLitBrace struct {
+	lit    *ast.FuncLit
+	column int
+}
+
+// placementLit is a closure and the syntax around it that decides whether a
+// directive on the line above applies.
+type placementLit struct {
+	lit *ast.FuncLit
+	// stmt is the innermost statement that holds the closure, or nil for a
+	// closure outside every function body.
+	stmt ast.Stmt
+	// spec is the innermost value spec that holds the closure when stmt is
+	// nil, or nil when there is none or a composite literal is between the
+	// two.
+	spec *ast.ValueSpec
+}
+
+// placementFrame is what a node's descendants inherit from it and its
+// ancestors during walkFile.
+type placementFrame struct {
+	stmt ast.Stmt
+	spec *ast.ValueSpec
+}
+
+// walkFile walks file once and returns what placeFuncLit needs.
+func (p *placement) walkFile(file *ast.File) *placementWalk {
+	w := &placementWalk{
+		codeEndColumns: make(map[int]int),
+		stmtColumns:    make(map[int]int),
+		litLines:       make(map[int]bool),
+		litBraces:      make(map[int][]placementLitBrace),
+	}
+	keepMin := func(m map[int]int, pos token.Position) {
+		if col, ok := m[pos.Line]; !ok || pos.Column < col {
+			m[pos.Line] = pos.Column
+		}
+	}
+	stack := []placementFrame{{}}
+	ast.Inspect(file, func(n ast.Node) bool {
+		if n == nil {
+			stack = stack[:len(stack)-1]
+			return true
+		}
+		frame := stack[len(stack)-1]
+		switch n := n.(type) {
+		case *ast.CommentGroup, *ast.Comment:
+			stack = append(stack, frame)
+			return true
+		case *ast.FuncLit:
+			w.lits = append(w.lits, placementLit{lit: n, stmt: frame.stmt, spec: frame.spec})
+			w.litLines[p.fset.PositionFor(n.Pos(), false).Line] = true
+			if n.Body != nil {
+				brace := p.fset.PositionFor(n.Body.Lbrace, false)
+				w.litBraces[brace.Line] = append(w.litBraces[brace.Line], placementLitBrace{n, brace.Column})
+			}
+		case *ast.ValueSpec:
+			frame.spec = n
+		case *ast.CompositeLit:
+			frame.spec = nil
+		case ast.Stmt:
+			frame.stmt = n
+			keepMin(w.stmtColumns, p.fset.PositionFor(n.Pos(), false))
+		}
+		keepMin(w.codeEndColumns, p.fset.PositionFor(n.End(), false))
+		stack = append(stack, frame)
+		return true
+	})
+	return w
+}
+
+// findDirectiveAfterFuncDeclBrace finds a directive comment after the opening
+// brace of a FuncDecl, on the same line (same-line pattern), and returns its
+// position, or token.NoPos.
 //
 // This is simpler than FuncLit handling because FuncDecl cannot be nested
 // within another FuncDecl on the same line, so we don't need innermost detection.
@@ -128,41 +270,32 @@ func (p *placement) findMatchingDirective(node ast.Node, predicate func(file *as
 //	    ...
 //	}
 //
-// Edge case handled:
-// - External function bodies (funcDecl.Body == nil) return false
-//
-// findDirectiveAfterFuncDeclBrace finds a directive comment after the opening brace.
-// Returns the position of the directive, or token.NoPos if not found.
+// An external function body (funcDecl.Body == nil) has none.
 //
 //declscope:shared // immutable_input.go places its directives with the same rules
 func (p *placement) findDirectiveAfterFuncDeclBrace(funcDecl *ast.FuncDecl) token.Pos {
 	if p.fset == nil || funcDecl.Body == nil {
 		return token.NoPos
 	}
-	bracePos := p.fset.PositionFor(funcDecl.Body.Lbrace, false)
-	return p.findMatchingDirective(funcDecl, func(_ *ast.File, cg *ast.CommentGroup) bool {
-		return p.isCommentAfterBrace(cg, bracePos)
-	})
+	idx := p.indexFor(funcDecl)
+	if idx == nil {
+		return token.NoPos
+	}
+	brace := p.fset.PositionFor(funcDecl.Body.Lbrace, false)
+	for _, i := range idx.byStartLine[brace.Line] {
+		if g := idx.groups[i]; g.startColumn > brace.Column {
+			return g.directives[0].Pos()
+		}
+	}
+	return token.NoPos
 }
 
-// isCommentAfterBrace checks if a comment is on the same line as a brace and appears after it.
-//
-// This is used for same-line directive detection:
-//
-//	func() { //comment  ← comment column > brace column, same line → true
-//	//comment           ← different line → false
-//	{ //comment         ← brace at column 1, comment at column 3 → true
-func (p *placement) isCommentAfterBrace(cg *ast.CommentGroup, bracePos token.Position) bool {
-	cgPos := p.fset.PositionFor(cg.Pos(), false)
-	return cgPos.Line == bracePos.Line && cgPos.Column > bracePos.Column
-}
-
-// hasDirectiveForFuncLit checks if a FuncLit has a directive comment.
+// findDirectiveForFuncLit finds the directive comment of a FuncLit and
+// returns its position, or token.NoPos.
 //
 // Unlike FuncDecl which has Doc comments, FuncLit (closures) don't have attached
-// documentation, so we need to search the file's comment list for directives.
-//
-// This supports two placement styles:
+// documentation, so the directive is found by where it is written. Two
+// placements are supported.
 //
 // # Next-line pattern
 //
@@ -200,39 +333,42 @@ func (p *placement) isCommentAfterBrace(cg *ast.CommentGroup, bracePos token.Pos
 //
 // This "innermost" rule prevents ambiguity when closures are on the same line.
 //
-// findDirectiveForFuncLit finds a directive comment for a FuncLit and returns its position.
-// Returns token.NoPos if no directive is found.
-//
 //declscope:shared // immutable_input.go places its directives with the same rules
 func (p *placement) findDirectiveForFuncLit(funcLit *ast.FuncLit) token.Pos {
 	if p.fset == nil {
 		return token.NoPos
 	}
-	if pos, ok := p.funcLitDirectiveCache[funcLit]; ok {
-		return pos
+	idx := p.indexFor(funcLit)
+	if idx == nil {
+		return token.NoPos
 	}
-	pos := p.findMatchingDirective(funcLit, func(file *ast.File, cg *ast.CommentGroup) bool {
-		return p.matchesSameLineDirective(file, funcLit, cg) || p.matchesNextLineDirective(file, funcLit, cg)
-	})
-	p.funcLitDirectiveCache[funcLit] = pos
-	return pos
+	return idx.lits[funcLit]
 }
 
-// getFileForNode returns the file added with AddFile that contains the given
-// node, or nil.
-func (p *placement) getFileForNode(node ast.Node) *ast.File {
-	pos := node.Pos()
-	if !pos.IsValid() {
-		return nil
+// placeFuncLit returns the directive comment of a closure, or token.NoPos:
+// the first directive group in the file that matches it by either pattern.
+// Only a group on the line of its opening brace, or one that ends on the
+// line above it or above its statement, can match, so only those are tried.
+func (p *placement) placeFuncLit(idx *placementIndex, w *placementWalk, lit placementLit) token.Pos {
+	var candidates []int
+	if lit.lit.Body != nil {
+		candidates = append(candidates, idx.byStartLine[p.fset.PositionFor(lit.lit.Body.Lbrace, false).Line]...)
 	}
-	return p.files[p.fset.PositionFor(pos, false).Filename]
-}
-
-// commentGroupHasDirective checks if a comment group contains our directive.
-//
-//declscope:shared // funcset.go tells a comment group that holds the directive
-func (p *placement) commentGroupHasDirective(cg *ast.CommentGroup) bool {
-	return slices.ContainsFunc(cg.List, func(c *ast.Comment) bool { return p.isDirective(c.Text) })
+	candidates = append(candidates, idx.byEndLine[p.fset.PositionFor(lit.lit.Pos(), false).Line-1]...)
+	switch {
+	case lit.stmt != nil:
+		candidates = append(candidates, idx.byEndLine[p.fset.PositionFor(lit.stmt.Pos(), false).Line-1]...)
+	case lit.spec != nil:
+		candidates = append(candidates, idx.byEndLine[p.fset.PositionFor(lit.spec.Pos(), false).Line-1]...)
+	}
+	slices.Sort(candidates)
+	for _, i := range slices.Compact(candidates) {
+		g := idx.groups[i]
+		if p.matchesSameLineDirective(w, lit.lit, g) || p.matchesNextLineDirective(w, lit, g) {
+			return g.directives[0].Pos()
+		}
+	}
+	return token.NoPos
 }
 
 // matchesNextLineDirective checks if a directive comment applies to a FuncLit via
@@ -266,25 +402,22 @@ func (p *placement) commentGroupHasDirective(cg *ast.CommentGroup) bool {
 //
 //	}, //gormreuse:pure
 //	func(){}  ← does NOT get the directive (directive is not alone on its line)
-func (p *placement) matchesNextLineDirective(file *ast.File, funcLit *ast.FuncLit, cg *ast.CommentGroup) bool {
-	cgStartLine := p.fset.PositionFor(cg.Pos(), false).Line
-	cgEndLine := p.fset.PositionFor(cg.End(), false).Line
-
+func (p *placement) matchesNextLineDirective(w *placementWalk, lit placementLit, g placementGroup) bool {
 	// Requirement 1: Directive must be alone on its line (no code before it)
-	if p.hasCodeBeforeComment(file, cg) {
+	if col, ok := w.codeEndColumns[g.startLine]; ok && col < g.startColumn {
 		return false
 	}
 
 	// Requirement 2: If there's any FuncLit on any line of the comment,
 	// this is a same-line pattern, not next-line
-	for line := cgStartLine; line <= cgEndLine; line++ {
-		if p.hasFuncLitOnLine(file, line) {
+	for line := g.startLine; line <= g.endLine; line++ {
+		if w.litLines[line] {
 			return false
 		}
 	}
 
 	// Find the enclosing assignment statement and check requirements
-	return p.isDirectValueInStatementAfterLine(file, funcLit, cgEndLine)
+	return p.isDirectValueInStatementAfterLine(w, lit, g.endLine)
 }
 
 // matchesSameLineDirective checks if a directive comment applies to a FuncLit via
@@ -312,21 +445,24 @@ func (p *placement) matchesNextLineDirective(file *ast.File, funcLit *ast.FuncLi
 //	outer := func() { //gormreuse:pure
 //	    inner := func() {}  ← inner is on different line
 //	}
-func (p *placement) matchesSameLineDirective(file *ast.File, funcLit *ast.FuncLit, cg *ast.CommentGroup) bool {
+func (p *placement) matchesSameLineDirective(w *placementWalk, funcLit *ast.FuncLit, g placementGroup) bool {
 	if funcLit.Body == nil {
 		return false
 	}
 
-	bracePos := p.fset.PositionFor(funcLit.Body.Lbrace, false)
-
 	// Requirements 1 & 2: Comment must be after brace on same line
-	if !p.isCommentAfterBrace(cg, bracePos) {
+	brace := p.fset.PositionFor(funcLit.Body.Lbrace, false)
+	if g.startLine != brace.Line || g.startColumn <= brace.Column {
 		return false
 	}
 
-	// Requirement 3: Check there's no nested FuncLit brace between this { and the comment
-	cgColumn := p.fset.PositionFor(cg.Pos(), false).Column
-	return !p.hasNestedFuncLitBetween(funcLit, bracePos.Column, cgColumn, bracePos.Line)
+	// Requirement 3: no closure nested in this one has its { between this {
+	// and the comment
+	body := funcLit.Body
+	return !slices.ContainsFunc(w.litBraces[brace.Line], func(nested placementLitBrace) bool {
+		return nested.lit != funcLit && nested.column > brace.Column && nested.column < g.startColumn &&
+			body.Pos() <= nested.lit.Pos() && nested.lit.End() <= body.End()
+	})
 }
 
 // isDirectValueInStatementAfterLine checks if the FuncLit is a direct RHS value
@@ -344,53 +480,38 @@ func (p *placement) matchesSameLineDirective(file *ast.File, funcLit *ast.FuncLi
 // For semicolon-separated statements on the same line, only the FIRST statement applies:
 //
 //	a := func(){}; b := func(){}  ← only 'a' gets the directive
-func (p *placement) isDirectValueInStatementAfterLine(file *ast.File, funcLit *ast.FuncLit, directiveLine int) bool {
+func (p *placement) isDirectValueInStatementAfterLine(w *placementWalk, lit placementLit, directiveLine int) bool {
 	expectedLine := directiveLine + 1
 
-	// Find the path to the FuncLit using astutil
-	path, _ := astutil.PathEnclosingInterval(file, funcLit.Pos(), funcLit.End())
-	if path == nil {
-		return false
-	}
-
-	// Walk up the path to find the enclosing statement
-	var enclosingStmt ast.Stmt
-	for _, node := range path {
-		if stmt, ok := node.(ast.Stmt); ok {
-			enclosingStmt = stmt
-			break
-		}
-	}
-
-	if enclosingStmt == nil {
+	if lit.stmt == nil {
 		// No enclosing statement: this is a package-level `var f = func(){}`
 		// declaration (a GenDecl/ValueSpec is a Decl, not a Stmt). Local-var
-		// closures reach here via a DeclStmt and are handled above; package-level
+		// closures reach here via a DeclStmt and are handled below; package-level
 		// ones need the ValueSpec handled directly (issue #72 gap2).
-		return p.isDirectValueInValueSpecAfterLine(path, funcLit, directiveLine)
+		return p.isDirectValueInValueSpecAfterLine(lit, directiveLine)
 	}
 
-	stmtLine := p.fset.PositionFor(enclosingStmt.Pos(), false).Line
-	funcLitLine := p.fset.PositionFor(funcLit.Pos(), false).Line
+	stmtPos := p.fset.PositionFor(lit.stmt.Pos(), false)
+	funcLitLine := p.fset.PositionFor(lit.lit.Pos(), false).Line
 
 	// Case 1: Statement starts on expected line → all direct FuncLits in that statement
 	// Case 2: FuncLit starts on expected line → this specific FuncLit (multi-line assignment)
-	if stmtLine != expectedLine && funcLitLine != expectedLine {
+	if stmtPos.Line != expectedLine && funcLitLine != expectedLine {
 		return false
 	}
 
-	// For semicolon-separated statements, only the first statement applies
-	// Check based on which line is the expected line
-	checkLine := stmtLine
-	if stmtLine != expectedLine {
+	// For semicolon-separated statements, only the first statement applies:
+	// no statement may start before this one's column on the expected line.
+	checkLine := stmtPos.Line
+	if stmtPos.Line != expectedLine {
 		checkLine = funcLitLine
 	}
-	if !p.isFirstStatementOnLine(file, enclosingStmt, checkLine) {
+	if col, ok := w.stmtColumns[checkLine]; ok && col < stmtPos.Column {
 		return false
 	}
 
 	// Check if FuncLit is a direct value (not inside CompositeLit)
-	return p.isDirectRHSValue(enclosingStmt, funcLit)
+	return p.isDirectRHSValue(lit.stmt, lit.lit)
 }
 
 // isDirectValueInValueSpecAfterLine handles the package-level counterpart of
@@ -404,58 +525,24 @@ func (p *placement) isDirectValueInStatementAfterLine(file *ast.File, funcLit *a
 // (not nested inside a composite literal), and either the spec or the closure
 // must begin on directiveLine+1. All direct closures in a multi-value spec
 // (`var a, b = func(){}, func(){}`) get the directive.
-func (p *placement) isDirectValueInValueSpecAfterLine(path []ast.Node, funcLit *ast.FuncLit, directiveLine int) bool {
+func (p *placement) isDirectValueInValueSpecAfterLine(lit placementLit, directiveLine int) bool {
 	expectedLine := directiveLine + 1
 
-	var spec *ast.ValueSpec
-	for _, node := range path {
-		if vs, ok := node.(*ast.ValueSpec); ok {
-			spec = vs
-			break
-		}
-		// A composite literal between the FuncLit and the spec means the closure
-		// is not a direct value (e.g. `var x = &S{Fn: func(){}}`).
-		if _, ok := node.(*ast.CompositeLit); ok {
-			return false
-		}
-	}
-	if spec == nil {
+	// A composite literal between the FuncLit and the spec means the closure
+	// is not a direct value (e.g. `var x = &S{Fn: func(){}}`); walkFile
+	// leaves spec nil then.
+	if lit.spec == nil {
 		return false
 	}
 
-	specLine := p.fset.PositionFor(spec.Pos(), false).Line
-	funcLitLine := p.fset.PositionFor(funcLit.Pos(), false).Line
+	specLine := p.fset.PositionFor(lit.spec.Pos(), false).Line
+	funcLitLine := p.fset.PositionFor(lit.lit.Pos(), false).Line
 	if specLine != expectedLine && funcLitLine != expectedLine {
 		return false
 	}
 
 	// The closure must be a direct value of the spec.
-	return slices.Contains(spec.Values, ast.Expr(funcLit))
-}
-
-// isFirstStatementOnLine checks if the given statement is the first (leftmost) one on its line.
-// This is important for semicolon-separated statements: `a := f1(); b := f2()`
-func (p *placement) isFirstStatementOnLine(file *ast.File, target ast.Stmt, line int) bool {
-	targetColumn := p.fset.PositionFor(target.Pos(), false).Column
-	isFirst := true
-
-	// Check all function bodies in the file for statements on this line
-	p.fileCursor(file).Inspect(nil, func(c inspector.Cursor) bool {
-		n := c.Node()
-		if !isFirst {
-			return false
-		}
-		if stmt, ok := n.(ast.Stmt); ok && stmt != target {
-			stmtPos := p.fset.PositionFor(stmt.Pos(), false)
-			if stmtPos.Line == line && stmtPos.Column < targetColumn {
-				// Found a statement earlier on the same line
-				isFirst = false
-				return false
-			}
-		}
-		return true
-	})
-	return isFirst
+	return slices.Contains(lit.spec.Values, ast.Expr(lit.lit))
 }
 
 // isDirectRHSValue checks if the FuncLit is a direct RHS value in the statement,
@@ -506,114 +593,4 @@ func (p *placement) isDirectExprOrUnaryByPos(expr ast.Expr, targetPos, targetEnd
 		// CompositeLit, CallExpr, IndexExpr, etc. - target is nested, not direct
 		return false
 	}
-}
-
-// hasFuncLitOnLine checks if there's any FuncLit that starts on the given line.
-// Results are cached per file to avoid O(nodes) traversal per line check.
-func (p *placement) hasFuncLitOnLine(file *ast.File, line int) bool {
-	// Build cache if not exists
-	if _, ok := p.funcLitLinesCache[file]; !ok {
-		p.buildFuncLitLinesCache(file)
-	}
-	return p.funcLitLinesCache[file][line]
-}
-
-// buildFuncLitLinesCache pre-computes all FuncLit line numbers for a file.
-func (p *placement) buildFuncLitLinesCache(file *ast.File) {
-	lines := make(map[int]bool)
-	for c := range p.fileCursor(file).Preorder(funcLitTypes...) {
-		fl := c.Node().(*ast.FuncLit)
-		lines[p.fset.PositionFor(fl.Pos(), false).Line] = true
-	}
-	p.funcLitLinesCache[file] = lines
-}
-
-// hasCodeBeforeComment checks if there's any code (non-whitespace) before the comment on the same line.
-// This is used to determine if a directive is "alone" on its line or follows other code like "}, //gormreuse:pure".
-// Results are cached per file to avoid O(comments * nodes) complexity.
-func (p *placement) hasCodeBeforeComment(file *ast.File, cg *ast.CommentGroup) bool {
-	// Check cache first
-	if fileCache, ok := p.codeBeforeCommentCache[file]; ok {
-		if result, ok := fileCache[cg.Pos()]; ok {
-			return result
-		}
-	}
-
-	// Initialize cache for this file if not exists
-	if p.codeBeforeCommentCache[file] == nil {
-		p.codeBeforeCommentCache[file] = make(map[token.Pos]bool)
-	}
-
-	// Compute result
-	result := p.computeCodeBeforeComment(file, cg)
-	p.codeBeforeCommentCache[file][cg.Pos()] = result
-	return result
-}
-
-// computeCodeBeforeComment does the actual computation for hasCodeBeforeComment.
-func (p *placement) computeCodeBeforeComment(file *ast.File, cg *ast.CommentGroup) bool {
-	cgPos := p.fset.PositionFor(cg.Pos(), false)
-	cgLine := cgPos.Line
-	cgColumn := cgPos.Column
-
-	// Check if any AST node ends on the same line before the comment
-	hasCode := false
-	p.fileCursor(file).Inspect(nil, func(c inspector.Cursor) bool {
-		n := c.Node()
-		if hasCode {
-			return false
-		}
-		if n == nil || n == cg {
-			return true
-		}
-		// Skip comment groups and comments
-		switch n.(type) {
-		case *ast.CommentGroup, *ast.Comment:
-			return true
-		}
-
-		// Early termination optimization: skip nodes that can't be on the target line
-		nodeStart := p.fset.PositionFor(n.Pos(), false)
-		nodeEnd := p.fset.PositionFor(n.End(), false)
-
-		// If node ends before the comment's line, skip it and its children
-		if nodeEnd.Line < cgLine {
-			return false
-		}
-		// If node starts after the comment's line, skip it
-		if nodeStart.Line > cgLine {
-			return false
-		}
-
-		// Node ends on the same line, before the comment
-		if nodeEnd.Line == cgLine && nodeEnd.Column < cgColumn {
-			hasCode = true
-			return false
-		}
-		return true
-	})
-	return hasCode
-}
-
-// hasNestedFuncLitBetween checks if there's a nested FuncLit whose opening brace
-// is between startColumn and endColumn on the given line.
-// This is used for same-line pattern to ensure the directive applies to the innermost FuncLit.
-func (p *placement) hasNestedFuncLitBetween(parent *ast.FuncLit, startColumn, endColumn, line int) bool {
-	found := false
-	ast.Inspect(parent.Body, func(n ast.Node) bool {
-		if found {
-			return false
-		}
-		if nested, ok := n.(*ast.FuncLit); ok && nested != parent {
-			if nested.Body != nil {
-				nestedPos := p.fset.PositionFor(nested.Body.Lbrace, false)
-				if nestedPos.Line == line && nestedPos.Column > startColumn && nestedPos.Column < endColumn {
-					found = true
-					return false
-				}
-			}
-		}
-		return true
-	})
-	return found
 }

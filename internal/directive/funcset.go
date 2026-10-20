@@ -6,6 +6,7 @@ import (
 	"go/types"
 	"maps"
 	"slices"
+	"sync"
 
 	"golang.org/x/tools/go/ast/inspector"
 	"golang.org/x/tools/go/ssa"
@@ -29,6 +30,12 @@ type DirectiveFuncSet struct {
 	validateSignature   signatureValidator          // Checks if signature is valid for this directive
 	invalidDirectives   map[token.Pos]struct{}      // Directives on functions with invalid signatures
 	processedDirectives map[token.Pos]struct{}      // All directive positions processed by this set
+	// contains remembers what Contains found for each declared function
+	// without an inferred directive, hits and misses alike. Add and Import
+	// clear it (#301). containsMu guards it: tests share a set across
+	// parallel subtests.
+	contains   map[*ssa.Function]bool
+	containsMu sync.Mutex
 }
 
 // NewPureFuncSet creates a DirectiveFuncSet for //gormreuse:pure.
@@ -88,6 +95,7 @@ func (s *DirectiveFuncSet) AddFile(cur inspector.Cursor) {
 func (s *DirectiveFuncSet) Import(imported func(fn *ssa.Function) bool) {
 	if s != nil {
 		s.imported = imported
+		s.forgetContains()
 	}
 }
 
@@ -110,6 +118,7 @@ func (s *DirectiveFuncSet) Inferred(fn *ssa.Function) bool {
 func (s *DirectiveFuncSet) Add(key FuncKey) {
 	if s != nil && s.known != nil {
 		s.known[key] = struct{}{}
+		s.forgetContains()
 	}
 }
 
@@ -155,17 +164,32 @@ func (s *DirectiveFuncSet) Contains(fn *ssa.Function) bool {
 	if s.Inferred(fn) {
 		return true
 	}
-
-	// First, check the pre-built set (for current package)
-	if s != nil && s.known != nil {
-		if _, exists := s.known[funcKeyOf(fn)]; exists {
-			return true
-		}
+	if s == nil {
+		return false
+	}
+	s.containsMu.Lock()
+	defer s.containsMu.Unlock()
+	if found, ok := s.contains[fn]; ok {
+		return found
 	}
 
-	// Second, check the SSA function's syntax, or the fact of a function of
-	// another package
-	return s.hasDirective(fn)
+	// First, check the pre-built set (for current package). Second, check
+	// the SSA function's syntax, or the fact of a function of another
+	// package.
+	_, found := s.known[funcKeyOf(fn)]
+	found = found || s.hasDirective(fn)
+	if s.contains == nil {
+		s.contains = make(map[*ssa.Function]bool)
+	}
+	s.contains[fn] = found
+	return found
+}
+
+// forgetContains drops what Contains remembers, after the set changed.
+func (s *DirectiveFuncSet) forgetContains() {
+	s.containsMu.Lock()
+	defer s.containsMu.Unlock()
+	clear(s.contains)
 }
 
 // CommentsOf returns the positions of the directive comments written on fn,
@@ -262,12 +286,10 @@ func (s *DirectiveFuncSet) collectDirectivePositions(file *ast.File) {
 	}
 
 	// Mark all non-associated (orphan) directives as invalid
-	for _, cg := range file.Comments {
-		for _, c := range cg.List {
-			if s.isDirective(c.Text) && !associatedDirectives[c.Pos()] {
-				s.processedDirectives[c.Pos()] = struct{}{}
-				s.invalidDirectives[c.Pos()] = struct{}{}
-			}
+	for _, c := range s.directivesIn(file) {
+		if !associatedDirectives[c.Pos()] {
+			s.processedDirectives[c.Pos()] = struct{}{}
+			s.invalidDirectives[c.Pos()] = struct{}{}
 		}
 	}
 }
@@ -317,7 +339,7 @@ func (s *DirectiveFuncSet) hasDirective(fn *ssa.Function) bool {
 	switch syntax := fn.Syntax().(type) {
 	case *ast.FuncDecl:
 		// Check Doc comments (next-line pattern)
-		if syntax.Doc != nil && s.commentGroupHasDirective(syntax.Doc) {
+		if syntax.Doc != nil && slices.ContainsFunc(syntax.Doc.List, func(c *ast.Comment) bool { return s.isDirective(c.Text) }) {
 			return true
 		}
 		// Check same-line pattern (after opening brace)

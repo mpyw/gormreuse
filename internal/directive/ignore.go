@@ -1,6 +1,7 @@
 package directive
 
 import (
+	"cmp"
 	"go/ast"
 	"go/token"
 	"slices"
@@ -66,8 +67,12 @@ func (ig *Ignores) Ignore(pos token.Pos) bool {
 		entry.used = true
 		return true
 	}
-	for _, fn := range f.funcs {
-		if fn.start <= pos && pos < fn.end {
+	// The spans are in source order and do not overlap: the last one that
+	// starts at or before pos is the only one that can hold it.
+	if i, _ := slices.BinarySearchFunc(f.funcs, pos, func(fn ignoredFuncSpan, pos token.Pos) int {
+		return cmp.Compare(fn.start, pos+1)
+	}); i > 0 {
+		if fn := f.funcs[i-1]; pos < fn.end {
 			if entry := f.lines[fn.directiveLine]; entry != nil {
 				entry.used = true
 			}
@@ -98,7 +103,10 @@ func (ig *Ignores) UnusedIgnores() []token.Pos {
 type fileIgnores struct {
 	file  *ast.File
 	lines ignoreMap
-	funcs []ignoredFuncSpan
+	funcs []ignoredFuncSpan // In source order
+	// stmts and lits are the file's statements and closures, built on the
+	// first lookup that needs them.
+	stmts, lits *ignoreSpans
 }
 
 // ignoredFuncSpan is a func declaration with a function-level ignore.
@@ -118,7 +126,10 @@ func (f *fileIgnores) lineIgnoreFor(fset *token.FileSet, pos token.Pos, line int
 	if entry := f.lines.lineIgnore(line); entry != nil {
 		return entry
 	}
-	stmt := innermostIgnoreStmt(f.file, pos)
+	if f.stmts == nil {
+		f.stmts, f.lits = buildIgnoreSpans(f.file)
+	}
+	stmt, _ := f.stmts.innermost(pos).(ast.Stmt)
 	if stmt == nil {
 		return nil
 	}
@@ -129,29 +140,73 @@ func (f *fileIgnores) lineIgnoreFor(fset *token.FileSet, pos token.Pos, line int
 	first := fset.PositionFor(stmt.Pos(), false).Line
 	last := fset.PositionFor(end, false).Line
 	for l := first; l <= last; l++ {
-		if entry := f.lines.lineIgnore(l); entry != nil && !inIgnoreFuncLit(stmt, entry.pos) {
+		if entry := f.lines.lineIgnore(l); entry != nil && !f.inIgnoreFuncLit(stmt, entry.pos) {
 			return entry
 		}
 	}
 	return nil
 }
 
-// innermostIgnoreStmt returns the innermost statement that holds pos, skipping
-// blocks and labeled statements, or nil when pos is outside every statement.
-func innermostIgnoreStmt(file *ast.File, pos token.Pos) ast.Stmt {
-	var found ast.Stmt
+// ignoreSpans are the nodes of one kind in a file, in source order, each with
+// the index of the innermost one that holds it. Syntax nodes nest, so the
+// nodes that hold a position are the last one that starts at or before it and
+// the ones that hold that one: a lookup is a binary search and a walk up
+// (#301). Before, each lookup walked the file from its root.
+type ignoreSpans struct {
+	nodes  []ast.Node
+	parent []int // Index in nodes of the innermost node that holds each one, or -1
+}
+
+// buildIgnoreSpans walks file once and returns its statements (blocks and
+// labeled statements left out) and its closures.
+func buildIgnoreSpans(file *ast.File) (stmts, lits *ignoreSpans) {
+	stmts, lits = &ignoreSpans{}, &ignoreSpans{}
+	// The innermost statement and closure that hold the node being visited.
+	type open struct{ stmt, lit int }
+	stack := []open{{-1, -1}}
 	ast.Inspect(file, func(n ast.Node) bool {
-		if n == nil || pos < n.Pos() || n.End() <= pos {
-			return false
+		if n == nil {
+			stack = stack[:len(stack)-1]
+			return true
 		}
-		switch s := n.(type) {
+		top := stack[len(stack)-1]
+		switch n.(type) {
 		case *ast.BlockStmt, *ast.LabeledStmt:
 		case ast.Stmt:
-			found = s
+			top.stmt = stmts.add(n, top.stmt)
+		case *ast.FuncLit:
+			top.lit = lits.add(n, top.lit)
 		}
+		stack = append(stack, top)
 		return true
 	})
-	return found
+	return stmts, lits
+}
+
+// add appends n, held by the node at index parent, and returns its index.
+func (s *ignoreSpans) add(n ast.Node, parent int) int {
+	s.nodes = append(s.nodes, n)
+	s.parent = append(s.parent, parent)
+	return len(s.nodes) - 1
+}
+
+// innermost returns the innermost node that holds pos, or nil.
+func (s *ignoreSpans) innermost(pos token.Pos) ast.Node {
+	if i := s.innermostIndex(pos); i >= 0 {
+		return s.nodes[i]
+	}
+	return nil
+}
+
+// innermostIndex returns the index of the innermost node that holds pos, or -1.
+func (s *ignoreSpans) innermostIndex(pos token.Pos) int {
+	i, _ := slices.BinarySearchFunc(s.nodes, pos, func(n ast.Node, pos token.Pos) int {
+		return cmp.Compare(n.Pos(), pos+1)
+	})
+	for i--; i >= 0 && s.nodes[i].End() <= pos; {
+		i = s.parent[i]
+	}
+	return i
 }
 
 // ignoreStmtHeaderEnd returns where the part of stmt that a line ignore covers
@@ -181,19 +236,22 @@ func ignoreStmtHeaderEnd(stmt ast.Stmt) token.Pos {
 
 // inIgnoreFuncLit reports whether pos lies inside the body of a closure
 // nested in stmt.
-func inIgnoreFuncLit(stmt ast.Stmt, pos token.Pos) bool {
-	inside := false
-	ast.Inspect(stmt, func(n ast.Node) bool {
-		if inside || n == nil || pos < n.Pos() || n.End() <= pos {
+func (f *fileIgnores) inIgnoreFuncLit(stmt ast.Stmt, pos token.Pos) bool {
+	if pos < stmt.Pos() || stmt.End() <= pos {
+		return false
+	}
+	// The closures that hold pos, innermost first. The ones nested in stmt
+	// come before the ones that hold stmt.
+	for i := f.lits.innermostIndex(pos); i >= 0; i = f.lits.parent[i] {
+		lit := f.lits.nodes[i].(*ast.FuncLit)
+		if lit.Pos() < stmt.Pos() {
 			return false
 		}
-		if lit, ok := n.(*ast.FuncLit); ok && lit.Body.Lbrace < pos {
-			inside = true
-			return false
+		if lit.Body.Lbrace < pos {
+			return true
 		}
-		return true
-	})
-	return inside
+	}
+	return false
 }
 
 // buildIgnoredFuncSpans returns the func declarations of a file whose doc

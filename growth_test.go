@@ -577,7 +577,7 @@ var growthCases = []growthCase{
 		return []string{b.String()}
 	}},
 	// n functions each with a reuse silenced by ignore, plus an unused ignore.
-	{name: "ignores", limit: growthLinear, after: "#301", shape: func(n int) []string {
+	{name: "ignores", limit: growthLinear, shape: func(n int) []string {
 		var b strings.Builder
 		for i := range n {
 			fmt.Fprintf(&b, "func f%d(db *gorm.DB) {\n\tq := db.Where(\"x\")\n\tq.Find(nil)\n\tq.Find(nil) //gormreuse:ignore\n\t//gormreuse:ignore\n\t_ = 1\n}\n\n", i)
@@ -585,7 +585,7 @@ var growthCases = []growthCase{
 		return []string{b.String()}
 	}},
 	// n ignored functions.
-	{name: "ignorefn", limit: growthLinear, after: "#301", shape: func(n int) []string {
+	{name: "ignorefn", limit: growthLinear, shape: func(n int) []string {
 		var b strings.Builder
 		for i := range n {
 			fmt.Fprintf(&b, "//gormreuse:ignore\nfunc f%d(db *gorm.DB) {\n\tq := db.Where(\"x\")\n\tq.Find(nil)\n\tq.Find(nil)\n}\n\n", i)
@@ -603,7 +603,7 @@ var growthCases = []growthCase{
 		return []string{b.String()}
 	}},
 	// n independent pure + immutable-return functions with directives.
-	{name: "directives", limit: growthLinear, after: "#301", shape: func(n int) []string {
+	{name: "directives", limit: growthLinear, shape: func(n int) []string {
 		var b strings.Builder
 		for i := range n {
 			fmt.Fprintf(&b, "//gormreuse:pure\nfunc p%d(db *gorm.DB) *gorm.DB {\n\treturn db\n}\n\n//gormreuse:immutable-return\nfunc r%d(db *gorm.DB) *gorm.DB {\n\treturn db.Session(&gorm.Session{})\n}\n\n", i, i)
@@ -619,7 +619,7 @@ var growthCases = []growthCase{
 		return []string{b.String()}
 	}},
 	// n unused/redundant directives.
-	{name: "unuseddir", limit: growthLinear, after: "#301", shape: func(n int) []string {
+	{name: "unuseddir", limit: growthLinear, shape: func(n int) []string {
 		var b strings.Builder
 		for i := range n {
 			fmt.Fprintf(&b, "//gormreuse:pure\nfunc p%d(x int) int {\n\treturn x\n}\n\n", i)
@@ -813,7 +813,7 @@ var growthCases = []growthCase{
 		return []string{b.String()}
 	}},
 	// Helpers + one ignore directive in the file (arms Contains scans).
-	{name: "helpersign", limit: growthLinear, after: "#301", shape: func(n int) []string {
+	{name: "helpersign", limit: growthLinear, shape: func(n int) []string {
 		var b strings.Builder
 		for i := range n {
 			fmt.Fprintf(&b, "// h%d doc.\nfunc h%d(db *gorm.DB) *gorm.DB { return db.Where(\"c%d\") }\n\n", i, i, i)
@@ -839,13 +839,31 @@ var growthCases = []growthCase{
 		return []string{b.String()}
 	}},
 	// n closures with //gormreuse:pure above, each called twice.
-	{name: "closurepure", limit: growthLinear, after: "#301", shape: func(n int) []string {
+	{name: "closurepure", limit: growthLinear, shape: func(n int) []string {
 		var b strings.Builder
 		b.WriteString("func f(db *gorm.DB) {\n")
 		for i := range n {
 			fmt.Fprintf(&b, "\t//gormreuse:pure\n\tp%d := func(db *gorm.DB) *gorm.DB { return db }\n\t_ = p%d(db)\n\t_ = p%d(db)\n", i, i, i)
 		}
 		b.WriteString("}\n")
+		return []string{b.String()}
+	}},
+	// n closures with //gormreuse:pure after the opening brace, each called twice.
+	{name: "closurepuresame", limit: growthLinear, shape: func(n int) []string {
+		var b strings.Builder
+		b.WriteString("func f(db *gorm.DB) {\n")
+		for i := range n {
+			fmt.Fprintf(&b, "\tp%d := func(db *gorm.DB) *gorm.DB { //gormreuse:pure\n\t\treturn db\n\t}\n\t_ = p%d(db)\n\t_ = p%d(db)\n", i, i, i)
+		}
+		b.WriteString("}\n")
+		return []string{b.String()}
+	}},
+	// n package-level closures with //gormreuse:pure above, each called twice.
+	{name: "closurepurepkg", limit: growthLinear, shape: func(n int) []string {
+		var b strings.Builder
+		for i := range n {
+			fmt.Fprintf(&b, "//gormreuse:pure\nvar p%d = func(db *gorm.DB) *gorm.DB { return db }\n\nfunc f%d(db *gorm.DB) {\n\t_ = p%d(db)\n\t_ = p%d(db)\n}\n\n", i, i, i, i)
+		}
 		return []string{b.String()}
 	}},
 	// n unexported funcs reusing their param, each called once.
@@ -896,7 +914,7 @@ var growthCases = []growthCase{
 		return []string{b.String()}
 	}},
 	// n unused ignores on clean code.
-	{name: "unusedign", limit: growthQuadratic, shape: func(n int) []string {
+	{name: "unusedign", limit: growthNearLinear, shape: func(n int) []string {
 		var b strings.Builder
 		b.WriteString("func f(db *gorm.DB) {\n")
 		for i := range n {
