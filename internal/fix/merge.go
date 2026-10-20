@@ -24,7 +24,7 @@ import (
 // twice in a goroutine, both stores get a Session, not only the root's (#247).
 //
 //declscope:shared // session.go's sessionPositionsForRoot gives each one a Session
-func mergedEdges(root ssa.Value, uses []pollution.UsageInfo) []ssa.Value {
+func mergedEdges(a *cfg.Analyzer, root ssa.Value, uses []pollution.UsageInfo) []ssa.Value {
 	instr, ok := root.(ssa.Instruction)
 	if !ok {
 		return nil
@@ -48,7 +48,7 @@ func mergedEdges(root ssa.Value, uses []pollution.UsageInfo) []ssa.Value {
 	var edges []ssa.Value
 	for _, block := range fn.Blocks {
 		for _, instr := range block.Instrs {
-			if store, ok := instr.(*ssa.Store); ok && store.Addr == alloc && store.Val != root && mergedStoreReadTwice(store, uses) {
+			if store, ok := instr.(*ssa.Store); ok && store.Addr == alloc && store.Val != root && mergedStoreReadTwice(a, store, uses) {
 				edges = append(edges, store.Val)
 			}
 		}
@@ -78,20 +78,22 @@ func mergeVarOf(fn *ssa.Function, v ssa.Value) *ssa.Alloc {
 
 // mergedStoreReadTwice reports whether two of uses may run after store. A use
 // in another function, such as a closure, may run after it whatever its block.
-func mergedStoreReadTwice(store *ssa.Store, uses []pollution.UsageInfo) bool {
-	a := cfg.NewAnalyzer()
+// It stops at the second one.
+func mergedStoreReadTwice(a *cfg.Analyzer, store *ssa.Store, uses []pollution.UsageInfo) bool {
 	after := 0
 	for _, use := range uses {
 		switch {
 		case use.Block.Parent() != store.Parent():
 		case use.Block == store.Block():
-			if use.Pos < store.Pos() && !cfg.RepeatsOf(store.Parent()).RunsAgain(use.Block) {
+			if use.Pos < store.Pos() && !a.RepeatsOf(store.Parent()).RunsAgain(use.Block) {
 				continue
 			}
 		case !a.CanReach(store.Block(), use.Block):
 			continue
 		}
-		after++
+		if after++; after == 2 {
+			return true
+		}
 	}
-	return after >= 2
+	return false
 }

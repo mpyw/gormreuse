@@ -88,11 +88,16 @@ type Analyzer struct {
 //     It may be nil
 //   - funcVars: Package-level variables that hold one function, so a call through one
 //     honours that function's directives (#183)
-func NewAnalyzer(fn *ssa.Function, pureFuncs, immutableReturnFuncs, immutableParamFuncs *directive.DirectiveFuncSet, pure *tracer.PureVerdicts, scopesCallbacks, immutableCallbacks map[*ssa.Function]bool, needsImmutableParam func(*ssa.Function) bool, funcVars callsite.FuncVars) *Analyzer {
+//   - cfgs: The CFG cache of the pass, shared with the suggested fixes (#299). When
+//     nil, the analyzer makes its own
+func NewAnalyzer(fn *ssa.Function, pureFuncs, immutableReturnFuncs, immutableParamFuncs *directive.DirectiveFuncSet, pure *tracer.PureVerdicts, scopesCallbacks, immutableCallbacks map[*ssa.Function]bool, needsImmutableParam func(*ssa.Function) bool, funcVars callsite.FuncVars, cfgs *cfg.Analyzer) *Analyzer {
+	if cfgs == nil {
+		cfgs = cfg.NewAnalyzer()
+	}
 	return &Analyzer{
 		fn:                  fn,
 		rootTracer:          tracer.NewRootTracer(pureFuncs, immutableReturnFuncs, immutableParamFuncs, pure, scopesCallbacks, immutableCallbacks, funcVars),
-		cfgAnalyzer:         cfg.NewAnalyzer(),
+		cfgAnalyzer:         cfgs,
 		needsImmutableParam: needsImmutableParam,
 	}
 }
@@ -180,9 +185,9 @@ func (a *Analyzer) processFunction(fn *ssa.Function, tracker *pollution.Tracker,
 	// Detect loops for special handling of loop-external roots. A closure
 	// also runs again when its parent runs it more than once (#249).
 	loopInfo := a.cfgAnalyzer.DetectLoops(fn)
-	repeats := cfg.NewRepeats(fn, loopInfo)
+	repeats := a.cfgAnalyzer.Repeats(fn)
 	if parent != nil {
-		repeats = parent.Closure(fn, loopInfo)
+		repeats = parent.Closure(fn)
 	}
 
 	// Create handler context shared across all instruction handlers

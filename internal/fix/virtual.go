@@ -41,14 +41,13 @@ func (g *Generator) simulateVirtualRoots(root ssa.Value, uses []pollution.UsageI
 
 	original := virtualRootKey{isOriginal: true, pos: root.Pos(), block: tracer.RootBlock(root)}
 	virtualUses := make(map[virtualRootKey][]pollution.UsageInfo)
-	cfgAnalyzer := cfg.NewAnalyzer()
 
 	// The virtual roots made so far, in position order.
 	var made []virtualRootKey
 	for _, use := range sortedUses {
 		dominated := false
 		for _, vr := range slices.Backward(made) {
-			reaches, dominates := virtualRootReaches(cfgAnalyzer, vr.block, use.Block)
+			reaches, dominates := virtualRootReaches(g.cfg, vr.block, use.Block)
 			if reaches {
 				virtualUses[vr] = append(virtualUses[vr], use)
 			}

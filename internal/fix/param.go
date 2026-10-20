@@ -55,7 +55,6 @@ func (g *Generator) paramCallersIsolate(p *ssa.Parameter) bool {
 	if !g.seesAllCallers(fn.Pos()) || !g.calledOnlyDirectly(fn) {
 		return false
 	}
-	loops := cfg.NewAnalyzer()
 	for _, caller := range g.funcs {
 		var loopInfo *cfg.LoopInfo
 		for _, block := range caller.Blocks {
@@ -69,7 +68,7 @@ func (g *Generator) paramCallersIsolate(p *ssa.Parameter) bool {
 					continue
 				}
 				if loopInfo == nil {
-					loopInfo = loops.DetectLoops(caller)
+					loopInfo = g.cfg.DetectLoops(caller)
 				}
 				// Every argument, not only p's: the caller-side check
 				// asks the same of each one (#245).

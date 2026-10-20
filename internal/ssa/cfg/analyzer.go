@@ -66,23 +66,62 @@ import (
 
 // Analyzer provides control flow graph analysis for SSA functions.
 //
-// It is stateless and can be reused across multiple analyses.
-// All analysis results are returned as new objects, not stored internally.
-type Analyzer struct{}
-
-// NewAnalyzer creates a new Analyzer.
-func NewAnalyzer() *Analyzer {
-	return &Analyzer{}
+// It caches what it finds for each function: the blocks each block reaches,
+// the loops and the Repeats. One Analyzer is shared by everything that asks
+// about the functions of a pass, the checker and the suggested fixes, so each
+// question is answered once (#299). The functions must not change while it
+// is in use, and it is not safe for concurrent use.
+type Analyzer struct {
+	graphs map[*ssa.Function]*analyzerGraph
 }
 
-// CanReach checks if srcBlock can reach dstBlock in the CFG using BFS.
+// analyzerGraph is what an Analyzer has found for one function.
+type analyzerGraph struct {
+	// reach holds, for the block of each index, the set of blocks it
+	// reaches, itself included, as a bitset indexed by block index. A set is
+	// nil until a block is asked about.
+	reach [][]uint64
+
+	//declscope:shared // loop.go's DetectLoops fills it
+	loops *LoopInfo
+
+	// The Repeats of the function analysed on its own, and of the function
+	// as a closure of each parent Repeats, and the blocks where it is
+	// declared and runs in the function that declares it.
+	//declscope:shared // repeat.go fills it
+	repeats *Repeats
+	//declscope:shared // repeat.go fills it
+	closures map[*Repeats]*Repeats
+	//declscope:shared // repeat.go fills it
+	sites *repeatSites
+}
+
+// NewAnalyzer creates a new Analyzer with nothing cached.
+func NewAnalyzer() *Analyzer {
+	return &Analyzer{graphs: make(map[*ssa.Function]*analyzerGraph)}
+}
+
+// graphOf returns the cache of fn, creating it.
+//
+//declscope:shared // loop.go and repeat.go cache their results in it
+func (a *Analyzer) graphOf(fn *ssa.Function) *analyzerGraph {
+	g, ok := a.graphs[fn]
+	if !ok {
+		g = &analyzerGraph{}
+		a.graphs[fn] = g
+	}
+	return g
+}
+
+// CanReach checks if srcBlock can reach dstBlock in the CFG.
 //
 // This is used for violation detection: if an earlier use of a mutable root
 // can reach a later use, the later use is a violation.
 //
-// Algorithm: Breadth-first search through successor edges.
-//
-// Time complexity: O(V + E) where V = blocks, E = edges
+// The blocks that src reaches are found once, by a breadth-first search
+// through successor edges, and kept, so later questions about src take
+// constant time. Blocks that are not those of fn.Blocks at their index, such
+// as blocks built by hand, are searched each time.
 func (a *Analyzer) CanReach(src, dst *ssa.BasicBlock) bool {
 	if src == nil || dst == nil {
 		return false
@@ -90,8 +129,48 @@ func (a *Analyzer) CanReach(src, dst *ssa.BasicBlock) bool {
 	if src == dst {
 		return true // Same block is trivially reachable
 	}
+	fn := src.Parent()
+	if !indexedByAnalyzer(fn, src) || dst.Parent() != fn || !indexedByAnalyzer(fn, dst) {
+		return reachOutsideAnalyzer(src, dst)
+	}
+	return a.reachSet(fn, src)[dst.Index/64]&(1<<(dst.Index%64)) != 0
+}
 
-	// BFS traversal
+// indexedByAnalyzer reports whether b is the block of fn.Blocks at b.Index.
+func indexedByAnalyzer(fn *ssa.Function, b *ssa.BasicBlock) bool {
+	return fn != nil && b.Index >= 0 && b.Index < len(fn.Blocks) && fn.Blocks[b.Index] == b
+}
+
+// reachSet returns the blocks that src, a block of fn at its index, reaches,
+// itself included.
+func (a *Analyzer) reachSet(fn *ssa.Function, src *ssa.BasicBlock) []uint64 {
+	g := a.graphOf(fn)
+	if g.reach == nil {
+		g.reach = make([][]uint64, len(fn.Blocks))
+	}
+	if set := g.reach[src.Index]; set != nil {
+		return set
+	}
+	set := make([]uint64, (len(fn.Blocks)+63)/64)
+	set[src.Index/64] |= 1 << (src.Index % 64)
+	queue := []*ssa.BasicBlock{src}
+	for len(queue) > 0 {
+		block := queue[0]
+		queue = queue[1:]
+		for _, succ := range block.Succs {
+			if set[succ.Index/64]&(1<<(succ.Index%64)) == 0 {
+				set[succ.Index/64] |= 1 << (succ.Index % 64)
+				queue = append(queue, succ)
+			}
+		}
+	}
+	g.reach[src.Index] = set
+	return set
+}
+
+// reachOutsideAnalyzer reports whether src reaches dst, by a breadth-first
+// search through successor edges, for blocks the cache does not index.
+func reachOutsideAnalyzer(src, dst *ssa.BasicBlock) bool {
 	visited := make(map[*ssa.BasicBlock]bool)
 	queue := []*ssa.BasicBlock{src}
 	visited[src] = true

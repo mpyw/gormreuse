@@ -10,6 +10,7 @@ import (
 	"github.com/mpyw/gormreuse/internal/fix"
 	ssautil "github.com/mpyw/gormreuse/internal/ssa"
 	"github.com/mpyw/gormreuse/internal/ssa/callsite"
+	"github.com/mpyw/gormreuse/internal/ssa/cfg"
 	"github.com/mpyw/gormreuse/internal/ssa/pollution"
 	"github.com/mpyw/gormreuse/internal/ssa/tracer"
 )
@@ -33,6 +34,7 @@ type checker struct {
 	funcVars             callsite.FuncVars           // Package-level variables that hold one function (#183)
 	reported             map[reportKey]bool          // Deduplication of reports
 	fixGen               *fix.Generator              // Cached fix generator for all violations
+	cfgs                 *cfg.Analyzer               // CFG cache of the pass, shared with fixGen (#299)
 }
 
 // newChecker creates a new checker for a specific file.
@@ -41,7 +43,7 @@ type checker struct {
 // The fixGen is shared to avoid recreating the generator for each violation.
 //
 //declscope:shared // run.go makes a checker per package
-func newChecker(pass *analysis.Pass, ignores *directive.Ignores, pureFuncs, immutableReturnFuncs, immutableParamFuncs *directive.DirectiveFuncSet, pureVerdicts *tracer.PureVerdicts, scopesCallbacks, immutableCallbacks map[*ssa.Function]bool, needsImmutableParam func(*ssa.Function) bool, funcVars callsite.FuncVars, reported map[reportKey]bool, fixGen *fix.Generator) *checker {
+func newChecker(pass *analysis.Pass, ignores *directive.Ignores, pureFuncs, immutableReturnFuncs, immutableParamFuncs *directive.DirectiveFuncSet, pureVerdicts *tracer.PureVerdicts, scopesCallbacks, immutableCallbacks map[*ssa.Function]bool, needsImmutableParam func(*ssa.Function) bool, funcVars callsite.FuncVars, reported map[reportKey]bool, fixGen *fix.Generator, cfgs *cfg.Analyzer) *checker {
 	return &checker{
 		pass:                 pass,
 		ignores:              ignores,
@@ -55,6 +57,7 @@ func newChecker(pass *analysis.Pass, ignores *directive.Ignores, pureFuncs, immu
 		funcVars:             funcVars,
 		reported:             reported,
 		fixGen:               fixGen,
+		cfgs:                 cfgs,
 	}
 }
 
@@ -62,7 +65,7 @@ func newChecker(pass *analysis.Pass, ignores *directive.Ignores, pureFuncs, immu
 //
 //declscope:shared // run.go checks every function with it
 func (c *checker) checkFunction(fn *ssa.Function) {
-	analyzer := ssautil.NewAnalyzer(fn, c.pureFuncs, c.immutableReturnFuncs, c.immutableParamFuncs, c.pureVerdicts, c.scopesCallbacks, c.immutableCallbacks, c.needsImmutableParam, c.funcVars)
+	analyzer := ssautil.NewAnalyzer(fn, c.pureFuncs, c.immutableReturnFuncs, c.immutableParamFuncs, c.pureVerdicts, c.scopesCallbacks, c.immutableCallbacks, c.needsImmutableParam, c.funcVars, c.cfgs)
 	violations := analyzer.Analyze()
 
 	// Every diagnostic of a root carries the root's fix, not only the first:

@@ -300,7 +300,7 @@ var growthCases = []growthCase{
 		return []string{b.String()}
 	}},
 	// One closure called at n sites in distinct blocks.
-	{name: "closurecalls", limit: growthQuadratic, after: "#299", shape: func(n int) []string {
+	{name: "closurecalls", limit: growthQuadratic, shape: func(n int) []string {
 		var b strings.Builder
 		b.WriteString("func f(db *gorm.DB, c []bool) {\n\tq := db.Where(\"x\")\n\tg := func() { q.Find(nil) }\n")
 		for i := range n {
@@ -310,7 +310,7 @@ var growthCases = []growthCase{
 		return []string{b.String()}
 	}},
 	// Closure called at n sites, closure has n/10 uses.
-	{name: "closurecallsuses", limit: growthQuadratic, after: "#299", shape: func(n int) []string {
+	{name: "closurecallsuses", limit: growthQuadratic, shape: func(n int) []string {
 		var b strings.Builder
 		b.WriteString("func f(db *gorm.DB, c []bool) {\n\tq := db.Where(\"x\")\n\tg := func() {\n")
 		for i := range n/10 + 1 {
@@ -446,7 +446,7 @@ var growthCases = []growthCase{
 		return []string{b.String()}
 	}},
 	// A closure using a captured query that n optional filters reassign, called after each.
-	{name: "capturedre", limit: growthQuadratic, after: "#299", shape: func(n int) []string {
+	{name: "capturedre", limit: growthQuadratic, shape: func(n int) []string {
 		var b strings.Builder
 		b.WriteString("func f(db *gorm.DB, c []bool) {\n\tq := db.Model(nil)\n\tg := func() { q.Find(nil) }\n")
 		for i := range n {
@@ -456,7 +456,7 @@ var growthCases = []growthCase{
 		return []string{b.String()}
 	}},
 	// Captured var: n stores of fresh roots, n reads in the parent.
-	{name: "storereads", limit: growthQuadratic, after: "#299", shape: func(n int) []string {
+	{name: "storereads", limit: growthQuadratic, shape: func(n int) []string {
 		var b strings.Builder
 		b.WriteString("func f(db *gorm.DB, c []bool) {\n\tq := db.Model(nil)\n\t_ = func() { _ = q }\n")
 		for i := range n {
@@ -695,7 +695,7 @@ var growthCases = []growthCase{
 		return []string{b.String()}
 	}},
 	// n exclusive uses followed by a long tail of blocks.
-	{name: "excltail", limit: growthQuadratic, after: "#299", shape: func(n int) []string {
+	{name: "excltail", limit: growthQuadratic, shape: func(n int) []string {
 		var b strings.Builder
 		b.WriteString("func side() {}\n\nfunc f(db *gorm.DB, k int, c []bool) {\n\tq := db.Where(\"x\")\n\tswitch k {\n")
 		for i := range n {
@@ -709,7 +709,7 @@ var growthCases = []growthCase{
 		return []string{b.String()}
 	}},
 	// Merged roots each with a polluting (non-pure) use.
-	{name: "mergedpollute", limit: growthQuadratic, after: "#299", shape: func(n int) []string {
+	{name: "mergedpollute", limit: growthQuadratic, shape: func(n int) []string {
 		var b strings.Builder
 		b.WriteString("func logDB(db *gorm.DB) {}\n\nfunc f(db *gorm.DB, c []bool) {\n\tq := db.Model(nil)\n")
 		for i := range n {
@@ -834,7 +834,7 @@ var growthCases = []growthCase{
 		return []string{b.String()}
 	}},
 	// Discarded conditional chains (virtual roots).
-	{name: "discarded", limit: growthQuadratic, after: "#299", shape: func(n int) []string {
+	{name: "discarded", limit: growthQuadratic, shape: func(n int) []string {
 		var b strings.Builder
 		b.WriteString("func f(db *gorm.DB, c []bool) {\n\tq := db.Model(nil)\n")
 		for i := range n {
@@ -844,7 +844,7 @@ var growthCases = []growthCase{
 		return []string{b.String()}
 	}},
 	// Switch with n exclusive uses, last case reuses, long tail.
-	{name: "conflict", limit: growthQuadratic, after: "#299", shape: func(n int) []string {
+	{name: "conflict", limit: growthQuadratic, shape: func(n int) []string {
 		var b strings.Builder
 		b.WriteString("func f(db *gorm.DB, k int, c []bool, x int) int {\n\tq := db.Where(\"x\")\n\tswitch k {\n")
 		for i := range n {

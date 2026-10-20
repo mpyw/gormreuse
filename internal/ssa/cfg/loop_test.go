@@ -54,12 +54,12 @@ func TestDetectLoops(t *testing.T) {
 		},
 	}
 
-	a := NewAnalyzer()
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			fn := buildFunc(t, tc.src, tc.fn)
-			info := a.DetectLoops(fn)
+			// An Analyzer caches, so each parallel subtest has its own.
+			info := NewAnalyzer().DetectLoops(fn)
 
 			var headers, blocks int
 			for _, b := range fn.Blocks {
