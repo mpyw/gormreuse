@@ -289,6 +289,34 @@ var growthCases = []growthCase{
 		b.WriteString("func caller(db *gorm.DB) {\n\tq := i0(db)\n\tq.Find(nil)\n\tq.Find(nil)\n}\n")
 		return []string{b.String()}
 	}},
+	// A chain of n immutable-return functions whose last breaks the
+	// contract: distrust propagates to every one (#314). Each function has a
+	// file of its own, since a directive lookup scans the comments of its
+	// file (#301).
+	{name: "distrustreturn", limit: growthLinear, shape: func(n int) []string {
+		files := make([]string, n)
+		for i := range n {
+			next := "db.Where(\"bad\")"
+			if i < n-1 {
+				next = fmt.Sprintf("R%d(db)", i+1)
+			}
+			files[i] = fmt.Sprintf("//gormreuse:immutable-return\nfunc R%d(db *gorm.DB) *gorm.DB {\n\treturn %s\n}\n", i, next)
+		}
+		return files
+	}},
+	// A chain of n immutable-input functions, each handing its callback to
+	// the next, whose last breaks the contract (#314).
+	{name: "distrustinput", limit: growthLinear, shape: func(n int) []string {
+		files := make([]string, n)
+		for i := range n {
+			body := "cb(db.Where(\"bad\"))"
+			if i < n-1 {
+				body = fmt.Sprintf("I%d(db, cb)", i+1)
+			}
+			files[i] = fmt.Sprintf("//gormreuse:immutable-input(cb)\nfunc I%d(db *gorm.DB, cb func(*gorm.DB)) {\n\t%s\n}\n", i, body)
+		}
+		return files
+	}},
 	// n closures, each using one captured root once.
 	{name: "closures", limit: growthQuadratic, shape: func(n int) []string {
 		var b strings.Builder

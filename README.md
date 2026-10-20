@@ -728,6 +728,8 @@ A directive on an exported function or method also applies in the packages that 
 
 A contract that the body breaks is reported in the declaring package. Its callers in that package still trust it, so the mistake is reported once. A caller in another package does not trust it, since the author of that package may never see the report.
 
+Another package also does not trust an `immutable-return` or `immutable-input(name)` function that keeps its contract only by relying on a broken one: one that returns its result, hands it to the callback, or hands the callback to it. This holds through any number of such functions.
+
 > [!WARNING]
 > Any other comment that starts with `gormreuse:` has no effect, and is reported with how to write it. One unknown name in a list drops the whole comment: `//gormreuse:pure,bogus` does not mark the function pure.
 

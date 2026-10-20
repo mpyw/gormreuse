@@ -20,7 +20,7 @@ type factSources struct {
 	pureFuncs, immutableReturnFuncs *directive.DirectiveFuncSet
 	immutableInputSet               *directive.ImmutableInputSet
 	pureVerdicts                    *tracer.PureVerdicts
-	distrustedReturn, failedInput   map[*ssa.Function]bool
+	distrusted                      distrustedContracts
 	needsImmutableParam             map[*ssa.Function]bool
 	tracer                          *tracer.RootTracer
 }
@@ -62,9 +62,9 @@ func exportFacts(pass *analysis.Pass, ssaInfo *buildssa.SSA, src factSources, sk
 				f.Returned = src.pureVerdicts.Returned[fn]
 				f.ReturnsOnlyParams = len(f.Returned) > 0 && src.tracer.PureReturnsOnlyParams(fn)
 			}
-			f.ImmutableReturn = src.immutableReturnFuncs.Contains(fn) && !src.distrustedReturn[fn]
+			f.ImmutableReturn = src.immutableReturnFuncs.Contains(fn) && !src.distrusted.returns[fn]
 			f.BranchesImmutableParam = src.needsImmutableParam[fn]
-			if !src.failedInput[fn] {
+			if !src.distrusted.inputs[fn] {
 				f.ImmutableInput = src.immutableInputSet.Callbacks(fn)
 			}
 			facts.Export(pass, fn, f)

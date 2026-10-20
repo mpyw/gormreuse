@@ -48,8 +48,12 @@ type ImmutableReturnValidator struct {
 	// package-level variable.
 	funcs []*ssa.Function
 	// globals holds the stores into each package-level variable, or nil for
-	// one whose address escapes. It is filled on first use.
-	globals map[*ssa.Global][]ssa.Value
+	// one whose address escapes. It is filled on first use, and the copies
+	// that Distrusting makes share it.
+	globals *map[*ssa.Global][]ssa.Value
+	// distrusted reports the functions whose results count as provably
+	// mutable (see Distrusting). It is nil for the body check.
+	distrusted func(*ssa.Function) bool
 }
 
 // NewImmutableReturnValidator returns a validator for the functions in set.
@@ -58,7 +62,19 @@ type ImmutableReturnValidator struct {
 // sources (including other immutable-return functions and immutable-param'd
 // parameters) correctly.
 func NewImmutableReturnValidator(funcs []*ssa.Function, set *directive.DirectiveFuncSet, rt *tracer.RootTracer) *ImmutableReturnValidator {
-	return &ImmutableReturnValidator{set: set, rt: rt, funcs: funcs}
+	return &ImmutableReturnValidator{set: set, rt: rt, funcs: funcs, globals: new(map[*ssa.Global][]ssa.Value)}
+}
+
+// Distrusting returns a validator like v that uses rt, a tracer that does not
+// trust the functions distrusted reports, and counts a call to one of them as
+// provably mutable. A function it reports keeps its contract only by relying
+// on one of them (#314). The copies share the stores of package-level
+// variables, which do not depend on trust.
+func (v *ImmutableReturnValidator) Distrusting(rt *tracer.RootTracer, distrusted func(*ssa.Function) bool) *ImmutableReturnValidator {
+	d := *v
+	d.rt = rt
+	d.distrusted = distrusted
+	return &d
 }
 
 // Validate reports fn when it is marked //gormreuse:immutable-return and
@@ -167,6 +183,11 @@ func (v *ImmutableReturnValidator) rootMutable(root ssa.Value, seen map[ssa.Valu
 	if !ok {
 		return false
 	}
+	if v.distrusted != nil {
+		if callee := origin.Declared(v.rt.Site(call).Declared); callee != nil && v.distrusted(callee) {
+			return true
+		}
+	}
 	// A method value call is the call of its method.
 	if site := v.rt.Site(call); site.Recv != nil {
 		if !site.IsGormMethod() {
@@ -204,8 +225,9 @@ func (v *ImmutableReturnValidator) globalMutable(g *ssa.Global, seen map[ssa.Val
 // globalStores returns the values stored into g by the package, or nil when
 // g's address is used other than to load or store it.
 func (v *ImmutableReturnValidator) globalStores(g *ssa.Global) []ssa.Value {
-	if v.globals == nil {
-		v.globals = make(map[*ssa.Global][]ssa.Value)
+	if *v.globals == nil {
+		globals := make(map[*ssa.Global][]ssa.Value)
+		*v.globals = globals
 		escaped := make(map[*ssa.Global]bool)
 		for _, fn := range immutableReturnPackageFuncs(v.funcs, g.Pkg) {
 			for _, block := range fn.Blocks {
@@ -213,7 +235,7 @@ func (v *ImmutableReturnValidator) globalStores(g *ssa.Global) []ssa.Value {
 					switch x := instr.(type) {
 					case *ssa.Store:
 						if sg, ok := x.Addr.(*ssa.Global); ok {
-							v.globals[sg] = append(v.globals[sg], x.Val)
+							globals[sg] = append(globals[sg], x.Val)
 						}
 						if sg, ok := x.Val.(*ssa.Global); ok {
 							escaped[sg] = true
@@ -235,10 +257,10 @@ func (v *ImmutableReturnValidator) globalStores(g *ssa.Global) []ssa.Value {
 			}
 		}
 		for sg := range escaped {
-			v.globals[sg] = nil
+			globals[sg] = nil
 		}
 	}
-	return v.globals[g]
+	return (*v.globals)[g]
 }
 
 // immutableReturnPackageFuncs returns funcs plus the package initializer, which
