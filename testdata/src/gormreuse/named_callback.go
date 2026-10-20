@@ -262,6 +262,8 @@ func namedCallbackUseGen(db *gorm.DB) {
 
 // --- Recursion is a direct call ---
 
+// namedCallbackRecursive hands q, with the errors of its queries, to the
+// call whose result it returns, so it gets no fix (#372).
 func namedCallbackRecursive(q *gorm.DB) error {
 	q.Find(nil)
 	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`

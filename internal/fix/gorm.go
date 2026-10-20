@@ -142,9 +142,17 @@ func gormImportEdit(file *ast.File, name string) analysis.TextEdit {
 //
 //declscope:shared // change.go's changedElsewhere finds the reads of the root's state with it
 func isGormStateField(fa *ssa.FieldAddr) bool {
-	if !typeutil.IsGormDB(fa.X.Type()) {
-		return false
-	}
-	name := fa.X.Type().Underlying().(*types.Pointer).Elem().Underlying().(*types.Struct).Field(fa.Field).Name()
+	name := gormFieldName(fa)
 	return name == "Error" || name == "RowsAffected" || name == "Statement"
+}
+
+// gormFieldName returns the name of the *gorm.DB field that fa takes, or ""
+// when fa takes a field of another type.
+//
+//declscope:shared // change.go's finisherErrorChanges finds the reads of a query's Error with it
+func gormFieldName(fa *ssa.FieldAddr) string {
+	if !typeutil.IsGormDB(fa.X.Type()) {
+		return ""
+	}
+	return fa.X.Type().Underlying().(*types.Pointer).Elem().Underlying().(*types.Struct).Field(fa.Field).Name()
 }

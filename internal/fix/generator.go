@@ -95,6 +95,8 @@ type Generator struct {
 	ssaCalls map[*ssa.Function]map[token.Pos]*ssa.Call
 	//declscope:shared // reassign.go indexes the variables calls are assigned to in it
 	assigned map[*ast.File]map[token.Pos]ast.Expr
+	//declscope:shared // change.go memoizes whether a Session changes the errors of each root's queries in it
+	errorChanges map[ssa.Value]bool
 
 	files   map[*token.File]*ast.File      // token.File -> ast.File mapping
 	cursors map[*ast.File]inspector.Cursor // file cursors in the pass inspector
@@ -230,6 +232,13 @@ func (g *Generator) Generate(v pollution.Violation) []analysis.SuggestedFix {
 	// Code that changes the root in place, other than a discarded statement on
 	// its variable, would change a copy once the root gets a Session (#243).
 	if g.changedElsewhere(v, len(reassigned) == 0) {
+		return fallback
+	}
+
+	// A query whose error nothing reads leaves it on a mutable root, and a
+	// later query reports it and is skipped. A Session would let that query
+	// run and report its own outcome (#372).
+	if g.finisherErrorChanges(v) {
 		return fallback
 	}
 

@@ -2176,6 +2176,23 @@ Each query adds its error to `q.Error`, and that chain changes `q` the same way 
 </td></tr>
 <tr><td>
 
+A query on `q` whose error nothing reads, followed by code that sees a later result (#372)
+
+</td><td>
+
+```go
+q := db.Model(&Order{ID: id})
+q.Update("name", "new") // fails
+return q.Update("id", id).Error
+```
+
+On a mutable `q`, a failed query leaves its error on `q`. gorm skips the later `Update`, and the function returns the first error. With a Session, the later `Update` runs and the function returns `nil`. In a `Transaction` callback, that turns a rollback into a commit.
+
+The later code sees the error when it reads `Error` or `RowsAffected`, returns the chain, passes it to a call whose result is used, or stores it in a field. Check the first query's error (`if err := q.Update(...).Error; err != nil { return err }`), and the fix comes back.
+
+</td></tr>
+<tr><td>
+
 A parameter root that the fix cannot isolate
 
 </td><td>

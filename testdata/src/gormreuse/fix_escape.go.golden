@@ -212,11 +212,17 @@ func fixEscapeErrorOfFinisher(db *gorm.DB) error {
 	return q.Where("b = 1").Find(&[]User{}).Error // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
-// fixEscapeErrorOfSession: the Error of a Session copy is the copy's.
+// fixEscapeErrorOfSession: the Error of a Session copy is not a read of q's
+// own state. The copy takes q's Error with it, so each query's error is read
+// first, and none stays on q (#372).
 func fixEscapeErrorOfSession(db *gorm.DB) error {
 	q := db.Model(&User{}).Session(&gorm.Session{})
-	q.Where("a = 1").Find(&[]User{})
-	q.Where("b = 1").Find(&[]User{})        // want `\*gorm\.DB reused: second branch from mutable root`
+	if err := q.Where("a = 1").Find(&[]User{}).Error; err != nil {
+		return err
+	}
+	if err := q.Where("b = 1").Find(&[]User{}).Error; err != nil { // want `\*gorm\.DB reused: second branch from mutable root`
+		return err
+	}
 	return q.Session(&gorm.Session{}).Error // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
@@ -284,10 +290,13 @@ func fixEscapeCallsTenantTupleUsed(db *gorm.DB, b *[]User) error {
 
 // fixEscapeParamResult changes tx in place, and returns a *gorm.DB that
 // carries the change back to its callers, so its discarded statement is
-// reassigned.
+// reassigned. The query's error is read, so it does not stay on tx for the
+// caller (#372).
 func fixEscapeParamResult(tx *gorm.DB) *gorm.DB {
 	tx = tx.Where("a = 1").Session(&gorm.Session{})
-	tx.Find(&[]User{})       // want `\*gorm\.DB reused: second branch from mutable root`
+	if err := tx.Find(&[]User{}).Error; err != nil { // want `\*gorm\.DB reused: second branch from mutable root`
+		return nil
+	}
 	return tx.Where("b = 1") // want `\*gorm\.DB reused: second branch from mutable root`
 }
 

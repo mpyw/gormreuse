@@ -1,6 +1,6 @@
 --- named_callback.go	1970-01-01 00:00:00
 +++ named_callback.go.golden	1970-01-01 00:00:00
-@@ -1,356 +1,377 @@
+@@ -1,358 +1,378 @@
  package internal
  
  import "gorm.io/gorm"
@@ -280,8 +280,9 @@
  
  // --- Recursion is a direct call ---
  
+ // namedCallbackRecursive hands q, with the errors of its queries, to the
+ // call whose result it returns, so it gets no fix (#372).
  func namedCallbackRecursive(q *gorm.DB) error {
-+	q = q.Session(&gorm.Session{})
  	q.Find(nil)
  	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  	return namedCallbackRecursive(q) // want `\*gorm\.DB reused: second branch from mutable root`

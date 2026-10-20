@@ -1,6 +1,7 @@
 package fix
 
 import (
+	"go/token"
 	"slices"
 
 	"golang.org/x/tools/go/ssa"
@@ -75,6 +76,84 @@ func (g *Generator) changedElsewhere(v pollution.Violation, noDiscarded bool) bo
 		}
 	}
 	return deferChanges > 0 && (deferUses > 1 || deferRepeats)
+}
+
+// finisherErrorChanges reports whether a Session at the root would change
+// which error, or which RowsAffected, v's queries report (#372). On a mutable
+// root a query's result is the root itself, so its Error carries the errors
+// of the queries that ran on the root before it, and gorm skips a query once
+// Error is set. Take this code:
+//
+//	q := db.Model(&Order{ID: id})
+//	q.Update("name", "new") // fails
+//	return q.Update("id", id).Error
+//
+// The second Update is skipped, and the function returns the error of the
+// first. With a Session at q, each Update runs on its own copy, so the
+// second one runs and the function returns nil. In a Transaction callback
+// that turns a rollback into a commit.
+//
+// It holds when a use runs a query whose Error nothing reads, and a later
+// read, or the same query again in a loop, passes the error on: it reads a
+// field of a result, returns it, or hands it to code that may (see
+// changeErrorsOfUse). A use whose chain is a discarded statement, such as
+// q.Find(&x), passes nothing on. A result kept where other code may read it
+// later, such as a struct field, is taken to pass it on after every query.
+// So is a use that AllUses does not list (see pollution.Violation.Hidden),
+// such as a deferred call or a query on a Session copy, which is also taken
+// to run before every read. A use in a closure is ordered by its position.
+//
+//declscope:shared // generator.go's Generate withholds the fix with it
+func (g *Generator) finisherErrorChanges(v pollution.Violation) bool {
+	if changes, ok := g.errorChanges[v.Root]; ok {
+		return changes
+	}
+	changes := g.computeFinisherErrorChanges(v)
+	if g.errorChanges == nil {
+		g.errorChanges = make(map[ssa.Value]bool)
+	}
+	g.errorChanges[v.Root] = changes
+	return changes
+}
+
+// computeFinisherErrorChanges is finisherErrorChanges without the memo: the
+// violations of one root share their uses, so a root reused n times is
+// checked once, not n times (#350).
+func (g *Generator) computeFinisherErrorChanges(v pollution.Violation) bool {
+	def := tracer.RootBlock(v.Root)
+	var unread, passed []changePoint
+	for _, use := range v.AllUses {
+		errs := g.changeErrorsOfUse(v.Root, use)
+		unread = append(unread, errs.unread...)
+		passed = append(passed, errs.passed...)
+	}
+	for _, use := range v.Hidden {
+		errs := g.changeErrorsOfUse(v.Root, use)
+		if len(errs.unread) > 0 {
+			unread = append(unread, changePoint{})
+		}
+		if len(errs.passed) > 0 {
+			passed = append(passed, changePoint{})
+		}
+	}
+	for _, first := range unread {
+		repeats := first.block == nil || def == nil || useRepeatsAfter(g.cfg, first.block, def)
+		if slices.ContainsFunc(passed, func(later changePoint) bool {
+			switch {
+			case repeats || later.block == nil:
+				return true
+			case later.value == first.value:
+				// A query's own result: its error is its own.
+				return false
+			case later.block == first.block || later.block.Parent() != first.block.Parent():
+				return later.pos > first.pos
+			}
+			return g.cfg.CanReach(first.block, later.block)
+		}) {
+			return true
+		}
+	}
+	return false
 }
 
 // changeStatements is what changedElsewhere reads of one function for every
@@ -228,4 +307,421 @@ func (g *Generator) changeCarryingRoots(x ssa.Value, loopInfo *cfg.LoopInfo) []s
 		}
 		x = site.Recv
 	}
+}
+
+// changeUseErrors is what a use does with the error on a mutable root (see
+// finisherErrorChanges).
+type changeUseErrors struct {
+	// unread are the queries whose result is discarded, or whose fields
+	// other than Error are the only ones read. Their error stays on the root
+	// for the queries after them.
+	unread []changePoint
+	// passed are where a result is read, returned or handed to other code,
+	// so that an error an earlier query left on the root is seen.
+	passed []changePoint
+}
+
+// changePoint is where a query or a read of its result runs. A zero block
+// stands for a point that may run anywhere.
+type changePoint struct {
+	block *ssa.BasicBlock
+	pos   token.Pos
+	value ssa.Value // the result it is of
+}
+
+// changeErrorsOfUse returns what use, a use of root, does with the error of
+// its chain: the *gorm.DB methods that start at the use's call, each called
+// on the result of the one before, as in q.Where("a").Find(&x).Error (see
+// changeErrorsOfValue). A use moved to the call site of its closure (#68) is
+// read at its own call. A use that is an argument passes the error on only
+// when the call it is passed to may (see changeRefPassesError).
+func (g *Generator) changeErrorsOfUse(root ssa.Value, use pollution.UsageInfo) changeUseErrors {
+	pos := use.Pos
+	if use.Method != "" {
+		pos = use.Call
+	}
+	instr := changeCallAt(root, use.Block, pos)
+	if instr == nil {
+		return changeUseErrors{passed: []changePoint{{}}}
+	}
+	if use.Method == "" {
+		if !g.changeRefPassesError(instr, nil) {
+			return changeUseErrors{}
+		}
+		return changeUseErrors{passed: []changePoint{{block: instr.Block(), pos: instr.Pos()}}}
+	}
+	call, ok := instr.(*ssa.Call)
+	if !ok {
+		// A go or defer statement has no result.
+		return changeUseErrors{}
+	}
+	return g.changeErrorsOfValue(call, changeWalk{seen: make(map[ssa.Value]bool)})
+}
+
+// changeCallAt returns the call instruction at pos: in block, or in a
+// closure of root's function.
+func changeCallAt(root ssa.Value, block *ssa.BasicBlock, pos token.Pos) ssa.CallInstruction {
+	find := func(b *ssa.BasicBlock) ssa.CallInstruction {
+		for _, instr := range b.Instrs {
+			if call, ok := instr.(ssa.CallInstruction); ok && call.Pos() == pos {
+				return call
+			}
+		}
+		return nil
+	}
+	if call := find(block); call != nil {
+		return call
+	}
+	if root.Parent() == nil {
+		return nil
+	}
+	for _, f := range withClosures(root.Parent()) {
+		for _, b := range f.Blocks {
+			if call := find(b); call != nil {
+				return call
+			}
+		}
+	}
+	return nil
+}
+
+// changeErrorsDepth bounds how many values changeErrorsOfValue follows a
+// result through. A deeper result is taken to pass the error on.
+const changeErrorsDepth = 16
+
+// changeErrorsOfValue returns what the code that reads v, a *gorm.DB that is
+// a mutable root at run time, does with the error it holds. query says
+// whether a call before v ran a query. v is followed:
+//   - into each *gorm.DB method called on it, as the receiver. Each runs on
+//     the same Statement, so its result holds the same error;
+//   - out of a closure that is only called in place, as in
+//     `_ = func() *gorm.DB { return q.Where("a") }().Find(nil)`, into the
+//     results of its calls;
+//   - into the loads of a local variable it is stored in, and into a
+//     closure that captures it. What a closure does is taken to run
+//     anywhere (far): the order of closures is not followed.
+//
+// A Phi that takes v passes nothing on by itself: the uses of the Phi are
+// uses of the root too. A return from the function passes it on where it
+// returns. A store anywhere else, such as a struct field, passes it on
+// anywhere. A query's error is unread when its result is discarded, or when
+// only a field other than Error is read from it.
+func (g *Generator) changeErrorsOfValue(v ssa.Value, walk changeWalk) changeUseErrors {
+	if walk.depth >= changeErrorsDepth {
+		return changeUseErrors{passed: []changePoint{{}}}
+	}
+	if walk.seen[v] {
+		return changeUseErrors{}
+	}
+	walk.seen[v] = true
+	if call, ok := v.(*ssa.Call); ok {
+		if site := g.tracer.Site(call); site.IsGormMethod() && typeutil.IsFinisher(site.Method()) {
+			walk.query = true
+		}
+	}
+	var errs changeUseErrors
+	errorRead, kept := false, false
+	for _, ref := range *v.Referrers() {
+		r := g.changeErrorsOfRef(ref, v, walk)
+		errs.unread = append(errs.unread, r.unread...)
+		errs.passed = append(errs.passed, r.passed...)
+		errorRead = errorRead || r.errorRead
+		kept = kept || r.kept
+	}
+	if walk.query && !errorRead && !kept {
+		point := changePoint{}
+		if instr, ok := v.(ssa.Instruction); ok && !walk.far {
+			point = changePoint{block: instr.Block(), pos: changeValuePos(v), value: v}
+		}
+		errs.unread = append(errs.unread, point)
+	}
+	return errs
+}
+
+// changeWalk is the state of changeErrorsOfValue along one path: whether a
+// query ran on the value before, how deep the walk is, whether the code is
+// taken to run anywhere (far), and the values already walked.
+type changeWalk struct {
+	query bool
+	depth int
+	far   bool
+	seen  map[ssa.Value]bool
+}
+
+// changeRefErrors is what one referrer of a value does with its error (see
+// changeErrorsOfRef).
+type changeRefErrors struct {
+	changeUseErrors
+	errorRead bool // it reads the value's Error
+	kept      bool // it keeps the value, or follows it into other code
+}
+
+// changeErrorsOfRef returns what ref, a referrer of v, does with the error v
+// holds (see changeErrorsOfValue).
+func (g *Generator) changeErrorsOfRef(ref ssa.Instruction, v ssa.Value, walk changeWalk) changeRefErrors {
+	var r changeRefErrors
+	follow := func(next ssa.Value, far bool) {
+		more := g.changeErrorsOfValue(next, changeWalk{query: walk.query, depth: walk.depth + 1, far: walk.far || far, seen: walk.seen})
+		r.unread = append(r.unread, more.unread...)
+		r.passed = append(r.passed, more.passed...)
+	}
+	pass := func(anywhere bool) {
+		if anywhere || walk.far || ref.Block() == nil {
+			r.passed = append(r.passed, changePoint{})
+			return
+		}
+		pos := ref.Pos()
+		if !pos.IsValid() {
+			pos = changeValuePos(v)
+		}
+		r.passed = append(r.passed, changePoint{block: ref.Block(), pos: pos, value: v})
+	}
+	switch ref := ref.(type) {
+	case *ssa.DebugRef:
+		return r
+	case *ssa.FieldAddr:
+		pass(false)
+		r.errorRead = gormFieldName(ref) == "Error"
+		return r
+	case *ssa.Call:
+		if site := g.tracer.Site(ref); site.IsGormMethod() && site.Recv == v {
+			follow(ref, false)
+		} else if g.changeRefPassesError(ref, v) {
+			pass(false)
+		}
+	case *ssa.Return:
+		if results, ok := changeInlineResults(ref, v); ok {
+			for _, result := range results {
+				follow(result, false)
+			}
+		} else {
+			pass(ref.Parent().Parent() != nil)
+		}
+	case *ssa.Store:
+		alloc, ok := changeVariableOf(ref.Addr).(*ssa.Alloc)
+		if !ok || ref.Val != v {
+			if g.changeRefPassesError(ref, v) {
+				pass(true)
+			}
+			break
+		}
+		reads, escapes := changeVariableReads(alloc)
+		if escapes {
+			pass(true)
+		}
+		for _, loaded := range reads {
+			follow(loaded, loaded.Parent() != alloc.Parent() || ref.Parent() != alloc.Parent())
+		}
+	case *ssa.MakeClosure:
+		for i, bound := range ref.Bindings {
+			if bound == v {
+				follow(ref.Fn.(*ssa.Function).FreeVars[i], true)
+			}
+		}
+	case *ssa.Phi:
+	default:
+		if g.changeRefPassesError(ref, v) {
+			pass(true)
+		}
+	}
+	r.kept = true
+	return r
+}
+
+// changeValuePos returns the position of v: that of the call whose result it
+// is, for an element of a tuple.
+func changeValuePos(v ssa.Value) token.Pos {
+	if extract, ok := v.(*ssa.Extract); ok {
+		return extract.Tuple.Pos()
+	}
+	return v.Pos()
+}
+
+// changeVariableOf returns the variable that addr, the address of a store,
+// stands for: the one a closure captures, for a free variable.
+func changeVariableOf(addr ssa.Value) ssa.Value {
+	for {
+		fv, ok := addr.(*ssa.FreeVar)
+		if !ok {
+			return addr
+		}
+		fn := fv.Parent()
+		index := slices.Index(fn.FreeVars, fv)
+		var bound ssa.Value
+		for _, block := range fn.Parent().Blocks {
+			for _, instr := range block.Instrs {
+				if mc, isMC := instr.(*ssa.MakeClosure); isMC && mc.Fn == fn {
+					bound = mc.Bindings[index]
+				}
+			}
+		}
+		if bound == nil {
+			return addr
+		}
+		addr = bound
+	}
+}
+
+// changeVariableReads returns the values that the loads of alloc, a local
+// variable, read, in its function or a closure that captures it. escapes is
+// set when its address goes anywhere else, as to a call.
+func changeVariableReads(alloc *ssa.Alloc) (reads []ssa.Value, escapes bool) {
+	var walk func(addr ssa.Value, depth int)
+	walk = func(addr ssa.Value, depth int) {
+		for _, ref := range *addr.Referrers() {
+			switch ref := ref.(type) {
+			case *ssa.DebugRef, *ssa.Store:
+			case *ssa.UnOp:
+				if ref.Op == token.MUL {
+					reads = append(reads, ref)
+				}
+			case *ssa.MakeClosure:
+				if depth >= changeErrorsDepth {
+					escapes = true
+					continue
+				}
+				for i, bound := range ref.Bindings {
+					if bound == addr {
+						walk(ref.Fn.(*ssa.Function).FreeVars[i], depth+1)
+					}
+				}
+			default:
+				escapes = true
+			}
+		}
+	}
+	walk(alloc, 0)
+	return reads, escapes
+}
+
+// changeInlineResults returns the values that the calls of the closure that
+// ret returns from take v from, when the closure is only called, by plain
+// calls in the function that declares it: each call's result, or the element
+// of its tuple at v's index. ok is false otherwise, as for a closure that is
+// stored, passed on, or run by a go or defer statement.
+func changeInlineResults(ret *ssa.Return, v ssa.Value) (results []ssa.Value, ok bool) {
+	fn := ret.Parent()
+	index := slices.Index(ret.Results, v)
+	if index < 0 || fn.Parent() == nil {
+		return nil, false
+	}
+	for _, block := range fn.Parent().Blocks {
+		for _, instr := range block.Instrs {
+			if mc, isMC := instr.(*ssa.MakeClosure); isMC && mc.Fn == fn {
+				for _, r := range *mc.Referrers() {
+					c, isCall := r.(*ssa.Call)
+					if !isCall || c.Call.Value != mc || slices.Contains(c.Call.Args, ssa.Value(mc)) {
+						return nil, false
+					}
+				}
+				continue
+			}
+			for _, op := range instr.Operands(nil) {
+				if *op != ssa.Value(fn) {
+					continue
+				}
+				c, isCall := instr.(*ssa.Call)
+				if !isCall || c.Call.Value != fn || slices.Contains(c.Call.Args, ssa.Value(fn)) {
+					return nil, false
+				}
+			}
+		}
+	}
+	for _, block := range fn.Parent().Blocks {
+		for _, instr := range block.Instrs {
+			c, isCall := instr.(*ssa.Call)
+			if !isCall {
+				continue
+			}
+			if mc, isMC := c.Call.Value.(*ssa.MakeClosure); (!isMC || mc.Fn != fn) && c.Call.Value != ssa.Value(fn) {
+				continue
+			}
+			if len(ret.Results) == 1 {
+				results = append(results, c)
+				continue
+			}
+			for _, r := range *c.Referrers() {
+				if extract, isExtract := r.(*ssa.Extract); isExtract && extract.Index == index {
+					results = append(results, extract)
+				}
+			}
+		}
+	}
+	return results, true
+}
+
+// changeRefPassesError reports whether ref, an instruction that takes a
+// *gorm.DB, may pass on the error that the value holds. A call passes it on
+// only through its own result, as in return helper(q): a helper that returns
+// nothing, as in applyTenant(q, 7), and a go or defer statement have no
+// result to carry it. The argument of a *gorm.DB method, such as the
+// condition of q.Or(q.Where("a")), passes nothing on. Any instruction other
+// than a call, such as a return or a store, is taken to pass it on. So is a
+// *gorm.DB method that takes v, the value, as its receiver: it runs on the
+// same Statement, and its result holds the same error.
+func (g *Generator) changeRefPassesError(ref ssa.Instruction, v ssa.Value) bool {
+	call, ok := ref.(ssa.CallInstruction)
+	if !ok {
+		calls, ok := changeVariadicCalls(ref)
+		if !ok {
+			return true
+		}
+		return slices.ContainsFunc(calls, func(call ssa.CallInstruction) bool { return g.changeRefPassesError(call, nil) })
+	}
+	if site := g.tracer.Site(call); site.IsGormMethod() {
+		return v != nil && site.Recv == v
+	}
+	result := call.Value()
+	return result != nil && callResultUsed(result)
+}
+
+// changeVariadicCalls returns the calls that ref, an instruction that is not
+// a call, only hands its value to: the calls that take the interface a
+// MakeInterface boxes it in, and the variadic calls whose argument array a
+// Store puts it in, as `q.Or(q.Where("a"))` and `db.Where("id IN (?)", sub)`
+// do. ok is false when the value may go anywhere else.
+func changeVariadicCalls(ref ssa.Instruction) (calls []ssa.CallInstruction, ok bool) {
+	switch ref := ref.(type) {
+	case *ssa.MakeInterface:
+		for _, r := range *ref.Referrers() {
+			switch r := r.(type) {
+			case *ssa.DebugRef:
+			case ssa.CallInstruction:
+				calls = append(calls, r)
+			default:
+				more, ok := changeVariadicCalls(r)
+				if !ok {
+					return nil, false
+				}
+				calls = append(calls, more...)
+			}
+		}
+		return calls, true
+	case *ssa.Store:
+		idx, isIdx := ref.Addr.(*ssa.IndexAddr)
+		if !isIdx {
+			return nil, false
+		}
+		array, isAlloc := idx.X.(*ssa.Alloc)
+		if !isAlloc {
+			return nil, false
+		}
+		for _, r := range *array.Referrers() {
+			switch r := r.(type) {
+			case *ssa.IndexAddr:
+			case *ssa.Slice:
+				for _, sr := range *r.Referrers() {
+					call, isCall := sr.(ssa.CallInstruction)
+					if !isCall {
+						return nil, false
+					}
+					calls = append(calls, call)
+				}
+			default:
+				return nil, false
+			}
+		}
+		return calls, true
+	}
+	return nil, false
 }

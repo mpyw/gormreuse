@@ -105,6 +105,7 @@ func stateMethodsCommitOnSession(db *gorm.DB) {
 // ===== SHOULD REPORT =====
 
 // stateMethodsToSQLAfterBranch: ToSQL reads the condition the branch added.
+// Its dry run takes the error of the Find too, so no fix is offered (#372).
 func stateMethodsToSQLAfterBranch(db *gorm.DB) string {
 	q := db.Where("x")
 	q.Where("a").Find(nil)

@@ -2114,7 +2114,7 @@ type iifeHolder struct {
 // The IIFE's q.Where is the first branch of q, and h.query continues that
 // chain. q.Count is a second branch of q.
 func structFieldIIFE(db *gorm.DB) {
-	q := db.Where("x = ?", 1).Session(&gorm.Session{})
+	q := db.Where("x = ?", 1)
 
 	// IIFE result stored in struct field - internal call pollutes q
 	h := iifeHolder{

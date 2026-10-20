@@ -1,0 +1,161 @@
+package internal
+
+import "gorm.io/gorm"
+
+// Fixtures for issue #372: on a mutable root, a query's result is the root
+// itself, so its Error carries the errors of the queries before it, and gorm
+// skips a query once Error is set. A Session at the root gives each query
+// its own copy. A query whose error nothing reads then no longer stops the
+// queries after it, and a later read of Error or RowsAffected changes. No
+// fix is offered for such a root.
+
+// ===== NO FIX: an earlier query's error is seen later =====
+
+// fixErrPropReturned: the second Update is skipped, and the function returns
+// the error of the first.
+func fixErrPropReturned(db *gorm.DB, id int) error {
+	q := db.Model(&User{})
+	q.Update("name", "new")
+	return q.Update("id", id).Error // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// FixErrPropParam is fixErrPropReturned on a parameter. It is exported, so
+// its fix would be the body Session.
+func FixErrPropParam(q *gorm.DB, id int) error { // want FixErrPropParam:`gormreuse finisher-only\[0\]`
+	q.Update("name", "new")
+	return q.Update("id", id).Error // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixErrPropRowsAffected: RowsAffected is not the query's error, so the
+// error of the first Find stays on q.
+func fixErrPropRowsAffected(db *gorm.DB) int64 {
+	q := db.Model(&User{})
+	_ = q.Where("a = 1").Find(&[]User{}).RowsAffected
+	return q.Where("b = 1").Find(&[]User{}).RowsAffected // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixErrPropChainReturned: the returned chain carries the error.
+func fixErrPropChainReturned(db *gorm.DB) *gorm.DB {
+	q := db.Model(&User{})
+	q.Find(&[]User{})
+	return q.Where("b = 1") // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixErrPropLoop: an Update in a loop leaves its error for the next one.
+func fixErrPropLoop(db *gorm.DB, ids []int) (n int64) {
+	q := db.Model(&User{})
+	for _, id := range ids {
+		n += q.Where("id = ?", id).Update("name", "x").RowsAffected // want `\*gorm\.DB reused: second branch from mutable root`
+	}
+	return n
+}
+
+// fixErrPropPaginate is pagination that does not check Count's error. Find
+// is skipped when Count fails, and the function returns Count's error.
+func fixErrPropPaginate(db *gorm.DB, name string) (total int64, err error) {
+	q := db.Model(&User{})
+	if name != "" {
+		q = q.Where("name = ?", name)
+	}
+	q.Count(&total)
+	err = q.Limit(10).Find(&[]User{}).Error // want `\*gorm\.DB reused: second branch from mutable root`
+	return total, err
+}
+
+// fixErrPropSessionCopy: a Session copy takes the root's Error with it.
+func fixErrPropSessionCopy(db *gorm.DB) error {
+	q := db.Model(&User{})
+	q.Find(&[]User{})
+	return q.Session(&gorm.Session{}).Find(&[]User{}).Error // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixErrPropHelper: the helper's result reports its own query, which is
+// skipped when the first Find fails.
+func fixErrPropHelper(db *gorm.DB) error {
+	q := db.Model(&User{})
+	q.Find(&[]User{})
+	return fixErrPropCount(q) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+func fixErrPropCount(tx *gorm.DB) error {
+	var n int64
+	return tx.Count(&n).Error
+}
+
+// fixErrPropClosure: a closure called in place returns the chain.
+func fixErrPropClosure(db *gorm.DB) error {
+	q := db.Model(&User{})
+	q.Find(&[]User{})
+	return func() *gorm.DB {
+		return q.Where("b = 1") // want `\*gorm\.DB reused: second branch from mutable root`
+	}().Find(&[]User{}).Error
+}
+
+// fixErrPropChainReadLater: r is q itself, so its query is skipped when the
+// Find before it fails.
+func fixErrPropChainReadLater(db *gorm.DB) error {
+	q := db.Model(&User{})
+	r := q.Where("b = 1")
+	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+	return r.Find(&[]User{}).Error
+}
+
+// fixErrPropStored: the chain is stored, and other code may read its Error
+// after the Find.
+func fixErrPropStored(db *gorm.DB, out **gorm.DB) {
+	q := db.Model(&User{})
+	*out = q.Where("b = 1")
+	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// ===== FIX KEPT =====
+
+// fixErrPropChecked: the first Update's error is read, so an error never
+// stays on q for the second.
+func fixErrPropChecked(db *gorm.DB, id int) error {
+	q := db.Model(&User{}).Session(&gorm.Session{})
+	if err := q.Update("name", "new").Error; err != nil {
+		return err
+	}
+	return q.Update("id", id).Error // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixErrPropNothingRead: no query's result is read.
+func fixErrPropNothingRead(db *gorm.DB) {
+	q := db.Model(&User{}).Session(&gorm.Session{})
+	q.Find(&[]User{})
+	q.Where("b = 1").Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixErrPropReadBefore: the result read runs before the query whose error
+// nothing reads.
+func fixErrPropReadBefore(db *gorm.DB) error {
+	q := db.Model(&User{}).Session(&gorm.Session{})
+	err := q.Where("a = 1").Find(&[]User{}).Error
+	q.Where("b = 1").Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+	return err
+}
+
+// fixErrPropOtherBranch: the query whose error nothing reads and the read
+// are on different paths.
+func fixErrPropOtherBranch(db *gorm.DB, c bool) error {
+	q := db.Model(&User{}).Session(&gorm.Session{})
+	if err := q.Count(nil).Error; err != nil {
+		return err
+	}
+	if c {
+		q.Where("a = 1").Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+		return nil
+	}
+	return q.Where("b = 1").Find(&[]User{}).Error // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixErrPropHelperNoResult: the helper returns nothing, so its query's
+// outcome is not seen.
+func fixErrPropHelperNoResult(db *gorm.DB) {
+	q := db.Model(&User{}).Session(&gorm.Session{})
+	q.Find(&[]User{})
+	fixErrPropRun(q) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+func fixErrPropRun(tx *gorm.DB) { tx.Count(nil) }

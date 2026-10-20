@@ -38,6 +38,7 @@ A call through a receiver of a type parameter's type, and a closure that a call 
 | Root of a range-over-func variable | `for d := range seq` names the `d` line as `root at`. Before, it named the declaration of `iter.Seq` in the standard library, or the parameter's type (#378) |
 | `-fix` in package `gorm.io/gorm` | The fix writes `&Session{}`. Before, it imported `gorm.io/gorm` into itself, which does not compile (#378) |
 | `-fix` adds one gorm import per file | When `gorm` is taken anywhere in the file, such as by a parameter, every fix in the file uses `gormio`. Before, one file could get both `"gorm.io/gorm"` and `gormio "gorm.io/gorm"` (staticcheck ST1019) (#378) |
+| No fix that swallows an earlier query's error (#372) | On a mutable root, a failed query leaves its error on the root, and gorm skips the later queries. `q.Update("name", "new"); return q.Update("id", id).Error` returns the first error. A Session made the second `Update` run and return `nil`, which in a `Transaction` callback commits instead of rolling back. Such a root now gets no fix. Check the first query's error, as in `if err := q.Update(...).Error; err != nil { return err }`, to get the fix back. Pagination that ignores `Count`'s error is such a case too |
 
 ### Faster `-fix`
 

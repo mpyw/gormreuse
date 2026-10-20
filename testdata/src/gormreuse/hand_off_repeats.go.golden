@@ -52,7 +52,7 @@ func hoMapStoreInLoop(db *gorm.DB, m map[string]*gorm.DB, keys []string) {
 func hoSendMerged(db *gorm.DB, ch chan *gorm.DB, c bool) {
 	base := db.Session(&gorm.Session{})
 	a := base.Where("a")
-	b := base.Where("b").Session(&gorm.Session{})
+	b := base.Where("b")
 	q := a
 	if c {
 		q = b
@@ -65,7 +65,7 @@ func hoSendMerged(db *gorm.DB, ch chan *gorm.DB, c bool) {
 func hoAppendMerged(db *gorm.DB, c bool) []*gorm.DB {
 	base := db.Session(&gorm.Session{})
 	a := base.Where("a")
-	b := base.Where("b").Session(&gorm.Session{})
+	b := base.Where("b")
 	q := a
 	if c {
 		q = b

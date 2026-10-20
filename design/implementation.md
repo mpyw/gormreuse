@@ -191,7 +191,7 @@ gormreuse/
 │   │   ├── use.go               # Order of a root's uses, and whether one runs again
 │   │   ├── session.go           # Where Sessions go, and their edits
 │   │   ├── merge.go             # Values that merge with a root: Phi edges, other stores (#247)
-│   │   ├── change.go            # In-place changes outside the variable (#243)
+│   │   ├── change.go            # In-place changes outside the variable (#243), errors left on the root (#372)
 │   │   ├── holder.go            # Struct stores of a root that other code reaches: escapes for #243 (#310)
 │   │   ├── handoff.go           # Escapes that change nothing: finisher-only helpers, recursive calls (#347)
 │   │   ├── closure.go           # Closures: captured variables, reassignments in a closure
@@ -2277,6 +2277,7 @@ Decisions and limitations:
 > - A discarded statement it cannot reassign ([Discarded statements](#discarded-statements-under-a-session-fix))
 > - A change made outside the variable ([In-place changes](#in-place-changes-outside-the-variable))
 > - `Attrs`, `Assign` or `InstanceSet` state that a Session drops ([Statement state a Session drops](#statement-state-a-session-drops))
+> - The error of a query that a later read sees ([Errors left on the root](#errors-left-on-the-root))
 
 <details><summary>Other diagnostics without a fix</summary>
 
@@ -2656,7 +2657,7 @@ The summary of an exported function travels as `facts.Func.FinisherOnly`, so a h
 - `changeSeenAfterEscape` keeps the fix of an escape that nothing can observe. That is the last use of the root, in no loop, when every use is in order (`usesOrdered`). `q.Find(&a); render(q)` keeps its Session.
 - An argument of a call that returns a `*gorm.DB`, other than a `*gorm.DB` method, always counts. `q = withTenant(q)` may return `q` itself, so the uses of its result see the change. A `*gorm.DB` method such as `base.Model(q)` returns a chain on its receiver.
 - Read-only uses do not escape: a subquery (`RecordPureUse`), a `//gormreuse:pure` function, and the `fmt`/`log`/`testing` variadics.
-- The field read on a finisher's result, as in `q.Where("a").Find(&x).Error`, is that query's own outcome, and keeps the fix. A read of the root's own field counts wherever it is, even before the first use. Telling the two apart needs ordering against the closures that may read it.
+- The field read on a finisher's result, as in `q.Where("a").Find(&x).Error`, keeps this check's fix. On a mutable root it also holds the errors of the queries before it, which [Errors left on the root](#errors-left-on-the-root) checks (#372). A read of the root's own field counts wherever it is, even before the first use. Telling the two apart needs ordering against the closures that may read it.
 - A reassignment-only fix (`q = q.Where("a")` with no Session) would not change behaviour, since a mutable root's method returns the root itself. It is withheld too: the check runs before the fix is built, and a reassignment whose chain ends in a Session does change the root.
 
 </details>
@@ -2738,6 +2739,43 @@ Limitations:
 `e2e/internal/uncloned_state_test.go` checks each field at run time against `statementCloned` and `statementUncloned`, and the runtime effects of `Attrs`, `Assign`, `InstanceSet` and the body Session. `TestGormStatementFieldsClassified` fails when gorm adds a Statement field neither list holds. `testdata/src/gormreuse/fix_uncloned_state.go` holds the fixtures.
 
 </details>
+
+### Errors left on the root
+
+On a mutable root, a query's result is the root itself. A failed query leaves its error in the root's `Error`, gorm skips every later query on the root, and each later result reports the first error (#372). A Session gives each query its own copy, so a later query runs and reports its own outcome:
+
+```go
+q := db.Model(&Order{ID: id})
+q.Update("name", "new") // fails
+return q.Update("id", id).Error
+```
+
+Before the fix, the second `Update` is skipped and the function returns `name update failed`. After a Session at `q`, or `q = q.Session(...)` at the top of a body for a parameter, the second `Update` runs and the function returns `nil`. In a `Transaction` callback that turns a rollback into a commit. The re-lint is clean.
+
+`finisherErrorChanges` in `internal/fix/change.go` withholds the fix when a query whose error nothing reads can run before a read that sees the error. `changeErrorsOfValue` follows each use's result:
+
+| Result | Counts as |
+| --- | --- |
+| A finisher's result that is discarded, or whose only fields read are not `Error` (`n := q.Find(&x).RowsAffected`) | An unread error, at the query |
+| A field read (`Error`, `RowsAffected`, `Statement`) | A read, at the field |
+| A return from the function | A read, at the return |
+| An argument of a call that is not a `*gorm.DB` method, whose result is used (`return helper(q)`) | A read, at the call. A call whose result is unused, such as `applyTenant(q, 7)`, or a `go` or `defer` statement, reads nothing |
+| A store anywhere but a local variable, such as a struct field or a package-level variable | A read that may run anywhere |
+| The argument of a `*gorm.DB` method (`q.Or(q.Where("a"))`, `db.Where("id IN (?)", sub)`) | Nothing |
+| A Phi | Nothing. The Phi's uses are uses of the root |
+
+It follows a result into the `*gorm.DB` methods called on it, out of a closure that is only called in place (`changeInlineResults`), into the loads of a local variable it is stored in (`changeVariableReads`), and into a closure that captures it. What a closure does is taken to run anywhere. So is a use that `AllUses` does not list (`Violation.Hidden`): a deferred or spawned call, a query on a `Session` copy (which takes the root's `Error` with it), a loop-carried read. A query that repeats in a loop sees its own error on the next iteration. Without a loop, a query's own result is not a read of an earlier error.
+
+A query whose error is read, as in `if err := q.Count(&n).Error; err != nil { return err }`, keeps the fix: on every path that goes on, no error is left on the root. The immutable-param directive alone stays, since it changes nothing at run time. The result is memoized per root.
+
+Tests: `testdata/src/gormreuse/fix_error_propagation.go` holds the cases with and without a fix. `TestFixErrorPropagationPreservesQueries` in `e2e/internal/error_propagation_test.go` runs `fixsql/before/error_propagation.go` against real GORM, where a query runs only when the error is returned. `TestFixErrorPropagationDetectsSessionAtRoot` checks that the comparison fails for the fixes suggested before.
+
+Limitations:
+
+- An error that is read is taken to be handled, even when the code goes on after it, as in `if q.Find(&x).Error != nil { log(...) }`.
+- The rule is conservative wherever the result goes out of sight. A builder that stores its chain in a field or a package-level variable (`r.db = r.db.Where(c)`) after a query whose error nothing reads gets no fix. Neither does a function that hands the root to a call whose result it returns, such as a recursive call.
+- Standard pagination that does not check `Count`'s error (`q.Count(&n); err := q.Find(&us).Error`) gets no fix. Check `Count`'s error to get it back.
+- The diagnostic still advises a Session. Its message is built by the checker, before the fix is known.
 
 ### Fixes that compile
 
