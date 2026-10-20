@@ -52,7 +52,7 @@ func siteBoundDefer(db *gorm.DB) {
 }
 
 func siteBoundDeferTwice(db *gorm.DB) {
-	q := db.Where("x")
+	q := db.Where("x").Session(&gorm.Session{})
 	f := q.Find
 	defer f(nil)
 	defer f(nil) // want `\*gorm\.DB reused: second branch from mutable root`
@@ -194,14 +194,14 @@ func siteDeferSessionCopyBranchAfterDefer(db *gorm.DB) {
 // --- go / defer in a loop ---
 
 func siteGoInLoop(db *gorm.DB, items []int) {
-	q := db.Where("x")
+	q := db.Where("x").Session(&gorm.Session{})
 	for range items {
 		go q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 	}
 }
 
 func siteDeferInLoop(db *gorm.DB, items []int) {
-	q := db.Where("x")
+	q := db.Where("x").Session(&gorm.Session{})
 	for range items {
 		defer q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 	}
@@ -287,7 +287,7 @@ func sitePhiSecondRootReusedByBound(db *gorm.DB, c bool) {
 
 func sitePhiSecondRootReusedByDefer(db *gorm.DB, c bool) {
 	db = db.Session(&gorm.Session{})
-	a := db.Where("a")
+	a := db.Where("a").Session(&gorm.Session{})
 	b := db.Where("b")
 	q := b
 	if c {
@@ -299,7 +299,7 @@ func sitePhiSecondRootReusedByDefer(db *gorm.DB, c bool) {
 
 func sitePhiSecondRootReusedByGo(db *gorm.DB, c bool) {
 	db = db.Session(&gorm.Session{})
-	a := db.Where("a")
+	a := db.Where("a").Session(&gorm.Session{})
 	b := db.Where("b")
 	q := b
 	if c {

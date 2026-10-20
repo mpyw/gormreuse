@@ -238,8 +238,8 @@ func (t *Tracker) RecordAssignment(root ssa.Value, use UsageInfo) {
 // Recorded so a later defer/go can observe an earlier one; excluded from
 // DetectViolations (see the branchUses field doc). Caller must ensure root is
 // not nil.
-func (t *Tracker) RecordBranchUse(root ssa.Value, block *ssa.BasicBlock, pos token.Pos) {
-	t.branchUses[root] = append(t.branchUses[root], UsageInfo{Block: block, Pos: pos})
+func (t *Tracker) RecordBranchUse(root ssa.Value, use UsageInfo) {
+	t.branchUses[root] = append(t.branchUses[root], use)
 }
 
 // RecordAliasUse records a use of a Session/Debug copy that shares root's
@@ -536,13 +536,18 @@ func (t *Tracker) CollectViolations() []Violation {
 // own, and a branch through a merge that may hold the root at v's position.
 // The latter is the reported use when the branch reuses the root on every
 // loop iteration, so without it the fix of a root whose only use is such a
-// branch had no use to give a Session to (#306).
+// branch had no use to give a Session to (#306). A root used only in go and
+// defer statements, as in `go q.Count(nil); go q.Find(nil)`, has only its
+// branch uses, so the fix sees those (#309).
 func (t *Tracker) violationUses(v Violation) []UsageInfo {
 	uses := t.getAllUses(v.Root)
 	for _, use := range t.mayUses[v.Root] {
 		if use.Pos == v.Pos && !slices.ContainsFunc(uses, func(u UsageInfo) bool { return u.Pos == use.Pos }) {
 			uses = append(uses, use.UsageInfo)
 		}
+	}
+	if len(uses) == 0 {
+		uses = slices.Clone(t.branchUses[v.Root])
 	}
 	return uses
 }
@@ -631,18 +636,33 @@ func (t *Tracker) loc(pos token.Pos) string {
 }
 
 // firstBranchPos returns the earliest polluting use of root (its first branch),
-// which precedes the second branch that triggered the violation.
+// which precedes the second branch that triggered the violation. A root with
+// no such use, only branches in go and defer statements, has its first
+// branch among those, recorded before the one reported (#309). They are not
+// ordered by position, so they count only then.
 func (t *Tracker) firstBranchPos(root ssa.Value) token.Pos {
 	best := token.NoPos
-	for _, u := range t.pollutingUses[root] {
+	earliest := func(u UsageInfo) {
 		if u.Pos.IsValid() && (!best.IsValid() || u.Pos < best) {
 			best = u.Pos
 		}
 	}
+	for _, u := range t.pollutingUses[root] {
+		earliest(u)
+	}
 	for _, u := range t.mayUses[root] {
-		if u.ordered && u.Pos.IsValid() && (!best.IsValid() || u.Pos < best) {
-			best = u.Pos
+		if u.ordered {
+			earliest(u.UsageInfo)
 		}
+	}
+	if best.IsValid() {
+		return best
+	}
+	for _, u := range t.branchUses[root] {
+		earliest(u)
+	}
+	for _, u := range t.mayUses[root] {
+		earliest(u.UsageInfo)
 	}
 	return best
 }

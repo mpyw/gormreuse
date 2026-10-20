@@ -287,7 +287,7 @@ func deferFunctionCallWithDB(db *gorm.DB) {
 // twoDefersNoDirectUse: two deferred branches from the same root with NO direct
 // use. Neither defer used to record pollution, so the reuse was missed (#67).
 func twoDefersNoDirectUse(db *gorm.DB) {
-	q := db.Where("x = ?", 1)
+	q := db.Where("x = ?", 1).Session(&gorm.Session{})
 	defer q.Find(nil)
 	defer q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
@@ -460,7 +460,7 @@ func goroutineCrossFunctionPollution(db *gorm.DB) {
 // twoGoroutinesNoDirectUse: two goroutine branches from the same root with NO
 // direct use. Neither go statement recorded pollution, so the reuse was missed (#67).
 func twoGoroutinesNoDirectUse(db *gorm.DB) {
-	q := db.Where("x = ?", 1)
+	q := db.Where("x = ?", 1).Session(&gorm.Session{})
 	go q.Find(nil)
 	go q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }

@@ -119,7 +119,9 @@ func (r *Repeats) nested(fn *ssa.Function) *Repeats {
 //     so `for … { save := func() { … }; if c { save() } else { save() } }`
 //     runs each closure once (#306). That holds only when each site uses the
 //     MakeClosure itself: a merge or a variable may still hold the closure of
-//     an earlier run.
+//     an earlier run. Then a site that can reach itself, as `last()` in
+//     `for … { save := func() { … }; if c { last = save }; last() }` can,
+//     runs that closure again (#309).
 //
 // A site in a function that r's does not declare is taken to run twice.
 func (r *Repeats) repeatRunsMayFollow(fn *ssa.Function, sites *repeatSites) bool {
@@ -141,20 +143,26 @@ func (r *Repeats) repeatRunsMayFollow(fn *ssa.Function, sites *repeatSites) bool
 		return true
 	}
 	var made ssa.Instruction
-	if sites.made != nil && in == r.fn && !slices.ContainsFunc(sites.runs, func(run ssa.Instruction) bool {
-		return !slices.ContainsFunc(run.Operands(nil), func(op *ssa.Value) bool { return *op == ssa.Value(sites.made) })
-	}) {
-		made = sites.made
+	kept := false
+	if sites.made != nil && in == r.fn {
+		if slices.ContainsFunc(sites.runs, func(run ssa.Instruction) bool {
+			return !slices.ContainsFunc(run.Operands(nil), func(op *ssa.Value) bool { return *op == ssa.Value(sites.made) })
+		}) {
+			kept = true
+		} else {
+			made = sites.made
+		}
 	}
-	return repeatRunReachesAnother(sites.runs, made)
+	return repeatRunReachesAnother(sites.runs, made, kept)
 }
 
 // repeatRunReachesAnother reports whether one of runs, instructions of one
 // function, may run after another one on a path that does not run made (nil
-// for none). It labels each block with up to two of the runs whose paths
-// reach it, so it takes time linear in the size of the function, not in the
-// number of runs times that size.
-func repeatRunReachesAnother(runs []ssa.Instruction, made ssa.Instruction) bool {
+// for none). With kept, a run that reaches itself counts too: it may run a
+// closure that an earlier run ran. It labels each block with up to two of the
+// runs whose paths reach it, so it takes time linear in the size of the
+// function, not in the number of runs times that size.
+func repeatRunReachesAnother(runs []ssa.Instruction, made ssa.Instruction, kept bool) bool {
 	// repeatMark is a run, or made (run -1), at index at of its block.
 	type repeatMark struct{ run, at int }
 	marks := make(map[*ssa.BasicBlock][]repeatMark)
@@ -210,7 +218,7 @@ func repeatRunReachesAnother(runs []ssa.Instruction, made ssa.Instruction) bool 
 		p := work[len(work)-1]
 		work = work[:len(work)-1]
 		if ms, ok := marks[p.block]; ok {
-			if ms[0].run >= 0 && ms[0].run != p.run {
+			if ms[0].run >= 0 && (ms[0].run != p.run || kept) {
 				return true
 			}
 			continue

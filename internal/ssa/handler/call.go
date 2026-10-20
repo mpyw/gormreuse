@@ -369,7 +369,7 @@ func (u siteUse) branch(roots []ssa.Value, use pollution.UsageInfo, assigns func
 				t.RecordMayBranch(r, use, u.ordered())
 			}
 		case !u.ordered():
-			t.RecordBranchUse(r, u.block, u.pos)
+			t.RecordBranchUse(r, use)
 		default:
 			t.ProcessBranch(r, use)
 		}
