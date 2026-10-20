@@ -74,6 +74,7 @@ func godeferSessionCopyUnderGo(db *gorm.DB) {
 
 // A chain method under go changes the root in place, and a go statement
 // cannot be reassigned to keep the change, so there is no fix.
+// [LIMITATION] No fix.
 func godeferGoChainOnly(db *gorm.DB) {
 	q := db.Where("x = ?", 1)
 	go q.Where("a")
@@ -82,6 +83,7 @@ func godeferGoChainOnly(db *gorm.DB) {
 
 // The deferred Where runs first and adds its condition to q in place, so the
 // deferred Find sees it. A Session at the root would drop it: no fix.
+// [LIMITATION] No fix.
 func godeferDeferChainOnly(db *gorm.DB) {
 	q := db.Where("x = ?", 1)
 	defer q.Find(nil)
@@ -92,6 +94,8 @@ func godeferApplyTenant(tx *gorm.DB) {
 	tx.Where("tenant_id = ?", 7)
 }
 
+// A deferred helper changes q in place, and the other deferred call sees it.
+// [LIMITATION] No fix.
 func godeferDeferHelperOnly(db *gorm.DB) {
 	q := db.Where("x = ?", 1)
 	defer q.Find(nil)
@@ -118,6 +122,7 @@ func godeferDeferChainUnseen(db *gorm.DB) {
 
 // A deferred change in a loop is seen by the same statement on the next
 // iteration's call.
+// [LIMITATION] No fix.
 func godeferDeferHelperInLoop(db *gorm.DB, ids []int) {
 	q := db.Where("x = ?", 1)
 	for range ids {

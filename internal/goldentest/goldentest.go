@@ -185,15 +185,31 @@ func (r *Analysis) SyncFixture(srcPath string, update bool) (stale []string, err
 	return stale, nil
 }
 
-// SyncOrphans returns the .golden/.diff files under srcDir whose source fixture
-// is gone (or is no longer a fixture, see Fixtures). They would otherwise sit
-// in the tree unchecked. With update set, it deletes them instead and returns
-// nothing.
-func SyncOrphans(srcDir string, update bool) (orphans []string, err error) {
-	fixtures, err := Fixtures(srcDir)
-	if err != nil {
-		return nil, err
+// FixedFiles returns the base names of the files in srcDir that a suggested
+// fix of the run edits, sorted.
+func (r *Analysis) FixedFiles(srcDir string) []string {
+	var names []string
+	for _, result := range r.results {
+		for _, diag := range result.Diagnostics {
+			for _, fix := range diag.SuggestedFixes {
+				for _, edit := range fix.TextEdits {
+					name := result.Pass.Fset.File(edit.Pos).Name()
+					if filepath.Dir(name) == filepath.Clean(srcDir) {
+						names = append(names, filepath.Base(name))
+					}
+				}
+			}
+		}
 	}
+	slices.Sort(names)
+	return slices.Compact(names)
+}
+
+// SyncOrphans returns the .golden/.diff files under srcDir whose source is
+// not one of fixtures: the fixture is gone, or it no longer has golden files.
+// They would otherwise sit in the tree unchecked. With update set, it deletes
+// them instead and returns nothing.
+func SyncOrphans(srcDir string, fixtures []string, update bool) (orphans []string, err error) {
 	for _, ext := range []string{".golden", ".diff"} {
 		matches, err := filepath.Glob(filepath.Join(srcDir, "*.go"+ext))
 		if err != nil {

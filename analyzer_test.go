@@ -1,6 +1,7 @@
 package gormreuse_test
 
 import (
+	"fmt"
 	"go/ast"
 	"go/token"
 	"os/exec"
@@ -126,19 +127,30 @@ func TestCrossPackageDirectives(t *testing.T) {
 // cgo and a C compiler, and is skipped without them.
 func TestCgoFiles(t *testing.T) {
 	t.Parallel()
-	out, err := exec.Command("go", "env", "CGO_ENABLED", "CC").Output()
-	if err != nil {
-		t.Skipf("go env failed: %v", err)
-	}
-	env := strings.Fields(string(out))
-	if len(env) < 2 || env[0] != "1" {
-		t.Skip("cgo is disabled")
-	}
-	if _, err := exec.LookPath(env[1]); err != nil {
-		t.Skipf("no C compiler: %v", err)
+	if reason := cgoUnavailable(); reason != "" {
+		t.Skip(reason)
 	}
 	testdata := analysistest.TestData()
 	analysistest.Run(t, testdata, gormreuse.Analyzer, "cgofile")
+}
+
+// cgoUnavailable returns why the cgofile fixtures cannot be loaded, or "" when
+// cgo is enabled and its C compiler is on PATH.
+//
+//declscope:shared // golden_test.go's goldenPackages leaves cgofile out with it
+func cgoUnavailable() string {
+	out, err := exec.Command("go", "env", "CGO_ENABLED", "CC").Output()
+	if err != nil {
+		return fmt.Sprintf("go env failed: %v", err)
+	}
+	env := strings.Fields(string(out))
+	if len(env) < 2 || env[0] != "1" {
+		return "cgo is disabled"
+	}
+	if _, err := exec.LookPath(env[1]); err != nil {
+		return fmt.Sprintf("no C compiler: %v", err)
+	}
+	return ""
 }
 
 func TestSuggestedFixes(t *testing.T) {

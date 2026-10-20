@@ -1,0 +1,44 @@
+--- inferred_use.go	1970-01-01 00:00:00
++++ inferred_use.go.golden	1970-01-01 00:00:00
+@@ -1,37 +1,38 @@
+ package externalpure
+ 
+ import "purelib"
++import "gorm.io/gorm"
+ 
+ // Functions of purelib inferred immutable-return export the fact, so their
+ // results are immutable here too (#261).
+ func inferredAcrossPackages() {
+ 	db := purelib.InferredSession()
+ 	db.Find(nil)
+ 	db.Find(nil) // OK
+ 
+ 	q, err := purelib.InferredOpen()
+ 	if err != nil {
+ 		return
+ 	}
+ 	q.Find(nil)
+ 	q.Find(nil) // OK
+ 
+ 	c := purelib.InferredChain()
+ 	c.Find(nil)
+ 	c.Find(nil) // OK
+ }
+ 
+ // A function inferred only through a broken contract exports no fact.
+ func inferredThroughBrokenContract() {
+-	v := purelib.ViaBadImmutableReturn()
++	v := purelib.ViaBadImmutableReturn().Session(&gorm.Session{})
+ 	v.Find(nil)
+ 	v.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ 
+-	w := purelib.ViaViaBadImmutableReturn()
++	w := purelib.ViaViaBadImmutableReturn().Session(&gorm.Session{})
+ 	w.Find(nil)
+ 	w.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ 
+-	n := purelib.NotInferred()
++	n := purelib.NotInferred().Session(&gorm.Session{})
+ 	n.Find(nil)
+ 	n.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
