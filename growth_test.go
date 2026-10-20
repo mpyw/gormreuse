@@ -468,7 +468,7 @@ var growthCases = []growthCase{
 	// n optional filters on a captured query, each followed by a goroutine
 	// that reads it: every read sees the stores before and after it (#303), so
 	// it has up to n roots, as in capturedre.
-	{name: "spawnedre", limit: growthQuadratic, after: "#299", shape: func(n int) []string {
+	{name: "spawnedre", limit: growthQuadratic, after: "#325", shape: func(n int) []string {
 		var b strings.Builder
 		b.WriteString("func f(db *gorm.DB, c []bool) {\n\tq := db.Model(nil)\n")
 		for i := range n {
@@ -478,7 +478,7 @@ var growthCases = []growthCase{
 		return []string{b.String()}
 	}},
 	// The same through a field of a captured pointer (#303).
-	{name: "spawnedfields", limit: growthQuadratic, after: "#299", shape: func(n int) []string {
+	{name: "spawnedfields", limit: growthQuadratic, after: "#325", shape: func(n int) []string {
 		var b strings.Builder
 		b.WriteString("type S struct{ db *gorm.DB }\n\nfunc f(db *gorm.DB, c []bool) {\n\ts := &S{db: db.Model(nil)}\n")
 		for i := range n {
