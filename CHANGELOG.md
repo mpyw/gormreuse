@@ -98,7 +98,7 @@ Most added reports in the root module are a `*gorm.DB` parameter branched in a l
 | Parameter roots (#201, #245, #313) | An exported function, a method, a function value or a closure without a `*gorm.DB` result, such as a `Transaction` wrapper's callback, gets `tx = tx.Session(&gorm.Session{})` at the top of the body. `immutable-param` is added only when every caller of a function declaration is checked |
 | Sessions by control flow (#202, #247, #311) | Sessions go where the paths need them, also for a reassignment read in a later loop and for a value merged with a parameter. One pass of fixes resolves the diagnostics |
 | New fixes (#248) | Isolate an argument passed to an `immutable-param` parameter. Delete an unused or redundant directive, or an unused ignore |
-| Every diagnostic carries its root's fix (#246) | A quick fix works on each diagnostic, also when another one is ignored |
+| Every diagnostic carries its root's fix (#246, #312) | A quick fix works on each diagnostic. A root with an ignored diagnostic gets no fix, so the fix cannot make the ignore unused |
 | Same output on every run (#184, #273) | `-json` lists diagnostics in position order |
 
 ### Performance

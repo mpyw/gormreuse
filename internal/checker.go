@@ -56,13 +56,23 @@ func (c *checker) checkFunction(fn *ssa.Function) {
 	violations := analyzer.Analyze()
 
 	// Every diagnostic of a root carries the root's fix, not only the first:
-	// the first may be suppressed by an ignore directive or already reported,
-	// and an editor offers a quick fix only on the diagnostic that carries it
-	// (#246). Each fix is complete on its own (#200), so the copies are
-	// identical, and the drivers apply an edit that several fixes share once.
-	// A root's fix is generated once, for the first diagnostic of the root that
-	// is reported. It depends only on the root and its uses.
+	// the first may be already reported, and an editor offers a quick fix
+	// only on the diagnostic that carries it (#246). Each fix is complete on
+	// its own (#200), so the copies are identical, and the drivers apply an
+	// edit that several fixes share once. A root's fix is generated once, for
+	// the first diagnostic of the root that is reported. It depends only on
+	// the root and its uses.
+	//
+	// A root with a diagnostic that an ignore directive suppresses gets no
+	// fix (#312). The ignore says that reuse is meant, and the fix would
+	// change it too: it isolates the root or reassigns the ignored statement,
+	// so the next run would report the ignore as unused.
 	fixes := make(map[ssa.Value][]analysis.SuggestedFix)
+	for _, v := range violations {
+		if v.Root != nil && c.ignores.Covers(v.Pos) {
+			fixes[v.Root] = nil
+		}
+	}
 	fixOf := func(v pollution.Violation) []analysis.SuggestedFix {
 		f, ok := fixes[v.Root]
 		if !ok {

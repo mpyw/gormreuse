@@ -55,17 +55,33 @@ func (ig *Ignores) AddFile(file inspector.Cursor) {
 // specific scope first (line, then function, then file), so overlapping
 // ignores leave the wider one unused.
 func (ig *Ignores) Ignore(pos token.Pos) bool {
+	entry, ok := ig.lookup(pos)
+	if entry != nil {
+		entry.used = true
+	}
+	return ok
+}
+
+// Covers reports whether an ignore directive would suppress a diagnostic at
+// pos, as Ignore does, without marking it used.
+func (ig *Ignores) Covers(pos token.Pos) bool {
+	_, ok := ig.lookup(pos)
+	return ok
+}
+
+// lookup returns whether an ignore directive suppresses a diagnostic at pos,
+// and the line or function ignore that does. A file ignore has no entry.
+func (ig *Ignores) lookup(pos token.Pos) (*ignoreEntry, bool) {
 	if ig == nil || !pos.IsValid() {
-		return false
+		return nil, false
 	}
 	position := ig.fset.PositionFor(pos, false)
 	f := ig.files[position.Filename]
 	if f == nil {
-		return false
+		return nil, false
 	}
 	if entry := f.lineIgnoreFor(ig.fset, pos, position.Line); entry != nil {
-		entry.used = true
-		return true
+		return entry, true
 	}
 	// The spans are in source order and do not overlap: the last one that
 	// starts at or before pos is the only one that can hold it.
@@ -73,16 +89,11 @@ func (ig *Ignores) Ignore(pos token.Pos) bool {
 		return cmp.Compare(fn.start, pos+1)
 	}); i > 0 {
 		if fn := f.funcs[i-1]; pos < fn.end {
-			if entry := f.lines[fn.directiveLine]; entry != nil {
-				entry.used = true
-			}
-			return true
+			return f.lines[fn.directiveLine], true
 		}
 	}
-	if _, fileIgnore := f.lines[-1]; fileIgnore {
-		return true
-	}
-	return false
+	_, fileIgnore := f.lines[-1]
+	return nil, fileIgnore
 }
 
 // UnusedIgnores returns the positions of line and function ignores that

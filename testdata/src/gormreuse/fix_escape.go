@@ -102,6 +102,57 @@ func fixEscapeGo(db *gorm.DB) {
 	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
+// fixEscapeGoChain: the goroutine adds a condition to q in place, and a go
+// statement cannot be reassigned to keep it (#312).
+func fixEscapeGoChain(db *gorm.DB) {
+	q := db.Model(&User{})
+	q.Find(&[]User{})
+	go q.Where("a = 1") // want `\*gorm\.DB reused: second branch from mutable root`
+	q.Find(&[]User{})   // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// ===== NO FIX: a caller discards the helper's result (#312) =====
+
+// fixEscapeTenantDiscarded returns a *gorm.DB, but its caller discards it
+// and relies on tx changing in place, so its discarded statement is not
+// reassigned.
+func fixEscapeTenantDiscarded(tx *gorm.DB, out *[]User) *gorm.DB {
+	tx.Where("a = 1").Find(out)
+	tx.Where("tenant_id = 7") // want `\*gorm\.DB reused: second branch from mutable root`
+	return tx
+}
+
+func fixEscapeCallsTenantDiscarded(db *gorm.DB, a, b *[]User) {
+	q := db.Where("x = 1")
+	fixEscapeTenantDiscarded(q, a)
+	q.Find(b) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixEscapeTenantInGo: a go statement discards the result.
+func fixEscapeTenantInGo(tx *gorm.DB, out *[]User) *gorm.DB {
+	tx.Where("a = 1").Find(out)
+	tx.Where("tenant_id = 7") // want `\*gorm\.DB reused: second branch from mutable root`
+	return tx
+}
+
+func fixEscapeCallsTenantInGo(db *gorm.DB, a *[]User) {
+	go fixEscapeTenantInGo(db.Where("x = 1"), a)
+}
+
+// fixEscapeTenantTuple: the caller reads only the error of the tuple.
+func fixEscapeTenantTuple(tx *gorm.DB, out *[]User) (*gorm.DB, error) {
+	tx.Where("a = 1").Find(out)
+	tx.Where("tenant_id = 7") // want `\*gorm\.DB reused: second branch from mutable root`
+	return tx, nil
+}
+
+func fixEscapeCallsTenantTuple(db *gorm.DB, a, b *[]User) error {
+	q := db.Where("x = 1")
+	_, err := fixEscapeTenantTuple(q, a)
+	q.Find(b) // want `\*gorm\.DB reused: second branch from mutable root`
+	return err
+}
+
 // ===== NO FIX: a state field is read =====
 
 // fixEscapeErrorOfChain: the chain's only result is its Error, so it changes
@@ -204,6 +255,30 @@ func fixEscapeSubquery(db, base *gorm.DB) {
 	q.Find(&[]User{})
 	base.Where("id IN (?)", q).Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
 	q.Where("a = 1").Find(&[]User{})           // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixEscapeGoFinisher: the goroutine runs a query on q, which is a use like
+// any other. With the Session it runs on a copy, as in the closure form
+// `go func() { q.Count(nil) }()` (#312).
+func fixEscapeGoFinisher(db *gorm.DB) {
+	q := db.Model(&User{})
+	q.Find(&[]User{})
+	go q.Count(nil)  // want `\*gorm\.DB reused: second branch from mutable root`
+	q.First(&User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixEscapeTenantTupleUsed: the caller reads the *gorm.DB of the tuple, so
+// it carries the change back (#312).
+func fixEscapeTenantTupleUsed(tx *gorm.DB, out *[]User) (*gorm.DB, error) {
+	tx.Where("a = 1").Find(out)
+	tx.Where("tenant_id = 7") // want `\*gorm\.DB reused: second branch from mutable root`
+	return tx, nil
+}
+
+func fixEscapeCallsTenantTupleUsed(db *gorm.DB, b *[]User) error {
+	q, err := fixEscapeTenantTupleUsed(db.Where("x = 1"), b)
+	q.Find(b)
+	return err
 }
 
 // fixEscapeParamResult changes tx in place, and returns a *gorm.DB that
