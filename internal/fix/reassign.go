@@ -152,6 +152,34 @@ func (g *Generator) findReassignedChains(uses []pollution.UsageInfo, target *typ
 	return chains, true
 }
 
+// reassignMergedChains adds to reassigned the discarded chains on values
+// merged with root that the uses of root do not list (see
+// mergedDiscardedChains), each from the position of its first call to the
+// end of its statement, as findReassignedChains does. It reports false when
+// one of them cannot be reassigned to target, and the fix would drop its
+// condition (#373).
+//
+//declscope:shared // generator.go's Generate reassigns them with the root's own statements
+func (g *Generator) reassignMergedChains(root ssa.Value, uses []pollution.UsageInfo, target *types.Var, reassigned map[token.Pos]token.Pos) bool {
+	for _, call := range g.mergedDiscardedChains(root, uses) {
+		if _, ok := reassigned[call.Pos()]; ok {
+			continue
+		}
+		use := pollution.UsageInfo{Block: call.Block(), Pos: call.Pos(), Method: g.tracer.Site(call).Method(), Call: call.Pos()}
+		stmt, recv, isChain := g.discardedChainToReassign(use)
+		if !isChain {
+			// Not a statement, such as an assignment whose variable is never
+			// read again.
+			continue
+		}
+		if !g.isReassignable(use, recv, target) {
+			return false
+		}
+		reassigned[use.Pos] = stmt.X.End()
+	}
+	return true
+}
+
 // isReassignable reports whether `target = <statement>` keeps the effect of
 // the discarded chain that starts at use, whose first call has receiver recv.
 // The receiver must be the variable that holds the root. In `r.Where("a")` r

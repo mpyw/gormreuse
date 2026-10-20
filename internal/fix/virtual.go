@@ -44,6 +44,7 @@ func (g *Generator) simulateVirtualRoots(root ssa.Value, uses []pollution.UsageI
 
 	// The virtual roots made so far, in position order.
 	var made []virtualRootKey
+	kills := virtualReassignPoints(sortedUses, reassigned)
 	for _, use := range sortedUses {
 		dominated := false
 		for _, vr := range slices.Backward(made) {
@@ -56,7 +57,7 @@ func (g *Generator) simulateVirtualRoots(root ssa.Value, uses []pollution.UsageI
 				break
 			}
 		}
-		if !dominated {
+		if !dominated || virtualOriginalReaches(root, use, kills) {
 			virtualUses[original] = append(virtualUses[original], use)
 		}
 
@@ -74,6 +75,72 @@ func (g *Generator) simulateVirtualRoots(root ssa.Value, uses []pollution.UsageI
 	}
 
 	return virtualUses
+}
+
+// virtualPoint is an instruction's place: its block and its index there.
+type virtualPoint struct {
+	block *ssa.BasicBlock
+	index int
+}
+
+// virtualReassignPoints returns the places of the reassignments among uses.
+func virtualReassignPoints(uses []pollution.UsageInfo, reassigned map[token.Pos]token.Pos) []virtualPoint {
+	var points []virtualPoint
+	for _, use := range uses {
+		if _, ok := reassigned[use.Pos]; ok {
+			points = append(points, virtualPoint{use.Block, useRunIndex(use.Block, use.Pos)})
+		}
+	}
+	return points
+}
+
+// virtualOriginalReaches reports whether use, a use of root, may read root
+// itself on a path that passes none of kills, the reassignments of the fix.
+// The position order of the simulation misses such a path when root is
+// defined in a loop and use comes before it in the body: the next iteration
+// reads root through the back edge. In `for … { q.Where("o"); for … {
+// q.Where("x").Find(&us); if c { q = q.Where("r") } } }` the Where("x")
+// reads the Where("r") of the iteration before, though the reassignment of
+// q.Where("o") dominates it (#373). A use in another function is left to
+// the position order.
+func virtualOriginalReaches(root ssa.Value, use pollution.UsageInfo, kills []virtualPoint) bool {
+	def := tracer.RootBlock(root)
+	if def == nil || def.Parent() != use.Block.Parent() {
+		return false
+	}
+	defIndex := -1
+	if instr, ok := root.(ssa.Instruction); ok {
+		defIndex = slices.Index(def.Instrs, instr)
+	}
+	useIndex := useRunIndex(use.Block, use.Pos)
+	killed := func(b *ssa.BasicBlock, from, to int) bool {
+		return slices.ContainsFunc(kills, func(k virtualPoint) bool { return k.block == b && k.index > from && k.index < to })
+	}
+	end := len(def.Instrs)
+	if use.Block == def && useIndex > defIndex {
+		return !killed(def, defIndex, useIndex)
+	}
+	if killed(def, defIndex, end) {
+		return false
+	}
+	seen := map[*ssa.BasicBlock]bool{}
+	work := slices.Clone(def.Succs)
+	for len(work) > 0 {
+		b := work[len(work)-1]
+		work = work[:len(work)-1]
+		if seen[b] {
+			continue
+		}
+		seen[b] = true
+		if b == use.Block && !killed(b, -1, useIndex) {
+			return true
+		}
+		if killed(b, -1, len(b.Instrs)) {
+			continue
+		}
+		work = append(work, b.Succs...)
+	}
+	return false
 }
 
 // virtualRootReaches reports whether a use in block use, later in position,

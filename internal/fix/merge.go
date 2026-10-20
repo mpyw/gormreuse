@@ -1,6 +1,7 @@
 package fix
 
 import (
+	"cmp"
 	"slices"
 
 	"golang.org/x/tools/go/analysis"
@@ -87,6 +88,106 @@ func (g *Generator) mergedDropsState(root ssa.Value, uses []pollution.UsageInfo)
 	return slices.ContainsFunc(g.mergedEdges(root, uses), g.tracer.SessionDropsState)
 }
 
+// mergedDiscardedChains returns the calls that start a discarded chain
+// statement, such as q.Where("b"), on root, on a Phi that takes it (see
+// mergingPhis) or on a value merged with it (see mergedEdges). The tracker
+// files a use of a Phi under one of its edges, so the uses of another edge
+// do not list it. In
+//
+//	for range items {
+//		if c { q = q.Where("a") } else { q.Find(&us) }
+//		q.Where("b")
+//	}
+//
+// q.Where("b") is filed under the value before the loop. The fix of the
+// Where("a") gives it a Session, so unless the statement is reassigned too,
+// it changes a copy and "b" is lost (#373).
+//
+//declscope:shared // generator.go's Generate reassigns them with the root's own statements
+func (g *Generator) mergedDiscardedChains(root ssa.Value, uses []pollution.UsageInfo) []*ssa.Call {
+	fn := root.Parent()
+	if fn == nil {
+		return nil
+	}
+	// The edges of the Phis are followed too: a reassignment such as
+	// `q = q.Where("b")` in a loop flows back into the Phi that takes root.
+	values := map[ssa.Value]bool{root: true}
+	for _, phi := range mergingPhis(root) {
+		values[phi] = true
+		for _, edge := range phi.Edges {
+			values[edge] = true
+		}
+	}
+	for _, edge := range g.mergedEdges(root, uses) {
+		values[edge] = true
+	}
+	var calls []*ssa.Call
+	for _, block := range fn.Blocks {
+		for _, instr := range block.Instrs {
+			call, ok := instr.(*ssa.Call)
+			if !ok {
+				continue
+			}
+			if site := g.tracer.Site(call); site.IsGormMethod() && values[site.Recv] && g.mergeDiscardsChain(call) {
+				calls = append(calls, call)
+			}
+		}
+	}
+	return calls
+}
+
+// mergedReassignmentsNeedingSession returns roots, the roots that get a
+// Session (see findRootsNeedingSession), with each reassignment of
+// virtualUses that may reach a Phi that takes root and is used twice (see
+// mergeUsedTwice). The reassigned value takes root's place on that edge, and
+// the uses of the Phi, which the tracker files under another of its edges,
+// read it twice. In `if c { q.Where("a") } else { q.Find(&us) }; for … { q =
+// q.Where("b") }; for … { q.Find(&us) }`, q = q.Where("a") is read by
+// each Find of the last loop (#373).
+//
+//declscope:shared // generator.go's Generate adds them to the roots that get a Session
+func (g *Generator) mergedReassignmentsNeedingSession(root ssa.Value, virtualUses map[virtualRootKey][]pollution.UsageInfo, roots []virtualRootKey) []virtualRootKey {
+	var added []virtualRootKey
+	for vr := range virtualUses {
+		if !slices.Contains(roots, vr) && g.mergeReassignmentReachesTwice(root, vr) {
+			added = append(added, vr)
+		}
+	}
+	if len(added) == 0 {
+		return roots
+	}
+	roots = append(roots, added...)
+	slices.SortFunc(roots, func(a, b virtualRootKey) int { return cmp.Compare(a.pos, b.pos) })
+	return roots
+}
+
+// mergeReassignedReceiver returns the receiver of the first call of the
+// chain that vr, a reassignment, rewrites, or nil.
+func (g *Generator) mergeReassignedReceiver(vr virtualRootKey) ssa.Value {
+	for _, instr := range vr.block.Instrs {
+		if call, ok := instr.(*ssa.Call); ok && call.Pos() == vr.pos {
+			return g.tracer.Site(call).Recv
+		}
+	}
+	return nil
+}
+
+// mergeReassignmentReachesTwice reports whether vr, a reassignment of the
+// fix, may reach a Phi that takes root and is used twice (see
+// mergeUsedTwice). The Phi that the reassignment reads is not one its value
+// flows into: the uses of that Phi after it read the reassignment once.
+//
+//declscope:shared // generator.go's rootSessionSites isolates the Phi's other edges with it
+func (g *Generator) mergeReassignmentReachesTwice(root ssa.Value, vr virtualRootKey) bool {
+	if vr.isOriginal || vr.block == nil {
+		return false
+	}
+	recv := g.mergeReassignedReceiver(vr)
+	return slices.ContainsFunc(mergingPhis(root), func(phi *ssa.Phi) bool {
+		return ssa.Value(phi) != recv && phi.Parent() == vr.block.Parent() && g.cfg.CanReach(vr.block, phi.Block()) && g.mergeUsedTwice(phi)
+	})
+}
+
 // mergingPhis returns root when it is a Phi, and the Phis that take root,
 // directly or through another of them. Each conditional filter of
 // `db := DB.Model(&User{}); if a != "" { db = db.Where("a") }; if b != "" {
@@ -166,7 +267,7 @@ func (g *Generator) phiMergedEdges(root ssa.Value, phis []*ssa.Phi) []ssa.Value 
 		}
 	}
 	for _, phi := range phis {
-		if !seen[phi] && mergeUsedTwice(phi) {
+		if !seen[phi] && g.mergeUsedTwice(phi) {
 			seen[phi] = true
 			walk(phi)
 		}
@@ -202,9 +303,54 @@ func (g *Generator) mergeOnly(v ssa.Value) bool {
 	return true
 }
 
-// mergeUsedTwice reports whether the result of phi is used more than once.
-func mergeUsedTwice(phi *ssa.Phi) bool {
-	return len(*phi.Referrers()) > 1
+// mergeDiscardsChain reports whether call, a *gorm.DB method, starts a
+// chain of methods that runs no query and whose result nothing reads, as
+// q.Where("a").Limit(1) does as a statement. A chain that starts with a
+// Session-family call never changes its receiver.
+func (g *Generator) mergeDiscardsChain(call *ssa.Call) bool {
+	if method := g.tracer.Site(call).Method(); typeutil.IsFinisher(method) || typeutil.IsImmutableReturningBuiltin(method) || !typeutil.IsGormDB(call.Type()) {
+		return false
+	}
+	for {
+		var next *ssa.Call
+		for _, ref := range *call.Referrers() {
+			if _, ok := ref.(*ssa.DebugRef); ok {
+				continue
+			}
+			c, ok := ref.(*ssa.Call)
+			if !ok || next != nil {
+				return false
+			}
+			next = c
+		}
+		if next == nil {
+			return true
+		}
+		site := g.tracer.Site(next)
+		if !site.IsGormMethod() || site.Recv != ssa.Value(call) || typeutil.IsFinisher(site.Method()) || !typeutil.IsGormDB(next.Type()) {
+			return false
+		}
+		call = next
+	}
+}
+
+// mergeUsedTwice reports whether the result of phi is used more than once:
+// by two instructions, or by one that may run again for one value of phi,
+// as a query in a later loop does. In `for … { q = q.Where("b") }; for i :=
+// range 2 { q.Where("i = ?", i).Find(&us) }` the Phi of the first loop has
+// one use, and each iteration of the second loop reads it (#373).
+func (g *Generator) mergeUsedTwice(phi *ssa.Phi) bool {
+	refs := *phi.Referrers()
+	if len(refs) > 1 {
+		return true
+	}
+	if len(refs) == 0 {
+		return false
+	}
+	if _, ok := refs[0].(*ssa.Phi); ok {
+		return false
+	}
+	return refs[0].Block() != nil && useRepeatsAfter(g.cfg, refs[0].Block(), phi.Block())
 }
 
 // mergeVarOf returns the variable of fn that v is stored to, or nil.

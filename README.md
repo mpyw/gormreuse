@@ -2304,6 +2304,8 @@ A function with a discarded statement on the parameter (`tx.Where("a")`), and ei
 
 **No fix**. The statement also changes the caller's value, and callers such as `applyTenant(q); q.Find(&users)` rely on that. With `tx = tx.Where("a")` the change would stay inside the function.
 
+The same holds when the statement runs on a value that the parameter's variable holds, as after `if admin { tx = tx.Where("admin") }`. On a mutable `tx`, the `Where` returns the caller's value itself (#373).
+
 A `*gorm.DB` result carries it back only to a caller that reads it. So every call in the package must read the result, and a `go` or `defer` call does not. When the package has test files, the function must be declared in a test file.
 
 </td></tr>
