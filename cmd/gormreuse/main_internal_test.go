@@ -54,17 +54,27 @@ func TestPrintVersion(t *testing.T) {
 	}
 }
 
-// TestVersionFlagValue checks the flag.Value methods of versionFlag that run
-// without exiting. Set("full") prints and exits, so TestVersionFlag runs it in
-// a built binary.
+// TestVersionFlagValue checks the flag.Value methods of versionFlag, with
+// the output and the exit of -V=full replaced. It does not run in parallel,
+// since it replaces them for the whole package.
 func TestVersionFlagValue(t *testing.T) {
-	t.Parallel()
 	var v versionFlag
 	if !v.IsBoolFlag() || v.Get() != nil || v.String() != "" {
 		t.Errorf("IsBoolFlag, Get, String = %v, %v, %q; want true, nil, \"\"", v.IsBoolFlag(), v.Get(), v.String())
 	}
 	if err := v.Set("short"); err == nil {
 		t.Error("Set(\"short\"): no error")
+	}
+
+	var b strings.Builder
+	exit := -1
+	versionOutput, versionExit = &b, func(code int) { exit = code }
+	defer func() { versionOutput, versionExit = os.Stdout, os.Exit }()
+	if err := v.Set("full"); err != nil {
+		t.Fatal(err)
+	}
+	if exit != 0 || !versionFull.MatchString(b.String()) {
+		t.Errorf("Set(\"full\") printed %q and exited %d, want a -V=full line and 0", b.String(), exit)
 	}
 }
 

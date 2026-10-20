@@ -47,15 +47,21 @@ func (versionFlag) Set(s string) error {
 		return fmt.Errorf("unsupported flag value: -V=%s (use -V=full)", s)
 	}
 	progname, err := os.Executable()
-	if err != nil {
-		return err
+	if err == nil {
+		err = printVersion(versionOutput, progname)
 	}
-	if err := printVersion(os.Stdout, progname); err != nil {
-		return err
+	if err == nil {
+		versionExit(0)
 	}
-	os.Exit(0)
-	return nil
+	return err
 }
+
+// versionOutput and versionExit are where -V=full prints, and how it exits.
+// A test replaces them.
+var (
+	versionOutput io.Writer = os.Stdout
+	versionExit             = os.Exit
+)
 
 // printVersion writes the -V=full line of the binary at progname to w.
 func printVersion(w io.Writer, progname string) error {
