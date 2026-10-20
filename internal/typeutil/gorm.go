@@ -26,7 +26,11 @@
 //	├─────────────────────────────────────────────────────────────────────────┤
 //	│  Pure (clone>0)   │  Session, WithContext │  New immutable *gorm.DB     │
 //	│                   │  Debug, Open, Begin   │  (safe to reuse result)     │
-//	│                   │  Transaction          │  error; reads the receiver  │
+//	│                   │  Transaction, ToSQL   │  no *gorm.DB; reads the     │
+//	│                   │                       │  receiver                   │
+//	├─────────────────────────────────────────────────────────────────────────┤
+//	│  State only       │  AddError, DB, Get,   │  no *gorm.DB; touches no    │
+//	│                   │  InstanceGet, Callback│  clause (not a use at all)  │
 //	├─────────────────────────────────────────────────────────────────────────┤
 //	│  Non-pure         │  Where, Find, Count   │  Mutable *gorm.DB           │
 //	│  (all others)     │  Order, Limit, etc.   │  (shares internal state)    │
@@ -35,8 +39,9 @@
 // Pure methods return a new *gorm.DB with clone>0 (1 for Open and
 // Session{NewDB: true}, else 2), which forks a fresh Statement on its next
 // chain call and is safe to reuse. A call to one reads its receiver without
-// branching it. Transaction returns an error, so only that last part applies
-// to it. Non-pure methods return a clone==0 handle that shares the
+// branching it. Transaction and ToSQL return no *gorm.DB, so only that last
+// part applies to them. A state-only method neither reads nor changes a
+// clause of the Statement (#307). Non-pure methods return a clone==0 handle that shares the
 // receiver's Statement.
 //
 // Two of them are not fully clean (#174); see callsite.SessionEffect:
@@ -138,37 +143,82 @@ func isGormDBNamed(t types.Type) bool {
 // Method Classification
 // =============================================================================
 
-// immutableReturningMethods are methods/functions whose call reads its
-// receiver without branching it. All but Transaction return a new immutable
-// *gorm.DB instance (clone > 0):
+// receiverUse is how a call of a gorm method uses its receiver, beyond
+// branching it.
+type receiverUse int
+
+const (
+	// receiverRead: the call reads the receiver's Statement without changing
+	// it.
+	receiverRead receiverUse = iota + 1
+	// receiverStateOnly: the call neither reads nor changes a clause of the
+	// receiver's Statement. It reads or sets only state that no query is built
+	// from (#307).
+	receiverStateOnly
+)
+
+// receiverUses lists the methods and functions whose call does not branch
+// its receiver. Every other gorm method branches it. design/implementation.md
+// ("Methods that do not branch", #307) has the GORM source behind each entry,
+// and e2e/internal/state_methods_test.go checks this table against the real
+// *gorm.DB: every method of it that returns no *gorm.DB is either listed here
+// or listed there as a branch, with the reason.
+//
+// Reads. All but Transaction and ToSQL return a new immutable *gorm.DB
+// instance (clone > 0):
 //   - Safe methods: Session, WithContext, Debug (can be used mid-chain)
 //   - Init methods: Open, Begin (start new chains)
 //   - Transaction returns an error. It runs its callback on a Begin result,
 //     and the callback's fresh tx is handled by callback.CollectImmutableCallbacks.
+//   - ToSQL returns a string. It runs its callback on a DryRun Session of the
+//     receiver with a cloned Statement, so it reads the receiver's clauses.
+//
+// State only. Each reads or sets a field that no query is built from:
+//   - AddError sets db.Error. A later chain of the same clone==0 value
+//     inherits it and does not run: that is what AddError is for.
+//   - DB returns the *sql.DB behind the connection pool.
+//   - Get and InstanceGet read Statement.Settings.
+//   - Callback returns the callback manager of the Config.
 //
 // This map is unexported to prevent external modification.
-var immutableReturningMethods = map[string]struct{}{
+var receiverUses = map[string]receiverUse{
 	// Safe methods - return immutable copy
-	"Session":     {},
-	"WithContext": {},
-	"Debug":       {},
+	"Session":     receiverRead,
+	"WithContext": receiverRead,
+	"Debug":       receiverRead,
 	// Init methods - create new instance
-	"Open":        {},
-	"Begin":       {},
-	"Transaction": {},
+	"Open":        receiverRead,
+	"Begin":       receiverRead,
+	"Transaction": receiverRead,
+	// Builds SQL from a copy of the Statement
+	"ToSQL": receiverRead,
+	// State only
+	"AddError":    receiverStateOnly,
+	"DB":          receiverStateOnly,
+	"Get":         receiverStateOnly,
+	"InstanceGet": receiverStateOnly,
+	"Callback":    receiverStateOnly,
 }
 
-// IsImmutableReturningBuiltin reports whether name is one of
-// immutableReturningMethods: Session, WithContext, Debug, Open and Begin return
-// a new immutable instance that can be branched freely, and Transaction
-// returns an error. A call to any of them reads its receiver without
-// branching it.
+// IsImmutableReturningBuiltin reports whether a call of the gorm method or
+// function name reads its receiver without branching it: name is in
+// receiverUses. Session, WithContext, Debug, Open and Begin return a new
+// immutable instance that can be branched freely. The others return no
+// *gorm.DB: Transaction and ToSQL read the receiver's Statement, and the
+// state-only methods (IsStateOnlyMethod) touch no clause of it.
 //
 // Note: This is different from user-defined pure functions (//gormreuse:pure),
 // which only guarantee no argument pollution - they may return mutable values.
 func IsImmutableReturningBuiltin(name string) bool {
-	_, ok := immutableReturningMethods[name]
+	_, ok := receiverUses[name]
 	return ok
+}
+
+// IsStateOnlyMethod reports whether the gorm method name neither reads nor
+// changes a clause of its receiver's Statement, such as AddError or Get
+// (#307). A call of one is not a use of the receiver at all.
+func IsStateOnlyMethod(name string) bool {
+	return receiverUses[name] == receiverStateOnly
 }
 
 // HasGormDBParameter reports whether a function signature has any parameter

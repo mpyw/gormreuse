@@ -7,10 +7,11 @@ import "gorm.io/gorm"
 // an error to q, and `q = q.Commit()` rebinds q to a finished transaction.
 
 // fixResultTypeAddError: AddError returns an error, so it is not reassigned.
+// It touches no clause either, so it is not a branch (#307).
 func fixResultTypeAddError(db *gorm.DB, err error) {
 	q := db.Where("x").Session(&gorm.Session{})
 	q.AddError(err)
-	q.Where("a").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	q.Where("a").Find(nil)
 	q.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
@@ -22,11 +23,12 @@ func fixResultTypeAutoMigrate(db *gorm.DB) {
 	q.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
-// fixResultTypeDB: DB returns two values.
+// fixResultTypeDB: DB returns two values. It touches no clause, so it is not
+// a branch (#307).
 func fixResultTypeDB(db *gorm.DB) {
 	q := db.Where("x").Session(&gorm.Session{})
 	q.DB()
-	q.Where("a").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	q.Where("a").Find(nil)
 	q.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 

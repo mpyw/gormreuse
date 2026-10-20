@@ -400,10 +400,14 @@ func (u siteUse) definedBefore(root ssa.Value) bool {
 //
 // There's no distinction between "terminal" and "non-terminal" methods. A
 // method that returns an immutable copy (Session, Debug, ...) reads its
-// receiver; any other method branches it, unless its result reassigns the
-// variable (isAssignment).
+// receiver, a state-only method (AddError, Get, ...) does not use it, and any
+// other method branches it, unless its result reassigns the variable
+// (isAssignment).
 func (u siteUse) handleReceiver() {
 	recv, method := u.site.Recv, u.site.Method()
+	if typeutil.IsStateOnlyMethod(method) {
+		return // touches no clause, so it neither reads nor branches (#307)
+	}
 
 	// A receiver that is a Session/Debug copy reads the Statement of the root
 	// it was copied from (#174). This holds even though the copy itself is

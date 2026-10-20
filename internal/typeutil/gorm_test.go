@@ -20,6 +20,10 @@ func TestIsImmutableReturningBuiltin(t *testing.T) {
 		{"Open is pure", "Open", true},
 		{"Begin is pure", "Begin", true},
 		{"Transaction is pure", "Transaction", true},
+		{"ToSQL reads", "ToSQL", true},
+		// State-only methods do not branch either (#307)
+		{"AddError does not branch", "AddError", true},
+		{"Get does not branch", "Get", true},
 		// Non-pure methods (chain methods)
 		{"Find is not pure", "Find", false},
 		{"Where is not pure", "Where", false},
@@ -34,6 +38,21 @@ func TestIsImmutableReturningBuiltin(t *testing.T) {
 				t.Errorf("IsImmutableReturningBuiltin(%q) = %v, want %v", tt.method, got, tt.expected)
 			}
 		})
+	}
+}
+
+func TestIsStateOnlyMethod(t *testing.T) {
+	t.Parallel()
+
+	for _, name := range []string{"AddError", "DB", "Get", "InstanceGet", "Callback"} {
+		if !IsStateOnlyMethod(name) {
+			t.Errorf("IsStateOnlyMethod(%q) = false, want true", name)
+		}
+	}
+	for _, name := range []string{"Session", "ToSQL", "Transaction", "Where", "Find", "Migrator", "Set"} {
+		if IsStateOnlyMethod(name) {
+			t.Errorf("IsStateOnlyMethod(%q) = true, want false", name)
+		}
 	}
 }
 
