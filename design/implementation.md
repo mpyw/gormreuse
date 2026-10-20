@@ -83,7 +83,7 @@ The name-based "immutable-returning" class is not exact. In GORM v1.31, `Session
 
 **Rejected: one shared `visited` set for the whole search.** It visits each value once, but through a loop it visits roots in a different order, and the order of alias uses picks the message when two reports share a position.
 
-`TestPerformance` in `performance_test.go` times the analyzer on generated functions with 400 reassignments, 400 reassignments through `Session` copies, and a chain of 400 pure functions.
+`TestAllocationGrowth` in `growth_test.go` holds these shapes (`filters`, `sessfilters`, `purechain`) to quadratic growth. See [Allocation-growth gate](#allocation-growth-gate-302).
 
 Alias violations carry no suggested fix. The reuse-fix strategies rewrite the root's branches, and the right fix (`.Session(&gorm.Session{})` at the end of the root's chain, or an isolating copy) depends on intent.
 
@@ -243,7 +243,7 @@ gormreuse/
 ├── convergence_test.go          # TestFixesConverge: one pass of fixes leaves no diagnostic
 ├── determinism_test.go          # TestDeterministicDiagnostics: same output on every run
 ├── limitation_test.go           # Known Limitations lists every [LIMITATION] fixture; these notes name only code that exists
-├── performance_test.go          # TestPerformance: analysis time on generated worst cases (#260)
+├── growth_test.go               # TestAllocationGrowth: allocation growth on generated shapes (#302)
 ├── cmd/gormreuse/
 │   ├── main.go                  # CLI entry point (singlechecker)
 │   └── *_test.go                # Build the command and run it (go vet, //line, facts, inspector paths)
@@ -1153,6 +1153,29 @@ A fixture of `testdata/src/gormreuse` whose fixes must also converge is listed i
 > The intentional exceptions are `testdata/src/filefilter/code_test.go`, which
 > exists specifically to test the analyzer's `-test` flag handling, and
 > `testdata/src/ignoretests/code_test.go`, which gives its package test files.
+
+### Allocation-growth gate (#302)
+
+`TestAllocationGrowth` in `growth_test.go` generates each case at two sizes, runs the analyzer on them, and fails when the heap allocations of its `Run` grow faster than the case's limit. The packages are generated in a temporary `GOPATH`, so no large fixture is committed.
+
+| Limit | Sizes | Ratio allowed | For |
+| --- | --- | --- | --- |
+| `growthLinear` | n, 2n | 2.5 | Many small functions, or one function whose work is linear |
+| `growthNearLinear` | n, 2n | 3.0 | Shapes that grow a little faster than n (about 2.3x, 2.5x with the race detector), such as one large function |
+| `growthQuadratic` | n, 2n | 4.5 | Shapes that are quadratic today |
+| `growthExponential` | n, n+4 | 2.0 | Shapes that used to double their work per statement (about 16x) |
+
+How it measures:
+
+- It counts `runtime.MemStats.Mallocs` around `Analyzer.Run` only, so loading and building SSA are not counted. The packages run one at a time (`checker.Options.Sequential`) and the test is not parallel, because the count is process-wide.
+- It analyzes every package three times and keeps the smallest count. The analyzer does a few percent more or less work from run to run with map order, and the race detector makes `sync.Pool` drop items at random.
+
+**Rejected: a wall-clock limit (#260's time limit).** Under CI's flags (`-race -covermode=atomic -coverpkg=./...`) the analyzer ran about 25 times slower, so a limit was either flaky or too loose to catch anything. Allocation counts repeat, and the race detector and coverage change most ratios little.
+
+Limitations:
+
+- Work that allocates nothing, such as a linear search repeated in a loop, is not counted. The race detector's `sync.Pool` drops make some of it visible (`switchuse` grows about 2.3x without the race detector and about 3x with it, so it has the quadratic limit).
+- A case whose issue is still open has `after: "#NNN"` and is skipped. Its fix removes the field, and every later performance fix adds its shape with a limit it meets.
 
 ### Testdata Organization
 
