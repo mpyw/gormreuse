@@ -71,6 +71,8 @@ type Generator struct {
 	seesAllCallers func(token.Pos) bool // whether this variant sees every caller of code at a position
 	//declscope:shared // the fixes ask it about loops, reachability and repeats
 	cfg *cfg.Analyzer // the CFG cache of the pass, shared with the checker (#299)
+	//declscope:shared // holder.go memoizes the struct stores of each function in it for change.go
+	holders holderCache
 
 	files   map[*token.File]*ast.File      // token.File -> ast.File mapping
 	cursors map[*ast.File]inspector.Cursor // file cursors in the pass inspector

@@ -1,0 +1,398 @@
+package internal
+
+import (
+	"sort"
+	"strings"
+
+	"gorm.io/gorm"
+)
+
+// Fixtures for issue #310: a store of the root into a struct, or into an
+// element of a value, hands it to other code once that value leaves the
+// function's own field reads. Such code may change the root in place, so the
+// fix of #243 is withheld as for a call argument.
+
+type fixEscapeStructSvc struct{ db *gorm.DB }
+
+// apply adds a condition to s.db in place.
+func (s *fixEscapeStructSvc) apply() { s.db.Where("tenant = 7") }
+
+// applyValue adds a condition to s.db in place, through a value receiver.
+func (s fixEscapeStructSvc) applyValue() { s.db.Where("tenant = 7") }
+
+type fixEscapeStructParams struct{ db *gorm.DB }
+
+func fixEscapeStructApplyParams(p fixEscapeStructParams) { p.db.Where("tenant = 7") }
+
+func fixEscapeStructApplyParamsPtr(p *fixEscapeStructParams) { p.db.Where("tenant = 7") }
+
+type fixEscapeStructOuter struct{ in fixEscapeStructParams }
+
+func fixEscapeStructApplyOuter(o fixEscapeStructOuter) { o.in.db.Where("tenant = 7") }
+
+func fixEscapeStructBuild(p fixEscapeStructParams) *gorm.DB { return p.db.Where("tenant = 7") }
+
+// ===== NO FIX: the struct holding the root reaches other code =====
+
+// fixEscapeStructReceiver: a method of the struct changes q in place.
+func fixEscapeStructReceiver(db *gorm.DB) {
+	q := db.Model(&User{}).Where("x = 1")
+	s := &fixEscapeStructSvc{db: q}
+	s.apply()
+	q.Find(&[]User{})
+	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixEscapeStructValueReceiver: the same through a value receiver.
+func fixEscapeStructValueReceiver(db *gorm.DB) {
+	q := db.Model(&User{}).Where("x = 1")
+	s := fixEscapeStructSvc{db: q}
+	s.applyValue()
+	q.Find(&[]User{})
+	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixEscapeStructLiteral: a struct literal is passed by value.
+func fixEscapeStructLiteral(db *gorm.DB) {
+	q := db.Model(&User{}).Where("x = 1")
+	fixEscapeStructApplyParams(fixEscapeStructParams{db: q})
+	q.Find(&[]User{})
+	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixEscapeStructPointerLiteral: a pointer to a struct literal is passed.
+func fixEscapeStructPointerLiteral(db *gorm.DB) {
+	q := db.Model(&User{}).Where("x = 1")
+	fixEscapeStructApplyParamsPtr(&fixEscapeStructParams{db: q})
+	q.Find(&[]User{})
+	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixEscapeStructFieldStore: q is stored into a field after the struct is
+// built.
+func fixEscapeStructFieldStore(db *gorm.DB) {
+	q := db.Model(&User{}).Where("x = 1")
+	var p fixEscapeStructParams
+	p.db = q
+	fixEscapeStructApplyParamsPtr(&p)
+	q.Find(&[]User{})
+	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixEscapeStructNested: q is in a struct nested in the one passed.
+func fixEscapeStructNested(db *gorm.DB) {
+	q := db.Model(&User{}).Where("x = 1")
+	fixEscapeStructApplyOuter(fixEscapeStructOuter{in: fixEscapeStructParams{db: q}})
+	q.Find(&[]User{})
+	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixEscapeStructNestedLocal: the inner struct is built first, then copied
+// into the outer one.
+func fixEscapeStructNestedLocal(db *gorm.DB) {
+	q := db.Model(&User{}).Where("x = 1")
+	in := fixEscapeStructParams{db: q}
+	o := fixEscapeStructOuter{in: in}
+	fixEscapeStructApplyOuter(o)
+	q.Find(&[]User{})
+	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixEscapeStructChain: the field holds a chain on q, which is q itself.
+func fixEscapeStructChain(db *gorm.DB) {
+	q := db.Model(&User{}).Where("x = 1")
+	fixEscapeStructApplyParams(fixEscapeStructParams{db: q.Where("y = 1")})
+	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixEscapeStructResult: build may return q itself, so a use of its result
+// sees the change.
+func fixEscapeStructResult(db *gorm.DB) {
+	q := db.Model(&User{}).Where("x = 1")
+	q.Find(&[]User{})
+	r := fixEscapeStructBuild(fixEscapeStructParams{db: q})
+	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+	r.Find(&[]User{})
+}
+
+// fixEscapeStructCaptured: a closure captures the struct and hands it on.
+func fixEscapeStructCaptured(db *gorm.DB) {
+	q := db.Model(&User{}).Where("x = 1")
+	s := &fixEscapeStructSvc{db: q}
+	func() { s.apply() }()
+	q.Find(&[]User{})
+	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixEscapeStructParam: a parameter root gets a Session at the top of the
+// body, which the struct's method would change instead of tx.
+func fixEscapeStructParam(tx *gorm.DB) {
+	s := &fixEscapeStructSvc{db: tx}
+	s.apply()
+	tx.Find(&[]User{})
+	tx.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixEscapeStructParamCaller passes a mid-chain value, so tx cannot be
+// declared immutable-param.
+func fixEscapeStructParamCaller(db *gorm.DB) {
+	fixEscapeStructParam(db.Model(&User{}))
+}
+
+var fixEscapeStructGlobal fixEscapeStructParams
+
+// fixEscapeStructGlobalStore: q is stored into a package-level variable,
+// which any function may change.
+func fixEscapeStructGlobalStore(db *gorm.DB) {
+	q := db.Model(&User{}).Where("x = 1")
+	fixEscapeStructGlobal.db = q
+	fixEscapeStructApplyParamsPtr(&fixEscapeStructGlobal)
+	q.Find(&[]User{})
+	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixEscapeStructParamField: q is stored into a struct the caller passed.
+func fixEscapeStructParamField(db *gorm.DB, p *fixEscapeStructParams) {
+	q := db.Model(&User{}).Where("x = 1")
+	p.db = q
+	fixEscapeStructApplyParamsPtr(p)
+	q.Find(&[]User{})
+	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixEscapeStructInLoop: the struct reaches applyParams after the last
+// query of the body, and the next iteration sees its change.
+func fixEscapeStructInLoop(db *gorm.DB, xs []int) {
+	q := db.Model(&User{}).Where("x = 1")
+	for range xs {
+		q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+		fixEscapeStructApplyParams(fixEscapeStructParams{db: q})
+	}
+}
+
+var fixEscapeStructRegistered *fixEscapeStructParams
+
+func fixEscapeStructRegister(p *fixEscapeStructParams) { fixEscapeStructRegistered = p }
+
+func fixEscapeStructApplyRegistered() { fixEscapeStructRegistered.db.Where("tenant = 7") }
+
+// fixEscapeStructHandedBeforeStore: the struct is handed on before q is
+// stored into it, and a later call changes q through it.
+func fixEscapeStructHandedBeforeStore(db *gorm.DB) {
+	q := db.Model(&User{}).Where("x = 1")
+	var p fixEscapeStructParams
+	fixEscapeStructRegister(&p)
+	p.db = q
+	fixEscapeStructApplyRegistered()
+	q.Find(&[]User{})
+	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// ===== FIX: nothing outside the function's own field reads sees the root =====
+
+// fixEscapeStructLocalOnly: the struct is only read by the function itself,
+// whose reads of s.db are uses of q.
+func fixEscapeStructLocalOnly(db *gorm.DB) {
+	q := db.Model(&User{}).Where("x = 1").Session(&gorm.Session{})
+	s := fixEscapeStructSvc{db: q}
+	s.db.Where("a = 1").Find(&[]User{})
+	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixEscapeStructAfterLastUse: the struct reaches applyParams after the last
+// use of q, so nothing sees what it changes.
+func fixEscapeStructAfterLastUse(db *gorm.DB) {
+	q := db.Model(&User{}).Where("x = 1").Session(&gorm.Session{})
+	q.Find(&[]User{})
+	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+	fixEscapeStructApplyParams(fixEscapeStructParams{db: q})
+}
+
+// fixEscapeStructOtherField: the struct that reaches other code holds
+// another value, not q.
+func fixEscapeStructOtherField(db, other *gorm.DB) {
+	q := db.Model(&User{}).Where("x = 1").Session(&gorm.Session{})
+	fixEscapeStructApplyParams(fixEscapeStructParams{db: other})
+	q.Find(&[]User{})
+	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixEscapeStructGlobalNoCall: q is stored into a package-level variable, but
+// no function runs before the last use.
+func fixEscapeStructGlobalNoCall(db *gorm.DB) {
+	q := db.Model(&User{}).Where("x = 1").Session(&gorm.Session{})
+	fixEscapeStructGlobal.db = q
+	q.Find(&[]User{})
+	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+	fixEscapeStructApplyParamsPtr(&fixEscapeStructGlobal)
+}
+
+// fixEscapeStructCapturedRead: a closure captures the struct and only reads
+// its field, which is a use of q.
+func fixEscapeStructCapturedRead(db *gorm.DB) {
+	q := db.Model(&User{}).Where("x = 1").Session(&gorm.Session{})
+	s := &fixEscapeStructSvc{db: q}
+	q.Find(&[]User{})
+	func() { s.db.Find(&[]User{}) }() // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixEscapeStructMerged: a Phi merges two local structs that hold q, and
+// neither is handed on.
+func fixEscapeStructMerged(db *gorm.DB, c bool) {
+	q := db.Model(&User{}).Where("x = 1").Session(&gorm.Session{})
+	s := fixEscapeStructParams{db: q}
+	if c {
+		s = fixEscapeStructParams{db: q}
+	}
+	_ = s
+	q.Find(&[]User{})
+	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// ===== Struct stores in more shapes =====
+
+var fixEscapeStructPtr *fixEscapeStructParams
+
+var fixEscapeStructPtrPtr **fixEscapeStructParams
+
+func fixEscapeStructTouch() {}
+
+// fixEscapeStructPointerToGlobal: NO FIX. The struct's address is stored in
+// a package-level variable, and a later call may change q through it.
+func fixEscapeStructPointerToGlobal(db *gorm.DB) {
+	q := db.Model(&User{}).Where("x = 1")
+	p := &fixEscapeStructParams{db: q}
+	fixEscapeStructPtr = p
+	fixEscapeStructTouch()
+	q.Find(&[]User{})
+	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixEscapeStructPointerVarToGlobal: NO FIX. A captured variable holds the
+// struct's address, and its own address is stored in a package-level
+// variable.
+func fixEscapeStructPointerVarToGlobal(db *gorm.DB) {
+	q := db.Model(&User{}).Where("x = 1")
+	p := &fixEscapeStructParams{db: q}
+	func() { _ = p }()
+	fixEscapeStructPtrPtr = &p
+	fixEscapeStructTouch()
+	q.Find(&[]User{})
+	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+func fixEscapeStructTakePtrPtr(pp **fixEscapeStructParams) {}
+
+// fixEscapeStructPointerVarPassed: NO FIX. The address of a captured
+// variable that holds the struct's address is passed to a call.
+func fixEscapeStructPointerVarPassed(db *gorm.DB) {
+	q := db.Model(&User{}).Where("x = 1")
+	p := &fixEscapeStructParams{db: q}
+	func() { _ = p }()
+	fixEscapeStructTakePtrPtr(&p)
+	q.Find(&[]User{})
+	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixEscapeStructCopiedInClosure: NO FIX. A closure copies the struct into a
+// package-level variable.
+func fixEscapeStructCopiedInClosure(db *gorm.DB) {
+	q := db.Model(&User{}).Where("x = 1")
+	s := fixEscapeStructParams{db: q}
+	func() { fixEscapeStructGlobal = s }()
+	fixEscapeStructTouch()
+	q.Find(&[]User{})
+	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixEscapeStructGlobalLaterBlock: NO FIX. A call in a later block may
+// change q through the package-level variable before the queries.
+func fixEscapeStructGlobalLaterBlock(db *gorm.DB, c bool) {
+	q := db.Model(&User{}).Where("x = 1")
+	fixEscapeStructGlobal.db = q
+	if c {
+		fixEscapeStructTouch()
+	}
+	q.Find(&[]User{})
+	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixEscapeStructGlobalInLoop: NO FIX. The store and the call run again on
+// the next iteration.
+func fixEscapeStructGlobalInLoop(db *gorm.DB, xs []int) {
+	q := db.Model(&User{}).Where("x = 1")
+	for range xs {
+		q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+		fixEscapeStructGlobal.db = q
+		if len(xs) > 1 {
+			fixEscapeStructTouch()
+		}
+	}
+}
+
+// fixEscapeStructGlobalFuncArg: NO FIX. A call into another package that
+// takes a function may run code that changes q.
+func fixEscapeStructGlobalFuncArg(db *gorm.DB, xs []int) {
+	q := db.Model(&User{}).Where("x = 1")
+	fixEscapeStructGlobal.db = q
+	sort.Slice(xs, func(i, j int) bool { return xs[i] < xs[j] })
+	q.Find(&[]User{})
+	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixEscapeStructGlobalCallAfterUses: FIX. The call in a later block runs
+// after every use.
+func fixEscapeStructGlobalCallAfterUses(db *gorm.DB, c bool) {
+	q := db.Model(&User{}).Where("x = 1").Session(&gorm.Session{})
+	fixEscapeStructGlobal.db = q
+	q.Find(&[]User{})
+	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+	if c {
+		fixEscapeStructTouch()
+	}
+}
+
+// fixEscapeStructGlobalHarmlessCalls: FIX. A deferred call runs after every
+// use, a builtin and a call into a package that does not reach gorm cannot
+// change q.
+func fixEscapeStructGlobalHarmlessCalls(db *gorm.DB, xs []int) {
+	q := db.Model(&User{}).Where("x = 1").Session(&gorm.Session{})
+	fixEscapeStructGlobal.db = q
+	defer fixEscapeStructTouch()
+	_ = len(xs)
+	_ = strings.ToUpper("a")
+	q.Find(&[]User{})
+	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+type fixEscapeStructCounted struct {
+	db *gorm.DB
+	n  int
+}
+
+// fixEscapeStructLocalReads: FIX. The struct is copied into another local
+// struct twice and its int field is read, and none of it leaves the
+// function.
+func fixEscapeStructLocalReads(db *gorm.DB) int {
+	q := db.Model(&User{}).Where("x = 1").Session(&gorm.Session{})
+	s := fixEscapeStructCounted{db: q, n: 1}
+	var pair [2]fixEscapeStructCounted
+	pair[0] = s
+	pair[1] = s
+	q.Find(&[]User{})
+	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+	return pair[0].n + s.n
+}
+
+// fixEscapeStructPointerVarReassigned: FIX. A captured variable gets the
+// struct's address twice, and the closure only reads the field.
+func fixEscapeStructPointerVarReassigned(db *gorm.DB) {
+	q := db.Model(&User{}).Where("x = 1").Session(&gorm.Session{})
+	s := fixEscapeStructParams{db: q}
+	p := &s
+	q.Find(&[]User{})
+	func() { p.db.Find(&[]User{}) }() // want `\*gorm\.DB reused: second branch from mutable root`
+	p = &s
+	_ = p
+}

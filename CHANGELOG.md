@@ -92,7 +92,7 @@ Most added reports in the root module are a `*gorm.DB` parameter branched in a l
 | Change | Detail |
 | --- | --- |
 | Every fix compiles (#200) | Alone, as an editor's quick fix, or with every other fix. The `gorm` import is added under a free name when needed |
-| No fix that drops a condition (#199, #243) | A discarded statement such as `q.Where("a")` must be reassigned. When it cannot be, or when other code changes the root in place, there is no fix |
+| No fix that drops a condition (#199, #243, #310) | A discarded statement such as `q.Where("a")` must be reassigned. When it cannot be, or when other code changes the root in place, there is no fix. That code includes a method of a struct that holds the root (`s := &Svc{db: q}; s.apply()`) |
 | The right variable (#198) | A reassignment rebinds the variable that holds the reused root, never an outer receiver |
 | Parameter roots (#201, #245) | An exported function, a method or a function value gets `tx = tx.Session(&gorm.Session{})` at the top of the body. `immutable-param` is added only when every caller is checked |
 | Sessions by control flow (#202, #247, #311) | Sessions go where the paths need them, also for a reassignment read in a later loop and for a value merged with a parameter. One pass of fixes resolves the diagnostics |

@@ -966,4 +966,21 @@ var growthCases = []growthCase{
 		b.WriteString("}\n")
 		return []string{b.String()}
 	}},
+	// n roots each stored into a local struct that a call takes, then reused,
+	// and n into the fields of a package-level struct with a call after each
+	// (struct stores as escapes, #310).
+	{name: "structescape", limit: growthNearLinear, shape: func(n int) []string {
+		var b strings.Builder
+		b.WriteString("type H struct{ db *gorm.DB }\n\nfunc use(h *H) {}\n\nfunc touch() {}\n\ntype G struct {\n")
+		for i := range n {
+			fmt.Fprintf(&b, "\tf%d *gorm.DB\n", i)
+		}
+		b.WriteString("}\n\nvar g G\n\nfunc f(db *gorm.DB) {\n")
+		for i := range n {
+			fmt.Fprintf(&b, "\tq%d := db.Where(\"c%d\")\n\tuse(&H{db: q%d})\n\tq%d.Find(nil)\n\tq%d.Find(nil)\n", i, i, i, i, i)
+			fmt.Fprintf(&b, "\tr%d := db.Where(\"d%d\")\n\tg.f%d = r%d\n\ttouch()\n\tr%d.Find(nil)\n\tr%d.Find(nil)\n", i, i, i, i, i, i)
+		}
+		b.WriteString("}\n")
+		return []string{b.String()}
+	}},
 }

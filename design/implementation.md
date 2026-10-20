@@ -1045,6 +1045,7 @@ The #199 rule covers a discarded statement written on the root's variable. Other
 | The root is handed to other code, and a later use may see the change | `applyTenant(q)`, `apply(q)` for a closure, `_ = withTenant(q)`, `qs := []*gorm.DB{q}`, `m["q"] = q`, `ch <- q` | `UsageInfo.Escapes`, set by `Tracker.MarkPolluted` (a call argument, slice or map store, send) and by `q = helper(q)`. `changeSeenAfterEscape` decides whether a later use exists |
 | The `Error`, `RowsAffected` or `Statement` field is read from the root, or from a chain on it that runs no query | `return q.Error`, `if err := q.Where("a").Error; ...`, `q.Where("a").Limit(1).Statement` | A `FieldAddr` in the root's function or its closures, whose operand `carriesRootChanges` walks down a chain of non-finisher, non-Session-family `*gorm.DB` methods to the root |
 | A go statement hands the root to a call | `go applyTenant(q)` | An `*ssa.Go` whose argument traces to the root. The goroutine may change it while the uses after the statement run |
+| The root is stored in a struct field that other code reaches (#310) | `s := &Svc{db: q}; s.apply()`, `applyP(params{db: q})`, `p.db = q; helper(&p)` | `holderChangesRoot`, over the stores that `holderStores` finds (below) |
 
 `changeSeenAfterEscape` keeps the fix of an escape that nothing can observe: the last use of the root, in no loop, when every use is in order (`usesOrdered`). `q.Find(&a); render(q)` keeps its Session. An argument of a call that returns a `*gorm.DB`, other than a `*gorm.DB` method, always counts: `q = withTenant(q)` may return `q` itself, so the uses of its result see the change. A `*gorm.DB` method such as `base.Model(q)` returns a chain on its receiver. Read-only uses do not escape: a subquery (`RecordPureUse`), a `//gormreuse:pure` function, and the `fmt`/`log`/`testing` variadics.
 
@@ -1052,13 +1053,26 @@ The field read on a finisher's result, as in `q.Where("a").Find(&x).Error`, is t
 
 A reassignment-only fix (`q = q.Where("a")` with no Session) would not change behaviour, since a mutable root's method returns the root itself. It is withheld too: the check runs before the fix is built, and a reassignment whose chain ends in a Session does change the root.
 
-`TestFixEscapePreservesQueries` in `e2e/internal/fix_escape_test.go` runs each case of the issue from `fixsql/before` and `fixsql/after` against real GORM. `TestFixEscapeDetectsSessionAtRoot` checks that the comparison fails for the fixes suggested before. In `ErrorPropagation` a query runs only when `q.Error` holds the error of a failed query, so a lost error shows up as a missing query. `testdata/src/gormreuse/fix_escape.go` holds the fixtures with and without a fix.
+**Struct stores (#310).** A store of the root into a struct field is not a use: detection reads the fields of a local struct as the value stored in them (#181), so `s.db.Find(&x)` is a use of `q`. The handler marks nothing at the store either, so `UsageInfo.Escapes` never covered it, and `s := &Svc{db: q}; s.apply(); q.Find(&a); q.Find(&b)` got a Session at `q` that made `apply` add its filter to a copy. `changedElsewhere` now also checks each store of the root, or of a chain on it that runs no query (`changeCarryingRoots`), into anything other than a variable or a slice, array or map element. Each point where other code can reach the stored root is an escape for `changeSeenAfterEscape`:
+
+| Memory | Where other code reaches it | Found by |
+| --- | --- | --- |
+| A local struct or array (an `Alloc` reached through field and array element addresses) | Where it is handed on: a call that takes it, also as a receiver, a copy of its value that goes anywhere but another local struct, or such an instruction in a closure that captures the struct or a variable holding its address. A read of a `*gorm.DB` field, a copy into another local struct and a Phi are followed, not escapes | `holderWalk`, once per struct |
+| Other memory: a package-level variable, or a struct that a parameter or another pointer points to | At any call that may run after the store. The first such call in the store's block is the escape; a call in a later block is taken as running at the end of the store's block. A local struct copied into such memory is reached the same way after the copy | `holderNextCall` over `holderFuncCalls`, once per function |
+
+A `*gorm.DB` method, a builtin and a deferred call do not count as such a call, nor does a static call into a package that does not reach gorm with no function argument (`fmt.Println(n)`). Code in a closure of the root's function is not ordered against the uses, so an escape there, or a store there into memory that is not a local struct, is taken as seen. The stores, the walks and the calls are memoized in `Generator.holders`, so a function with n such stores stays linear (`structescape` in the growth gate).
+
+The rule withholds no fix that the existing golden fixtures had: their struct stores go to a struct the function only reads, to a package-level variable or receiver field with no call between the store and the uses (the builder idiom `r.db = r.db.Where(c)`), or to a captured struct whose closure only reads the field.
+
+`TestFixEscapePreservesQueries` in `e2e/internal/fix_escape_test.go` runs each case of the issue from `fixsql/before` and `fixsql/after` against real GORM. `TestFixEscapeDetectsSessionAtRoot` checks that the comparison fails for the fixes suggested before. `e2e/internal/fix_struct_escape_test.go` does the same for the struct cases of #310, including a parameter root whose body Session would drop the change. In `ErrorPropagation` a query runs only when `q.Error` holds the error of a failed query, so a lost error shows up as a missing query. `testdata/src/gormreuse/fix_escape.go` and `fix_escape_struct.go` hold the fixtures with and without a fix.
 
 Limitations:
 
 - An escape before a later use withholds the fix even when the callee only reads the value, such as `voidFunc(q)` with an empty body, or a `*gorm.DB` method argument (`base.Model(q)`). Mark a read-only helper `//gormreuse:pure`, or pass it an isolated value.
 - A parameter's body Session still drops the in-place changes of the function's queries, such as the errors in the caller's `q.Error` after `helper(q)`. See [Parameter-Root Fix](#parameter-root-fix-201).
 - A deferred call that takes the root, as in `defer applyTenant(q)`, keeps the fix. It runs after every use the fix orders, so only another deferred call could see its change.
+- A struct store is withheld more often than needed: a struct handed to a callee that only reads it (`log(params{db: q})`), and any call between a store into a package-level variable and a later use, count as escapes. A call in another block after such a store counts even when it runs after the last use.
+- A struct reached through a pointer field of a local struct (`s.inner.db = q` with `inner *T`) is other memory, so every later call counts.
 
 ## Where Sessions Go (#202)
 
