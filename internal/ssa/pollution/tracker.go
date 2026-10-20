@@ -621,7 +621,23 @@ func (t *Tracker) reuseMessage(root ssa.Value) string {
 		msg += " (" + strings.Join(locs, ", ") + ")"
 	}
 
-	return msg + "; make the root immutable with .Session(&gorm.Session{})"
+	return msg + reuseSessionAdvice
+}
+
+// reuseSessionAdvice ends a reuse diagnostic. reuseStateAdvice replaces it
+// for a root whose Statement may carry state that a Session drops (#344).
+const (
+	reuseSessionAdvice = "; make the root immutable with .Session(&gorm.Session{})"
+	reuseStateAdvice   = "; a Session would drop its Attrs, Assign or InstanceSet, so build each branch from a fresh chain instead"
+)
+
+// AdviseWithoutSession rewrites the advice of v, a reuse violation, for a
+// root that a Session cannot make immutable without dropping state its
+// Statement carries, such as Assign (#344).
+func (v *Violation) AdviseWithoutSession() {
+	if msg, ok := strings.CutSuffix(v.Message, reuseSessionAdvice); ok {
+		v.Message = msg + reuseStateAdvice
+	}
 }
 
 // loc renders pos as "file.go:line" (base name only — the file is almost always

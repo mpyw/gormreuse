@@ -749,6 +749,7 @@ An exclude rule that matches a message must match the new text. A rule that matc
 | Scopes warning for `WithContext` and `Debug` | `WithContext() in Scopes callback causes ...` | `WithContext() result returned from Scopes callback causes ...` |
 | A variadic `immutable-input` callback (#259) | `unused gormreuse:immutable-input directive: parameter "cbs" is not a function type` | `... parameter "cbs" is variadic; variadic callbacks are not supported` |
 | Reuse | Sometimes `(root at …)` or `(first branch at …)` alone | Always `(root at …, first branch at …)` |
+| Reuse, or an `immutable-param` argument, that may carry `Attrs`, `Assign` or `InstanceSet` (#344) | `...; make the root immutable with .Session(&gorm.Session{})` | `...; a Session would drop its Attrs, Assign or InstanceSet, so ...` |
 
 </details>
 
@@ -785,6 +786,7 @@ Directives now work across packages, through method expressions and function var
 | --- | --- |
 | Every fix compiles (#200) | Alone, as an editor's quick fix, or with every other fix. The `gorm` import is added under a free name when needed |
 | No fix that drops a condition (#199, #243, #309, #310, #312) | A discarded statement such as `q.Where("a")` must be reassigned. When it cannot be, or when other code changes the root in place, there is no fix. See the examples below |
+| No Session that drops `Attrs`, `Assign` or `InstanceSet` (#344) | A Session clones the `Statement` on the next call, and the clone drops them. A root whose chain sets them, or keeps the effect of a chain that does, gets no Session. Neither does a parameter that reaches `FirstOrInit` or `FirstOrCreate` |
 | Roots used only in `go`/`defer` (#309, #312) | `go q.Count(&n); go q.Find(&x)` and `for … { go q.Find(&x) }` get a Session at the root. The message names the first branch |
 | The right variable (#198) | A reassignment rebinds the variable that holds the reused root, never an outer receiver |
 | Parameter roots (#201, #245, #313) | An exported function, a method, a function value or a closure without a `*gorm.DB` result gets `tx = tx.Session(&gorm.Session{})` at the top of the body. A `Transaction` wrapper's callback is such a closure. `immutable-param` is added only when every caller of a function declaration is checked |

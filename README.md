@@ -2036,7 +2036,7 @@ if c { f() } else { run() }
 
 **Wrong position:** a use inside a deferred closure runs at function exit. gormreuse orders it by its source position. So `defer func() { q.Count(nil) }(); q.Find(nil)` is reported at `q.Find`, which runs first.
 
-**No fix:** a `go` or `defer` statement that changes the root in place, where another use may see the change, gets no suggested fix. That is `go q.Where("a")` or `go applyTenant(q)`, and `defer q.Where("a")` or `defer applyTenant(q)` with another `defer` that uses `q`, or in a loop. A Session at the root would make the call change a copy. Isolate the root by hand where the change is not needed.
+**No fix:** a `go` or `defer` statement that changes the root in place, where another use may see the change, gets no suggested fix. That is `go q.Where("a")` or `go applyTenant(q)`, and `defer q.Where("a")` or `defer applyTenant(q)` with another `defer` that uses `q`, or in a loop. A Session at the root would make the call change a copy. Isolate the root by hand where the change is not needed. A root whose `Statement` may carry `Attrs`, `Assign` or `InstanceSet` state, such as `db.Model(&User{}).Assign(u)`, gets no Session either: a Session drops that state, so `FirstOrInit` and `FirstOrCreate` would change their result. Build each branch from a fresh chain instead.
 
 </details>
 

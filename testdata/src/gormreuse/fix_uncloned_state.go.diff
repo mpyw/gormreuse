@@ -1,0 +1,139 @@
+--- fix_uncloned_state.go	1970-01-01 00:00:00
++++ fix_uncloned_state.go.golden	1970-01-01 00:00:00
+@@ -1,130 +1,132 @@
+ package internal
+ 
+ import "gorm.io/gorm"
+ 
+ // Fixtures for issue #344: the next call on a Session result clones the
+ // Statement, and Statement.clone() does not copy what Attrs and Assign set.
+ // InstanceSet's value is keyed by the Statement's address, so the clone does
+ // not find it either. A Session at a root whose Statement carries such state
+ // would change what FirstOrInit and FirstOrCreate do, so these diagnostics
+ // carry no Session fix and do not advise one.
+ 
+ // ===== NO FIX: the root's chain sets the state =====
+ 
+ // ucsAssignRoot is the issue's case: with a Session after Assign, the found
+ // row keeps its own Age.
+ //
+ // [LIMITATION] No fix.
+ func ucsAssignRoot(db *gorm.DB, names []string) {
+ 	var u User
+ 	q := db.Model(&User{}).Assign(User{Age: 77})
+ 	for _, n := range names {
+ 		q.Where("name = ?", n).FirstOrInit(&u) // want `\*gorm\.DB reused: second branch from mutable root .*; a Session would drop its Attrs, Assign or InstanceSet, so build each branch from a fresh chain instead`
+ 	}
+ }
+ 
+ // ucsAttrsRoot: a chain method after Attrs does not clear it.
+ func ucsAttrsRoot(db *gorm.DB) {
+ 	var u User
+ 	q := db.Model(&User{}).Attrs(User{Age: 30}).Where("active = ?", true)
+ 	q.Where("name = ?", "a").FirstOrInit(&u)
+ 	q.Where("name = ?", "b").FirstOrInit(&u) // want `a Session would drop its Attrs, Assign or InstanceSet`
+ }
+ 
+ // ucsInstanceSetRoot: a callback's InstanceGet would not find the value.
+ func ucsInstanceSetRoot(db *gorm.DB) {
+ 	q := db.Model(&User{}).InstanceSet("audit", true)
+ 	q.Where("a = 1").Find(&[]User{})
+ 	q.Where("b = 1").Find(&[]User{}) // want `a Session would drop its Attrs, Assign or InstanceSet`
+ }
+ 
+ // ucsAssignDiscarded: the discarded Assign changes q in place. Reassigning it
+ // would need a Session after it.
+ func ucsAssignDiscarded(db *gorm.DB) {
+ 	var u User
+ 	q := db.Model(&User{})
+ 	q.Assign(User{Age: 77})
+ 	q.Where("name = ?", "a").FirstOrInit(&u) // want `a Session would drop its Attrs, Assign or InstanceSet`
+ 	q.Where("name = ?", "b").FirstOrInit(&u) // want `a Session would drop its Attrs, Assign or InstanceSet`
+ }
+ 
+ // ucsAssignOnEdge: one edge of the merge sets Assign.
+ func ucsAssignOnEdge(db *gorm.DB, upsert bool) {
+ 	var u User
+ 	q := db.Model(&User{})
+ 	if upsert {
+ 		q = q.Assign(User{Age: 77})
+ 	}
+ 	q.Where("name = ?", "a").FirstOrInit(&u)
+ 	q.Where("name = ?", "b").FirstOrInit(&u) // want `a Session would drop its Attrs, Assign or InstanceSet`
+ }
+ 
+ // ===== NO SESSION: a parameter that reaches FirstOrInit or FirstOrCreate =====
+ 
+ // UcsParamFirstOrCreate may be called with db.Assign(...), which a body
+ // Session would drop. It is exported, so it would get the body Session.
+ //
+ // [LIMITATION] No fix.
+ func UcsParamFirstOrCreate(tx *gorm.DB) {
+ 	var u User
+ 	tx.Where("name = ?", "a").FirstOrCreate(&u)
+ 	tx.Where("name = ?", "b").FirstOrCreate(&u) // want `a Session would drop its Attrs, Assign or InstanceSet`
+ }
+ 
+ // ucsParamFirstOrInit has no caller, so its fix declares it
+ // immutable-param, which adds no Session.
++//gormreuse:immutable-param
+ func ucsParamFirstOrInit(tx *gorm.DB) {
+ 	var u User
+ 	tx.Where("name = ?", "a").FirstOrInit(&u)
+ 	tx.Where("name = ?", "b").FirstOrInit(&u) // want `a Session would drop its Attrs, Assign or InstanceSet`
+ }
+ 
+ // ===== NO FIX: an argument to an immutable-param parameter =====
+ 
+ //gormreuse:immutable-param
+ func ucsFindTwice(tx *gorm.DB) {
+ 	var u User
+ 	tx.Where("name = ?", "a").FirstOrInit(&u)
+ 	tx.Where("name = ?", "b").FirstOrInit(&u)
+ }
+ 
+ // ucsIsolateAssign: a Session after the argument would drop its Assign.
+ func ucsIsolateAssign(db *gorm.DB) {
+ 	ucsFindTwice(db.Model(&User{}).Assign(User{Age: 77})) // want `mutable \*gorm\.DB passed to //gormreuse:immutable-param parameter of ucsFindTwice; a Session would drop its Attrs, Assign or InstanceSet, so pass a value built for this call instead`
+ }
+ 
+ // ===== FIX: no state reaches the Session =====
+ 
+ // ucsAssignPerBranch: each branch sets its own Assign after the Session.
+ func ucsAssignPerBranch(db *gorm.DB) {
+ 	var u User
+-	q := db.Model(&User{})
++	q := db.Model(&User{}).Session(&gorm.Session{})
+ 	q.Assign(User{Age: 1}).FirstOrInit(&u)
+ 	q.Assign(User{Age: 2}).FirstOrInit(&u) // want `make the root immutable with \.Session`
+ }
+ 
+ // ucsAssignBeforeSession: the chain's own Session already dropped the Assign.
+ func ucsAssignBeforeSession(db *gorm.DB) {
+-	q := db.Assign(User{Age: 77}).Session(&gorm.Session{}).Where("a = 1")
++	q := db.Assign(User{Age: 77}).Session(&gorm.Session{}).Where("a = 1").Session(&gorm.Session{})
+ 	q.Find(&[]User{})
+ 	q.Find(&[]User{}) // want `make the root immutable with \.Session`
+ }
+ 
+ // ucsSetRoot: Set's key does not hold the Statement's address, so the clone
+ // keeps it.
+ func ucsSetRoot(db *gorm.DB) {
+-	q := db.Model(&User{}).Set("audit", true)
++	q := db.Model(&User{}).Set("audit", true).Session(&gorm.Session{})
+ 	q.Where("a = 1").Find(&[]User{})
+ 	q.Where("b = 1").Find(&[]User{}) // want `make the root immutable with \.Session`
+ }
+ 
+ // UcsParamFind: a parameter that reaches no FirstOrInit or FirstOrCreate.
+ func UcsParamFind(tx *gorm.DB) {
++	tx = tx.Session(&gorm.Session{})
+ 	tx.Where("a = 1").Find(&[]User{})
+ 	tx.Where("b = 1").Find(&[]User{}) // want `make the root immutable with \.Session`
+ }
+ 
+ // ucsIsolatePlain: an argument with no such state is isolated.
+ func ucsIsolatePlain(db *gorm.DB) {
+-	ucsFindTwice(db.Model(&User{}).Where("a = 1")) // want `isolate it with \.Session`
++	ucsFindTwice(db.Model(&User{}).Where("a = 1").Session(&gorm.Session{})) // want `isolate it with \.Session`
+ }
