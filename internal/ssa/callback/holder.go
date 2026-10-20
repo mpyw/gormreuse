@@ -90,7 +90,7 @@ func collectHolders(funcs []*ssa.Function, vars callsite.FuncVars) *holders {
 			field := holderFieldOf(x)
 			h.fieldLoads[field] = append(h.fieldLoads[field], x)
 		case *ssa.UnOp:
-			if g, ok := x.X.(*ssa.Global); ok && x.Op == token.MUL && vars[g] != nil {
+			if g, ok := x.X.(*ssa.Global); ok && x.Op == token.MUL && vars.Held(g) != nil {
 				h.varLoads[g] = append(h.varLoads[g], x)
 			}
 		case *ssa.ChangeType:
@@ -167,7 +167,7 @@ func (h *holders) heldValue(v ssa.Value) ssa.Value {
 		}
 		switch addr := x.X.(type) {
 		case *ssa.Global:
-			if fn := h.vars[addr]; fn != nil {
+			if fn := h.vars.Held(addr); fn != nil {
 				return fn
 			}
 		case *ssa.FieldAddr:
@@ -189,7 +189,7 @@ func (h *holders) feedsOnlyCallbacks(addr ssa.Value, inputs *directive.Immutable
 	var loads []ssa.Value
 	switch a := addr.(type) {
 	case *ssa.Global:
-		if h.vars[a] == nil {
+		if h.vars.Held(a) == nil {
 			return false
 		}
 		key, loads = a, h.varLoads[a]

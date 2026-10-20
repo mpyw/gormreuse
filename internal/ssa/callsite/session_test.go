@@ -104,7 +104,7 @@ func sessionCallOf(t *testing.T, pkg *ssa.Package, name string) Site {
 	if last == nil {
 		t.Fatalf("no call in %s", name)
 	}
-	return SiteOf(last, nil)
+	return SiteOf(last, FuncVars{})
 }
 
 func TestSessionEffect(t *testing.T) {

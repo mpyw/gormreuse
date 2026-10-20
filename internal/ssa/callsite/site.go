@@ -5,9 +5,10 @@
 // (f := r.m; f(x)) calls a MakeClosure over a synthetic "m$bound" wrapper; a
 // method expression (T.m(r, x)) calls a synthetic "m$thunk" wrapper that takes
 // the receiver as its first argument; a call through a package-level variable
-// that holds one function (#183) loads the variable first; a function literal
-// called in place is a MakeClosure of its own. A Site reads each of these as the call it stands for, so callers do
-// not each repeat the pattern matching.
+// that holds one function (#183), or through a local one that a closure
+// captures (#304), loads the variable first; a function literal called in
+// place is a MakeClosure of its own. A Site reads each of these as the call it
+// stands for, so callers do not each repeat the pattern matching.
 package callsite
 
 import (
@@ -85,13 +86,21 @@ type Site struct {
 }
 
 // SiteOf reads instr as a Site. vars resolves calls through package-level
-// function variables. Pass the FuncVars of the package, so a call through
-// such a variable lines up its receiver and arguments as the checker does
-// (#293); a read that cannot reach them uses SiteOfWithoutFuncVars instead.
+// and local function variables: a call through a local variable is read as
+// the call of the value it holds (FuncVars.LocalValue). Pass the FuncVars of
+// the package, so a call through such a variable lines up its receiver and
+// arguments as the checker does (#293); a read that cannot reach them uses
+// SiteOfWithoutFuncVars instead.
 func SiteOf(instr ssa.CallInstruction, vars FuncVars) Site {
 	common := instr.Common()
 	s := Site{Instr: instr, Mode: siteModeOf(instr), Args: common.Args}
-	switch v := common.Value.(type) {
+	if common.IsInvoke() {
+		s.Kind = SiteInvoke
+		return s
+	}
+	// A call through a local variable assigned once is the call of the value
+	// it holds (#304).
+	switch v := vars.LocalValue(common.Value).(type) {
 	case *ssa.Builtin:
 		s.Kind = SiteBuiltin
 		return s
@@ -100,21 +109,17 @@ func SiteOf(instr ssa.CallInstruction, vars FuncVars) Site {
 			bound.Instr, bound.Mode, bound.Args = instr, s.Mode, common.Args
 			return bound
 		}
-		s.Kind = SiteClosure
+		s.Kind, s.Callee = SiteClosure, v.Fn.(*ssa.Function)
 	case *ssa.Function:
-		s.Kind = SiteStatic
+		s.Kind, s.Callee = SiteStatic, v
 		if isSiteWrapper(v, "$thunk") {
 			s.Kind = SiteThunk
 		}
 	default:
 		s.Kind = SiteDynamic
-		if common.IsInvoke() {
-			s.Kind = SiteInvoke
+		if s.Callee = vars.globalFuncVar(v); s.Callee != nil {
+			s.Kind = SiteFuncVar
 		}
-	}
-	s.Callee = vars.callee(common)
-	if s.Kind == SiteDynamic && s.Callee != nil {
-		s.Kind = SiteFuncVar
 	}
 	s.Declared = s.Callee
 	if s.Kind == SiteThunk || s.Kind == SiteFuncVar && isSiteWrapper(s.Callee, "$thunk") {
@@ -129,13 +134,13 @@ func SiteOf(instr ssa.CallInstruction, vars FuncVars) Site {
 }
 
 // SiteOfWithoutFuncVars reads instr as a Site without resolving calls through
-// package-level function variables: such a call is a SiteDynamic with no
-// Callee. It is for reads that look only for a *gorm.DB method or a library
-// function called by name, where the FuncVars are not at hand. Every other
-// read calls SiteOf with the package's FuncVars; a test keeps SiteOf from
-// being called with a nil literal outside tests.
+// package-level or local function variables: such a call is a SiteDynamic
+// with no Callee. It is for reads that look only for a *gorm.DB method or a
+// library function called by name, where the FuncVars are not at hand. Every
+// other read calls SiteOf with the package's FuncVars; a test keeps SiteOf
+// from being called with a zero FuncVars literal outside tests.
 func SiteOfWithoutFuncVars(instr ssa.CallInstruction) Site {
-	return SiteOf(instr, nil)
+	return SiteOf(instr, FuncVars{})
 }
 
 // siteModeOf returns the mode of instr.

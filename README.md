@@ -698,6 +698,17 @@ A global that the function only reads is treated as immutable, because it usuall
 
 The body of a package-level closure (`var f = func(db *gorm.DB) { ... }`) is checked like any other closure, and the directives on it are validated. A call through `f` honours those directives when `f` is unexported, assigned only in its declaration, and its address is never taken.
 
+A local variable that holds a function is read the same way, also inside a closure that captures it, such as a closure that calls it or a recursive closure. A call through it honours the directives of the function it holds when the variable is assigned exactly once, outside any closure, and its address is never taken:
+
+```go
+//gormreuse:pure
+peek := func(q *gorm.DB) { ... }
+q := db.Where("x")
+peek(q)
+q.Find(&users)          // OK - peek is pure
+func() { peek(nil) }()  // the capture does not change that
+```
+
 ## Directives
 
 Only `//gormreuse:name[,name...]` is a directive: a line comment, lowercase names, and no space anywhere in it, including after a comma. A reason may follow after `//`, as in `//gormreuse:ignore // reason here`. `//` is the only reason separator.

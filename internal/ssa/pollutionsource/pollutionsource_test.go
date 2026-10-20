@@ -10,6 +10,7 @@ import (
 	"golang.org/x/tools/go/ssa"
 	"golang.org/x/tools/go/ssa/ssautil"
 
+	"github.com/mpyw/gormreuse/internal/ssa/callsite"
 	"github.com/mpyw/gormreuse/internal/ssa/pollutionsource"
 )
 
@@ -70,7 +71,7 @@ func leakKindsIn(fn *ssa.Function) map[pollutionsource.Kind]bool {
 	kinds := make(map[pollutionsource.Kind]bool)
 	for _, b := range fn.Blocks {
 		for _, instr := range b.Instrs {
-			if v, k := pollutionsource.Leak(instr, nil); k != pollutionsource.KindNone && v != nil {
+			if v, k := pollutionsource.Leak(instr, callsite.FuncVars{}); k != pollutionsource.KindNone && v != nil {
 				kinds[k] = true
 			}
 		}

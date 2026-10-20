@@ -8,6 +8,7 @@ import (
 
 	"golang.org/x/tools/go/ssa"
 
+	"github.com/mpyw/gormreuse/internal/ssa/callsite"
 	"github.com/mpyw/gormreuse/internal/ssa/cfg"
 )
 
@@ -57,7 +58,7 @@ func fieldBaseAddrs(root ssa.Value, seen map[ssa.Value]bool) []ssa.Value {
 	seen[root] = true
 	switch r := root.(type) {
 	case *ssa.FreeVar:
-		if binding := FreeVarBinding(r); binding != nil {
+		if binding := callsite.FreeVarBinding(r); binding != nil {
 			return fieldBaseAddrs(binding, seen)
 		}
 	case *ssa.UnOp:
@@ -66,7 +67,7 @@ func fieldBaseAddrs(root ssa.Value, seen map[ssa.Value]bool) []ssa.Value {
 		}
 		slot := r.X
 		if fv, ok := slot.(*ssa.FreeVar); ok {
-			slot = FreeVarBinding(fv)
+			slot = callsite.FreeVarBinding(fv)
 		}
 		if alloc, ok := slot.(*ssa.Alloc); ok {
 			var bases []ssa.Value

@@ -290,7 +290,8 @@ gormreuse/
 │       ├── callsite/            # What a call, go or defer instruction runs
 │       │   ├── site.go          # Site, SiteOf, EachSite: callee, receiver, arguments
 │       │   ├── session.go       # SessionEffect: what a Session/Debug call shares (#174)
-│       │   ├── funcvar.go       # FuncVars: package-level variables that hold one function
+│       │   ├── funcvar.go       # FuncVars: package-level and local variables that hold one function
+│       │   ├── freevar.go       # FreeVarBinding: the value a closure captured
 │       │   └── walk.go          # WalkInstrs: every instruction, nested closures included
 │       ├── callback/            # Functions that gorm or an immutable-input function calls back
 │       │   ├── resolve.go       # resolveMayFuncs (may-hold), resolveExactFunc (exact): what a func value is
@@ -301,7 +302,7 @@ gormreuse/
 │       │   ├── root.go          # RootTracer, NewRootTracer, RootBlock: trace dispatch, calls, immutable sources
 │       │   ├── store.go         # AllocStoredValues, FieldStoredValues: which stores reach a load
 │       │   ├── field.go         # FieldRoot, SameField: field paths and roots of returned structs
-│       │   ├── freevar.go       # FreeVarBinding: the value a closure captured
+│       │   ├── freevar.go       # traceFreeVar: roots through a closure's captured variables
 │       │   ├── phi.go           # Phi edges, loop variable swaps through Phis
 │       │   ├── pure.go          # PureVerdicts, IsPureFunction: pure calls and the arguments they return
 │       │   ├── alias.go         # FindAliasedRoots: Session/Debug copies and read-only arguments a value reads
@@ -750,6 +751,29 @@ Limitations:
 - `callsite.CollectFuncVars` maps a variable to its closure, and `callsite.SiteOf` reads a call through it as a `SiteFuncVar` site. Every reader of a call uses it, so every directive applies at the call site: `pure`, `immutable-return`, the `immutable-param` caller contract, and since #257 `immutable-input` (its callbacks are collected, and forwarding a callback to the variable keeps the promise). A Transaction callback or an `immutable-input` callback can also be held by such a variable (see "Callbacks held in a variable or a field (#257)" under [Directives](#directives)).
 
 A variable is resolved only when the package stores to it once, the stored value is a function, its address is used only to load and store it, and it is unexported. Otherwise the call may run another function: a second assignment, a write through a pointer, or an assignment in another package. An unresolved call stays a dynamic call: it pollutes its arguments, and its result is a mutable root (#176).
+
+### Local function variables (#304)
+
+A local variable that holds a function and is never captured is no variable in SSA: `f := func(...) {...}; f(x)` calls the `MakeClosure` (or the `*ssa.Function`) directly. Once a closure captures `f`, such as a closure that calls it, a recursive closure, or an IIFE that reads it, `f` lives in an `Alloc`, the closure reads it through a `FreeVar`, and each call loads it first. Before #304 `SiteOf` resolved only a static callee or a load of a package-level variable, so every call through a captured `f` was a `SiteDynamic`: its directives were dropped, the `immutable-param` caller contract was skipped, an inferred immutable-return was lost, and an `immutable-input` callback (such as the recursive `transaction` wrapper in gorm's own transaction tests) was not collected.
+
+`FuncVars.LocalValue` now resolves a load of a local `Alloc`, directly or through a chain of `FreeVar`s, to the value stored into it, and `SiteOf` reads the call as the call of that value: a `SiteClosure` for a function literal, a `SiteBound` for a method value, a `SiteStatic` or `SiteThunk` for a function. A stored load of another such variable, or of a package-level one, is followed. So the call is read exactly as the same call without the capture. The immutable-return body check (`immutableReturnClosure`) and the closure-factory rule (`closureCallOwnsRoots`) ask the same function, so there is one sole-store implementation (`funcVarSoleStore`), which replaced the body check's own copy.
+
+A variable is resolved only when:
+
+| Condition | Why |
+| --- | --- |
+| It has exactly one `Store`, in the function that declares it | A second store may give it another function. A store in a closure may run at any point |
+| Its address is only loaded, stored to, or bound to a closure, at any depth of nesting | Any other use, such as `&f` passed to a call, may write it |
+
+A read before the store holds nil, and calling it panics, so every call that runs, runs the stored value. A store in a loop stores a new closure of the same function on each iteration.
+
+`FuncVars` remembers the result for each `Alloc`, so a variable called at n sites is scanned once. The zero `FuncVars` (`SiteOfWithoutFuncVars`) resolves neither package-level nor local variables. Directive placement for a function literal is also memoized (`placement.funcLitDirectiveCache`), since a closure called at n sites asked it n times, each walking the enclosing statement.
+
+Limitations:
+
+- A variable that a branch assigns (`if c { f = g }`) or that a closure assigns stays dynamic, as before.
+- `cfg.Repeats` still counts a capturing `MakeClosure` as one site of the captured closure, so a closure called twice inside another closure is counted once (#305).
+- A closure that is stored in a variable still reads every store of a captured, reassigned variable (#251). So after `db = db.Session(&gorm.Session{})`, a factory `base := func() *gorm.DB { return db.Model(nil) }` that an IIFE also calls sees the parameter `db` too. Its second direct call is now reported, where before #304 each call was its own root. The function was reported already, at `db.Model` in the body.
 
 ## Pure Contract Validation
 

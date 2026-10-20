@@ -254,7 +254,8 @@ func closureInvocationCalls(mc *ssa.MakeClosure) []*ssa.Call {
 //
 //declscope:shared // root.go's traceCall and traceAll keep a closure factory's call as its own root
 func (t *RootTracer) closureCallOwnsRoots(call *ssa.Call, roots []ssa.Value, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) bool {
-	mc, ok := call.Call.Value.(*ssa.MakeClosure)
+	// A call through a captured local variable runs the closure it holds (#304).
+	mc, ok := t.FuncVars().LocalValue(call.Call.Value).(*ssa.MakeClosure)
 	if !ok || !t.closureRunsRepeatedly(mc) {
 		return false
 	}

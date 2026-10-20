@@ -167,7 +167,7 @@ func (t *returnTracer) value(f *frame, v ssa.Value) {
 			t.value(f.caller, f.args[i])
 		}
 	case *ssa.FreeVar:
-		t.value(f.enclosing(x), tracer.FreeVarBinding(x))
+		t.value(f.enclosing(x), callsite.FreeVarBinding(x))
 	case *ssa.UnOp:
 		if x.Op == token.MUL {
 			t.load(f, x.X)
@@ -185,7 +185,7 @@ func (t *returnTracer) load(f *frame, addr ssa.Value) {
 			t.value(f, sv)
 		}
 	case *ssa.FreeVar:
-		t.load(f.enclosing(a), tracer.FreeVarBinding(a))
+		t.load(f.enclosing(a), callsite.FreeVarBinding(a))
 	}
 }
 

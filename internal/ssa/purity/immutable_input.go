@@ -64,7 +64,7 @@ func ValidateImmutableInputs(fn *ssa.Function, set *directive.ImmutableInputSet,
 			param:     fn.Params[idx],
 			derived:   make(map[ssa.Value]bool),
 			funcCache: make(map[types.Type]bool),
-			gorm:      NewValidator(fn, nil, nil, nil, nil),
+			gorm:      NewValidator(fn, nil, nil, nil, callsite.FuncVars{}),
 		}
 		violations = append(violations, flow.check()...)
 	}

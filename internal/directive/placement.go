@@ -39,6 +39,11 @@ type placement struct {
 	//
 	//declscope:private
 	funcLitLinesCache map[*ast.File]map[int]bool
+	// funcLitDirectiveCache caches findDirectiveForFuncLit. A closure called
+	// at n sites is asked n times, and each answer walks its statement (#304).
+	//
+	//declscope:private
+	funcLitDirectiveCache map[*ast.FuncLit]token.Pos
 }
 
 // newPlacement is a placement of the directive isDirective tells, in the
@@ -53,6 +58,7 @@ func newPlacement(fset *token.FileSet, isDirective directiveChecker) placement {
 		cursors:                make(map[*ast.File]inspector.Cursor),
 		codeBeforeCommentCache: make(map[*ast.File]map[token.Pos]bool),
 		funcLitLinesCache:      make(map[*ast.File]map[int]bool),
+		funcLitDirectiveCache:  make(map[*ast.FuncLit]token.Pos),
 	}
 }
 
@@ -202,9 +208,14 @@ func (p *placement) findDirectiveForFuncLit(funcLit *ast.FuncLit) token.Pos {
 	if p.fset == nil {
 		return token.NoPos
 	}
-	return p.findMatchingDirective(funcLit, func(file *ast.File, cg *ast.CommentGroup) bool {
+	if pos, ok := p.funcLitDirectiveCache[funcLit]; ok {
+		return pos
+	}
+	pos := p.findMatchingDirective(funcLit, func(file *ast.File, cg *ast.CommentGroup) bool {
 		return p.matchesSameLineDirective(file, funcLit, cg) || p.matchesNextLineDirective(file, funcLit, cg)
 	})
+	p.funcLitDirectiveCache[funcLit] = pos
+	return pos
 }
 
 // getFileForNode returns the file added with AddFile that contains the given

@@ -118,7 +118,7 @@ func (r *funcResolver) addSliceElems(v ssa.Value) {
 			}
 		}
 	case *ssa.FreeVar:
-		r.addSliceElems(tracer.FreeVarBinding(x))
+		r.addSliceElems(callsite.FreeVarBinding(x))
 	case *ssa.ChangeType:
 		r.addSliceElems(x.X)
 	}
@@ -171,7 +171,7 @@ func (r *funcResolver) addFunc(v ssa.Value) {
 			}
 		}
 	case *ssa.FreeVar:
-		r.addFunc(tracer.FreeVarBinding(x))
+		r.addFunc(callsite.FreeVarBinding(x))
 	}
 }
 
@@ -187,7 +187,7 @@ func (r *funcResolver) storedValues(addr ssa.Value) []ssa.Value {
 		// over-approximation stays on the reporting side.
 		return tracer.FieldStoredValues(a, nil)
 	case *ssa.FreeVar:
-		return r.storedValues(tracer.FreeVarBinding(a))
+		return r.storedValues(callsite.FreeVarBinding(a))
 	case *ssa.Global:
 		return r.globalStoredValues(a)
 	}
