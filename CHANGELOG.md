@@ -2,7 +2,7 @@
 
 These notes say what changes for users in each release, and what to do about it. The full commit list of each release is on [GitHub Releases](https://github.com/mpyw/gormreuse/releases). Releases up to 0.22.0 have their notes there only.
 
-## Unreleased (planned as 0.23.0)
+## 0.23.0 (2026-10-20)
 
 gormreuse now follows a `*gorm.DB` through far more code. It also reads directives across packages. It infers `immutable-return` for most connection helpers, and `immutable-param` and `immutable-input` for most helpers that only get fresh handles. It no longer counts methods such as `AddError` as a branch. `-fix` offers fewer fixes, but each one compiles and keeps every condition.
 
