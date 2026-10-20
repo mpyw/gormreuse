@@ -37,7 +37,7 @@ func (g *Generator) findReassignTarget(root ssa.Value, uses []pollution.UsageInf
 		return nil
 	}
 	for _, use := range uses {
-		call := findCallAtLparen(g.fileCursor(file), use.Pos)
+		call := g.callAtLparen(file, use.Pos)
 		if call == nil || !g.mentionsReassignTarget(call, v) {
 			return nil
 		}
@@ -64,10 +64,23 @@ func (g *Generator) varToReassign(root ssa.Value) *types.Var {
 	if file == nil {
 		return nil
 	}
-	isRoot := func(e ast.Expr) bool {
-		call, ok := ast.Unparen(e).(*ast.CallExpr)
-		return ok && call.Lparen == pos
+	id, ok := ast.Unparen(g.reassignLHS(file)[pos]).(*ast.Ident)
+	if !ok {
+		return nil
 	}
+	v, _ := g.pass.TypesInfo.ObjectOf(id).(*types.Var)
+	return v
+}
+
+// reassignLHS maps the Lparen of each call that `v := <call>`, `v = <call>`
+// or `var v = <call>` assigns in file to its left-hand side, built on first
+// use, so the variable of each of n roots is found without walking the file n
+// times (#350).
+func (g *Generator) reassignLHS(file *ast.File) map[token.Pos]ast.Expr {
+	if assigned, ok := g.assigned[file]; ok {
+		return assigned
+	}
+	assigned := make(map[token.Pos]ast.Expr)
 	for c := range g.fileCursor(file).Preorder((*ast.AssignStmt)(nil), (*ast.ValueSpec)(nil)) {
 		var lhs []ast.Expr
 		var rhs []ast.Expr
@@ -84,18 +97,18 @@ func (g *Generator) varToReassign(root ssa.Value) *types.Var {
 			continue
 		}
 		for i, e := range rhs {
-			if !isRoot(e) {
-				continue
+			if call, ok := ast.Unparen(e).(*ast.CallExpr); ok {
+				if _, seen := assigned[call.Lparen]; !seen {
+					assigned[call.Lparen] = lhs[i]
+				}
 			}
-			id, ok := ast.Unparen(lhs[i]).(*ast.Ident)
-			if !ok {
-				return nil
-			}
-			v, _ := g.pass.TypesInfo.ObjectOf(id).(*types.Var)
-			return v
 		}
 	}
-	return nil
+	if g.assigned == nil {
+		g.assigned = make(map[*ast.File]map[token.Pos]ast.Expr)
+	}
+	g.assigned[file] = assigned
+	return assigned
 }
 
 // mentionsReassignTarget reports whether an identifier in n refers to v, a

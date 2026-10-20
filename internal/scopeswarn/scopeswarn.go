@@ -10,6 +10,7 @@ import (
 
 	"golang.org/x/tools/go/ssa"
 
+	"github.com/mpyw/gormreuse/internal/effort"
 	"github.com/mpyw/gormreuse/internal/ssa/callsite"
 	"github.com/mpyw/gormreuse/internal/ssa/tracer"
 	"github.com/mpyw/gormreuse/internal/typeutil"
@@ -101,27 +102,52 @@ var chainMethods = map[string]bool{
 	"Session": true, "WithContext": true, "Debug": true,
 }
 
+// ReadOnlyChains answers ReadsOnly for the Scopes calls of a package. It keeps
+// the answer for each call of a chain, so the n Scopes calls of one chain
+// walk it once, not once each (#350).
+type ReadOnlyChains struct {
+	vars  callsite.FuncVars
+	known map[*ssa.Call]bool
+}
+
+// NewReadOnlyChains returns a ReadOnlyChains that resolves calls through
+// package-level function variables with vars.
+func NewReadOnlyChains(vars callsite.FuncVars) *ReadOnlyChains {
+	return &ReadOnlyChains{vars: vars, known: make(map[*ssa.Call]bool)}
+}
+
 // ReadsOnly reports whether site, a Scopes call, provably runs its callbacks
 // only for a finisher that reads: every use of its result, and of each chain
 // method after it, is the receiver of another chain method or of a read
 // finisher, and the chain has a use. A result that is stored, passed, returned
 // or discarded may reach Create, Update or Delete, so it does not read only.
-func ReadsOnly(site callsite.Site, vars callsite.FuncVars) bool {
+func (c *ReadOnlyChains) ReadsOnly(site callsite.Site) bool {
 	call, ok := site.Instr.(*ssa.Call)
-	return ok && chainReadsOnly(call, vars)
+	return ok && c.chainReadsOnly(call)
 }
 
-func chainReadsOnly(v *ssa.Call, vars callsite.FuncVars) bool {
+func (c *ReadOnlyChains) chainReadsOnly(v *ssa.Call) bool {
+	if readsOnly, ok := c.known[v]; ok {
+		return readsOnly
+	}
+	readsOnly := c.walkReadsOnly(v)
+	c.known[v] = readsOnly
+	return readsOnly
+}
+
+// walkReadsOnly is chainReadsOnly without the memo.
+func (c *ReadOnlyChains) walkReadsOnly(v *ssa.Call) bool {
 	refs := *v.Referrers()
 	if len(refs) == 0 {
 		return false
 	}
 	for _, ref := range refs {
+		effort.Step()
 		call, ok := ref.(*ssa.Call)
 		if !ok {
 			return false
 		}
-		site := callsite.SiteOf(call, vars)
+		site := callsite.SiteOf(call, c.vars)
 		if !site.IsGormMethod() || site.Recv != ssa.Value(v) {
 			return false
 		}
@@ -129,7 +155,7 @@ func chainReadsOnly(v *ssa.Call, vars callsite.FuncVars) bool {
 		if readFinishers[method] {
 			continue
 		}
-		if !chainMethods[method] || !typeutil.IsGormDB(call.Type()) || !chainReadsOnly(call, vars) {
+		if !chainMethods[method] || !typeutil.IsGormDB(call.Type()) || !c.chainReadsOnly(call) {
 			return false
 		}
 	}

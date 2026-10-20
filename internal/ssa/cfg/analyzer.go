@@ -62,6 +62,8 @@ package cfg
 
 import (
 	"golang.org/x/tools/go/ssa"
+
+	"github.com/mpyw/gormreuse/internal/effort"
 )
 
 // Analyzer provides control flow graph analysis for SSA functions.
@@ -160,6 +162,7 @@ func (a *Analyzer) reachSet(fn *ssa.Function, src *ssa.BasicBlock) []uint64 {
 	queue[0] = src
 	for i := 0; i < len(queue); i++ {
 		for _, succ := range queue[i].Succs {
+			effort.Step()
 			if set[succ.Index/64]&(1<<(succ.Index%64)) == 0 {
 				set[succ.Index/64] |= 1 << (succ.Index % 64)
 				queue = append(queue, succ)
@@ -182,6 +185,7 @@ func reachOutsideAnalyzer(src, dst *ssa.BasicBlock) bool {
 		queue = queue[1:]
 
 		for _, succ := range block.Succs {
+			effort.Step()
 			if succ == dst {
 				return true
 			}

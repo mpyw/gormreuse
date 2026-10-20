@@ -46,18 +46,35 @@ func withClosures(fn *ssa.Function) []*ssa.Function {
 //declscope:shared // reassign.go's findReassignTarget rejects a captured variable
 func (g *Generator) capturedByClosure(file *ast.File, v *types.Var) bool {
 	cur, _ := g.fileCursor(file).FindByPos(v.Pos(), v.Pos())
-	declFn := enclosingFuncOrClosure(cur)
+	return g.closureCaptures(enclosingFuncOrClosure(cur))[v]
+}
+
+// closureCaptures returns the variables that a closure inside declFn refers to,
+// other than an immediately invoked one, building them on first use. The
+// answer for a variable declared in declFn is capturedByClosure's. The
+// function is scanned once, not once per variable (#350).
+func (g *Generator) closureCaptures(declFn inspector.Cursor) map[*types.Var]bool {
+	if captured, ok := g.captured[declFn]; ok {
+		return captured
+	}
+	captured := make(map[*types.Var]bool)
 	for c := range declFn.Preorder((*ast.Ident)(nil)) {
-		if g.pass.TypesInfo.Uses[c.Node().(*ast.Ident)] != v {
+		v, ok := g.pass.TypesInfo.Uses[c.Node().(*ast.Ident)].(*types.Var)
+		if !ok || captured[v] {
 			continue
 		}
 		for fn := enclosingFuncOrClosure(c); fn != declFn; fn = enclosingFuncOrClosure(fn.Parent()) {
 			if !isInlineCall(fn) {
-				return true
+				captured[v] = true
+				break
 			}
 		}
 	}
-	return false
+	if g.captured == nil {
+		g.captured = make(map[inspector.Cursor]map[*types.Var]bool)
+	}
+	g.captured[declFn] = captured
+	return captured
 }
 
 // enclosingFuncOrClosure returns the innermost function declaration or literal

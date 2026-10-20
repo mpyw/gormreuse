@@ -54,6 +54,17 @@ type ImmutableReturnValidator struct {
 	// distrusted reports the functions whose results count as provably
 	// mutable (see Distrusting). It is nil for the body check.
 	distrusted func(*ssa.Function) bool
+	// assignedMutable memoizes AssignedMutable per variable (#350). The
+	// copies that Distrusting makes do not share it, since distrust changes
+	// the answer.
+	assignedMutable map[immutableReturnAssignedVar]bool
+}
+
+// immutableReturnAssignedVar is the variable that AssignedMutable answers for: a
+// package-level variable or a struct field.
+type immutableReturnAssignedVar struct {
+	global *ssa.Global
+	field  *types.Var
 }
 
 // NewImmutableReturnValidator returns a validator for the functions in set.
@@ -62,7 +73,7 @@ type ImmutableReturnValidator struct {
 // sources (including other immutable-return functions and immutable-param'd
 // parameters) correctly.
 func NewImmutableReturnValidator(funcs []*ssa.Function, set *directive.DirectiveFuncSet, rt *tracer.RootTracer) *ImmutableReturnValidator {
-	return &ImmutableReturnValidator{set: set, rt: rt, funcs: funcs, assigned: &immutableReturnAssignments{}}
+	return &ImmutableReturnValidator{set: set, rt: rt, funcs: funcs, assigned: &immutableReturnAssignments{}, assignedMutable: make(map[immutableReturnAssignedVar]bool)}
 }
 
 // Distrusting returns a validator like v that uses rt, a tracer that does not
@@ -74,6 +85,7 @@ func (v *ImmutableReturnValidator) Distrusting(rt *tracer.RootTracer, distrusted
 	d := *v
 	d.rt = rt
 	d.distrusted = distrusted
+	d.assignedMutable = make(map[immutableReturnAssignedVar]bool)
 	return &d
 }
 
@@ -215,19 +227,34 @@ func (v *ImmutableReturnValidator) rootMutable(root ssa.Value, seen map[ssa.Valu
 // assign the chain before it calls the getter. It is true for a global whose
 // address escapes. A store in another package, or through a field address
 // that escapes, is not seen. Any other read has no stores.
+//
+// The answer depends only on the variable, so it is kept per variable: n
+// getters of one field assigned n times check the n stores once, not once
+// per getter (#350).
 func (v *ImmutableReturnValidator) AssignedMutable(read *ssa.UnOp) bool {
 	a := v.assignments(read.Parent().Pkg)
-	var stores []ssa.Value
+	var key immutableReturnAssignedVar
 	switch addr := read.X.(type) {
 	case *ssa.Global:
 		if a.escaped[addr] {
 			return true
 		}
-		stores = a.globals[addr]
+		key.global = addr
 	case *ssa.FieldAddr:
-		stores = a.fields[immutableReturnField(addr.X.Type(), addr.Field)]
+		key.field = immutableReturnField(addr.X.Type(), addr.Field)
+	default:
+		return false
 	}
-	return slices.ContainsFunc(stores, func(val ssa.Value) bool { return v.valueMutable(val, make(map[ssa.Value]bool)) })
+	if mutable, ok := v.assignedMutable[key]; ok {
+		return mutable
+	}
+	stores := a.fields[key.field]
+	if key.global != nil {
+		stores = a.globals[key.global]
+	}
+	mutable := slices.ContainsFunc(stores, func(val ssa.Value) bool { return v.valueMutable(val, make(map[ssa.Value]bool)) })
+	v.assignedMutable[key] = mutable
+	return mutable
 }
 
 // globalMutable reports whether the package-level variable g provably holds a

@@ -44,6 +44,7 @@ import (
 
 	"golang.org/x/tools/go/ssa"
 
+	"github.com/mpyw/gormreuse/internal/effort"
 	"github.com/mpyw/gormreuse/internal/ssa/callsite"
 	"github.com/mpyw/gormreuse/internal/ssa/cfg"
 	"github.com/mpyw/gormreuse/internal/ssa/origin"
@@ -79,6 +80,12 @@ type Context struct {
 	// ordered by the call-site (execution) position rather than the closure's
 	// (earlier) body position — the define-early/call-late case of #68.
 	PosOverride token.Pos
+
+	// assignMerges memoizes, for each call isAssignment walked to the end,
+	// the merges its result reaches, and mergeFree the values whose result
+	// reaches none (#350). Neither depends on the root asked about.
+	assignMerges map[*ssa.Call][]ssa.Value
+	mergeFree    map[ssa.Value]bool
 }
 
 // pos returns the effective source position to record for a use: the
@@ -118,17 +125,35 @@ func (c *Context) pos(raw token.Pos) token.Pos {
 // merged value traces back to root, so polluting root here would report that
 // use as a false second branch. Any other merge is a different variable, and
 // the call is a branch of root like any other.
+//
+// The merges a call reaches do not depend on root, so a walk that ends without
+// finding root keeps them for the call's other roots. A walk that finds no
+// merge at all marks every value it went through, and a later walk does not
+// go through them again: a chain of n reassignments is walked once, not once
+// per call (#350).
 func isAssignment(call *ssa.Call, root ssa.Value, ctx *Context) bool {
 	if isLoopFieldRebuild(call, ctx) {
 		return true
 	}
+	holdsRoot := func(merge ssa.Value) bool { return ctx.RootTracer.HasMutableRoot(merge, ctx.LoopInfo, root) }
+	if merges, ok := ctx.assignMerges[call]; ok {
+		return slices.ContainsFunc(merges, holdsRoot)
+	}
+	if ctx.mergeFree[call] {
+		return false
+	}
+	var merges []ssa.Value
 	visited := map[ssa.Value]bool{call: true}
 	work := []ssa.Value{call}
 	for len(work) > 0 {
 		v := work[len(work)-1]
 		work = work[:len(work)-1]
+		if v != ssa.Value(call) && ctx.mergeFree[v] {
+			continue
+		}
 
 		for _, user := range *v.Referrers() {
+			effort.Step()
 			var next, merge ssa.Value
 			switch u := user.(type) {
 			case *ssa.Phi:
@@ -157,8 +182,11 @@ func isAssignment(call *ssa.Call, root ssa.Value, ctx *Context) bool {
 					next = u
 				}
 			}
-			if merge != nil && ctx.RootTracer.HasMutableRoot(merge, ctx.LoopInfo, root) {
-				return true
+			if merge != nil {
+				merges = append(merges, merge)
+				if holdsRoot(merge) {
+					return true
+				}
 			}
 			if next != nil && !visited[next] {
 				visited[next] = true
@@ -167,6 +195,16 @@ func isAssignment(call *ssa.Call, root ssa.Value, ctx *Context) bool {
 		}
 	}
 
+	if ctx.assignMerges == nil {
+		ctx.assignMerges = make(map[*ssa.Call][]ssa.Value)
+		ctx.mergeFree = make(map[ssa.Value]bool)
+	}
+	ctx.assignMerges[call] = merges
+	if len(merges) == 0 {
+		for v := range visited {
+			ctx.mergeFree[v] = true
+		}
+	}
 	return false
 }
 

@@ -1,12 +1,14 @@
 package tracer
 
 import (
+	"cmp"
 	"go/token"
 	"slices"
 	"strconv"
 
 	"golang.org/x/tools/go/ssa"
 
+	"github.com/mpyw/gormreuse/internal/effort"
 	"github.com/mpyw/gormreuse/internal/ssa/callsite"
 	"github.com/mpyw/gormreuse/internal/ssa/cfg"
 )
@@ -327,21 +329,40 @@ func (m *storeMemo) searchYieldStores(target storeTarget, path []int, mc *ssa.Ma
 
 // AllocStoredValues returns, in program order, the values stored into alloc.
 // Shared by traceAllocStore (first), traceAllAllocStores (all), the Scopes
-// callback resolver, and scopeswarn.
+// callback resolver, and scopeswarn. It reads the referrers of alloc, not
+// every instruction of its function, so a function with n such variables is
+// not scanned n times (#350).
 func AllocStoredValues(alloc *ssa.Alloc) []ssa.Value {
 	fn := alloc.Parent()
-	if fn == nil {
+	if fn == nil || alloc.Referrers() == nil {
 		return nil
 	}
-	var vals []ssa.Value
-	for _, block := range fn.Blocks {
-		for _, instr := range block.Instrs {
-			if store, ok := instr.(*ssa.Store); ok && store.Addr == alloc {
-				vals = append(vals, store.Val)
-			}
+	type indexed struct {
+		block, instr int
+		val          ssa.Value
+	}
+	var stores []indexed
+	for _, ref := range *alloc.Referrers() {
+		// A store in a block that SSA removed as unreachable is not one.
+		store, ok := ref.(*ssa.Store)
+		if !ok || store.Addr != ssa.Value(alloc) || !storeBlockInFunction(fn, store.Block()) {
+			continue
 		}
+		stores = append(stores, indexed{store.Block().Index, slices.Index(store.Block().Instrs, ssa.Instruction(store)), store.Val})
+	}
+	slices.SortFunc(stores, func(a, b indexed) int {
+		return cmp.Or(cmp.Compare(a.block, b.block), cmp.Compare(a.instr, b.instr))
+	})
+	vals := make([]ssa.Value, 0, len(stores))
+	for _, store := range stores {
+		vals = append(vals, store.val)
 	}
 	return vals
+}
+
+// storeBlockInFunction reports whether block is one of fn's blocks.
+func storeBlockInFunction(fn *ssa.Function, block *ssa.BasicBlock) bool {
+	return block != nil && block.Index < len(fn.Blocks) && fn.Blocks[block.Index] == block
 }
 
 // FieldStoredValues returns, in program order, the values stored into the same
@@ -761,6 +782,7 @@ func (m *storeMemo) walkFieldStoresBack(target storeTarget, path []int, block *s
 			continue
 		}
 		visitedBlocks[block] = true
+		effort.Step()
 		instrs, defined := fieldStoreDefTail(target, block.Instrs)
 		start := len(found)
 		var written bool
