@@ -229,6 +229,13 @@ func (db *DB) DB() (interface{}, error) { return nil, nil }
 // Get reads a value from Statement.Settings.
 func (db *DB) Get(key string) (interface{}, bool) { return nil, false }
 
+// Set stores a value in Statement.Settings, which a clone copies.
+func (db *DB) Set(key string, value interface{}) *DB { return db }
+
+// InstanceSet stores a value under a key that holds the Statement's
+// address, so a clone of the Statement does not find it.
+func (db *DB) InstanceSet(key string, value interface{}) *DB { return db }
+
 // InstanceGet reads a value that InstanceSet stored for this Statement.
 func (db *DB) InstanceGet(key string) (interface{}, bool) { return nil, false }
 

@@ -445,3 +445,19 @@ func TestContainsGormDBCycleDetection(t *testing.T) {
 		t.Error("containsGormDB(Recursive) should return false")
 	}
 }
+
+func TestIsFinisher(t *testing.T) {
+	t.Parallel()
+	finishers := []string{"Find", "First", "Count", "Create", "Save", "Delete", "Exec", "Transaction", "Scan", "Rows", "Commit", "Rollback", "SavePoint", "RollbackTo", "FindInBatches", "CreateInBatches", "UpdateColumn", "UpdateColumns"}
+	for _, m := range finishers {
+		if !IsFinisher(m) {
+			t.Errorf("%q should be a finisher", m)
+		}
+	}
+	nonFinishers := []string{"Where", "Order", "Limit", "Session", "WithContext", "Preload", "Scopes", ""}
+	for _, m := range nonFinishers {
+		if IsFinisher(m) {
+			t.Errorf("%q should not be a finisher", m)
+		}
+	}
+}

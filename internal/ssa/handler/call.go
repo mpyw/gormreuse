@@ -531,7 +531,7 @@ func (u siteUse) handleArgs() {
 		// branching interferes because the value is not isolated. It holds
 		// for a deferred or spawned call as for a plain one (#192).
 		if checksImmutableParamArg(site, i, ctx) {
-			ctx.Tracker.AddContractViolation(u.pos, immutableParamContractMessage(ctx.RootTracer.FuncName(site.Callee)), site.Instr, p)
+			ctx.Tracker.AddContractViolation(u.pos, immutableParamContractMessage(ctx.RootTracer.FuncName(site.Callee), ctx.RootTracer.SessionDropsState(gormArg)), site.Instr, p)
 		}
 
 		// The function may change the argument in place, so even an
@@ -578,10 +578,14 @@ func BreaksImmutableParam(site callsite.Site, i int, rt *tracer.RootTracer, loop
 
 // immutableParamContractMessage builds the diagnostic for passing a mutable
 // *gorm.DB to a //gormreuse:immutable-param parameter of the function named
-// name.
-func immutableParamContractMessage(name string) string {
-	return "mutable *gorm.DB passed to //gormreuse:immutable-param parameter of " + name +
-		"; isolate it with .Session(&gorm.Session{}) before passing"
+// name. When a Session would drop state the argument carries (dropsState,
+// see tracer.RootTracer.SessionDropsState), it does not advise one (#344).
+func immutableParamContractMessage(name string, dropsState bool) string {
+	msg := "mutable *gorm.DB passed to //gormreuse:immutable-param parameter of " + name
+	if dropsState {
+		return msg + "; a Session would drop its Attrs, Assign or InstanceSet, so pass a value built for this call instead"
+	}
+	return msg + "; isolate it with .Session(&gorm.Session{}) before passing"
 }
 
 // sendHandler handles *ssa.Send instructions.

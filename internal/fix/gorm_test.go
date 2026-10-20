@@ -90,19 +90,3 @@ func checkGormNameSource(t *testing.T, src string) (*Generator, *ast.File, token
 type gormStubImporter func(path string) (*types.Package, error)
 
 func (f gormStubImporter) Import(path string) (*types.Package, error) { return f(path) }
-
-func TestIsGormFinisher(t *testing.T) {
-	t.Parallel()
-	finishers := []string{"Find", "First", "Count", "Create", "Save", "Delete", "Exec", "Transaction", "Scan", "Rows", "Commit", "Rollback", "SavePoint", "RollbackTo", "FindInBatches", "CreateInBatches", "UpdateColumn", "UpdateColumns"}
-	for _, m := range finishers {
-		if !isGormFinisher(m) {
-			t.Errorf("%q should be a finisher", m)
-		}
-	}
-	nonFinishers := []string{"Where", "Order", "Limit", "Session", "WithContext", "Preload", "Scopes", ""}
-	for _, m := range nonFinishers {
-		if isGormFinisher(m) {
-			t.Errorf("%q should not be a finisher", m)
-		}
-	}
-}

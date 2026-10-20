@@ -109,44 +109,6 @@ func gormImportEdit(file *ast.File, name string) analysis.TextEdit {
 	}
 }
 
-// isGormFinisher checks if a method name is a GORM finisher method.
-//
-//declscope:shared // reassign.go's discardedChainToReassign and change.go's carriesRootChanges stop at a finisher
-func isGormFinisher(methodName string) bool {
-	finishers := map[string]bool{
-		"Find":          true,
-		"First":         true,
-		"Last":          true,
-		"Take":          true,
-		"Count":         true,
-		"Pluck":         true,
-		"Scan":          true,
-		"Row":           true,
-		"Rows":          true,
-		"ScanRows":      true,
-		"Create":        true,
-		"Save":          true,
-		"Update":        true,
-		"Updates":       true,
-		"Delete":        true,
-		"Exec":          true,
-		"Transaction":   true,
-		"FirstOrCreate": true, // terminal (executes); #71 secondary
-		"FirstOrInit":   true, // terminal (executes); #71 secondary
-		// These return *gorm.DB but run SQL or end a transaction, so a
-		// discarded call is not a chain to reassign (#200).
-		"CreateInBatches": true,
-		"FindInBatches":   true,
-		"UpdateColumn":    true,
-		"UpdateColumns":   true,
-		"Commit":          true,
-		"Rollback":        true,
-		"SavePoint":       true,
-		"RollbackTo":      true,
-	}
-	return finishers[methodName]
-}
-
 // isGormStateField reports whether fa takes the Error, RowsAffected or
 // Statement field of a *gorm.DB.
 //

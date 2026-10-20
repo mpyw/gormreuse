@@ -38,9 +38,7 @@ var gormStubOmitted = map[string]string{
 	// Chain methods. The analyzer treats a gorm method that returns *gorm.DB
 	// and is not Session, WithContext, Debug, Open, Begin or Transaction as a
 	// chain method, so these need no fixture of their own.
-	"InstanceSet": "chain method",
-	"MapColumns":  "chain method",
-	"Set":         "chain method",
+	"MapColumns": "chain method",
 }
 
 // TestGormStubMatchesGorm checks the gorm stub that the analyzer tests load
@@ -410,12 +408,18 @@ func TestGormReceiverUsesMatchGorm(t *testing.T) {
 // analyzer's source: this module does not import the analyzer.
 func gormReceiverUses(t *testing.T) map[string]bool {
 	t.Helper()
-	path := filepath.Join("..", "..", "internal", "typeutil", "gorm.go")
+	return gormStringKeys(t, filepath.Join("..", "..", "internal", "typeutil", "gorm.go"), "receiverUses")
+}
+
+// gormStringKeys returns the string keys of the map literal that the
+// package-level variable name holds in the analyzer's file path.
+func gormStringKeys(t *testing.T, path, name string) map[string]bool {
+	t.Helper()
 	f, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
 	if err != nil {
 		t.Fatalf("parse %s: %v", path, err)
 	}
-	uses := map[string]bool{}
+	keys := map[string]bool{}
 	for _, decl := range f.Decls {
 		gen, ok := decl.(*ast.GenDecl)
 		if !ok || gen.Tok != token.VAR {
@@ -423,25 +427,104 @@ func gormReceiverUses(t *testing.T) map[string]bool {
 		}
 		for _, spec := range gen.Specs {
 			vs := spec.(*ast.ValueSpec)
-			if len(vs.Names) != 1 || vs.Names[0].Name != "receiverUses" || len(vs.Values) != 1 {
+			if len(vs.Names) != 1 || vs.Names[0].Name != name || len(vs.Values) != 1 {
 				continue
 			}
 			lit, _ := vs.Values[0].(*ast.CompositeLit)
 			if lit == nil {
-				t.Fatalf("receiverUses in %s is not a map literal", path)
+				t.Fatalf("%s in %s is not a map literal", name, path)
 			}
 			for _, elt := range lit.Elts {
 				key := elt.(*ast.KeyValueExpr).Key.(*ast.BasicLit)
-				name, err := strconv.Unquote(key.Value)
+				k, err := strconv.Unquote(key.Value)
 				if err != nil {
-					t.Fatalf("receiverUses key %s: %v", key.Value, err)
+					t.Fatalf("%s key %s: %v", name, key.Value, err)
 				}
-				uses[name] = true
+				keys[k] = true
 			}
 		}
 	}
-	if len(uses) == 0 {
-		t.Fatalf("find receiverUses in %s", path)
+	if len(keys) == 0 {
+		t.Fatalf("find %s in %s", name, path)
 	}
-	return uses
+	return keys
+}
+
+// statementUncloned are the fields of gorm.Statement that Statement.clone()
+// does not copy, with what sets them. The analyzer acts on the ones that a
+// chain method sets: attrs (Attrs) and assigns (Assign).
+var statementUncloned = map[string]string{
+	"DB":           "the clone points at its new *gorm.DB",
+	"BuildClauses": "set by a finisher's callbacks while they build the SQL",
+	"CurDestIndex": "set while rows are scanned",
+	"attrs":        "set by Attrs, read by FirstOrInit and FirstOrCreate",
+	"assigns":      "set by Assign, read by FirstOrInit and FirstOrCreate",
+}
+
+// statementCloned are the fields that Statement.clone() copies, with a note
+// where the copy is partial.
+var statementCloned = map[string]string{
+	"TableExpr":            "",
+	"Table":                "",
+	"Model":                "",
+	"Unscoped":             "",
+	"Dest":                 "",
+	"ReflectValue":         "",
+	"Clauses":              "",
+	"Distinct":             "",
+	"Selects":              "",
+	"Omits":                "",
+	"ColumnMapping":        "",
+	"Joins":                "",
+	"Preloads":             "",
+	"Settings":             "each entry, but InstanceSet's keys hold the old Statement's address (TestUnclonedState_InstanceSetLost)",
+	"ConnPool":             "",
+	"Schema":               "",
+	"Context":              "",
+	"RaiseErrorOnNotFound": "",
+	"SkipHooks":            "",
+	"SQL":                  "",
+	"Vars":                 "only when SQL is not empty",
+	"scopes":               "",
+	"Result":               "",
+}
+
+// TestGormStatementFieldsClassified checks statementCloned and
+// statementUncloned against the real gorm.Statement: every field is in
+// exactly one (#344). A field that gorm adds fails the test until it is
+// classified, so a new field that a Session drops is noticed when Dependabot
+// bumps gorm. TestUnclonedState_StatementFields checks the lists at run time.
+// Each method of the analyzer's unclonedStateMethods must be a method of
+// *gorm.DB and of the stub.
+func TestGormStatementFieldsClassified(t *testing.T) {
+	fields := map[string]bool{}
+	for f := range reflect.TypeFor[gorm.Statement]().Fields() {
+		fields[f.Name] = true
+		_, cloned := statementCloned[f.Name]
+		_, uncloned := statementUncloned[f.Name]
+		switch {
+		case cloned && uncloned:
+			t.Errorf("Statement.%s is in statementCloned and statementUncloned; keep one", f.Name)
+		case !cloned && !uncloned:
+			t.Errorf("gorm.Statement has %s, which neither list classifies; check whether Statement.clone() copies it, and whether a chain method sets it (#344)", f.Name)
+		}
+	}
+	for _, list := range []map[string]string{statementCloned, statementUncloned} {
+		for _, name := range slices.Sorted(maps.Keys(list)) {
+			if !fields[name] {
+				t.Errorf("a list of Statement fields has %s, but gorm.Statement has no such field", name)
+			}
+		}
+	}
+
+	methods := gormStringKeys(t, filepath.Join("..", "..", "internal", "ssa", "tracer", "state.go"), "unclonedStateMethods")
+	stub, real := gormStubMethods(t), gormRealMethods()
+	for _, name := range slices.Sorted(maps.Keys(methods)) {
+		if _, ok := real[name]; !ok {
+			t.Errorf("unclonedStateMethods lists %s, but *gorm.DB has no such method", name)
+		}
+		if _, ok := stub[name]; !ok {
+			t.Errorf("unclonedStateMethods lists %s, but the stub does not declare it", name)
+		}
+	}
 }

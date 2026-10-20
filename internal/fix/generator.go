@@ -52,6 +52,7 @@ import (
 	"github.com/mpyw/gormreuse/internal/ssa/cfg"
 	"github.com/mpyw/gormreuse/internal/ssa/origin"
 	"github.com/mpyw/gormreuse/internal/ssa/pollution"
+	"github.com/mpyw/gormreuse/internal/ssa/pollutionsource"
 	"github.com/mpyw/gormreuse/internal/ssa/tracer"
 	"github.com/mpyw/gormreuse/internal/typeutil"
 )
@@ -222,23 +223,13 @@ func (g *Generator) Generate(v pollution.Violation) []analysis.SuggestedFix {
 	// The original root is Phi-aware (Session on each incoming edge); a virtual
 	// root created by a reassignment gets Session appended at its creation site
 	// (e.g. q = q.Where("a").Session(&gorm.Session{})) — #71 defect 2.
-	var sites []sessionSite
-	for _, vr := range rootsNeedingSession {
-		switch {
-		case vr.isOriginal && isParam:
-			if fallback == nil {
-				sites = append(sites, g.paramSessionSite(p))
-			}
-			for _, pos := range g.mergedSessionPositions(p, allUses) {
-				sites = append(sites, sessionSite{pos: pos})
-			}
-		case vr.isOriginal:
-			for _, pos := range g.sessionPositionsForRoot(vr.pos, root, allUses) {
-				sites = append(sites, sessionSite{pos: pos})
-			}
-		case !g.virtualRootEndsImmutable(vr):
-			sites = append(sites, sessionSite{pos: vr.end})
-		}
+	sites := g.rootSessionSites(root, rootsNeedingSession, allUses, fallback != nil)
+
+	// A Session drops the Attrs, Assign and InstanceSet state of the
+	// Statement it copies, so no Session is written for a root that may
+	// carry it (#344). A reassignment alone changes nothing at run time.
+	if len(sites) > 0 && g.tracer.SessionDropsState(root) {
+		return fallback
 	}
 
 	// PHASE 3: Write the Sessions, with a gorm import when they need one. Each
@@ -267,6 +258,33 @@ func (g *Generator) Generate(v pollution.Violation) []analysis.SuggestedFix {
 	}
 }
 
+// rootSessionSites returns where the Sessions go for roots, the original
+// root and the roots its reassignments create that need one. A parameter
+// declared immutable-param (declared) gets no Session of its own, only on
+// the values merged with it.
+func (g *Generator) rootSessionSites(root ssa.Value, roots []virtualRootKey, allUses []pollution.UsageInfo, declared bool) []sessionSite {
+	var sites []sessionSite
+	p, isParam := root.(*ssa.Parameter)
+	for _, vr := range roots {
+		switch {
+		case vr.isOriginal && isParam:
+			if !declared {
+				sites = append(sites, g.paramSessionSite(p))
+			}
+			for _, pos := range g.mergedSessionPositions(p, allUses) {
+				sites = append(sites, sessionSite{pos: pos})
+			}
+		case vr.isOriginal:
+			for _, pos := range g.sessionPositionsForRoot(vr.pos, root, allUses) {
+				sites = append(sites, sessionSite{pos: pos})
+			}
+		case !g.virtualRootEndsImmutable(vr):
+			sites = append(sites, sessionSite{pos: vr.end})
+		}
+	}
+	return sites
+}
+
 // GenerateIsolation returns the fix for a violation of the caller-side
 // immutable-param contract: .Session(&gorm.Session{}) after the mutable
 // argument, as the diagnostic says (#248). The Session result is immutable,
@@ -293,6 +311,11 @@ func (g *Generator) GenerateIsolation(v pollution.Violation) []analysis.Suggeste
 		}
 	}
 	if arg == nil {
+		return nil
+	}
+	// The Session would drop the Attrs, Assign or InstanceSet state the
+	// argument carries (#344).
+	if ssaArg, ok := pollutionsource.UnwrapGormDB(v.Call.Common().Args[len(v.Call.Common().Args)-len(g.tracer.Site(v.Call).Args)+v.Param]); ok && g.tracer.SessionDropsState(ssaArg) {
 		return nil
 	}
 

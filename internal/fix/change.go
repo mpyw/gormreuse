@@ -91,7 +91,7 @@ func (g *Generator) changedElsewhere(v pollution.Violation) bool {
 // it.
 func (g *Generator) statementRootChange(instr ssa.CallInstruction, root ssa.Value, loopInfo *cfg.LoopInfo) (uses, changes bool) {
 	site := g.tracer.Site(instr)
-	queryOrCopy := site.IsGormMethod() && (isGormFinisher(site.Method()) || typeutil.IsImmutableReturningBuiltin(site.Method()))
+	queryOrCopy := site.IsGormMethod() && (typeutil.IsFinisher(site.Method()) || typeutil.IsImmutableReturningBuiltin(site.Method()))
 	for i, arg := range instr.Common().Args {
 		if gormArg, ok := pollutionsource.UnwrapGormDB(arg); ok && g.tracer.FindMutableRoot(gormArg, loopInfo) == root {
 			uses = true
@@ -163,7 +163,7 @@ func (g *Generator) changeCarryingRoots(x ssa.Value, loopInfo *cfg.LoopInfo) []s
 			return roots
 		}
 		site := g.tracer.Site(call)
-		if !site.IsGormMethod() || isGormFinisher(site.Method()) || typeutil.IsImmutableReturningBuiltin(site.Method()) {
+		if !site.IsGormMethod() || typeutil.IsFinisher(site.Method()) || typeutil.IsImmutableReturningBuiltin(site.Method()) {
 			return roots
 		}
 		x = site.Recv

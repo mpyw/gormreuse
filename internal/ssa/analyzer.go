@@ -127,8 +127,22 @@ func (a *Analyzer) Analyze() []Violation {
 
 	// PHASE 3: COLLECTION
 	violations := tracker.CollectViolations()
+	dropsState := make(map[ssa.Value]bool)
 	for i := range violations {
 		violations[i].Pos = positionedViolation(violations[i], a.fn)
+		// A Session at a root whose Statement carries Attrs, Assign or
+		// InstanceSet state drops it, so the diagnostic does not advise one
+		// (#344). It is asked once per root.
+		if root := violations[i].Root; root != nil {
+			drops, ok := dropsState[root]
+			if !ok {
+				drops = a.rootTracer.SessionDropsState(root)
+				dropsState[root] = drops
+			}
+			if drops {
+				violations[i].AdviseWithoutSession()
+			}
+		}
 	}
 	return violations
 }

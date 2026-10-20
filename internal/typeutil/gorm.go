@@ -221,6 +221,46 @@ func IsStateOnlyMethod(name string) bool {
 	return receiverUses[name] == receiverStateOnly
 }
 
+// finishers are the gorm methods that run a query or end a transaction.
+// FindInBatches, CreateInBatches, UpdateColumn(s), Commit, Rollback,
+// SavePoint and RollbackTo return *gorm.DB too, so a discarded call of one is
+// not a chain that changes its receiver (#200).
+var finishers = map[string]bool{
+	"Find":            true,
+	"First":           true,
+	"Last":            true,
+	"Take":            true,
+	"Count":           true,
+	"Pluck":           true,
+	"Scan":            true,
+	"Row":             true,
+	"Rows":            true,
+	"ScanRows":        true,
+	"Create":          true,
+	"Save":            true,
+	"Update":          true,
+	"Updates":         true,
+	"Delete":          true,
+	"Exec":            true,
+	"Transaction":     true,
+	"FirstOrCreate":   true,
+	"FirstOrInit":     true,
+	"CreateInBatches": true,
+	"FindInBatches":   true,
+	"UpdateColumn":    true,
+	"UpdateColumns":   true,
+	"Commit":          true,
+	"Rollback":        true,
+	"SavePoint":       true,
+	"RollbackTo":      true,
+}
+
+// IsFinisher reports whether the gorm method name runs a query or ends a
+// transaction (see finishers).
+func IsFinisher(name string) bool {
+	return finishers[name]
+}
+
 // HasGormDBParameter reports whether a function signature has any parameter
 // containing *gorm.DB, directly or in struct fields. It is the predicate that
 // decides whether a //gormreuse:immutable-param directive has a valid

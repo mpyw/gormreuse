@@ -195,6 +195,17 @@ var growthCases = []growthCase{
 		b.WriteString("\tq.Count(nil)\n\tq.Find(nil)\n}\n")
 		return []string{b.String()}
 	}},
+	// n optional filters, each merge used twice: n reused roots, and each
+	// one's chains run on through the merges after it (#344).
+	{name: "phiroots", limit: growthNearLinear, shape: func(n int) []string {
+		var b strings.Builder
+		b.WriteString("func f(db *gorm.DB, c []bool) {\n\tq := db.Model(nil)\n")
+		for i := range n {
+			fmt.Fprintf(&b, "\tif c[%d] {\n\t\tq = q.Where(\"c%d\")\n\t}\n\tq.Count(nil)\n\tq.Find(nil)\n", i, i)
+		}
+		b.WriteString("}\n")
+		return []string{b.String()}
+	}},
 	// n unconditional reassignments of one query.
 	{name: "chain", limit: growthNearLinear, shape: func(n int) []string {
 		var b strings.Builder

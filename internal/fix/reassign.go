@@ -171,7 +171,7 @@ func (g *Generator) refersToReassignTarget(expr ast.Expr, v *types.Var) bool {
 // require.NoError(t, tx.Create(...).Error), is not a chain. Nor is one whose
 // first call is a Session-family call: it never changes the receiver.
 func (g *Generator) discardedChainToReassign(use pollution.UsageInfo) (*ast.ExprStmt, ast.Expr, bool) {
-	if use.Method == "" || isGormFinisher(use.Method) || typeutil.IsImmutableReturningBuiltin(use.Method) {
+	if use.Method == "" || typeutil.IsFinisher(use.Method) || typeutil.IsImmutableReturningBuiltin(use.Method) {
 		return nil, nil, false
 	}
 	file := g.findFileContaining(use.Call)
@@ -198,7 +198,7 @@ func (g *Generator) discardedChainToReassign(use pollution.UsageInfo) (*ast.Expr
 			}
 			return stmt, sel.X, true
 		}
-		if !isMethod || isGormFinisher(sel.Sel.Name) || !typeutil.IsGormDB(g.pass.TypesInfo.TypeOf(sel.X)) {
+		if !isMethod || typeutil.IsFinisher(sel.Sel.Name) || !typeutil.IsGormDB(g.pass.TypesInfo.TypeOf(sel.X)) {
 			return nil, nil, false
 		}
 		// A Session-family call below the top-level call stops the calls above

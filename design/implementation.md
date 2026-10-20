@@ -195,7 +195,7 @@ gormreuse/
 │   │   └── stmt.go              # The innermost statement at a position
 │   ├── goldentest/goldentest.go # Shared golden machinery (ApplyFixes, UpdateCommand)
 │   ├── scopeswarn/scopeswarn.go # TEMPORARY Session-returned-from-Scopes warning (GORM bug #7592)
-│   ├── typeutil/gorm.go         # IsGormDB, IsImmutableReturningBuiltin, and whether a type holds a *gorm.DB
+│   ├── typeutil/gorm.go         # IsGormDB, IsImmutableReturningBuiltin, IsFinisher, and whether a type holds a *gorm.DB
 │   └── ssa/
 │       ├── analyzer.go          # Per-function Analyzer: tracking, then detection
 │       ├── origin/origin.go     # Declared: the declared function behind a generic instance, a method value or a method expression
@@ -219,6 +219,7 @@ gormreuse/
 │       │   ├── phi.go           # Phi edges, loop variable swaps through Phis
 │       │   ├── pure.go          # PureVerdicts, IsPureFunction: pure calls and the arguments they return
 │       │   ├── alias.go         # FindAliasedRoots: Session/Debug copies and read-only arguments a value reads
+│       │   ├── state.go         # SessionDropsState: Statement state that a Session drops (#344)
 │       │   └── closure.go       # ClosureCapturesGormDB, IIFE returns, stored closure results, closure factories (#251)
 │       ├── pollution/tracker.go # Tracker: records uses, DetectViolations
 │       ├── pollutionsource/     # Which uses leak a *gorm.DB; read-only query arguments
@@ -1974,7 +1975,7 @@ Decisions and limitations:
 | An unused or redundant directive | Delete the name | [Contract and directive fixes](#contract-and-directive-fixes) |
 
 > [!CAUTION]
-> A Session at a root makes later in-place changes hit a copy. The fixed code then drops a condition silently, and the linter is clean. So no fix is offered when it would lose an effect. That is a discarded statement it cannot reassign ([Discarded statements](#discarded-statements-under-a-session-fix)), or a change made outside the variable ([In-place changes](#in-place-changes-outside-the-variable)).
+> A Session at a root makes later in-place changes hit a copy. The fixed code then drops a condition silently, and the linter is clean. So no fix is offered when it would lose an effect. That is a discarded statement it cannot reassign ([Discarded statements](#discarded-statements-under-a-session-fix)), a change made outside the variable ([In-place changes](#in-place-changes-outside-the-variable)), or `Attrs`, `Assign` or `InstanceSet` state that a Session drops ([Statement state a Session drops](#statement-state-a-session-drops)).
 
 <details><summary>Other diagnostics without a fix</summary>
 
@@ -2315,13 +2316,40 @@ Limitations:
 - A struct store is withheld more often than needed. A struct handed to a callee that only reads it (`log(params{db: q})`) counts as an escape. So does any call between a store into a package-level variable and a later use. A call in another block after such a store counts even when it runs after the last use.
 - A struct reached through a pointer field of a local struct (`s.inner.db = q` with `inner *T`) is other memory, so every later call counts.
 
+### Statement state a Session drops
+
+The next call on a Session result clones the Statement, and gorm's `Statement.clone()` does not copy `attrs` (`Attrs`) or `assigns` (`Assign`). An `InstanceSet` entry is copied, but its key holds the old Statement's address, so `InstanceGet` on the clone misses it (#344). A Session after them changes what `FirstOrInit` and `FirstOrCreate` do: `q := db.Model(&User{}).Assign(User{Age: 77})`, reused with a Session, leaves `Age` at the row's value.
+
+`RootTracer.SessionDropsState` (`internal/ssa/tracer/state.go`) says a value may carry such state when its own chain, back to a Session-family call, calls one of the three; when a chain on it calls one and the value keeps the effect (a discarded `q.Assign(x)`, a merge back, or anything but a `*gorm.DB` receiver); or when it is a parameter that reaches `FirstOrInit` or `FirstOrCreate`. For such a value, `Generate` withholds the fix whenever it would write a Session (root, reassignment, merged edge, parameter body), and `GenerateIsolation` withholds the isolation. A fix with only `immutable-param` stays. The diagnostics end with "a Session would drop its Attrs, Assign or InstanceSet" in place of the Session advice.
+
+<details><summary>Every field clone() leaves out, decisions, limitations and tests</summary>
+
+| Field | Set by | Effect of the drop |
+| --- | --- | --- |
+| `attrs` | `Attrs` | `FirstOrInit`/`FirstOrCreate` no longer fill them when no row is found |
+| `assigns` | `Assign` | They are no longer assigned, found row or not |
+| `Settings` keys of `InstanceSet` | `InstanceSet` | Not found on the clone. `Set` keys are |
+| `Vars` | `Raw`, `Exec` | Copied only with a non-empty `SQL`, which these always set |
+| `BuildClauses`, `CurDestIndex` | a finisher's callbacks | None: each query sets them again |
+
+`WithContext`, and a Session with `Context`, `PrepareStmt` or `SkipHooks`, clone at once and drop the same fields. An immutable value never carries the state, since its next call clones: `db.Assign(x).Session(s).Where("a")` keeps its fix, and so does a chain that sets the state per branch, `q.Assign(x).FirstOrInit(&u)`. The analyzer asks once per reported root, and each walk follows a chain once (`phiroots` in the [growth gate](#allocation-growth-gate)).
+
+Limitations:
+
+- Only a parameter root is checked for its callers' state. A local root built from a parameter, `q := tx.Where("a")` reused in `FirstOrInit`, keeps its Session fix: checking it would withhold most `FirstOrInit` fixes in functions that take `db`.
+- A helper's result (`q := withAssign(db)`), a chain through a method value or in a closure, and a struct field root are not followed. A caller's `InstanceSet` on a parameter is not checked.
+
+`e2e/internal/uncloned_state_test.go` checks each field at run time against `statementCloned` and `statementUncloned`, and the runtime effects of `Attrs`, `Assign`, `InstanceSet` and the body Session. `TestGormStatementFieldsClassified` fails when gorm adds a Statement field neither list holds. `testdata/src/gormreuse/fix_uncloned_state.go` holds the fixtures.
+
+</details>
+
 ### Fixes that compile
 
 Every suggested fix must compile, applied with all the others (`-fix`) or alone (an editor's quick fix) (#200). `internal/fix` checks types before it writes an edit:
 
 | Edit | Rule | What went wrong before |
 | --- | --- | --- |
-| Reassignment `q = <statement>` | Each call in the chain must return `*gorm.DB` (`discardedChainToReassign`), and none may be a finisher (`isGormFinisher`) | `q = q.AddError(err)` assigned an `error`. `FindInBatches`, `CreateInBatches`, `UpdateColumn(s)`, `Commit`, `Rollback`, `SavePoint` and `RollbackTo` return `*gorm.DB` but run SQL or end a transaction, and were reassigned |
+| Reassignment `q = <statement>` | Each call in the chain must return `*gorm.DB` (`discardedChainToReassign`), and none may be a finisher (`typeutil.IsFinisher`) | `q = q.AddError(err)` assigned an `error`. `FindInBatches`, `CreateInBatches`, `UpdateColumn(s)`, `Commit`, `Rollback`, `SavePoint` and `RollbackTo` return `*gorm.DB` but run SQL or end a transaction, and were reassigned |
 | `.Session(...)` after a root or a Phi edge | Only after the call whose `Lparen` is the value's position, and only when it returns `*gorm.DB` (`sessionEndAfterCall`) | The innermost call that contained the position got it. For a closure parameter edge that was the call the closure is passed to: `run(db, func(tx *gorm.DB) { ... }).Session(...)` |
 | The `gorm` qualifier | `gormNameAt` resolves the name with `types.Scope.LookupParent` at each insertion point. It uses an import whose name resolves to `gorm.io/gorm` at all of them (a dot import if `Session` does). Otherwise it adds an import under the first free name of `gorm`, `gormio`, `gormio2`, ... | A blank import counted as an import (`undefined: gorm`). A parameter named `gorm` gave `gorm.Session is not a type`. A file importing another package as `gorm` got a second `gorm` (`gorm redeclared`) |
 | The import edit | Each diagnostic's fix carries every edit it needs. `internal/report.go` does not drop an edit that an earlier diagnostic already suggested | With two roots in a file without the import, only the first fix had it. Applying the second alone failed with `undefined: gorm` |
@@ -2663,6 +2691,7 @@ The `e2e/internal/` directory holds tests that verify actual GORM SQL behavior w
 | `TestGormStubFuncsMatchGorm` | Each package-level function of the stub (`Open`, `Expr`) against `gormRealFuncs`, in the same way |
 | `TestGormStubSessionMatchesGorm` | Each field of the stub's `Session` exists in gorm's with the same type. Each field that `callsite` reads from a Session literal (`Initialized`, `NewDB`, `Context`) is in both |
 | `TestGormReceiverUsesMatchGorm` | Each method that returns no `*gorm.DB` is in `typeutil.receiverUses` or in `gormNonChainBranches` (#307) |
+| `TestGormStatementFieldsClassified` | Each field of `gorm.Statement` is in `statementCloned` or `statementUncloned`, and each method of the analyzer's `unclonedStateMethods` is in gorm and the stub (#344) |
 
 When a gorm bump fails one of them, decide how the analyzer should treat the new or changed name. Then add it to the stub or to the list.
 
@@ -2746,7 +2775,7 @@ Each fixture function marked `[LIMITATION]` under `testdata/src` pins one of the
 
 **Wrong position.** Uses in a deferred closure are ordered by their source position, not by when they run. `defer func() { q.Count(nil) }(); q.Find(nil)` is reported at `q.Find`, which runs first. A deferred call such as `defer q.Count(nil)` is ordered after the function's other uses and reported at the `defer`. Fixtures: `ifInsideDefer`, `ifElseInsideDefer`, `nestedIfInsideDefer`, `tripleNestingIfForDefer`, `tripleNestingForIfDefer`, `deferCapturingLoopVar`, `nestedDeferClosures`, `tripleNestedDeferClosures`, `nestedDeferWithFor`, `ultimateIfForDeferChaos`.
 
-**No fix.** A `go` or `defer` statement that changes the root in place where another use may see it gets no fix ([In-place changes outside the variable](#in-place-changes-outside-the-variable)). Fixtures: `godeferGoChainOnly`, `godeferDeferChainOnly`, `godeferDeferHelperOnly`, `godeferDeferHelperInLoop`.
+**No fix.** A `go` or `defer` statement that changes the root in place where another use may see it gets no fix ([In-place changes outside the variable](#in-place-changes-outside-the-variable)). Fixtures: `godeferGoChainOnly`, `godeferDeferChainOnly`, `godeferDeferHelperOnly`, `godeferDeferHelperInLoop`. Neither does a root whose Statement may carry `Attrs`, `Assign` or `InstanceSet` state, which a Session would drop ([Statement state a Session drops](#statement-state-a-session-drops)). Fixtures: `ucsAssignRoot`, `UcsParamFirstOrCreate`.
 
 <details><summary>Before #309: roots used only in go/defer</summary>
 
