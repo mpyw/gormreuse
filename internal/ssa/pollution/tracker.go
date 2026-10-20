@@ -458,8 +458,8 @@ func (t *Tracker) aliasMessage(root ssa.Value, changePos token.Pos) string {
 // alias diagnostics, leaving out a position that is unknown.
 func (t *Tracker) changeLocs(root ssa.Value, changePos token.Pos) string {
 	var locs []string
-	if pos := rootPos(root); pos.IsValid() {
-		locs = append(locs, "root at "+t.loc(pos))
+	if root != nil && rootPos(root).IsValid() {
+		locs = append(locs, "root at "+t.loc(rootPos(root)))
 	}
 	if changePos.IsValid() {
 		locs = append(locs, "changed at "+t.loc(changePos))
@@ -680,8 +680,8 @@ func (t *Tracker) reuseMessage(root ssa.Value) string {
 	msg := "*gorm.DB reused: second branch from mutable root"
 
 	var locs []string
-	if pos := rootPos(root); pos.IsValid() {
-		locs = append(locs, "root at "+t.loc(pos))
+	if root != nil && rootPos(root).IsValid() {
+		locs = append(locs, "root at "+t.loc(rootPos(root)))
 	}
 	if fb := t.firstBranchPos(root); fb.IsValid() {
 		locs = append(locs, "first branch at "+t.loc(fb))
@@ -726,22 +726,18 @@ func (t *Tracker) loc(pos token.Pos) string {
 // iter.Seq in the standard library (#378). Its position is that of the range
 // variable, or the for keyword when the loop does not name it.
 func rootPos(root ssa.Value) token.Pos {
-	if root == nil {
-		return token.NoPos
-	}
 	param, ok := root.(*ssa.Parameter)
 	if !ok || !cfg.IsRangeFuncLoopBody(param.Parent()) {
 		return root.Pos()
 	}
-	rng, ok := param.Parent().Syntax().(*ast.RangeStmt)
-	if !ok {
-		return token.NoPos
+	// go/ssa gives the yield function its range statement as syntax, and a
+	// parameter for the key and one for the value at most.
+	rng := param.Parent().Syntax().(*ast.RangeStmt)
+	pos := rng.For
+	if v := []ast.Expr{rng.Key, rng.Value}[slices.Index(param.Parent().Params, param)]; v != nil {
+		pos = v.Pos()
 	}
-	vars := []ast.Expr{rng.Key, rng.Value}
-	if i := slices.Index(param.Parent().Params, param); i >= 0 && i < len(vars) && vars[i] != nil {
-		return vars[i].Pos()
-	}
-	return rng.For
+	return pos
 }
 
 // firstBranchPos returns the earliest polluting use of root (its first branch),
