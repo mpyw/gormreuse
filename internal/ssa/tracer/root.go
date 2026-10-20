@@ -132,6 +132,8 @@ type RootTracer struct {
 	cfgs *cfg.Analyzer // CFG cache for the Repeats of closures
 	//declscope:shared // closure.go's closureReturnsImmutable fills it
 	immutableClosures map[*ssa.Function]bool // Memo of closureReturnsImmutable (#308)
+	//declscope:shared // pointee.go keeps its PointeeRoots and searches in it
+	pointees pointeeMemo // What calls may store through a variable's address (#345)
 }
 
 // NewRootTracer creates a new RootTracer.
@@ -554,6 +556,11 @@ func (t *RootTracer) traceNonCall(v ssa.Value, visited map[ssa.Value]bool, loopI
 		// FieldRoot: a field of a struct a call returned (#181)
 		return t.internFieldRoot(val)
 
+	case *PointeeRoot:
+		// PointeeRoot: what a call may store through a variable's address
+		// (#345)
+		return val
+
 	default:
 		return nil
 	}
@@ -601,6 +608,8 @@ func RootBlock(v ssa.Value) *ssa.BasicBlock {
 	case ssa.Instruction:
 		return r.Block()
 	case *FieldRoot:
+		return r.Block()
+	case *PointeeRoot:
 		return r.Block()
 	case *ssa.Parameter:
 		if fn := r.Parent(); fn != nil && len(fn.Blocks) > 0 {

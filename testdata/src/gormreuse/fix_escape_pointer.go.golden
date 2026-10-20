@@ -1,0 +1,326 @@
+package internal
+
+import (
+	"encoding/json"
+	"fmt"
+	"sort"
+	"sync"
+
+	"gorm.io/gorm"
+)
+
+// Fixtures for issue #345: other code reaches the root through the address of
+// its variable, or through a struct it was stored in while a call runs code
+// that reaches the struct. Such code may change the root in place, so the fix
+// of #243 is withheld.
+
+// fixEscapePointerApply adds a condition to *p in place.
+func fixEscapePointerApply(p **gorm.DB) { (*p).Where("tenant = 7") }
+
+// fixEscapePointerScan stores a new chain into *p.
+func fixEscapePointerScan(p **gorm.DB, db *gorm.DB) { *p = db.Where("tenant = 7") }
+
+// fixEscapePointerApplyAll adds a condition to each *p in place.
+func fixEscapePointerApplyAll(ps []**gorm.DB) {
+	for _, p := range ps {
+		(*p).Where("tenant = 7")
+	}
+}
+
+//gormreuse:pure
+func fixEscapePointerRead(p **gorm.DB) string { return fmt.Sprint(p) }
+
+type fixEscapePointerSvc struct{ db *gorm.DB }
+
+// apply adds a condition to s.db in place.
+func (s *fixEscapePointerSvc) apply() { s.db.Where("tenant = 7") }
+
+var fixEscapePointerShared fixEscapePointerSvc
+
+// ===== NO FIX: the address of the root's variable is handed on =====
+
+// fixEscapePointerAddr: the helper changes q in place through its address.
+func fixEscapePointerAddr(db *gorm.DB) {
+	q := db.Model(&User{}).Where("x = 1")
+	fixEscapePointerApply(&q)
+	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixEscapePointerAddrOnce: one use after the helper is a second branch, as
+// with applyTenant(q).
+func fixEscapePointerAddrOnce(db *gorm.DB) {
+	q := db.Model(&User{}).Where("x = 1")
+	fixEscapePointerApply(&q)
+	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixEscapePointerRebind: the helper stores a new chain into q, which is then
+// used twice.
+func fixEscapePointerRebind(db *gorm.DB) {
+	var q *gorm.DB
+	fixEscapePointerScan(&q, db)
+	q.Find(&[]User{})
+	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixEscapePointerSlice: the address is stored in a slice that a helper reads.
+func fixEscapePointerSlice(db *gorm.DB) {
+	q := db.Model(&User{}).Where("x = 1")
+	ps := []**gorm.DB{&q}
+	fixEscapePointerApplyAll(ps)
+	q.Find(&[]User{})
+	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixEscapePointerRebindIf: the helper may store a new chain into q on one
+// path. The reads after the merge see it and the chain stored before.
+func fixEscapePointerRebindIf(db, src *gorm.DB, c bool) {
+	q := db.Model(&User{}).Where("x = 1")
+	if c {
+		fixEscapePointerScan(&q, src)
+	}
+	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixEscapePointerRebindClosure: a closure reads q after the helper may have
+// stored a new chain into it.
+func fixEscapePointerRebindClosure(db *gorm.DB) {
+	var q *gorm.DB
+	fixEscapePointerScan(&q, db)
+	func() { q.Find(&[]User{}) }()
+	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixEscapePointerRebindLoop: what the helper stored is used on every
+// iteration of a loop.
+func fixEscapePointerRebindLoop(src *gorm.DB, xs []int) {
+	var q *gorm.DB
+	fixEscapePointerScan(&q, src)
+	for range xs {
+		q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+	}
+}
+
+// fixEscapePointerAddrMerged: q holds either chain where the helper takes its
+// address, and the helper may change both.
+func fixEscapePointerAddrMerged(a, b *gorm.DB, c bool) {
+	q := a.Where("x = 1")
+	if c {
+		q = b.Where("y = 1")
+	}
+	fixEscapePointerApply(&q)
+	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// ===== NO REPORT: what the helper stores is used once =====
+
+// fixEscapePointerRebindOnce: one use of what the helper stored.
+func fixEscapePointerRebindOnce(db *gorm.DB) {
+	var q *gorm.DB
+	fixEscapePointerScan(&q, db)
+	q.Find(&[]User{})
+}
+
+// fixEscapePointerRebindStored: a store after the helper replaces what it
+// stored.
+func fixEscapePointerRebindStored(db, src *gorm.DB, c bool) {
+	var q *gorm.DB
+	fixEscapePointerScan(&q, src)
+	q.Find(&[]User{})
+	if c {
+		q = db.Where("y = 1")
+	} else {
+		q = db.Where("z = 1")
+	}
+	q.Find(&[]User{})
+}
+
+// ===== NO FIX: a call runs code that reaches the struct holding the root =====
+
+// fixEscapePointerConnection: Connection runs its callback before it returns.
+func fixEscapePointerConnection(db, conn *gorm.DB) {
+	q := db.Model(&User{}).Where("x = 1")
+	fixEscapePointerShared.db = q
+	conn.Connection(func(tx *gorm.DB) error { fixEscapePointerShared.apply(); return nil })
+	q.Find(&[]User{})
+	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixEscapePointerTransaction: so does Transaction.
+func fixEscapePointerTransaction(db, conn *gorm.DB) {
+	q := db.Model(&User{}).Where("x = 1")
+	fixEscapePointerShared.db = q
+	_ = conn.Transaction(func(tx *gorm.DB) error { fixEscapePointerShared.apply(); return nil })
+	q.Find(&[]User{})
+	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixEscapePointerScopes: Scopes takes the scope that Find runs.
+func fixEscapePointerScopes(db, conn *gorm.DB) {
+	q := db.Model(&User{}).Where("x = 1")
+	fixEscapePointerShared.db = q
+	conn.Scopes(func(tx *gorm.DB) *gorm.DB { fixEscapePointerShared.apply(); return tx }).Find(&[]User{})
+	q.Find(&[]User{})
+	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixEscapePointerSorter calls fixEscapePointerShared.apply from Len.
+type fixEscapePointerSorter []int
+
+func (s fixEscapePointerSorter) Len() int           { fixEscapePointerShared.apply(); return len(s) }
+func (s fixEscapePointerSorter) Less(i, j int) bool { return s[i] < s[j] }
+func (s fixEscapePointerSorter) Swap(i, j int)      { s[i], s[j] = s[j], s[i] }
+
+// fixEscapePointerSort: sort.Sort calls the methods of its argument.
+func fixEscapePointerSort(db *gorm.DB) {
+	q := db.Model(&User{}).Where("x = 1")
+	fixEscapePointerShared.db = q
+	sort.Sort(fixEscapePointerSorter{2, 1})
+	q.Find(&[]User{})
+	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixEscapePointerMarshaler calls fixEscapePointerShared.apply when encoded.
+type fixEscapePointerMarshaler struct{}
+
+func (fixEscapePointerMarshaler) MarshalJSON() ([]byte, error) {
+	fixEscapePointerShared.apply()
+	return []byte("1"), nil
+}
+
+// fixEscapePointerJSON: json.Marshal calls the method of the boxed value.
+func fixEscapePointerJSON(db *gorm.DB) {
+	q := db.Model(&User{}).Where("x = 1")
+	fixEscapePointerShared.db = q
+	_, _ = json.Marshal(fixEscapePointerMarshaler{})
+	q.Find(&[]User{})
+	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixEscapePointerWake: a send lets a running goroutine reach the struct.
+func fixEscapePointerWake(db *gorm.DB, wake chan<- struct{}) {
+	q := db.Model(&User{}).Where("x = 1")
+	fixEscapePointerShared.db = q
+	wake <- struct{}{}
+	q.Find(&[]User{})
+	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixEscapePointerWait: so does waiting for one.
+func fixEscapePointerWait(db *gorm.DB, wg *sync.WaitGroup) {
+	q := db.Model(&User{}).Where("x = 1")
+	fixEscapePointerShared.db = q
+	wg.Wait()
+	q.Find(&[]User{})
+	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixEscapePointerReceive: so does a receive.
+func fixEscapePointerReceive(db *gorm.DB, done <-chan struct{}) {
+	q := db.Model(&User{}).Where("x = 1")
+	fixEscapePointerShared.db = q
+	<-done
+	q.Find(&[]User{})
+	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixEscapePointerSelect: so does a select.
+func fixEscapePointerSelect(db *gorm.DB, a, b <-chan struct{}) {
+	q := db.Model(&User{}).Where("x = 1")
+	fixEscapePointerShared.db = q
+	select {
+	case <-a:
+	case <-b:
+	}
+	q.Find(&[]User{})
+	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixEscapePointerClose: so does closing a channel.
+func fixEscapePointerClose(db *gorm.DB, wake chan struct{}) {
+	q := db.Model(&User{}).Where("x = 1")
+	fixEscapePointerShared.db = q
+	close(wake)
+	q.Find(&[]User{})
+	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixEscapePointerKeys: a map of strings to funcs can run code.
+func fixEscapePointerKeys(db *gorm.DB, m map[string]func()) {
+	q := db.Model(&User{}).Where("x = 1")
+	fixEscapePointerShared.db = q
+	_ = fmt.Sprint(m)
+	q.Find(&[]User{})
+	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixEscapePointerTable holds an array of functions, by pointer.
+type fixEscapePointerTable struct {
+	next *fixEscapePointerTable
+	fs   [2]func()
+}
+
+// fixEscapePointerTableArg: a struct holding functions can run code.
+func fixEscapePointerTableArg(db *gorm.DB, t *fixEscapePointerTable) {
+	q := db.Model(&User{}).Where("x = 1")
+	fixEscapePointerShared.db = q
+	_ = fmt.Sprint(t)
+	q.Find(&[]User{})
+	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// ===== FIX: nothing reaches the root =====
+
+// fixEscapePointerPure: a //gormreuse:pure function changes nothing it is
+// handed.
+func fixEscapePointerPure(db *gorm.DB) {
+	q := db.Model(&User{}).Where("x = 1").Session(&gorm.Session{})
+	_ = fixEscapePointerRead(&q)
+	q.Find(&[]User{})
+	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// fixEscapePointerPrint: fmt.Sprint of an int runs no code that reaches the
+// struct.
+func fixEscapePointerPrint(db *gorm.DB, n int) string {
+	q := db.Model(&User{}).Where("x = 1").Session(&gorm.Session{})
+	fixEscapePointerShared.db = q
+	s := fmt.Sprint(n, "users")
+	q.Find(&[]User{})
+	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+	return s
+}
+
+// fixEscapePointerData: plain data, by value or through pointers, slices,
+// arrays, maps and channels, runs no code.
+func fixEscapePointerData(db *gorm.DB, data map[string][]*[2]int, ch chan int) string {
+	q := db.Model(&User{}).Where("x = 1").Session(&gorm.Session{})
+	fixEscapePointerShared.db = q
+	s := fmt.Sprint(data, ch, nil)
+	q.Find(&[]User{})
+	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+	return s
+}
+
+// fixEscapePointerWhere: a *gorm.DB method without a function argument runs
+// no code that reaches the struct.
+func fixEscapePointerWhere(db, conn *gorm.DB) {
+	q := db.Model(&User{}).Where("x = 1").Session(&gorm.Session{})
+	fixEscapePointerShared.db = q
+	conn.Where("y = ?", 1).Find(&[]User{})
+	q.Find(&[]User{})
+	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// ===== LIMITATION =====
+
+// fixEscapePointerFieldAddr: [LIMITATION] the helper changes s.db in place
+// through the address of the field, and the query sees the change. Only the
+// address of a variable is a branch, so the query is not reported.
+func fixEscapePointerFieldAddr(db *gorm.DB) {
+	s := fixEscapePointerSvc{db: db.Model(&User{}).Where("x = 1")}
+	fixEscapePointerApply(&s.db)
+	s.db.Find(&[]User{})
+}

@@ -1,6 +1,7 @@
 package fix
 
 import (
+	"go/token"
 	"go/types"
 	"slices"
 
@@ -29,6 +30,8 @@ type holderCache struct {
 	calls map[*ssa.Function]*holderCalls
 	//declscope:private
 	gorm map[*types.Package]bool
+	//declscope:private
+	runs map[types.Type]bool
 }
 
 // holderChangesRoot reports whether a store of v's root into a struct field,
@@ -63,12 +66,19 @@ func (g *Generator) holderChangesRoot(v pollution.Violation, ordered bool) bool 
 //     at the end of the store's block. A local struct copied into such
 //     memory is reached the same way after the copy.
 //
-// Code in a closure is not ordered against the uses, so an escape there, or a
-// store there into memory that is not a local struct, is taken as seen.
+// A //gormreuse:pure function changes nothing it is handed, as in
+// paDeref(&q). Code in a closure is not ordered against the uses, so an
+// escape there, or a store there into memory that is not a local struct, is
+// taken as seen.
 func (g *Generator) holderStoreChangesRoot(v pollution.Violation, store *ssa.Store, ordered bool) bool {
 	fn := v.Root.Parent()
 	def := tracer.RootBlock(v.Root)
 	seen := func(instr ssa.Instruction) bool {
+		if call, ok := instr.(ssa.CallInstruction); ok {
+			if site := g.tracer.Site(call); !site.IsGormMethod() && g.tracer.IsPureFunction(site.Declared) {
+				return false
+			}
+		}
 		if instr.Parent() != fn || !instr.Pos().IsValid() {
 			return true
 		}
@@ -103,8 +113,12 @@ func holderChangeSeenAfterBlock(a *cfg.Analyzer, def, block *ssa.BasicBlock, use
 }
 
 // holderStores returns the stores in f of a *gorm.DB into a struct field, or
-// into anything but a variable or a slice, array or map element, keyed by
-// each root whose changes the stored value carries (changeCarryingRoots).
+// into anything but a slice, array or map element, keyed by each root whose
+// changes the stored value carries (changeCarryingRoots). A store into a local
+// variable counts too: a variable lives in memory when its address is taken,
+// and code its address is handed to, as in applyP(&q), reaches the root
+// (#345). holderWalk finds where it is handed on. A variable that is only
+// read and written, also by the closures that capture it, hands nothing on.
 func (g *Generator) holderStores(f *ssa.Function) map[ssa.Value][]*ssa.Store {
 	c := &g.holders
 	if stores, ok := c.stores[f]; ok {
@@ -122,8 +136,9 @@ func (g *Generator) holderStores(f *ssa.Function) map[ssa.Value][]*ssa.Store {
 				continue
 			}
 			switch store.Addr.(type) {
-			case *ssa.Alloc, *ssa.FreeVar, *ssa.IndexAddr:
-				// A variable, or a pollutionsource.Leak element.
+			case *ssa.FreeVar, *ssa.IndexAddr:
+				// A variable a closure captures, which its function walks,
+				// or a pollutionsource.Leak element.
 				continue
 			}
 			val, ok := pollutionsource.UnwrapGormDB(store.Val)
@@ -326,7 +341,7 @@ func (g *Generator) holderFuncCalls(f *ssa.Function) *holderCalls {
 	for _, block := range f.Blocks {
 		for i, instr := range block.Instrs {
 			calls.index[instr] = i
-			if call, ok := instr.(ssa.CallInstruction); ok && g.holderCallChanges(call) {
+			if g.holderCallChanges(instr) {
 				calls.inBlock[block] = append(calls.inBlock[block], instr)
 			}
 		}
@@ -349,28 +364,136 @@ func (g *Generator) holderFuncCalls(f *ssa.Function) *holderCalls {
 	return calls
 }
 
-// holderCallChanges reports whether call may change memory that other
-// functions reach before the function returns. A *gorm.DB method and a
-// builtin do not, nor does a deferred call, which runs after every use. A
-// static call to a package that does not reach gorm, with no function among
-// its arguments, cannot reach a *gorm.DB either. Any other call, go
-// statement or dynamic call may.
-func (g *Generator) holderCallChanges(call ssa.CallInstruction) bool {
-	if _, ok := call.(*ssa.Defer); ok {
-		return false
-	}
-	common := call.Common()
-	if _, ok := common.Value.(*ssa.Builtin); ok || g.tracer.Site(call).IsGormMethod() {
-		return false
-	}
-	callee := common.StaticCallee()
-	if callee == nil || callee.Pkg == nil || g.holderReachesGorm(callee.Pkg.Pkg) {
+// holderCallChanges reports whether instr may run code that changes memory
+// other functions reach before the function returns. A builtin does not,
+// other than close, nor does a deferred call, which runs after every use.
+// Neither does a call into a package that does not reach gorm, when no
+// argument can run code of one that does (see holderArgRunsCode), nor a
+// *gorm.DB method, when no argument is a function. Connection, Transaction,
+// FindInBatches, ToSQL and the scopes of Scopes run such a function before
+// they return (#345). Any other call, go statement or dynamic call may. So may
+// a channel operation, close and a call into sync or sync/atomic, which let a
+// goroutine that is already running go on (#345).
+func (g *Generator) holderCallChanges(instr ssa.Instruction) bool {
+	switch instr := instr.(type) {
+	case *ssa.Send, *ssa.Select:
 		return true
+	case *ssa.UnOp:
+		return instr.Op == token.ARROW
+	case *ssa.Defer:
+		return false
+	case ssa.CallInstruction:
+		common := instr.Common()
+		if b, ok := common.Value.(*ssa.Builtin); ok {
+			return b.Name() == "close"
+		}
+		if site := g.tracer.Site(instr); site.IsGormMethod() {
+			return slices.ContainsFunc(site.Args, func(arg ssa.Value) bool { return holderTypeHasFunc(arg.Type()) })
+		}
+		callee := common.StaticCallee()
+		if callee == nil || callee.Pkg == nil || holderSyncPackage(callee.Pkg.Pkg) || g.holderReachesGorm(callee.Pkg.Pkg) {
+			return true
+		}
+		return slices.ContainsFunc(common.Args, g.holderArgRunsCode)
 	}
-	return slices.ContainsFunc(common.Args, func(arg ssa.Value) bool {
-		_, ok := arg.Type().Underlying().(*types.Signature)
-		return ok
-	})
+	return false
+}
+
+// holderSyncPackage reports whether pkg is sync or sync/atomic, whose calls
+// let another goroutine run past a point it waits at.
+func holderSyncPackage(pkg *types.Package) bool {
+	return pkg.Path() == "sync" || pkg.Path() == "sync/atomic"
+}
+
+// holderTypeHasFunc reports whether a value of type t is a function or a
+// slice of them, such as a callback or the scopes of Scopes.
+func holderTypeHasFunc(t types.Type) bool {
+	if slice, ok := t.Underlying().(*types.Slice); ok {
+		t = slice.Elem()
+	}
+	_, ok := t.Underlying().(*types.Signature)
+	return ok
+}
+
+// holderArgRunsCode reports whether arg, an argument of a call into a package
+// that does not reach gorm, lets the callee run code of a package that does
+// (#345). sort.Sort calls the methods of its interface argument, and
+// json.Marshal those of the value boxed in it. A value boxed in an interface
+// is judged by its own type, so fmt.Println(n) runs nothing. So is each value
+// of a variadic argument built at the call.
+func (g *Generator) holderArgRunsCode(arg ssa.Value) bool {
+	switch arg := arg.(type) {
+	case *ssa.Const:
+		return false
+	case *ssa.MakeInterface:
+		return g.holderTypeRunsCode(arg.X.Type())
+	case *ssa.Slice:
+		if array, ok := arg.X.(*ssa.Alloc); ok {
+			return slices.ContainsFunc(*array.Referrers(), func(r ssa.Instruction) bool {
+				elem, ok := r.(*ssa.IndexAddr)
+				if !ok {
+					return r != arg
+				}
+				return slices.ContainsFunc(*elem.Referrers(), func(r ssa.Instruction) bool {
+					store, ok := r.(*ssa.Store)
+					return !ok || g.holderArgRunsCode(store.Val)
+				})
+			})
+		}
+	}
+	return g.holderTypeRunsCode(arg.Type())
+}
+
+// holderTypeRunsCode reports whether a value of type t can run code of a
+// package that reaches gorm when another package uses it: it can hold a
+// function, an interface, a type parameter, or a value of a type with methods
+// declared in such a package. The result is kept per type.
+func (g *Generator) holderTypeRunsCode(t types.Type) bool {
+	c := &g.holders
+	runs, ok := c.runs[t]
+	if !ok {
+		if c.runs == nil {
+			c.runs = map[types.Type]bool{}
+		}
+		runs = g.holderTypeRunsCodeIn(t, map[types.Type]bool{})
+		c.runs[t] = runs
+	}
+	return runs
+}
+
+// holderTypeRunsCodeIn is holderTypeRunsCode without the memo. seen holds the
+// types being searched: a type that holds itself adds nothing.
+func (g *Generator) holderTypeRunsCodeIn(t types.Type, seen map[types.Type]bool) bool {
+	if seen[t] {
+		return false
+	}
+	seen[t] = true
+	if named, ok := types.Unalias(t).(*types.Named); ok {
+		if pkg := named.Obj().Pkg(); pkg != nil && types.NewMethodSet(types.NewPointer(named)).Len() > 0 && g.holderReachesGorm(pkg) {
+			return true
+		}
+	}
+	switch u := t.Underlying().(type) {
+	case *types.Signature, *types.Interface, *types.TypeParam:
+		return true
+	case *types.Pointer:
+		return g.holderTypeRunsCodeIn(u.Elem(), seen)
+	case *types.Slice:
+		return g.holderTypeRunsCodeIn(u.Elem(), seen)
+	case *types.Array:
+		return g.holderTypeRunsCodeIn(u.Elem(), seen)
+	case *types.Chan:
+		return g.holderTypeRunsCodeIn(u.Elem(), seen)
+	case *types.Map:
+		return g.holderTypeRunsCodeIn(u.Key(), seen) || g.holderTypeRunsCodeIn(u.Elem(), seen)
+	case *types.Struct:
+		for field := range u.Fields() {
+			if g.holderTypeRunsCodeIn(field.Type(), seen) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // holderReachesGorm memoizes typeutil.ReachesGorm.

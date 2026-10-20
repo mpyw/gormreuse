@@ -24,8 +24,9 @@ import (
 //
 //declscope:shared // root.go's traceNonCall and tracePointerLoad, and freevar.go's traceFreeVarLoad, send local variables here
 func (t *RootTracer) traceAllocStore(alloc *ssa.Alloc, load ssa.Instruction, visited map[ssa.Value]bool, loopInfo *cfg.LoopInfo) ssa.Value {
-	// Single-root: the first stored value that has a root (#340).
-	if vals := t.stores.allocReachingStoreValues(alloc, load); len(vals) > 0 {
+	// Single-root: the first stored value that has a root (#340). What a call
+	// that takes the variable's address may store comes after them (#345).
+	if vals := append(t.stores.allocReachingStoreValues(alloc, load), t.pointeeRootsAt(alloc, load)...); len(vals) > 0 {
 		return t.traceStores(vals, visited, loopInfo)
 	}
 	return nil
@@ -679,6 +680,9 @@ func (m *storeMemo) globalStoredValues(g *ssa.Global, load ssa.Instruction) []ss
 func (t *RootTracer) traceAllAllocStores(alloc *ssa.Alloc, load ssa.Instruction, search *allRootsSearch, loopInfo *cfg.LoopInfo) []ssa.Value {
 	var roots []ssa.Value
 	for _, v := range t.stores.allocReachingStoreValues(alloc, load) {
+		roots = append(roots, t.traceAll(v, search, loopInfo)...)
+	}
+	for _, v := range t.pointeeRootsAt(alloc, load) {
 		roots = append(roots, t.traceAll(v, search, loopInfo)...)
 	}
 	return roots

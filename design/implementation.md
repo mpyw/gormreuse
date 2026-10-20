@@ -217,6 +217,7 @@ gormreuse/
 │       │   ├── root.go          # RootTracer, NewRootTracer, RootBlock: trace dispatch, calls, immutable sources
 │       │   ├── store.go         # AllocStoredValues, FieldStoredValues: which stores reach a load
 │       │   ├── field.go         # FieldRoot, SameField: field paths and roots of returned structs
+│       │   ├── pointee.go       # PointeeRoot, PointeeRoots: what a call given a variable's address may store there (#345)
 │       │   ├── param_read.go    # ParamReadValues: a getter's call reads the field of its own argument (#342)
 │       │   ├── freevar.go       # traceFreeVar: roots through a closure's captured variables
 │       │   ├── phi.go           # Phi edges, loop variable swaps through Phis
@@ -1123,6 +1124,7 @@ The loop check reports a use in a loop of a root defined outside it. `tracer.Roo
 | --- | --- |
 | A call, a Phi (instructions) | Its own block |
 | `FieldRoot` | The block of its call (`FieldRoot.Block`) |
+| `PointeeRoot` | The block of its call (`PointeeRoot.Block`, [Addresses of variables](#addresses-of-variables)) |
 | `*ssa.Parameter` | The entry block of its function. That block is in a loop only for a range-over-func body, whose parameters are the values of the current iteration. So `for q := range seq { q.Find(nil) }` is not reported |
 | Anything else | None, so outside. The tracer returns no other kind: it follows a `FreeVar` to its binding and a global to its stores, and a constant is no root |
 
@@ -1146,6 +1148,31 @@ Decisions and limitations:
 - The loop check used to treat every value that is not an instruction as outside. A `FieldRoot` from a call inside the loop was then reported on every iteration.
 
 </details>
+
+### Addresses of variables
+
+A variable whose address is taken lives in an `Alloc`. A call such as `applyP(&q)` gets the `Alloc` itself as its argument, of type `**gorm.DB`, with no load of `q` (#345). The callee may change `*p` in place, or store another chain in it:
+
+```go
+func applyP(p **gorm.DB)               { (*p).Where("t = 1") }
+func scanInto(p **gorm.DB, db *gorm.DB) { *p = db.Where("x = 1") }
+```
+
+Before #345 neither was seen. `applyP(&q); q.Find(&a)` was not reported, and `-fix` added a Session at `q` that made the helper change a copy. `var q *gorm.DB; scanInto(&q, db); q.Find(&a); q.Count(&n)` was not reported at all: no store into `q` reaches the reads.
+
+| Part | Handling |
+| --- | --- |
+| The call | `handleArgs` asks `RootTracer.PointeeRoots` for the roots of the value `q` holds where the call runs: the stores that reach the call, as a load there would see them. The call branches them with `Escapes` set, as `applyTenant(q)` does. A `//gormreuse:pure` callee returns before this, so it changes nothing |
+| A later read of `q` | The read sees the stores that reach it, and also a `PointeeRoot{call, var}` for each call that takes the address and reaches the read with no store in between (`pointeeRootsAt`). The call may leave `q` as it was, so it does not hide the stores before it. The `PointeeRoot`s come after the stores, so the single-root trace takes a store first |
+| A read in a closure | It sees every such call, as a nil load sees every store. This keeps reuse reported when the closure may run after the call |
+| The fix | No fix is suggested for a `PointeeRoot`, as for a `FieldRoot`: the call returns no `*gorm.DB` to add `Session()` to. A stored root keeps its fix only when nothing hands the address on ([Struct stores](#struct-stores)) |
+
+The calls that take each variable's address, and the calls that reach the start of each block, are kept in `RootTracer.pointees`. The reads of one variable share them (`pointerescape` in the growth gate).
+
+Limitations:
+
+- Only the address of a variable is followed. The address of a struct field (`applyP(&s.db)`) is not a branch, so a single later use is missed (`fixEscapePointerFieldAddr`). The fix is withheld for it: the struct is handed on.
+- An address wrapped in an interface (`json.Unmarshal(b, &q)`) is not followed. Detection treats it as any other call: the read after it sees the stores before it.
 
 ### Package-level variables
 
@@ -2371,14 +2398,24 @@ A store of the root into a struct field is not a use (#310). Detection reads the
 
 <details><summary>Where other code reaches a stored root, and tests</summary>
 
-`changedElsewhere` also checks each store of the root, or of a chain on it that runs no query (`changeCarryingRoots`). It checks a store into anything other than a variable or a slice, array or map element. Each point where other code can reach the stored root is an escape for `changeSeenAfterEscape`:
+`changedElsewhere` also checks each store of the root, or of a chain on it that runs no query (`changeCarryingRoots`). It checks a store into anything other than a slice, array or map element. A store into a local variable counts too: code that the variable's address is handed to reaches the root, as in `applyAll([]**gorm.DB{&q})` (#345). Each point where other code can reach the stored root is an escape for `changeSeenAfterEscape`:
 
 | Memory | Where other code reaches it | Found by |
 | --- | --- | --- |
-| A local struct or array (an `Alloc` reached through field and array element addresses) | Where it is handed on. That is a call that takes it, also as a receiver. It is also a copy of its value that goes anywhere but another local struct. It is also such an instruction in a closure that captures the struct or a variable holding its address. A read of a `*gorm.DB` field, a copy into another local struct and a Phi are followed, not escapes | `holderWalk`, once per struct |
-| Other memory: a package-level variable, or a struct that a parameter or another pointer points to | At any call that may run after the store. The first such call in the store's block is the escape. A call in a later block is taken as running at the end of the store's block. A local struct copied into such memory is reached the same way after the copy | `holderNextCall` over `holderFuncCalls`, once per function |
+| A local variable, struct or array (an `Alloc` reached through field and array element addresses) | Where it is handed on. That is a call that takes it, also as a receiver. It is also a copy of its value that goes anywhere but another local struct. It is also such an instruction in a closure that captures the struct or a variable holding its address. A read of a `*gorm.DB` field, a copy into another local struct and a Phi are followed, not escapes | `holderWalk`, once per struct |
+| Other memory: a package-level variable, or a struct that a parameter or another pointer points to | At any call that may run code after the store (`holderCallChanges`, below). The first such call in the store's block is the escape. A call in a later block is taken as running at the end of the store's block. A local struct copied into such memory is reached the same way after the copy | `holderNextCall` over `holderFuncCalls`, once per function |
 
-- A `*gorm.DB` method, a builtin and a deferred call do not count as such a call. Neither does a static call into a package that does not reach gorm with no function argument (`fmt.Println(n)`).
+- What counts as a call that may run code (#345):
+
+  | Instruction | Counts when |
+  | --- | --- |
+  | A `*gorm.DB` method | An argument other than the receiver can hold a function. `Connection`, `Transaction`, `FindInBatches` and `ToSQL` run theirs before they return. `Scopes` keeps its scopes for the finisher, so the `Scopes` call counts in its place, which is earlier |
+  | A static call into a package that does not reach gorm | An argument can run code of a package that does (`holderArgRunsCode`): a function, an interface, a type parameter, or a value of a type with methods declared in such a package, held directly or in a field, element or pointer. A value boxed in an interface is judged by its own type, and so is each value of a variadic argument built at the call. So `sort.Sort(byTenant(xs))` counts, and so does `json.Marshal(v)` when the type of `v` has methods. `fmt.Println(n)` does not |
+  | A call into `sync` or `sync/atomic`, a channel send or receive, a `select`, `close` | Always. They let a goroutine that is already running go on, and it may reach the memory |
+  | Any other call, a dynamic call, a `go` statement | Always |
+  | A deferred call, another builtin | Never. A deferred call runs after every use |
+
+- A call to a `//gormreuse:pure` function hands nothing on, as in `paDeref(&q)`.
 - Code in a closure of the root's function is not ordered against the uses. An escape there, or a store there into memory that is not a local struct, is taken as seen.
 - The stores, the walks and the calls are memoized in `Generator.holders`, so a function with n such stores stays linear (`structescape` in the growth gate).
 - The rule withholds no fix that the existing golden fixtures had. Their struct stores go to one of these:
@@ -2386,7 +2423,7 @@ A store of the root into a struct field is not a use (#310). Detection reads the
   - a package-level variable or receiver field with no call between the store and the uses (the builder idiom `r.db = r.db.Where(c)`);
   - a captured struct whose closure only reads the field.
 
-Tests: `TestFixEscapePreservesQueries` in `e2e/internal/fix_escape_test.go` runs each case of the issue from `fixsql/before` and `fixsql/after` against real GORM. `TestFixEscapeDetectsSessionAtRoot` checks that the comparison fails for the fixes suggested before. `e2e/internal/fix_struct_escape_test.go` does the same for the struct cases of #310, including a parameter root whose body Session would drop the change. In `ErrorPropagation` a query runs only when `q.Error` holds the error of a failed query, so a lost error shows up as a missing query. `testdata/src/gormreuse/fix_escape.go` and `fix_escape_struct.go` hold the fixtures with and without a fix.
+Tests: `TestFixEscapePreservesQueries` in `e2e/internal/fix_escape_test.go` runs each case of the issue from `fixsql/before` and `fixsql/after` against real GORM. `TestFixEscapeDetectsSessionAtRoot` checks that the comparison fails for the fixes suggested before. `e2e/internal/fix_struct_escape_test.go` does the same for the struct cases of #310, including a parameter root whose body Session would drop the change. In `ErrorPropagation` a query runs only when `q.Error` holds the error of a failed query, so a lost error shows up as a missing query. `e2e/internal/fix_pointer_escape_test.go` does the same for #345: the address of `q` handed on, and `q` stored in a package-level struct before `Connection`, `Scopes` or `sort.Sort` runs code that reaches it. `testdata/src/gormreuse/fix_escape.go`, `fix_escape_struct.go` and `fix_escape_pointer.go` hold the fixtures with and without a fix.
 
 </details>
 
@@ -2395,6 +2432,8 @@ Limitations:
 - An escape before a later use withholds the fix even when the callee only reads the value. Examples are `voidFunc(q)` with an empty body, and a `*gorm.DB` method argument (`base.Model(q)`). Mark a read-only helper `//gormreuse:pure`, or pass it an isolated value.
 - A parameter's body Session still drops the in-place changes of the function's queries ([Parameter-root fix](#parameter-root-fix)).
 - A deferred call that takes the root, as in `defer applyTenant(q)`, keeps the fix when no other deferred call uses the root and it runs once. It runs after every use the fix orders, so only another deferred call could see its change. With another one, the fix is withheld even when that one runs first and cannot see it.
+- A `*gorm.DB` method can also run code through the model's hooks (such as AfterFind), a driver.Valuer or a registered callback. These are not counted: gorm runs them on every query, and counting them would withhold the fix after any query.
+- A goroutine that changes the memory without synchronizing with the function is a data race, and is not counted. Neither is a sleep nor a yield to the scheduler.
 - A struct store is withheld more often than needed. A struct handed to a callee that only reads it (`log(params{db: q})`) counts as an escape. So does any call between a store into a package-level variable and a later use. A call in another block after such a store counts even when it runs after the last use.
 - A struct reached through a pointer field of a local struct (`s.inner.db = q` with `inner *T`) is other memory, so every later call counts.
 
@@ -2851,6 +2890,7 @@ Each fixture function marked `[LIMITATION]` under `testdata/src` pins one of the
 | A struct field read through a parameter or a receiver: `s.db` twice | `fieldOfStructParam` | The field is not a mutable root ([Struct roots](#struct-roots)) |
 | The `immutable-param` caller contract through an interface or a func-typed parameter | `contractInterface` | No static callee |
 | A method expression of a method promoted through an embedded `*gorm.DB`: `W.Find(w, nil)` twice | `exprPromoted` | The thunk selects the field in its body, and the receiver `w` is not followed to it ([Method expressions](#method-expressions)) |
+| The address of a struct field handed to a helper that changes it: `applyP(&s.db); s.db.Find(nil)` | `fixEscapePointerFieldAddr` | Only the address of a variable is a branch and a `PointeeRoot` ([Addresses of variables](#addresses-of-variables)). The fix is still withheld: the struct is handed on ([Struct stores](#struct-stores)) |
 
 **Extra reports (false positives).**
 

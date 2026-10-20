@@ -166,6 +166,10 @@ func (g *Generator) Generate(v pollution.Violation) []analysis.SuggestedFix {
 	if _, ok := root.(*tracer.FieldRoot); ok {
 		return fallback
 	}
+	// Nor has what a call may store through a variable's address (#345).
+	if _, ok := root.(*tracer.PointeeRoot); ok {
+		return fallback
+	}
 
 	allUses := v.AllUses
 	if len(allUses) == 0 {
