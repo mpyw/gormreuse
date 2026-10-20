@@ -8,6 +8,7 @@ import (
 
 	"github.com/mpyw/gormreuse/internal/directive"
 	"github.com/mpyw/gormreuse/internal/ssa/callsite"
+	"github.com/mpyw/gormreuse/internal/ssa/origin"
 	"github.com/mpyw/gormreuse/internal/typeutil"
 )
 
@@ -69,6 +70,27 @@ func CollectImmutableInputCallbacks(funcs []*ssa.Function, vars callsite.FuncVar
 	addCollectedCallbacks(funcs, vars, set, into)
 }
 
+// CollectImmutableInputProviders maps each function that CollectImmutableInputCallbacks
+// adds to the functions that hand its *gorm.DB parameter a value: gorm's
+// Transaction or FindInBatches, and the immutable-input functions it is
+// passed to, as declared functions (origin.Declared). Its parameter is
+// immutable only while every one of them keeps its promise (#314).
+func CollectImmutableInputProviders(funcs []*ssa.Function, vars callsite.FuncVars, inputs *directive.ImmutableInputSet) map[*ssa.Function][]*ssa.Function {
+	providers := make(map[*ssa.Function][]*ssa.Function)
+	h := collectHolders(funcs, vars)
+	// Go and defer statements count too: the callee hands the callback the
+	// same value however the callee itself is invoked (#256).
+	callsite.EachSite(funcs, vars, func(site callsite.Site) {
+		args := site.Instr.Common().Args
+		for _, idx := range CollectedCallbackArgs(site, inputs) {
+			if fn := resolveExactFunc(args[idx], h); fn != nil {
+				providers[fn] = append(providers[fn], origin.Declared(site.Declared))
+			}
+		}
+	})
+	return providers
+}
+
 // CollectedCallbackArgs returns the indices into the instruction's arguments
 // (receiver included) of the arguments of site that receive a fresh or
 // immutable *gorm.DB as a callback:
@@ -128,17 +150,9 @@ func CollectsFreshCallbacks(site callsite.Site) bool {
 // addCollectedCallbacks adds, to set, the function passed at each
 // CollectedCallbackArgs position of every call in funcs.
 func addCollectedCallbacks(funcs []*ssa.Function, vars callsite.FuncVars, inputs *directive.ImmutableInputSet, set map[*ssa.Function]bool) {
-	h := collectHolders(funcs, vars)
-	// Go and defer statements count too: the callee hands the callback the
-	// same value however the callee itself is invoked (#256).
-	callsite.EachSite(funcs, vars, func(site callsite.Site) {
-		args := site.Instr.Common().Args
-		for _, idx := range CollectedCallbackArgs(site, inputs) {
-			if fn := resolveExactFunc(args[idx], h); fn != nil {
-				set[fn] = true
-			}
-		}
-	})
+	for fn := range CollectImmutableInputProviders(funcs, vars, inputs) {
+		set[fn] = true
+	}
 }
 
 // collectCallbacksPassedTo returns every function passed as a variadic

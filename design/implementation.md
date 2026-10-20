@@ -851,13 +851,14 @@ Now `exportFacts` in `internal/fact.go` exports a `facts.Func` object fact for e
 | `Pure` | Marked `pure`, valid or not, as `DirectiveFuncSet.Contains` decides in the package | `DirectiveFuncSet.Import` on the pure set |
 | `PureFailed` | The body definitively breaks the contract | `PureVerdicts.HasFailed`. So a pure function that passes its argument to it fails too (#187) |
 | `Returned`, `ReturnsOnlyParams` | The parameters the result may be (#188), and whether nothing else is returned | `PureVerdicts.ReturnedArgs`, `RootTracer.pureReturnsOnlyParams` |
-| `ImmutableReturn` | Marked `immutable-return`, and `ImmutableReturnValidator` reports nothing. Or inferred without relying on a broken contract (#261) | `DirectiveFuncSet.Import` on the immutable-return set |
+| `ImmutableReturn` | Marked `immutable-return` or inferred (#261), and not distrusted: the body keeps the contract without relying on a broken one (#314) | `DirectiveFuncSet.Import` on the immutable-return set |
 | `BranchesImmutableParam` | In `needsImmutableParam` | The caller-side check (`handler.Context.NeedsImmutableParam`) |
-| `ImmutableInput` | Marked `immutable-input(name)`, and `ValidateImmutableInputs` reports nothing | `ImmutableInputSet.Import`. The callback collectors and the body check then see the callee's callbacks |
+| `ImmutableInput` | Marked `immutable-input(name)`, and not distrusted: `ValidateImmutableInputs` reports nothing, and the body does not rely on a broken contract (#314) | `ImmutableInputSet.Import`. The callback collectors and the body check then see the callee's callbacks |
 
 Decisions:
 
 - **A broken contract is trusted at home, not abroad.** In the declaring package a broken `immutable-return` or `immutable-input` is reported at the declaration and still trusted, so the mistake is reported once. A caller in another package may belong to someone who never sees that report, so the fact leaves the directive out and the callee is treated as unmarked. A broken `pure` is distrusted in both places, as before (#66).
+- **Distrust is transitive (#314).** A function that keeps its contract only because it trusts a broken one exports no fact either, like pure's failures (#187). Before #314, `//gormreuse:immutable-return func DeclaredViaBad(db) { return BadConn(db) }` exported the fact when `BadConn` broke its contract, and so did an `immutable-input(cb)` function that handed `cb` to a broken one. See [Distrusted contracts](#distrusted-contracts-314). In the declaring package both are still trusted, so the broken contract is reported once, at `BadConn`.
 - **Exported functions only.** Another package can name only an exported function or method, so only those get a fact. This also keeps fact expectations in the test fixtures few: `analysistest` fails on a fact without an expectation, and an object fact is expected with `// want Name:"..."` on the declaration line.
 - **No fact means no directive.** The disk fallback is gone. Every driver that supports facts (`singlechecker`, `go vet`, golangci-lint, `analysistest`) runs the analyzer on the dependencies first, so a dependency without a fact has no directive function. A driver without facts would see none, which reports more, not less.
 - **The #191 exemption is not exported.** It concerns the callee's own parameter, which is checked when the callee's package is analyzed. Exported functions stay out of it, because facts cannot tell the declaring package how other packages call it.
@@ -891,7 +892,7 @@ Decisions:
 
 - **Positive proof, not the benefit of the doubt.** `ImmutableReturnValidator` reports only what is provably mutable, because a declared directive is the user's assertion. Inference has no assertion behind it, so it accepts only what is provably immutable. Between the two, a function stays unmarked.
 - **A least fixed point.** A worklist proves each candidate. A candidate that fails only on calls to other candidates waits on them, and is proved again once the last of them is added, so each candidate is proved at most twice. Proving it again whenever any one of them was added, and queuing it once per failed proof, grew exponentially with a caller that switches over a chain `c0 → c1 → … → ck` (17.7 s at k = 32, #298). `TestAllocationGrowth` (`inferexp`) holds the allocations near linear, and `TestInferImmutableReturnsGrowth` does the same for inference alone on a dense chain, where each `ci` switches over every later `cj`. The set only grows, and a larger set only proves more, so the result is the least fixed point, whatever the order. A function is never added on the strength of itself, which is why recursion is not inferred: `if n > 0 { return rec(n-1) }; return db.Session(...)` is immutable, but proving it needs a greatest fixed point, and an assumed-true cycle is harder to trust. `TestInferImmutableReturns` checks every rotation of the candidates, forwards and backwards.
-- **A broken declared contract: trusted at home, not abroad.** A declared `immutable-return` whose body breaks the contract is trusted in its package (see [Directives across packages](#directives-across-packages-195)). A function that returns its result is inferred there too, so the mistake is still reported once. `distrustedImmutableReturns` proves the inferred functions again with the broken ones distrusted, and the ones that no longer hold export no fact, like the broken function itself. The broken contracts are known only after the pure pass, which inference must precede, so this is a second, smaller fixed point and not a single one.
+- **A broken declared contract: trusted at home, not abroad.** A declared `immutable-return` whose body breaks the contract is trusted in its package (see [Directives across packages](#directives-across-packages-195)). A function that returns its result is inferred there too, so the mistake is still reported once. `distrustContracts` proves the inferred functions again with the broken ones distrusted, and the ones that no longer hold export no fact, like the broken function itself (see [Distrusted contracts](#distrusted-contracts-314)). The broken contracts are known only after the pure pass, which inference must precede, so this is a second fixed point and not a single one.
 - **A declared directive stays used.** An inferable function with the directive is not a candidate, keeps its body check, and its directive is not reported unused or redundant. It documents the intent, and a later change to the body is reported at the declaration instead of turning into reports at the call sites.
 - **`Validate` skips inferred functions.** Their bodies were proved, and a report would say "declared" about a function without the directive.
 - **No `-fix` to insert the directive.** The issue suggested it as an alternative to implicit inference. Inference is the same check the analyzer would make when validating an inserted directive, so inserting it adds a comment and no information.
@@ -904,6 +905,29 @@ Measured with the command on gorm's repository (v1.31.2):
 | `tests` | 34 | 15 | 19, all on the result of `OpenTestConnection`, which returns `gorm.Open`'s result or nil |
 
 Each removed report branched a `clone > 0` handle, so none was a real reuse. No report was added.
+
+## Distrusted contracts (#314)
+
+`distrustContracts` in `internal/distrust.go` decides which `immutable-return` and `immutable-input` functions, declared or inferred, another package must not trust. `exportFacts` leaves their directives out of the facts. The package itself keeps trusting them, as [Directives across packages](#directives-across-packages-195) says.
+
+A function is distrusted when its body breaks the contract, or when it is checked again with the distrusted functions distrusted and the check fails:
+
+| Function | Checked again with | Fails when |
+| --- | --- | --- |
+| Declared `immutable-return` | `ImmutableReturnValidator.Distrusting` | A returned root is a call to a distrusted function. The tracer from `RootTracer.Distrusting` does not trust one, so such a call is a root, and the validator counts it as provably mutable |
+| Inferred `immutable-return` | `purity.InferImmutableReturns` on the function alone | A returned call's callee is distrusted, so the proof no longer holds |
+| `immutable-input(name)` | `ValidateImmutableInputs` with `distrusted` and the distrusting tracer | It hands the callback the result of a distrusted function, hands the callback to a distrusted immutable-input function (an escape), or hands it the parameter of a callback that a distrusted immutable-input function calls |
+
+A callback's parameter stays exempt only while every function that calls it as a callback keeps its promise (`callback.CollectImmutableInputProviders`). One that is also called by gorm's `Transaction` still gets a mutable value from a distrusted function.
+
+It is a worklist, like `validatePureFuncs`. The functions whose body breaks a contract are the seeds. When a function becomes distrusted, the functions that call it or refer to it, in their body or in a closure inside it, and the functions that create or are a callback it calls, are checked again (`distrustDependents`). The sets only grow, and a larger set only fails more checks, so this ends at the same sets in any order. Each function is checked again at most once per function it depends on that becomes distrusted. A package where no contract breaks skips it. `TestAllocationGrowth` (`distrustreturn`, `distrustinput`) holds a chain of `n` directive functions whose last breaks its contract to linear growth. Each function is in a file of its own there, since a directive lookup scans the comments of its file (#301).
+
+Decisions and limitations:
+
+- **The declaring package keeps today's rule.** Distrusting `DeclaredViaBad` at home too would report each reuse of its result, on top of the report at `BadConn`. The issue and the README promise only that another package does not trust it.
+- **Only a reliance that the check can see.** A declared `immutable-return` function that returns the result of an unmarked helper that is not inferred still gets the benefit of the doubt, since the validator does not follow named helpers. An inferred helper is a target itself, so a helper that returns a broken function's result is distrusted, and so is the function that returns the helper's result.
+- **A function in a generated file is not a seed.** Its contract is not validated, so it exports no fact (#259), but a function that relies on it is not distrusted.
+- **`pure` is unchanged.** A pure function's fact already carries `PureFailed`, which is transitive (#187). PIR (`pure,immutable-return`) that returns a broken function's result exports `Pure` without `ImmutableReturn`.
 
 ## Reassignment Fix Target
 

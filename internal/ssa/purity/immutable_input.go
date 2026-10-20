@@ -11,6 +11,7 @@ import (
 	"github.com/mpyw/gormreuse/internal/directive"
 	"github.com/mpyw/gormreuse/internal/ssa/callback"
 	"github.com/mpyw/gormreuse/internal/ssa/callsite"
+	"github.com/mpyw/gormreuse/internal/ssa/origin"
 	"github.com/mpyw/gormreuse/internal/ssa/tracer"
 	"github.com/mpyw/gormreuse/internal/typeutil"
 )
@@ -35,7 +36,12 @@ import (
 //
 // rt must be a tracer configured with the pass's full context so FindMutableRoot
 // classifies immutable sources correctly.
-func ValidateImmutableInputs(fn *ssa.Function, set *directive.ImmutableInputSet, rt *tracer.RootTracer) []Violation {
+//
+// distrusted, when not nil, reports the immutable-input functions whose
+// promise is not trusted: handing the callback to one of them is an escape.
+// With it and a tracer from RootTracer.Distrusting, a violation means that the
+// function keeps its contract only by relying on a broken one (#314).
+func ValidateImmutableInputs(fn *ssa.Function, set *directive.ImmutableInputSet, rt *tracer.RootTracer, distrusted func(*ssa.Function) bool) []Violation {
 	if fn == nil || set == nil || rt == nil {
 		return nil
 	}
@@ -58,13 +64,14 @@ func ValidateImmutableInputs(fn *ssa.Function, set *directive.ImmutableInputSet,
 			continue
 		}
 		flow := &immutableInputFlow{
-			set:       set,
-			rt:        rt,
-			name:      cb.ParamName,
-			param:     fn.Params[idx],
-			derived:   make(map[ssa.Value]bool),
-			funcCache: make(map[types.Type]bool),
-			gorm:      NewValidator(fn, nil, nil, nil, callsite.FuncVars{}),
+			set:        set,
+			distrusted: distrusted,
+			rt:         rt,
+			name:       cb.ParamName,
+			param:      fn.Params[idx],
+			derived:    make(map[ssa.Value]bool),
+			funcCache:  make(map[types.Type]bool),
+			gorm:       NewValidator(fn, nil, nil, nil, callsite.FuncVars{}),
 		}
 		violations = append(violations, flow.check()...)
 	}
@@ -83,10 +90,13 @@ func ValidateImmutableInputs(fn *ssa.Function, set *directive.ImmutableInputSet,
 // immutableInputFlow follows one immutable-input callback parameter through
 // the function and the closures that capture it.
 type immutableInputFlow struct {
-	set   *directive.ImmutableInputSet
-	rt    *tracer.RootTracer
-	name  string
-	param *ssa.Parameter
+	set *directive.ImmutableInputSet
+	// distrusted reports the immutable-input functions whose promise is not
+	// trusted; nil trusts all.
+	distrusted func(*ssa.Function) bool
+	rt         *tracer.RootTracer
+	name       string
+	param      *ssa.Parameter
 
 	// derived holds the values that may be the callback, or hold it.
 	derived   map[ssa.Value]bool
@@ -220,6 +230,9 @@ func (f *immutableInputFlow) keepsImmutableInputPromise(site callsite.Site, idx 
 	// CollectedCallbackArgs reads as a callback.
 	if callback.CollectsFreshCallbacks(site) {
 		return true
+	}
+	if f.distrusted != nil && f.distrusted(origin.Declared(site.Declared)) {
+		return false
 	}
 	return slices.Contains(callback.CollectedCallbackArgs(site, f.set), idx)
 }

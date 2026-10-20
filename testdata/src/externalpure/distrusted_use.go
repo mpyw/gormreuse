@@ -1,0 +1,95 @@
+package externalpure
+
+import (
+	"purelib"
+
+	"gorm.io/gorm"
+)
+
+// A directive function that keeps its contract only by relying on a broken
+// one exports no fact, so it is unmarked here (#314).
+
+func distrustedDeclaredReturn(db *gorm.DB) {
+	q := purelib.DeclaredViaBad(db)
+	q.Find(nil)
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+func distrustedDeclaredReturnChain(db *gorm.DB) {
+	q := purelib.DeclaredViaViaBad(db)
+	q.Find(nil)
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+func distrustedPureImmutableReturn(db *gorm.DB) {
+	q := purelib.PIR(db)
+	q.Find(nil)
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+func distrustedInferredViaDeclared(db *gorm.DB) {
+	q := purelib.InferredViaDeclaredViaBad(db)
+	q.Find(nil)
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+func distrustedDeclaredViaInferred() {
+	q := purelib.DeclaredViaInferredViaBad()
+	q.Find(nil)
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+func trustedDeclaredNotRelying() {
+	q := purelib.DeclaredNotRelying()
+	q.Find(nil)
+	q.Count(nil) // OK
+}
+
+func distrustedForwardedInput(db *gorm.DB) {
+	purelib.Fwd(db, func(tx *gorm.DB) {
+		tx.Find(nil)
+		tx.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	})
+}
+
+func distrustedForwardedInputChain(db *gorm.DB) {
+	purelib.FwdFwd(db, func(tx *gorm.DB) {
+		tx.Find(nil)
+		tx.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	})
+}
+
+func distrustedInputViaReturn(db *gorm.DB) {
+	purelib.InputViaBadReturn(db, func(tx *gorm.DB) {
+		tx.Find(nil)
+		tx.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	})
+}
+
+func distrustedInputViaCallback(db *gorm.DB) {
+	purelib.InputViaBadCallback(db, func(tx *gorm.DB) {
+		tx.Find(nil)
+		tx.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	})
+}
+
+func distrustedInputViaSharedCallback(db *gorm.DB) {
+	purelib.InputViaSharedCallback(db, func(tx *gorm.DB) {
+		tx.Find(nil)
+		tx.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	})
+}
+
+func trustedInputViaTransaction(db *gorm.DB) {
+	purelib.InputViaTransaction(db, func(tx *gorm.DB) {
+		tx.Find(nil)
+		tx.Count(nil) // OK
+	})
+}
+
+func trustedForwardedInput(db *gorm.DB) {
+	purelib.FwdGood(db, func(tx *gorm.DB) {
+		tx.Find(nil)
+		tx.Count(nil) // OK
+	})
+}

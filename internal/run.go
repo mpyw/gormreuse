@@ -145,7 +145,7 @@ func RunSSA(
 
 	// Treat a function as immutable-return when its body proves it (#261),
 	// before any pass reads the set.
-	inferredReturns := inferImmutableReturns(funcs, immutableReturnFuncs, funcVars, skip)
+	inferImmutableReturns(funcs, immutableReturnFuncs, funcVars, skip)
 
 	// PASS 1: validate pure function contracts and collect the functions that
 	// definitively broke them, and the parameters each trusted one may return.
@@ -181,7 +181,7 @@ func RunSSA(
 			continue
 		}
 		guard.run(fn, func() {
-			for _, v := range purity.ValidateImmutableInputs(fn, immutableInputSet, inputTracer) {
+			for _, v := range purity.ValidateImmutableInputs(fn, immutableInputSet, inputTracer, nil) {
 				failedInput[fn] = true
 				report(v.Pos, v.Message)
 			}
@@ -244,10 +244,18 @@ func RunSSA(
 		immutableReturnFuncs: immutableReturnFuncs,
 		immutableInputSet:    immutableInputSet,
 		pureVerdicts:         pureVerdicts,
-		distrustedReturn:     distrustedImmutableReturns(failedReturn, inferredReturns, immutableReturnFuncs, funcVars),
-		failedInput:          failedInput,
-		needsImmutableParam:  needsImmutableParam,
-		tracer:               inputTracer,
+		distrusted: distrustContracts(distrustSources{
+			funcs:                funcs,
+			immutableReturnFuncs: immutableReturnFuncs,
+			immutableInputSet:    immutableInputSet,
+			failedReturn:         failedReturn,
+			failedInput:          failedInput,
+			tracer:               inputTracer,
+			funcVars:             funcVars,
+			skip:                 skip,
+		}, guard),
+		needsImmutableParam: needsImmutableParam,
+		tracer:              inputTracer,
 	}, skip, guard)
 
 	// Report unused ignore directives last, once every other diagnostic has had

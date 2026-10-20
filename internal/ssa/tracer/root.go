@@ -76,6 +76,7 @@ import (
 	"github.com/mpyw/gormreuse/internal/directive"
 	"github.com/mpyw/gormreuse/internal/ssa/callsite"
 	"github.com/mpyw/gormreuse/internal/ssa/cfg"
+	"github.com/mpyw/gormreuse/internal/ssa/origin"
 	"github.com/mpyw/gormreuse/internal/typeutil"
 )
 
@@ -113,6 +114,8 @@ type RootTracer struct {
 	fieldRoots           map[fieldRootKey]*FieldRoot // Interned FieldRoots (one per call and field path)
 	allRoots             map[allRootsKey][]ssa.Value // Memo of FindAllMutableRoots
 	funcVars             callsite.FuncVars           // Package-level variables that hold one function (#183)
+	distrustedReturn     func(*ssa.Function) bool    // immutable-return functions not trusted (#314); nil trusts all
+	distrustedCallback   func(*ssa.Function) bool    // immutableCallbacks not exempted (#314); nil exempts all
 
 	//declscope:shared // pure.go's IsPureFunction reads it
 	pureFuncs *directive.DirectiveFuncSet // User-defined pure functions
@@ -160,6 +163,18 @@ func NewRootTracer(pureFuncs, immutableReturnFuncs, immutableParamFuncs *directi
 		aliases:              make(map[aliasedRootsKey]bool),
 		closureRepeats:       make(map[*ssa.Function]*cfg.Repeats),
 	}
+}
+
+// Distrusting returns a tracer configured like t, with empty memos, that does
+// not trust the immutable-return functions that returns reports, and does not
+// exempt the parameter of the immutable callbacks that callbacks reports. It
+// tells which contracts rely on a broken one (#314). The predicates may grow
+// between calls, so the memos are not shared.
+func (t *RootTracer) Distrusting(returns, callbacks func(*ssa.Function) bool) *RootTracer {
+	d := NewRootTracer(t.pureFuncs, t.immutableReturnFuncs, t.immutableParamFuncs, t.pure, t.scopesCallbacks, t.immutableCallbacks, t.funcVars)
+	d.distrustedReturn = returns
+	d.distrustedCallback = callbacks
+	return d
 }
 
 // allRootsKey is a FindAllMutableRoots query.
@@ -813,7 +828,7 @@ func (t *RootTracer) isMutableParam(p *ssa.Parameter) bool {
 	if t.scopesCallbacks[fn] {
 		return true
 	}
-	if t.immutableCallbacks[fn] {
+	if t.immutableCallbacks[fn] && (t.distrustedCallback == nil || !t.distrustedCallback(fn)) {
 		return false
 	}
 	if t.immutableParamFuncs != nil && t.immutableParamFuncs.Contains(fn) {
@@ -875,6 +890,9 @@ func (t *RootTracer) IsImmutableCall(v ssa.Value) bool {
 func (t *RootTracer) returnsImmutable(callee *ssa.Function) bool {
 	if t.isImmutableReturningBuiltin(callee) {
 		return true
+	}
+	if t.distrustedReturn != nil && callee != nil && t.distrustedReturn(origin.Declared(callee)) {
+		return false
 	}
 	return t.immutableReturnFuncs != nil && t.immutableReturnFuncs.Contains(callee)
 }

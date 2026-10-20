@@ -2,7 +2,6 @@ package internal
 
 import (
 	"go/token"
-	"maps"
 	"slices"
 
 	"golang.org/x/tools/go/ssa"
@@ -49,16 +48,16 @@ func reportImmutableReturnViolations(
 
 // inferImmutableReturns adds to set the functions of funcs that have no
 // immutable-return directive but whose body proves that every *gorm.DB they
-// return is immutable (#261), and returns them in the order of funcs. A
-// function of a skipped file is not inferred, since its body is not analyzed.
+// return is immutable (#261). A function of a skipped file is not inferred,
+// since its body is not analyzed.
 //
 // Here a function marked immutable-return counts as immutable even when its
 // body breaks the contract, as everywhere else in the package: that body is
-// reported once, at its declaration. distrustedReturns keeps such trust out
+// reported once, at its declaration. distrustContracts keeps such trust out
 // of the facts.
 //
 //declscope:shared // run.go infers the immutable-return functions
-func inferImmutableReturns(funcs []*ssa.Function, set *directive.DirectiveFuncSet, funcVars callsite.FuncVars, skip func(*ssa.Function) bool) []*ssa.Function {
+func inferImmutableReturns(funcs []*ssa.Function, set *directive.DirectiveFuncSet, funcVars callsite.FuncVars, skip func(*ssa.Function) bool) {
 	var candidates []*ssa.Function
 	for _, fn := range funcs {
 		if !skip(fn) && !set.Contains(fn) && immutableReturnCandidate(fn) {
@@ -67,14 +66,11 @@ func inferImmutableReturns(funcs []*ssa.Function, set *directive.DirectiveFuncSe
 	}
 	builtins := tracer.NewRootTracer(nil, nil, nil, nil, nil, nil, funcVars)
 	inferred := purity.InferImmutableReturns(candidates, set.Contains, builtins)
-	var out []*ssa.Function
 	for _, fn := range candidates {
 		if inferred[fn] {
 			set.Infer(fn)
-			out = append(out, fn)
 		}
 	}
-	return out
 }
 
 // immutableReturnCandidate reports whether fn has a *gorm.DB result, which
@@ -86,30 +82,6 @@ func immutableReturnCandidate(fn *ssa.Function) bool {
 		}
 	}
 	return false
-}
-
-// distrustedImmutableReturns returns the immutable-return functions that another
-// package must not trust: those whose body breaks the contract, and those
-// inferred only because they return the result of one (#261). The inferred
-// functions are proved again with the broken ones distrusted.
-//
-//declscope:shared // run.go drops the inferred functions that a broken one calls
-func distrustedImmutableReturns(failed map[*ssa.Function]bool, inferred []*ssa.Function, set *directive.DirectiveFuncSet, funcVars callsite.FuncVars) map[*ssa.Function]bool {
-	if len(failed) == 0 || len(inferred) == 0 {
-		return failed
-	}
-	trusted := func(fn *ssa.Function) bool {
-		return set.Contains(fn) && !set.Inferred(fn) && !failed[fn]
-	}
-	builtins := tracer.NewRootTracer(nil, nil, nil, nil, nil, nil, funcVars)
-	kept := purity.InferImmutableReturns(inferred, trusted, builtins)
-	distrusted := maps.Clone(failed)
-	for _, fn := range inferred {
-		if !kept[fn] {
-			distrusted[fn] = true
-		}
-	}
-	return distrusted
 }
 
 // computeNeedsImmutableParam returns the //gormreuse:immutable-param functions
