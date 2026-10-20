@@ -1,0 +1,233 @@
+--- go_defer_only.go	1970-01-01 00:00:00
++++ go_defer_only.go.golden	1970-01-01 00:00:00
+@@ -1,220 +1,220 @@
+ package internal
+ 
+ import (
+ 	"fmt"
+ 	"log"
+ 	"testing"
+ 
+ 	"gorm.io/gorm"
+ )
+ 
+ // =============================================================================
+ // Small go/defer gaps (#309)
+ //
+ // A read-only stdlib variadic is read-only under go and defer too. A root
+ // used only in go and defer statements names its first branch and gets the
+ // Session fix, unless a statement changes the root in place where another
+ // one can see it. A comparison of a closure value with nil does not run it.
+ // =============================================================================
+ 
+ // --- Read-only stdlib variadics under go / defer ---
+ 
+ func godeferDeferLogPrintf(db *gorm.DB) {
+ 	q := db.Where("x = ?", 1)
+ 	defer log.Printf("query=%v", q)
+ 	q.Find(nil) // OK: log.Printf only formats q
+ }
+ 
+ func godeferGoFmtPrintln(db *gorm.DB) {
+ 	q := db.Where("x = ?", 1)
+ 	go fmt.Println(q)
+ 	q.Find(nil) // OK: fmt.Println only formats q
+ }
+ 
+ func godeferDeferTestingLogf(db *gorm.DB, t *testing.T) {
+ 	q := db.Where("x = ?", 1)
+ 	defer t.Logf("query=%v", q)
+ 	q.Find(nil) // OK: (*testing.T).Logf only formats q
+ }
+ 
+ func godeferUserVariadic(args ...interface{}) {}
+ 
+ func godeferDeferUserVariadic(db *gorm.DB) {
+ 	q := db.Where("x = ?", 1)
+ 	defer godeferUserVariadic(q) // the varargs store hands q to the callee
+ 	q.Find(nil)                  // want `\*gorm\.DB reused: second branch from mutable root`
+ 	q.Count(nil)                 // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // --- A root used only in go / defer statements ---
+ 
+ func godeferGoOnly(db *gorm.DB) {
+-	q := db.Where("x = ?", 1)
++	q := db.Where("x = ?", 1).Session(&gorm.Session{})
+ 	go q.Count(nil)
+ 	go q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root \(root at go_defer_only\.go:\d+, first branch at go_defer_only\.go:\d+\)`
+ }
+ 
+ func godeferDeferOnly(db *gorm.DB) {
+-	q := db.Where("x = ?", 1)
++	q := db.Where("x = ?", 1).Session(&gorm.Session{})
+ 	defer q.Count(nil)
+ 	defer q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root \(root at go_defer_only\.go:\d+, first branch at go_defer_only\.go:\d+\)`
+ }
+ 
+ func godeferGoAndDefer(db *gorm.DB) {
+-	q := db.Where("x = ?", 1)
++	q := db.Where("x = ?", 1).Session(&gorm.Session{})
+ 	defer q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root \(root at go_defer_only\.go:\d+, first branch at go_defer_only\.go:\d+\)`
+ 	go q.Find(nil)
+ }
+ 
+ func godeferSessionCopyUnderGo(db *gorm.DB) {
+ 	q := db.Where("x = ?", 1)
+ 	go q.Session(&gorm.Session{}).Find(nil) // Session runs here and only reads q
+ 	go q.Find(nil)                          // OK: the only branch of q
+ }
+ 
+ // A chain method under go changes the root in place, and a go statement
+ // cannot be reassigned to keep the change, so there is no fix.
+ func godeferGoChainOnly(db *gorm.DB) {
+ 	q := db.Where("x = ?", 1)
+ 	go q.Where("a")
+ 	go q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // The deferred Where runs first and adds its condition to q in place, so the
+ // deferred Find sees it. A Session at the root would drop it: no fix.
+ func godeferDeferChainOnly(db *gorm.DB) {
+ 	q := db.Where("x = ?", 1)
+ 	defer q.Find(nil)
+ 	defer q.Where("a") // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ func godeferApplyTenant(tx *gorm.DB) {
+ 	tx.Where("tenant_id = ?", 7)
+ }
+ 
+ func godeferDeferHelperOnly(db *gorm.DB) {
+ 	q := db.Where("x = ?", 1)
+ 	defer q.Find(nil)
+ 	defer godeferApplyTenant(q) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // The same holds with other uses: only a deferred call sees what a deferred
+ // call changes.
+ func godeferDeferChainWithUses(db *gorm.DB) {
+ 	q := db.Where("x = ?", 1)
+ 	defer q.Find(nil)  // want `\*gorm\.DB reused: second branch from mutable root`
+ 	defer q.Where("a") // want `\*gorm\.DB reused: second branch from mutable root`
+ 	q.Count(nil)
+ 	q.First(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // A deferred change that no other deferred call sees keeps the fix.
+ func godeferDeferChainUnseen(db *gorm.DB) {
+-	q := db.Where("x = ?", 1)
++	q := db.Where("x = ?", 1).Session(&gorm.Session{})
+ 	defer q.Where("a") // want `\*gorm\.DB reused: second branch from mutable root`
+ 	q.Count(nil)
+ 	q.First(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // A deferred change in a loop is seen by the same statement on the next
+ // iteration's call.
+ func godeferDeferHelperInLoop(db *gorm.DB, ids []int) {
+ 	q := db.Where("x = ?", 1)
+ 	for range ids {
+ 		defer godeferApplyTenant(q) // want `\*gorm\.DB reused: second branch from mutable root`
+ 	}
+ }
+ 
+ // --- A comparison does not run a closure ---
+ 
+ func godeferClosureNilCheck(db *gorm.DB) {
+ 	q := db.Where("x = ?", 1)
+ 	f := func() { q.Find(nil) }
+ 	if f != nil {
+ 		f() // OK: the comparison does not run f
+ 	}
+ }
+ 
+ func godeferClosureVarNilCheck(db *gorm.DB, c bool) {
+ 	q := db.Where("x = ?", 1)
+ 	var f func()
+ 	if c {
+ 		f = func() { q.Find(nil) }
+ 	}
+ 	if f != nil {
+ 		f() // OK: the comparison does not run f
+ 	}
+ }
+ 
+ func godeferClosureNilCheckTwoCalls(db *gorm.DB) {
+-	q := db.Where("x = ?", 1)
++	q := db.Where("x = ?", 1).Session(&gorm.Session{})
+ 	f := func() { q.Find(nil) } // want `\*gorm\.DB reused: second branch from mutable root`
+ 	if f != nil {
+ 		f()
+ 		f()
+ 	}
+ }
+ 
+ // --- A value that may hold several roots, under go / defer ---
+ 
+ func godeferMayRootGoThenUse(db *gorm.DB, c bool) {
+ 	base := db.Session(&gorm.Session{})
+-	a := base.Where("a")
++	a := base.Where("a").Session(&gorm.Session{})
+ 	b := base.Where("b")
+ 	q := b
+ 	if c {
+ 		q = a
+ 	}
+ 	go q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ 	a.Find(nil)
+ }
+ 
+ func godeferMayRootGoTwice(db *gorm.DB, c bool) {
+ 	base := db.Session(&gorm.Session{})
+-	a := base.Where("a")
++	a := base.Where("a").Session(&gorm.Session{})
+ 	b := base.Where("b")
+ 	q := b
+ 	if c {
+ 		q = a
+ 	}
+ 	go a.Find(nil)
+ 	go q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ func godeferMayRootDeferThenGo(db *gorm.DB, c bool) {
+ 	base := db.Session(&gorm.Session{})
+-	a := base.Where("a")
++	a := base.Where("a").Session(&gorm.Session{})
+ 	b := base.Where("b")
+ 	q := b
+ 	if c {
+ 		q = a
+ 	}
+ 	defer q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ 	go a.Find(nil)
+ }
+ 
+ func godeferMayRootGoInLoop(db *gorm.DB, c bool, ids []int) {
+ 	base := db.Session(&gorm.Session{})
+-	a := base.Where("a")
+-	b := base.Where("b")
++	a := base.Where("a").Session(&gorm.Session{})
++	b := base.Where("b").Session(&gorm.Session{})
+ 	q := b
+ 	if c {
+ 		q = a
+ 	}
+ 	for range ids {
+ 		go q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ 	}
+ }
+ 
+ // --- The pure contract reads go / defer the same way ---
+ 
+ //gormreuse:pure
+ func godeferPureLogs(db *gorm.DB) {
+ 	defer log.Printf("%v", db)
+ 	go fmt.Println("db:", db)
+ }
+ 
+ //gormreuse:pure
+ func godeferPureUserVariadic(db *gorm.DB) {
+ 	defer godeferUserVariadic(db) // want `pure function`
+ }

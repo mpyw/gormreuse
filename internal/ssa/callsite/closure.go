@@ -18,7 +18,7 @@ type ClosureRun struct {
 // ClosureRuns returns the instructions where v, a closure value (a
 // MakeClosure, or a function literal with no free variables), may run: each
 // use of it, such as a call, a go or defer statement, an argument or a store
-// into a slice or a field.
+// into a slice or a field. A comparison with nil is not one.
 //
 // The value is followed through a merge (Phi), and through a local variable
 // it is stored to: the variable's loads are followed, also in the closures
@@ -80,7 +80,9 @@ func ClosureRuns(v ssa.Value) []ClosureRun {
 		}
 		for _, ref := range *refs {
 			switch ref := ref.(type) {
-			case *ssa.DebugRef:
+			case *ssa.DebugRef, *ssa.BinOp:
+				// A func value can only be compared with nil, as in
+				// `if f != nil { f() }`, which does not run it (#309).
 				continue
 			case *ssa.Phi:
 				follow(ref)

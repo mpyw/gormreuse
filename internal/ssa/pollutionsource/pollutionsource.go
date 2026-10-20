@@ -143,6 +143,8 @@ var readOnlyVariadicPkgs = map[string]bool{
 //	t5 = slice t2[:]            // sliced ...
 //	t6 = fmt.Println(t5...)     // ... and handed to a variadic call
 //
+// The call may also be a go or defer statement.
+//
 // It returns true only when the slot is interface-typed (val is a MakeInterface),
 // the array flows into the variadic argument of a call, AND that callee is an
 // allow-listed read-only stdlib function. This deliberately excludes:
@@ -165,12 +167,14 @@ func isReadOnlyVariadicArg(idx *ssa.IndexAddr, val ssa.Value, vars callsite.Func
 			continue
 		}
 		for _, sr := range *slice.Referrers() {
-			call, ok := sr.(*ssa.Call)
+			// A go or defer statement formats its arguments when the call
+			// runs, as a plain call does (#309).
+			call, ok := sr.(ssa.CallInstruction)
 			if !ok {
 				continue
 			}
-			sig := call.Call.Signature()
-			args := call.Call.Args
+			sig := call.Common().Signature()
+			args := call.Common().Args
 			if sig != nil && sig.Variadic() && len(args) > 0 && args[len(args)-1] == slice && isReadOnlyStdlibCallee(call, vars) {
 				return true
 			}
@@ -182,7 +186,7 @@ func isReadOnlyVariadicArg(idx *ssa.IndexAddr, val ssa.Value, vars callsite.Func
 // isReadOnlyStdlibCallee reports whether call targets a function in an
 // allow-listed read-only package (see readOnlyVariadicPkgs): by name, as a
 // method value, or through a package-level variable that holds it (#257).
-func isReadOnlyStdlibCallee(call *ssa.Call, vars callsite.FuncVars) bool {
+func isReadOnlyStdlibCallee(call ssa.CallInstruction, vars callsite.FuncVars) bool {
 	callee := callsite.SiteOf(call, vars).Declared
 	if callee == nil || callee.Object() == nil || callee.Object().Pkg() == nil {
 		return false

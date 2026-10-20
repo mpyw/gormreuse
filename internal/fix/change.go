@@ -26,6 +26,13 @@ import (
 //     `if err := q.Where("a").Error; ...`;
 //   - a go statement hands the root to a call, as in `go applyTenant(q)`. The
 //     goroutine may change it while the uses after the statement run;
+//   - a defer statement changes the root in place, as `defer applyTenant(q)`
+//     and `defer q.Where("a")` do, and another deferred call may see it:
+//     the root has another use in a defer statement, or the statement runs
+//     more than once. Deferred calls run after every other use, so only a
+//     deferred call can see such a change, and without the order they run in
+//     any other one is taken to. `defer q.Find(nil); defer q.Where("a")`
+//     would lose its condition (#309);
 //   - the root is stored into a struct field or an element that other code
 //     can reach, as in `s := &Svc{db: q}; s.apply()` (see
 //     holderChangesRoot, #310).
@@ -43,6 +50,7 @@ func (g *Generator) changedElsewhere(v pollution.Violation) bool {
 	if g.holderChangesRoot(v, ordered) {
 		return true
 	}
+	deferUses, deferChanges, deferRepeats := 0, 0, false
 	for _, f := range withClosures(v.Root.Parent()) {
 		loopInfo := g.cfg.DetectLoops(f)
 		for _, block := range f.Blocks {
@@ -53,36 +61,44 @@ func (g *Generator) changedElsewhere(v pollution.Violation) bool {
 						return true
 					}
 				case *ssa.Go:
-					if g.goChangesRoot(instr, v.Root, loopInfo) {
+					if _, changes := g.statementRootChange(instr, v.Root, loopInfo); changes {
 						return true
+					}
+				case *ssa.Defer:
+					uses, changes := g.statementRootChange(instr, v.Root, loopInfo)
+					if uses {
+						deferUses++
+					}
+					if changes {
+						deferChanges++
+						deferRepeats = deferRepeats || useRepeatsAfter(g.cfg, block, tracer.RootBlock(v.Root))
 					}
 				}
 			}
 		}
 	}
-	return false
+	return deferChanges > 0 && (deferUses > 1 || deferRepeats)
 }
 
-// goChangesRoot reports whether instr, a go statement, hands root to code
-// that may change it in place. The receiver of a *gorm.DB finisher, as in
-// `go q.Count(nil)`, is not handed over: the query is a use of the root like
-// any other, and runs on a copy once the root has a Session, as with the
-// closure form `go func() { q.Count(nil) }()` (#312). Nor is that of a
-// Session-family call, which copies it. The receiver of a chain
-// method, as in `go q.Where("a")`, is: the goroutine adds the condition to
-// the root in place, and a go statement cannot be reassigned to keep it.
-func (g *Generator) goChangesRoot(instr *ssa.Go, root ssa.Value, loopInfo *cfg.LoopInfo) bool {
+// statementRootChange reports whether instr, a go or defer statement, uses root, and
+// whether it hands root to code that may change it in place. The receiver of
+// a *gorm.DB finisher, as in `go q.Count(nil)`, is not handed over: the query
+// is a use of the root like any other, and runs on a copy once the root has a
+// Session, as with the closure form `go func() { q.Count(nil) }()` (#312).
+// Nor is that of a Session-family call, which copies it. The receiver of a
+// chain method, as in `go q.Where("a")`, is: the call adds the condition to
+// the root in place, and a go or defer statement cannot be reassigned to keep
+// it.
+func (g *Generator) statementRootChange(instr ssa.CallInstruction, root ssa.Value, loopInfo *cfg.LoopInfo) (uses, changes bool) {
 	site := g.tracer.Site(instr)
 	queryOrCopy := site.IsGormMethod() && (isGormFinisher(site.Method()) || typeutil.IsImmutableReturningBuiltin(site.Method()))
-	for i, arg := range instr.Call.Args {
-		if queryOrCopy && site.ArgParam(i) < 0 {
-			continue
-		}
+	for i, arg := range instr.Common().Args {
 		if gormArg, ok := pollutionsource.UnwrapGormDB(arg); ok && g.tracer.FindMutableRoot(gormArg, loopInfo) == root {
-			return true
+			uses = true
+			changes = changes || !queryOrCopy || site.ArgParam(i) >= 0
 		}
 	}
-	return false
+	return uses, changes
 }
 
 // changeSeenAfterEscape reports whether code may see what escape, a use that

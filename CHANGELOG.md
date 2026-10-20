@@ -38,7 +38,7 @@ Most added reports in the root module are a `*gorm.DB` parameter branched in a l
 | The result of a helper, a func value or an interface method (#176) | `db, err := NewDB(); db.Find(&a); db.Find(&b)` | Most helpers are now [inferred](README.md#inferred-immutable-return) safe. Otherwise mark the helper `//gormreuse:immutable-return`. For an interface method, write `repo.DB().Session(&gorm.Session{})` |
 | A subquery changed before the outer query runs (#185) | `x := db.Where("id IN (?)", sub); sub.Where("a").Find(&y); x.Find(&z)` | The message is `mutable root passed as a query argument is read when the query runs`. End the subquery's chain with a Session |
 | One use that runs more than once (#177, #249, #252, #305) | `for … { q.Find(&x) }`, `f := func() { q.Find(&x) }; f(); f()`, `for … { g.Go(func() error { … }) }`, `run := func() { for … { f() } }; run()` | Define the root inside the loop or closure, or end its chain with a Session |
-| A `go`, `defer` or helper call in a loop (#254) | `for … { go q.Find(nil) }`, `for … { helper(q) }` | Same as above. A `go`/`defer` in a loop gets no fix |
+| A `go`, `defer` or helper call in a loop (#254) | `for … { go q.Find(nil) }`, `for … { helper(q) }` | Same as above |
 | A value that may hold one of several roots (#252) | `q := b; if c { q = a }; q.Find(&x); a.Find(&y)` | Isolate the root that is used again |
 | A field of a struct that a helper returns (#181, #250) | `s := newApp(db); s.DB.Find(&a); s.DB.Find(&b)` | Mark the helper `//gormreuse:immutable-return`, or put the Session where the helper builds the struct |
 | A package-level variable stored and reused in one function (#183) | `G = db.Where("t"); G.Find(&a); G.Find(&b)` | Store an isolated value |
@@ -69,6 +69,8 @@ Most added reports in the root module are a `*gorm.DB` parameter branched in a l
 | Two calls through a method value of an immutable value (#178) | `where := db.Session(s).Where; where("a").Find(&x); where("b").Find(&y)` |
 | A Transaction or FindInBatches callback under `go`/`defer`, or held in a variable or field (#256, #257) | `go db.Transaction(cb)`, `db.Transaction(s.cb)` |
 | Directives on generic instances and method values (#180) | `helper[int](q)`, `f := r.helper; f(q)` |
+| A `*gorm.DB` formatted under `go`/`defer` (#309) | `defer log.Printf("%v", q); q.Find(&x)` |
+| A closure compared with `nil` counted as a run of it (#309) | `if f != nil { f() }` |
 | `AddError`, `DB`, `Get`, `InstanceGet` and `Callback` counted as a branch (#307). `ToSQL` now only reads its receiver | `sqlDB, _ := db.DB(); db.AutoMigrate(&User{})`, `q.Where("a").Find(&x); q.AddError(err)` |
 
 > [!WARNING]
@@ -93,7 +95,8 @@ Most added reports in the root module are a `*gorm.DB` parameter branched in a l
 | Change | Detail |
 | --- | --- |
 | Every fix compiles (#200) | Alone, as an editor's quick fix, or with every other fix. The `gorm` import is added under a free name when needed |
-| No fix that drops a condition (#199, #243, #310) | A discarded statement such as `q.Where("a")` must be reassigned. When it cannot be, or when other code changes the root in place, there is no fix. That code includes a method of a struct that holds the root (`s := &Svc{db: q}; s.apply()`) |
+| No fix that drops a condition (#199, #243, #309, #310) | A discarded statement such as `q.Where("a")` must be reassigned. When it cannot be, or when other code changes the root in place, there is no fix. That code includes a method of a struct that holds the root (`s := &Svc{db: q}; s.apply()`), and a deferred change that another deferred call sees (`defer q.Find(&x); defer q.Where("a")`) |
+| Roots used only in `go`/`defer` (#309) | `go q.Count(&n); go q.Find(&x)` and `for … { go q.Find(&x) }` get a Session at the root. The message names the first branch |
 | The right variable (#198) | A reassignment rebinds the variable that holds the reused root, never an outer receiver |
 | Parameter roots (#201, #245, #313) | An exported function, a method, a function value or a closure without a `*gorm.DB` result, such as a `Transaction` wrapper's callback, gets `tx = tx.Session(&gorm.Session{})` at the top of the body. `immutable-param` is added only when every caller of a function declaration is checked |
 | Sessions by control flow (#202, #247, #311) | Sessions go where the paths need them, also for a reassignment read in a later loop and for a value merged with a parameter. One pass of fixes resolves the diagnostics |

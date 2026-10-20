@@ -207,13 +207,13 @@ func rcsPerIterationKept(db *gorm.DB, items []rcsItem) {
 	for _, it := range items {
 		q := db.Model(nil).Where("id = ?", it.ID)
 		save := func() error {
-			return q.Updates(it).Error // want `\*gorm\.DB reused: second branch from mutable root`
+			return q.Updates(it).Error
 		}
 		if it.New {
 			last = save
 		}
-		if last != nil {
-			_ = last()
+		if last != nil { // a comparison does not run the closure (#309)
+			_ = last() // want `\*gorm\.DB reused: second branch from mutable root`
 		}
 	}
 }

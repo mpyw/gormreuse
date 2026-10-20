@@ -49,14 +49,14 @@ func repeatsClosureCalledInLoop(db *gorm.DB, ids []int) {
 }
 
 func repeatsGoInLoop(db *gorm.DB, ids []int) {
-	q := db.Where("x")
+	q := db.Where("x").Session(&gorm.Session{})
 	for range ids {
 		go q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 	}
 }
 
 func repeatsDeferInLoop(db *gorm.DB, ids []int) {
-	q := db.Where("x")
+	q := db.Where("x").Session(&gorm.Session{})
 	for range ids {
 		defer q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 	}
