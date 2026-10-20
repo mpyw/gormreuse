@@ -1,0 +1,124 @@
+package internal
+
+import "gorm.io/gorm"
+
+// Fixtures for issue #343: the fix follows a chain of Phis back from the
+// diagnostic's root, here the last filter, through the loop-header Phi. It
+// follows a value only when nothing but a merge or a chain uses it. The
+// Sessions it would add before such a value would make the value's in-place
+// changes go to a copy.
+
+func phiChainTenant(db *gorm.DB) { db.Where("tenant_id = ?", 7) }
+
+// phiChainHelper hands the merged value to a helper before the loop: the
+// Model and the name filter get no Session.
+func phiChainHelper(db *gorm.DB, name, role string, ids []int) {
+	q := db.Model(&User{})
+	if name != "" {
+		q = q.Where("name = ?", name)
+	}
+	phiChainTenant(q)
+	for _, id := range ids {
+		q = q.Where("id <> ?", id) // want `\*gorm\.DB reused: second branch from mutable root`
+	}
+	if role != "" {
+		q = q.Where("role = ?", role) // want `\*gorm\.DB reused: second branch from mutable root`
+	}
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// phiChainOr passes the merged value to a method of its own: Or reads it as
+// a condition.
+func phiChainOr(db *gorm.DB, name, role string, ids []int) {
+	q := db.Model(&User{})
+	if name != "" {
+		q = q.Where("name = ?", name)
+	}
+	q = q.Or(q)
+	for _, id := range ids {
+		q = q.Where("id <> ?", id)
+	}
+	if role != "" {
+		q = q.Where("role = ?", role)
+	}
+	q.Count(nil)
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// phiChainDiscardedChain discards a chain on the merged value, so its Where
+// changes the value in place. The last filter's fix does not follow the Phis
+// back past it, but the Model's own fix reassigns it and gives every value a
+// Session.
+func phiChainDiscardedChain(db *gorm.DB, name, role string, ids []int) {
+	q := db.Model(&User{})
+	if name != "" {
+		q = q.Where("name = ?", name)
+	}
+	q.Where("deleted_at IS NULL").Limit(10)
+	for _, id := range ids {
+		q = q.Where("id <> ?", id) // want `\*gorm\.DB reused: second branch from mutable root`
+	}
+	if role != "" {
+		q = q.Where("role = ?", role) // want `\*gorm\.DB reused: second branch from mutable root`
+	}
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// phiChainReads only runs a query on and copies the merged value before the
+// loop, so the Phis are followed back to the Model.
+func phiChainReads(db *gorm.DB, name, role string, ids []int) {
+	q := db.Model(&User{})
+	if name != "" {
+		q = q.Where("name = ?", name)
+	}
+	q.Session(&gorm.Session{}).Where("x").Find(nil)
+	q.Where("y").Find(nil)
+	for _, id := range ids {
+		q = q.Where("id <> ?", id) // want `\*gorm\.DB reused: second branch from mutable root`
+	}
+	if role != "" {
+		q = q.Where("role = ?", role) // want `\*gorm\.DB reused: second branch from mutable root`
+	}
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// phiChainError reads the Error of the merged value before the loop, so the
+// Model and the name filter get no Session.
+func phiChainError(db *gorm.DB, name, role string, ids []int) error {
+	q := db.Model(&User{})
+	if name != "" {
+		q = q.Where("name = ?", name)
+	}
+	if err := q.Error; err != nil {
+		return err
+	}
+	for _, id := range ids {
+		q = q.Where("id <> ?", id)
+	}
+	if role != "" {
+		q = q.Where("role = ?", role)
+	}
+	q.Count(nil)
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	return nil
+}
+
+// phiChainAttrs sets Attrs on the Model, which a Session would drop (#344).
+// No value of the chain gets a Session.
+func phiChainAttrs(db *gorm.DB, name, role string, ids []int) {
+	q := db.Model(&User{}).Attrs(User{})
+	if name != "" {
+		q = q.Where("name = ?", name)
+	}
+	for _, id := range ids {
+		q = q.Where("id <> ?", id)
+	}
+	if role != "" {
+		q = q.Where("role = ?", role)
+	}
+	q.Count(nil)
+	q.FirstOrInit(&User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+}

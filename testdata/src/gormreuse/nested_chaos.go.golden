@@ -427,10 +427,10 @@ func nestedIfChaosKitchenSink(db *gorm.DB, a, b, c, d bool) {
 			q.Where("immediate_d").First(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 		} else {
 			// Stored chain
-			q = q.Where("stored_not_d") // want `\*gorm\.DB reused: second branch from mutable root`
+			q = q.Where("stored_not_d").Session(&gorm.Session{}) // want `\*gorm\.DB reused: second branch from mutable root`
 		}
 	} else {
-		q = q.Where("stored_not_c") // want `\*gorm\.DB reused: second branch from mutable root`
+		q = q.Where("stored_not_c").Session(&gorm.Session{}) // want `\*gorm\.DB reused: second branch from mutable root`
 	}
 
 	// Level 2 Phi: q_2 = Phi(q_1_c_not_d, q_1_not_c, q_1_c_d)
@@ -608,7 +608,7 @@ func chaosPollutionPropagation(db *gorm.DB, a, b, c bool) {
 
 	// Level 2: Extend from Phi result
 	if b {
-		q = q.Where("b") // want `\*gorm\.DB reused: second branch from mutable root`
+		q = q.Where("b").Session(&gorm.Session{}) // want `\*gorm\.DB reused: second branch from mutable root`
 	}
 	// Phi2: q2 = Phi(q1, q1.Where("b"))
 
@@ -690,7 +690,7 @@ func chaosPolluteInLoop(db *gorm.DB, items []int, threshold int) {
 
 // chaosNestedLoopsWithPollution demonstrates nested loops with pollution.
 func chaosNestedLoopsWithPollution(db *gorm.DB, outer, inner []int) {
-	q := db.Where("base")
+	q := db.Where("base").Session(&gorm.Session{})
 
 	for _, o := range outer {
 		q = q.Where("outer", o).Session(&gorm.Session{})
@@ -1004,7 +1004,7 @@ func chaosModernSwapConditional(db *gorm.DB, a, b bool) {
 //gormreuse:immutable-param
 func chaosModernSwapLoop(db *gorm.DB, flags []bool) {
 	q1 := db.Where("q1").Session(&gorm.Session{})
-	q2 := db.Where("q2")
+	q2 := db.Where("q2").Session(&gorm.Session{})
 
 	q1.Find(nil) // Pollute q1
 

@@ -223,12 +223,14 @@ func (g *Generator) Generate(v pollution.Violation) []analysis.SuggestedFix {
 	// The original root is Phi-aware (Session on each incoming edge); a virtual
 	// root created by a reassignment gets Session appended at its creation site
 	// (e.g. q = q.Where("a").Session(&gorm.Session{})) — #71 defect 2.
-	sites := g.rootSessionSites(root, rootsNeedingSession, allUses, fallback != nil)
+	paramEdits, sites := g.rootSessionSites(root, rootsNeedingSession, allUses, fallback != nil)
+	edits = append(edits, paramEdits...)
 
 	// A Session drops the Attrs, Assign and InstanceSet state of the
 	// Statement it copies, so no Session is written for a root that may
-	// carry it (#344). A reassignment alone changes nothing at run time.
-	if len(sites) > 0 && g.tracer.SessionDropsState(root) {
+	// carry it (#344), or for a value merged with it that may (#343). A
+	// reassignment alone changes nothing at run time.
+	if len(sites) > 0 && (g.tracer.SessionDropsState(root) || g.mergedDropsState(root, allUses)) {
 		return fallback
 	}
 
@@ -262,8 +264,7 @@ func (g *Generator) Generate(v pollution.Violation) []analysis.SuggestedFix {
 // root and the roots its reassignments create that need one. A parameter
 // declared immutable-param (declared) gets no Session of its own, only on
 // the values merged with it.
-func (g *Generator) rootSessionSites(root ssa.Value, roots []virtualRootKey, allUses []pollution.UsageInfo, declared bool) []sessionSite {
-	var sites []sessionSite
+func (g *Generator) rootSessionSites(root ssa.Value, roots []virtualRootKey, allUses []pollution.UsageInfo, declared bool) (edits []analysis.TextEdit, sites []sessionSite) {
 	p, isParam := root.(*ssa.Parameter)
 	for _, vr := range roots {
 		switch {
@@ -278,11 +279,14 @@ func (g *Generator) rootSessionSites(root ssa.Value, roots []virtualRootKey, all
 			for _, pos := range g.sessionPositionsForRoot(vr.pos, root, allUses) {
 				sites = append(sites, sessionSite{pos: pos})
 			}
+			paramEdits, paramSites := g.mergedParamFixes(root, allUses)
+			edits = append(edits, paramEdits...)
+			sites = append(sites, paramSites...)
 		case !g.virtualRootEndsImmutable(vr):
 			sites = append(sites, sessionSite{pos: vr.end})
 		}
 	}
-	return sites
+	return edits, sites
 }
 
 // GenerateIsolation returns the fix for a violation of the caller-side

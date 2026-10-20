@@ -206,6 +206,18 @@ var growthCases = []growthCase{
 		b.WriteString("}\n")
 		return []string{b.String()}
 	}},
+	// n/2 optional filters on a parameter, each followed by a loop of
+	// filters, then two uses. The fix follows the Phis back from the last
+	// filter through every loop-header Phi (#343).
+	{name: "filterloops", limit: growthNearLinear, shape: func(n int) []string {
+		var b strings.Builder
+		b.WriteString("func f(db *gorm.DB, c []bool, xs []int) {\n")
+		for i := range n / 2 {
+			fmt.Fprintf(&b, "\tif c[%d] {\n\t\tdb = db.Where(\"c%d\")\n\t}\n\tfor range xs {\n\t\tdb = db.Where(\"x%d\")\n\t}\n", i, i, i)
+		}
+		b.WriteString("\tdb.Count(nil)\n\tdb.Find(nil)\n}\n")
+		return []string{b.String()}
+	}},
 	// n unconditional reassignments of one query.
 	{name: "chain", limit: growthNearLinear, shape: func(n int) []string {
 		var b strings.Builder
