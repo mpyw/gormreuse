@@ -153,11 +153,13 @@ func (a *Analyzer) reachSet(fn *ssa.Function, src *ssa.BasicBlock) []uint64 {
 	}
 	set := make([]uint64, (len(fn.Blocks)+63)/64)
 	set[src.Index/64] |= 1 << (src.Index % 64)
-	queue := []*ssa.BasicBlock{src}
-	for len(queue) > 0 {
-		block := queue[0]
-		queue = queue[1:]
-		for _, succ := range block.Succs {
+	// Each block enters the queue once, so it is made at its full size and
+	// read by position. Reslicing its head off made the appends reallocate
+	// it again and again, for every src of fn (#300).
+	queue := make([]*ssa.BasicBlock, 1, len(fn.Blocks))
+	queue[0] = src
+	for i := 0; i < len(queue); i++ {
+		for _, succ := range queue[i].Succs {
 			if set[succ.Index/64]&(1<<(succ.Index%64)) == 0 {
 				set[succ.Index/64] |= 1 << (succ.Index % 64)
 				queue = append(queue, succ)
