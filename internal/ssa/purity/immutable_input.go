@@ -52,7 +52,7 @@ func ValidateImmutableInputs(fn *ssa.Function, set *directive.ImmutableInputSet,
 
 	var violations []Violation
 	for _, cb := range callbacks {
-		violations = append(violations, checkImmutableInputCallback(fn, cb, set, rt, distrusted)...)
+		violations = append(violations, checkImmutableInputCallback(fn, cb, set, rt, distrusted, false, nil)...)
 	}
 
 	// A call that passes the callback twice reports at the same position.
@@ -67,17 +67,22 @@ func ValidateImmutableInputs(fn *ssa.Function, set *directive.ImmutableInputSet,
 }
 
 // ProvesImmutableInput reports whether fn keeps the immutable-input contract
-// for cb without declaring it: every call of cb that fn makes gets immutable
-// values, and cb does not escape (#349). The callbacks of fn in set are not
-// read, so a function that hands cb to itself is not proved by assuming what
-// is being proved.
-func ProvesImmutableInput(fn *ssa.Function, cb directive.ImmutableInputCallback, set *directive.ImmutableInputSet, rt *tracer.RootTracer) bool {
-	return len(checkImmutableInputCallback(fn, cb, set, rt, nil)) == 0
+// for cb without declaring it: every call of cb that fn makes gets values
+// known to be immutable (tracer.RootTracer.ProvesImmutable), and cb does not
+// escape (#349). A value the tracer cannot follow proves nothing, such as
+// cb(s.db) with s a parameter, which holds what the caller put there (#371).
+// globals are the package-level variables a proof may read. The callbacks
+// of fn in set are not read, so a function that hands cb to
+// itself is not proved by assuming what is being proved.
+func ProvesImmutableInput(fn *ssa.Function, cb directive.ImmutableInputCallback, set *directive.ImmutableInputSet, rt *tracer.RootTracer, globals tracer.ProvenGlobals) bool {
+	return len(checkImmutableInputCallback(fn, cb, set, rt, nil, true, globals)) == 0
 }
 
 // checkImmutableInputCallback follows the callback parameter cb of fn and
-// returns the violations of the contract.
-func checkImmutableInputCallback(fn *ssa.Function, cb directive.ImmutableInputCallback, set *directive.ImmutableInputSet, rt *tracer.RootTracer, distrusted func(*ssa.Function) bool) []Violation {
+// returns the violations of the contract. With proof, a *gorm.DB argument
+// must be proved immutable, as ProvesImmutableInput asks. Without it, it
+// must have no mutable root, as the body check of a declared directive asks.
+func checkImmutableInputCallback(fn *ssa.Function, cb directive.ImmutableInputCallback, set *directive.ImmutableInputSet, rt *tracer.RootTracer, distrusted func(*ssa.Function) bool, proof bool, globals tracer.ProvenGlobals) []Violation {
 	// ssa.Function.Params lists the receiver first for methods, while
 	// ImmutableInputCallback.ParamIdx counts from the first non-receiver
 	// parameter, so shift by one when the function has a receiver.
@@ -92,6 +97,8 @@ func checkImmutableInputCallback(fn *ssa.Function, cb directive.ImmutableInputCa
 		set:        set,
 		distrusted: distrusted,
 		rt:         rt,
+		proof:      proof,
+		globals:    globals,
 		name:       cb.ParamName,
 		param:      fn.Params[idx],
 		derived:    make(map[ssa.Value]bool),
@@ -109,8 +116,12 @@ type immutableInputFlow struct {
 	// trusted; nil trusts all.
 	distrusted func(*ssa.Function) bool
 	rt         *tracer.RootTracer
-	name       string
-	param      *ssa.Parameter
+	// proof asks for proved immutable arguments, with the package-level
+	// variables of globals (see ProvesImmutableInput).
+	proof   bool
+	globals tracer.ProvenGlobals
+	name    string
+	param   *ssa.Parameter
 
 	// derived holds the values that may be the callback, or hold it.
 	derived   map[ssa.Value]bool
@@ -285,13 +296,16 @@ func (f *immutableInputFlow) immutableInputArgMutable(arg ssa.Value) (mutable, k
 		return false, true // nil
 	}
 	if typeutil.IsGormDB(arg.Type()) {
+		if f.proof {
+			return !f.rt.ProvesImmutable(arg, nil, f.globals), true
+		}
 		return f.rt.FindMutableRoot(arg, nil) != nil, true
 	}
 	if !f.gorm.holdsGormDB(arg.Type()) {
 		return false, true
 	}
 	alloc, ok := arg.(*ssa.Alloc)
-	if !ok || !typeutil.IsGormDB(alloc.Type().(*types.Pointer).Elem()) {
+	if f.proof || !ok || !typeutil.IsGormDB(alloc.Type().(*types.Pointer).Elem()) {
 		return false, false
 	}
 	return slices.ContainsFunc(tracer.AllocStoredValues(alloc), func(val ssa.Value) bool {
