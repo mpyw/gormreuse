@@ -261,8 +261,8 @@ The `plugin` package registers `Analyzer` with golangci-lint's module plugin sys
 | 2 | Collect Scopes and immutable callbacks (`callback` package), infer immutable-input and immutable-param functions (#349) |
 | 3 | Check immutable-input and immutable-return bodies |
 | 4 | Scopes Session warning (`scopeswarn`) |
-| 5 | For each function: detect violations (`ssa.Analyzer`: track uses, then `DetectViolations` by CFG reachability), add fixes |
-| 6 | Redundant and unused directives, export facts, unused ignores |
+| 5 | The [immutable-param body rule](#immutable-param-body-rule) (#346). Then, for each function: detect violations (`ssa.Analyzer`: track uses, then `DetectViolations` by CFG reachability), and add fixes. Last, the contract violations of the package initializer (#346) |
+| 6 | Redundant and unused directives, [distrusted contracts](#distrusted-contracts), export facts, unused ignores |
 
 <details><summary>Pipeline diagram and shared state</summary>
 
@@ -282,8 +282,10 @@ The `plugin` package registers `Analyzer` with golangci-lint's module plugin sys
 │       and immutable-param functions (#349)                              │
 │    3. Check immutable-input and immutable-return bodies                 │
 │    4. Scopes Session warning (scopeswarn)                               │
-│    5. For each function: detect violations (ssa.Analyzer), add fixes    │
-│    6. Redundant and unused directives, export facts, unused ignores     │
+│    5. immutable-param body rule. For each function: detect violations   │
+│       (ssa.Analyzer), add fixes. The package initializer's contracts    │
+│    6. Redundant and unused directives, distrusted contracts, export     │
+│       facts, unused ignores                                             │
 └─────────────────────────────────────────────────────────────────────────┘
                                     │
                                     ▼
@@ -356,7 +358,7 @@ The same input must give the same diagnostics and fixes on every run (#184). Gol
 
 - **Merged fixes (#184).** Before, the first violation in map order won the position, and the fixes of the other roots were dropped. So `-fix` needed several passes.
 - **Every diagnostic carries the fix (#246).** Before, the root was marked fixed on its first violation. That happened even when an ignore suppressed that diagnostic, or another function had already reported the position, so the fix was lost. An editor also offered the quick fix only on the first diagnostic.
-- **No fix for an ignored root (#312).** The ignore says that the reuse is meant. The fix changes it too: it isolates the root, or reassigns the ignored statement. The next run would then report the ignore as unused. Deleting the ignore in the same fix was rejected. The fix would have to know that the ignore covers no other diagnostic, of any kind or variant. It would also have to know that it resolves every diagnostic of the root, before the pass has reported them all. `testdata/src/gormreuse/fix_ignored_root.go` holds the cases. Before #346 the checker asked only the violations of the function it reported. A stored closure is a function of its own, so an ignore in `f := func() { q.Find(nil); q.Count(nil) //gormreuse:ignore }` left the fix on `q.First` in the enclosing function, and the next run reported the ignore unused. `testdata/src/converge/fix_escape.go` checks that the fix of another root leaves the ignore used.
+- **No fix for an ignored root (#312).** The ignore says that the reuse is meant. The fix changes it too: it isolates the root, or reassigns the ignored statement. The next run would then report the ignore as unused. Deleting the ignore in the same fix was rejected. The fix would have to know that the ignore covers no other diagnostic, of any kind or variant. It would also have to know that it resolves every diagnostic of the root, before the pass has reported them all. `testdata/src/gormreuse/fix_ignored_root.go` holds the cases. Before #346 the checker asked only the violations of the function it reported. A stored closure is a function of its own. So an ignore in `f := func() { q.Find(nil); q.Count(nil) //gormreuse:ignore }` left the fix on `q.First` in the enclosing function. The next run then reported the ignore unused. `testdata/src/converge/fix_escape.go` checks that the fix of another root leaves the ignore used.
 - **Sorted reports (#273).** `RunSSA` and the directive checks do not report in position order: the unused-directive reports come from map ranges. The text output is sorted by the driver anyway, but `-json` lists diagnostics in report order. File names are compared, not `token.Pos`, because the loader parses files concurrently and their order in the file set can vary.
 
 </details>
@@ -396,7 +398,7 @@ A package that imports `"C"` reaches the analyzer as cmd/cgo's output, not as th
 
 So when that header is followed by a `//line` directive before the package clause, the header is ignored, and the user's own comments decide. A user file marked `// Code generated ... DO NOT EDIT.` is still skipped. cgo's own files, such as `_cgo_gotypes.go`, have no such `//line` directive and are still skipped. All positions still come from `PositionFor(pos, false)`, so the file keys are the cgo output files, consistently. `testdata/src/cgofile` covers this with a real cgo build, and is skipped without a C compiler.
 
-A diagnostic in a cgo file has no fix (#346). Its edits would be offsets in cgo's output, while `-json` names the user's file through the `//line` directive, so a consumer that applied them to that file would corrupt it. `ReportInOrder` drops the fixes of a diagnostic with an edit in a file that `IsCgoOutput` reports. The diagnostics are still reported. The `-fix` drivers already skipped those fixes, since they skip every fix that edits a file `ast.IsGenerated` reports. `TestCgoFileHasNoFixes` checks it.
+A diagnostic in a cgo file has no fix (#346). Its edits would be offsets in cgo's output. But `-json` names the user's file, through the `//line` directive. A consumer that applied the edits to that file would corrupt it. `ReportInOrder` drops the fixes of a diagnostic with an edit in a file that `IsCgoOutput` reports. The diagnostics are still reported. The `-fix` drivers already skipped those fixes, since they skip every fix that edits a file `ast.IsGenerated` reports. `TestCgoFileHasNoFixes` checks it.
 
 Before #186 a panic was dropped with every diagnostic of the function. Since #190 an ignored function is analyzed too, so a `panicGuard` report can come from one.
 
@@ -507,8 +509,6 @@ A call through a variable that holds one function is read as the call of that fu
 
 <details><summary>Why each local condition holds</summary>
 
-Why each local condition holds:
-
 | Condition | Why |
 | --- | --- |
 | Exactly one `Store`, in the declaring function | A second store may give it another function. A store in a closure may run at any point |
@@ -567,7 +567,7 @@ Some functions hand a fresh `*gorm.DB` to a callback. Reuse inside such a callba
 | gorm's `Transaction` | `Begin`'s result, `clone > 0` | Yes |
 | gorm's `FindInBatches` | `Session(&Session{NewDB: true})`'s result, `clone > 0` | Yes |
 | gorm's `Connection` | `fc(db.getInstance())`, a `clone == 0` handle | **No.** Its callback's `tx` is an ordinary mutable parameter, and reuse inside it is reported (#173). Like a Scopes callback's, it stays mutable under `immutable-param` (#348): `CollectConnectionCallbacks` adds the callbacks to the set the tracers read. The fixes read the Scopes set only, so a Connection callback still gets the body Session |
-| A function marked `//gormreuse:immutable-input(name)` | What its body passes; checked ([immutable-input](#immutable-input-body-contract)) | Yes |
+| A function marked `//gormreuse:immutable-input(name)`, or inferred so (#349) | What its body passes; checked ([immutable-input](#immutable-input-body-contract), [inferred](#inferred-immutable-param-and-immutable-input)) | Yes |
 | `Scopes`, `Preload` | The query being built | No. Collected for the parameter rules and the [Scopes warning](#scopes-session-family-warning-temporary) |
 
 <details><summary>Collectors, callback positions, go and defer</summary>
@@ -622,17 +622,17 @@ The single store may run many times, but every value it stores is the same funct
 
 <details><summary>Decisions</summary>
 
-Decisions and limitations:
-
 - **Exactness rests on `DropReachableCallbacks`, not on the resolver.** The exemption only claims that the function's parameter receives fresh values. That holds when every reference reaches only callback positions, whatever the resolver found. A wrong resolution can only exempt a function whose every reference is a callback position, or miss one, which reports more.
 - **Field holders are per field, not per object.** Two `svc` values share the field's holder. That is why one store in the whole package is required: with two stores, a read may hold either function.
 
 </details>
-- **Not followed.** Each of these keeps its callback's parameter mutable:
-  - a local struct field stored twice;
-  - a field assigned by reflection, or through `unsafe` arithmetic beyond a plain `unsafe.Pointer` conversion of the struct;
-  - an exported field or variable;
-  - a variable or field that holds a method value (`var f = r.m`).
+
+**Not followed.** Each of these keeps its callback's parameter mutable:
+
+- A local struct field stored twice.
+- A field assigned by reflection, or through `unsafe` arithmetic beyond a plain `unsafe.Pointer` conversion of the struct.
+- An exported field or variable.
+- A variable or field that holds a method value (`var f = r.m`).
 
 <details><summary>Before #257</summary>
 
@@ -689,8 +689,8 @@ The results do not change. The goldens, and `-json` and `-fix -diff` over `e2e/i
 
 | Rule | Detail |
 | --- | --- |
-| Nested loops (#252) | Each loop has its own block set. `markLoopBlocks` used one set for every loop as its visited set, so the walk of an outer loop stopped at an inner header marked before it. The outer loop's blocks before the inner loop were then in no loop. Before, any loop counted, and a definition in any loop was taken to run as often as the use. So `for … { q := …; for … { q.Find(nil) } }` and a use in a later loop were missed |
-| `for cond` loops (#252) | Back-edges are found by block index, and go/ssa puts the header of `for cond { … }` after its body. The edge from the header to the body is then taken as the back-edge, with the body as its header, which does not dominate the edge's source. The walk from it went on through the blocks before the loop, up to the entry. A root defined at the entry, such as a parameter, then counted as defined in a loop. A use before the loop in a closure counted as repeating. The walk now keeps to the blocks that its header reaches |
+| Nested loops (#252) | Each loop has its own block set. A definition runs as often as a use only when they are in the same loop. So `for … { q := …; for … { q.Find(nil) } }` and a use in a later loop are reported |
+| `for cond` loops (#252) | Back-edges are found by block index, and go/ssa puts the header of `for cond { … }` after its body. So the edge from the header to the body looks like a back-edge, with the body as its header. The walk from a header keeps to the blocks that the header reaches |
 | Range-over-func bodies (#177) | See below |
 
 **Range-over-func loops (#177).** SSA compiles the body of `for v := range seq` (Go 1.23+) into a synthetic closure. The iterator calls it once per element. go/ssa marks it with `Synthetic == "range-over-func yield"`. The closure has no back-edge, so `DetectLoops` treats every block of it as in a loop.
@@ -699,8 +699,17 @@ The results do not change. The goldens, and `-json` and `-fix -diff` over `e2e/i
 - A root defined inside the body is in a loop block, so it is fresh on each iteration.
 - The body reaches outer variables through `FreeVar`s, so `q = q.Where(v)` inside it is a `Store` to a `FreeVar`, not to an `Alloc`. `isAssignment` treats a `FreeVar` as a merge point like an `Alloc` ([Which merges are reassignments](#which-merges-are-reassignments)). Its values are those of the captured variable, so the store is an assignment only when that variable can hold `root`. That is the in-place update of a plain loop. A store into another variable, such as `last = q.Where(v)`, still counts as a use of `q`.
 - A closure nested inside the body (an IIFE, a `defer`) runs once per run of the body, so it repeats as the body does.
-- A store in the body is a store at the loop (#341). The iterator calls the body only while the loop statement runs, so a read after the loop sees the body's stores, and the value before the loop too, since the body may run no time. That is what the loop-header Phi of a plain loop gives. Before #341 a read after the loop saw only the value before it. So `for k, v := range maps.All(f) { q = q.Where(k, v) }; q.Count(&n); q.Find(&us)` was missed ([Captured variables](#captured-variables)).
-- For the same reason, a read in the body sees only the stores that reach the loop, not those after it. Before #341 it also saw every later store, as a spawned closure does. So `q = db.Where("late")` after the loop made a query in the body a reuse on every iteration.
+- A store in the body is a store at the loop (#341). The iterator calls the body only while the loop statement runs. So a read after the loop sees the body's stores. It also sees the value before the loop, since the body may run no time. That is what the loop-header Phi of a plain loop gives ([Captured variables](#captured-variables)).
+- For the same reason, a read in the body sees only the stores that reach the loop, not those after it.
+
+<details><summary>Before #252 and #341</summary>
+
+- **Nested loops.** `markLoopBlocks` used one set for every loop as its visited set. So the walk of an outer loop stopped at an inner header marked before it. The outer loop's blocks before the inner loop were then in no loop. Any loop counted, and a definition in any loop was taken to run as often as the use.
+- **`for cond` loops.** The body taken as a header does not dominate the edge's source. So the walk from it went on through the blocks before the loop, up to the entry. A root defined at the entry, such as a parameter, then counted as defined in a loop. A use before the loop in a closure counted as repeating.
+- **Range-over-func reads after the loop (#341).** Such a read saw only the value before the loop. So `for k, v := range maps.All(f) { q = q.Where(k, v) }; q.Count(&n); q.Find(&us)` was missed.
+- **Range-over-func reads in the body (#341).** Such a read also saw every later store, as a spawned closure does. So `q = db.Where("late")` after the loop made a query in the body a reuse on every iteration.
+
+</details>
 
 <details><summary>Effect on gorm's own source (#252)</summary>
 
@@ -811,8 +820,6 @@ go func() { for … { update(id) } }()
 
 <details><summary>Where the definition is</summary>
 
-**Where the definition is.**
-
 | Definition | Handling |
 | --- | --- |
 | In a function that declares the use's function, at any depth | Asked at the site where the closure runs |
@@ -824,8 +831,6 @@ A closure analysed on its own (each closure is also a function of the package) a
 </details>
 
 <details><summary>Decisions</summary>
-
-Decisions:
 
 - **Sites in two functions may both run (#305).** Take a closure called once in the declaring function and once inside another closure, or inside two closures. It is taken to run twice. This holds even when the calls are on exclusive branches (`rcsExclusiveAcrossClosures`). Ordering the two would mean lifting each site to the sites of the closure that holds it. A site in the closure itself, or in one nested in it, is a recursive call, so the closure runs again. Two closures that call each other each ask for the other's sites. A question asked again while it is being answered counts as a repeat, since they recurse.
 - **A closure made on each iteration (#306).** Take this loop: `for … { save := func() { … }; if c { save() } else { save() } }`. It makes a new closure on each iteration, and each runs once. Two sites in the declaring function may both run only on a path that does not run the `MakeClosure` again. The path through the back-edge does, so the two calls are exclusive. This holds only when every site uses the `MakeClosure` itself. A Phi or a variable may still hold the closure of an earlier iteration, as `if c { last = save }; last()` does. Then any path counts, and one site that can reach itself runs again (`rcsPerIterationKept`).
@@ -886,8 +891,6 @@ The function may return `*gorm.DB`, and `isAssignment` may find a merge that han
 | `q := r.Query()`, interface method | The call | Never |
 
 <details><summary>Decisions</summary>
-
-Decisions:
 
 - **A trusted pure function's tuple result is an alias of its argument** when its body may return that argument, as for a single result ([Returned arguments](#returned-arguments)).
 - **`immutable-return` applies to a tuple result.** The signature check already accepts any result list with a `*gorm.DB`. `ImmutableReturnValidator.Validate` already checks every `*gorm.DB` operand of each `return`. So `//gormreuse:immutable-return` on `func open() (*gorm.DB, error)` makes its `*gorm.DB` immutable at call sites, and returning `db.Where(...)` from it is reported at the declaration.
@@ -1063,7 +1066,7 @@ A variable that a closure captures and that is reassigned lives in an `Alloc`, w
 | In a range-over-func body, or in a closure nested only in such bodies (#341) | The stores that reach the body's `MakeClosure` in the declaring function (`missesLaterStores`) |
 | In any other closure: deferred, spawned, stored, passed on (errgroup's `Go`, a `Transaction` callback), or nested in another closure (#303) | The stores that reach the `MakeClosure` in the declaring function (the outermost one, for a nested closure), plus every store that can run after it (`fieldStoresAfter`) |
 
-Every search also sees the stores of a range-over-func body, as stores at its `MakeClosure` (`yieldStores`, #341). Such a store does not end the backward walk, since the body may run no time. The stores of a loop nested in the body count, where its `MakeClosure` is. A read in a body does not see the body's own stores, as before: the receiver of `q = q.Where(v)` in the body resolves to the value before the loop, and `isAssignment` reads the store to the `FreeVar` as the reassignment.
+Every search also sees the stores of a range-over-func body, as stores at its `MakeClosure` (`yieldStores`, #341). Such a store does not end the backward walk, since the body may run no time. The stores of a loop nested in the body count, where its `MakeClosure` is. A read in a body does not see the body's own stores. The receiver of `q = q.Where(v)` in the body resolves to the value before the loop. `isAssignment` reads the store to the `FreeVar` as the reassignment.
 
 <details><summary>Why the MakeClosure, and fields through a captured pointer</summary>
 
@@ -1075,13 +1078,14 @@ Every search also sees the stores of a range-over-func body, as stores at its `M
 
 Limitations:
 
-- The single-root trace takes the first store, in block order, that has a root, as `tracePhi` does for the edges of a Phi (`traceStores`, #340). Before #340 it took the first store. An immutable one, such as `q := db.WithContext(ctx)` before `if name != "" { q = q.Where(...) }`, then hid the mutable value of the other. A captured `q`, a struct field or a global was not reported where a plain local was.
+- The single-root trace takes the first store, in block order, that has a root, as `tracePhi` does for the edges of a Phi (`traceStores`, #340).
 - A store made inside a closure other than a range-over-func body is not seen (`closureModifiesCaptured`). This also fixes `p := &q; *p = db.Where("y")`, which is a direct store to `q`'s `Alloc` (`reassignPointerDeref`).
 - The fix's `mergedEdges` still gives a Session to a store that may run before two reads of the variable. A store whose own reads need none can get a redundant one.
-- `mergedEdges` does not see the stores of a range-over-func body. When the value before the loop is mutable, as in `q := db.Model(&User{}); for k, v := range seq { q = q.Where(k, v) }; q.Count(&n); q.Find(&us)`, `-fix` adds a Session only at `Model` (`rangeFuncBodyStoreAfterIf`). The next run then reports the `Where` in the body, and its fix ends it with a Session. When the value before the loop is immutable, as in #341's `WithContext`, one run fixes it (`RangeFuncFilter` in `e2e/internal/fixsql`).
+- `mergedEdges` does not see the stores of a range-over-func body. Take a mutable value before the loop, as in `q := db.Model(&User{}); for k, v := range seq { q = q.Where(k, v) }; q.Count(&n); q.Find(&us)`. Then `-fix` adds a Session only at `Model` (`rangeFuncBodyStoreAfterIf`). The next run then reports the `Where` in the body, and its fix ends it with a Session. When the value before the loop is immutable, as in #341's `WithContext`, one run fixes it (`RangeFuncFilter` in `e2e/internal/fixsql`).
 
-<details><summary>History (#251, #303)</summary>
+<details><summary>History (#251, #303, #340)</summary>
 
+- Before #340 the single-root trace took the first store. An immutable one, such as `q := db.WithContext(ctx)` before `if name != "" { q = q.Where(...) }`, then hid the mutable value of the other. A captured `q`, a struct field or a global was not reported where a plain local was.
 - Before #251 every read of a captured, reassigned variable resolved to its first store, often the parameter it was initialized with. So `db = db.WithContext(ctx); db.Find(nil); func() { db.Count(nil) }()` reported two branches of the parameter, and `-fix` added a redundant Session.
 - Before #303 a closure that is not a plain call saw every store. `db = db.WithContext(ctx)` followed by `g.Go(func() error { return db.First(&u, id).Error })` in a loop resolved the read to the parameter and reported it. So did `for _, u := range slices.All(us) { db.Model(&u).Update(...) }`.
 - Before #303 `fieldStoredValuesAt` passed a nil load for a captured pointer, so every store was seen. Stores through the variable were missed, in the declaring function too. `d.db = d.db.WithContext(ctx)` did not replace the parameter, and a store of a mutable value after the closure was not seen (`cosFieldStoreAfterSpawn`).
@@ -1150,7 +1154,7 @@ A root defined in another function, such as an enclosing function's root used in
 Decisions and limitations:
 
 - No fix is suggested for a `FieldRoot`. `Session()` cannot be appended to a call that returns a struct. It belongs where the function builds the struct.
-- A field read through a parameter or a receiver is not a mutable root, whether the struct is passed by value or by pointer. Since #308 a getter that returns such a field is inferred `immutable-return`, so `d := r.DB()` is read like `r.db`. Since #342 each call reads the field of its own receiver, so `h := &Holder{db: mk(db)}; h.DB()` has `mk(db)`'s root ([Parameter reads](#parameter-reads)).
+- A field read through a parameter or a receiver is not a mutable root, whether the struct is passed by value or by pointer. A getter that returns such a field is inferred `immutable-return` (#308), so `d := r.DB()` is read like `r.db`. Each call reads the field of its own receiver (#342), so `h := &Holder{db: mk(db)}; h.DB()` has `mk(db)`'s root ([Parameter reads](#parameter-reads)).
 - A write to a returned struct inside another function (`p.Reset()`, `reset(&s)`) is not seen. A later read still sees the call's field, so it can be reported though the field was replaced. A closure capturing such a parameter sees only the stores in the enclosing function, as the function itself does.
 - A captured pointer variable is resolved by its stores in program order: the single-root trace takes the first pointer stored into it. After `h = &T{q: b}`, a use of `h.q` can still be matched to the first value. A store through `h` is not matched to either pointer. A captured `*gorm.DB` variable is read by the stores that reach the read instead ([Captured variables](#captured-variables)). With one pointer ever stored, the fields are read the same way (#303).
 - A struct value that a Phi merges (`e := E{a}; if c { e = E{b} }`) yields the field of every edge. The single-root trace takes the first edge, so the suggested fix makes only that edge immutable. A struct from a channel receive, or a map or slice element, is not followed.
@@ -1173,12 +1177,12 @@ func applyP(p **gorm.DB)               { (*p).Where("t = 1") }
 func scanInto(p **gorm.DB, db *gorm.DB) { *p = db.Where("x = 1") }
 ```
 
-Before #345 neither was seen. `applyP(&q); q.Find(&a)` was not reported, and `-fix` added a Session at `q` that made the helper change a copy. `var q *gorm.DB; scanInto(&q, db); q.Find(&a); q.Count(&n)` was not reported at all: no store into `q` reaches the reads.
+So the call branches the value `q` holds, and a later read of `q` also sees what the call may store.
 
 | Part | Handling |
 | --- | --- |
-| The call | `handleArgs` asks `RootTracer.PointeeRoots` for the roots of the value `q` holds where the call runs: the stores that reach the call, as a load there would see them. The call branches them with `Escapes` set, as `applyTenant(q)` does. A `//gormreuse:pure` callee returns before this, so it changes nothing |
-| A later read of `q` | The read sees the stores that reach it, and also a `PointeeRoot{call, var}` for each call that takes the address and reaches the read with no store in between (`pointeeRootsAt`). The call may leave `q` as it was, so it does not hide the stores before it. The `PointeeRoot`s come after the stores, so the single-root trace takes a store first |
+| The call | `handleArgs` asks `RootTracer.PointeeRoots` for the roots of the value `q` holds where the call runs. These are the stores that reach the call, as a load there would see them. The call branches them with `Escapes` set, as `applyTenant(q)` does. A `//gormreuse:pure` callee returns before this, so it changes nothing |
+| A later read of `q` | The read sees the stores that reach it. It also sees a `PointeeRoot{call, var}` for each call that takes the address and reaches the read with no store in between (`pointeeRootsAt`). The call may leave `q` as it was, so it does not hide the stores before it. The `PointeeRoot`s come after the stores, so the single-root trace takes a store first |
 | A read in a closure | It sees every such call, as a nil load sees every store. This keeps reuse reported when the closure may run after the call |
 | The fix | No fix is suggested for a `PointeeRoot`, as for a `FieldRoot`: the call returns no `*gorm.DB` to add `Session()` to. A stored root keeps its fix only when nothing hands the address on ([Struct stores](#struct-stores)) |
 
@@ -1188,6 +1192,12 @@ Limitations:
 
 - Only the address of a variable is followed. The address of a struct field (`applyP(&s.db)`) is not a branch, so a single later use is missed (`fixEscapePointerFieldAddr`). The fix is withheld for it: the struct is handed on.
 - An address wrapped in an interface (`json.Unmarshal(b, &q)`) is not followed. Detection treats it as any other call: the read after it sees the stores before it.
+
+<details><summary>Before #345</summary>
+
+Neither was seen. `applyP(&q); q.Find(&a)` was not reported, and `-fix` added a Session at `q` that made the helper change a copy. `var q *gorm.DB; scanInto(&q, db); q.Find(&a); q.Count(&n)` was not reported at all: no store into `q` reaches the reads.
+
+</details>
 
 ### Package-level variables
 
@@ -1265,7 +1275,7 @@ Not reported. Each copy reads `q`, and nothing changed it in between (`TestSessi
 
 </details>
 
-**The alias use.** `RootTracer.FindAliasedRoots` finds the copies a value reaches through `FindAllMutableRoots`, so Phi, variables and closure captures work. It returns each copy's receiver root, following copies of copies. A receiver that may hold several roots gives each of them, through `MutableRoots` (`aliasedRootsOf`, #341). So does a read-only argument. After `src := a; if c { src = b }`, a copy of `src` reads `b`'s Statement as much as `a`'s. Before #341 only the first root (`FindMutableRoot`) was given, so whether `b.Where("x").Find(&x); cp.Find(&y)` was reported depended on the order of the Phi's edges. An immutable value that the merge may hold, such as a `Session` result, has no Statement to change and is left out. The call handler records an alias use for a gorm method receiver, a bound-method receiver, and a `*gorm.DB` argument of a non-gorm function.
+**The alias use.** `RootTracer.FindAliasedRoots` finds the copies a value reaches through `FindAllMutableRoots`, so Phi, variables and closure captures work. It returns each copy's receiver root, following copies of copies. A receiver that may hold several roots gives each of them, through `MutableRoots` (`aliasedRootsOf`, #341). So does a read-only argument. After `src := a; if c { src = b }`, a copy of `src` reads `b`'s Statement as much as `a`'s. With only the first root (`FindMutableRoot`), whether `b.Where("x").Find(&x); cp.Find(&y)` is reported would depend on the order of the Phi's edges. An immutable value that the merge may hold, such as a `Session` result, has no Statement to change and is left out. The call handler records an alias use for a gorm method receiver, a bound-method receiver, and a `*gorm.DB` argument of a non-gorm function.
 
 `DetectViolations` reports an alias use when a polluting **or assignment** use of the root lies between the copy and the use, and reaches the use. Assignment uses count here because `q = q.Where(...)` changes a `clone == 0` Statement in place. A change before the copy is not counted. It already makes the `Session`/`Debug` call itself a second branch, so counting it again would duplicate that report.
 
@@ -1441,11 +1451,11 @@ On the safe side, the linter marks a `*gorm.DB` as polluted in these cases:
 > [!NOTE]
 > A struct literal store alone (`_ = &S{db: q}`) does NOT pollute. The linter tracks actual use through struct fields, not the store.
 
-**Structs handed on (#341).** A callee that gets a struct can reach the `*gorm.DB` inside it as well as one passed directly. Before #341 only a `*gorm.DB` argument, or one boxed in an interface, was a branch. So `useDeps(deps{DB: q}); q.Find(&us)` was missed, and at run time the helper's condition reached the later query (`e2e/internal/handoff_test.go`). `-fix` already took these hand-offs as escapes ([Struct stores](#struct-stores)). Now `handleHolders` makes them branches too:
+**Structs handed on (#341).** A callee that gets a struct can reach the `*gorm.DB` inside it as well as one passed directly. So `useDeps(deps{DB: q}); q.Find(&us)` is a reuse. At run time the helper's condition reaches the later query (`e2e/internal/handoff_test.go`). `-fix` takes these hand-offs as escapes ([Struct stores](#struct-stores)), and `handleHolders` makes them branches:
 
 | Rule | Detail |
 | --- | --- |
-| What is handed on | An argument or the receiver of a call, `go` or `defer`, through a method value too: a struct, its address or a copy, also boxed in an interface. A closure that captures the struct and makes such a call makes it at its own site |
+| What is handed on | An argument or the receiver of a call, `go` or `defer`, also through a method value. It is a struct, its address or a copy, also boxed in an interface. A closure that captures the struct and makes such a call makes it at its own site |
 | What it holds | `RootTracer.GormDBFieldValues`: the `*gorm.DB` fields it holds inline, at any depth of struct fields, embedded or not. Each field is read at the call as a field load is (`fieldStoredValuesAt`), so a field replaced before the call holds the new value. A pointer field is not followed |
 | Not a branch | A `*gorm.DB` method. A `pure` function. An inferred getter, whose call is read as the field it returns (`HasParamReads`, #342). A method of `gorm.Statement`, which reads only the configuration of its `DB` (`stmt.Parse(&User{})`). A static call into a package that does not reach gorm, with no function argument (`reflect.ValueOf(s)`) |
 | Not followed | A struct sent on a channel, stored in a slice, a map or memory other than a variable, or packed into a variadic argument (`fmt.Println(s)`). A call through an interface, whose receiver is boxed before the call |
@@ -1457,7 +1467,13 @@ Decisions:
 - **A getter only reads.** `r.DB()` is traced as `r.db` since #342, so the query on its result is the branch. Counting the call too made `r.DB().Find(&a)` two branches. `r.DB().Find(&a); r.DB().Find(&b)` is still reported, as both queries run on `q`. A getter that also branches the field in its body is missed.
 - **No fix.** `-fix` withholds the Session for a stored root that other code reaches ([Struct stores](#struct-stores)), and the reports here are such roots.
 
+<details><summary>Before #341, and the effect on real code</summary>
+
+Before #341 only a `*gorm.DB` argument, or one boxed in an interface, was a branch. So `useDeps(deps{DB: q}); q.Find(&us)` was missed.
+
 On gorm's own repository the root module goes from 66 to 69 reports. Two pass a Statement that holds the query callback's handle to the Dialector interface's BindVarTo, in a loop. One hands gorm's preload builder to the user's `Preload` callback, which changes the handle in place. `tests`, new-api and gin-vue-admin are unchanged. Without the `gorm.Statement` rule, five more reports came from Statements that gorm builds around a handle and calls the methods of, such as Build and Parse.
+
+</details>
 
 ### One handler for every call site
 
@@ -1492,8 +1508,6 @@ The mode (`Site.Mode`) decides only two things:
 **A value that may hold several roots (#252).** Take `q := b; if c { q = a }`. `q` resolves to `b` (`FindMutableRoot`), and `FindAllMutableRoots` returns `a` too. The other roots get a *may branch* (`Tracker.RecordMayBranch`). `DetectViolations` checks a may branch against the root's own uses, both ways: a use of `a` after it, and a polluting use of `a` before it. The second also catches `boundMethodWithPhiOnePollutedReverse`, where the polluting branch is in a block that is handled after the merge. A `go`/`defer` checks its first root against may branches too.
 
 <details><summary>Decisions</summary>
-
-Decisions:
 
 - **Two may branches are never checked against each other.** Two values that each may hold a root can be exclusive. In `chaosVariableSwapLoop`, `q1` and `q2` swap in a loop. Each may hold either original root, but never the same one. Reporting such pairs would be a false positive for every swap.
 - **Rejected: record the use for every root.** It reported the swap above, and every pair of values that share a root only through correlated merges.
@@ -1569,7 +1583,7 @@ Directives are line comments of the form `//gormreuse:name[,name...]`, lowercase
 | `//gormreuse:ignore` | Suppresses reports in its scope ([Ignore scopes](#ignore-scopes)) | Reported unused when it suppresses nothing |
 | `//gormreuse:pure` | Marks a function, method or closure as not polluting its `*gorm.DB` argument | Body ([Pure contract](#pure-contract)) |
 | `//gormreuse:immutable-return` | Marks a function, method or closure as returning an immutable `*gorm.DB`, like `Session`/`WithContext` | Body: a provably mutable return is reported ([Immutable-return body contract](#immutable-return-body-contract)) |
-| `//gormreuse:immutable-param` | Treats the function's `*gorm.DB` parameters as immutable inside it. The caller is responsible for passing an isolated value | Callers: a mutable argument to a parameter the function branches is reported ([immutable-param caller contract](#immutable-param-caller-contract)) |
+| `//gormreuse:immutable-param` | Treats the function's `*gorm.DB` parameters as immutable inside it. The caller is responsible for passing an isolated value | Callers: a mutable argument to a parameter the function branches is reported ([immutable-param caller contract](#immutable-param-caller-contract)). Body: a discarded chain on the parameter is reported ([immutable-param body rule](#immutable-param-body-rule)) |
 | `//gormreuse:immutable-input(name)` | Declares that the function passes an **immutable** `*gorm.DB` to its callback parameter `name`, a user-defined equivalent of gorm's `Transaction`/`FindInBatches`. The callback's `*gorm.DB` parameter is then immutable, so reuse inside the callback is allowed | Body: a mutable value passed to the callback is reported ([immutable-input body contract](#immutable-input-body-contract)) |
 
 Generated files are skipped with the rest of the analysis. Their directives are never trusted ([Directives across packages](#directives-across-packages)).
@@ -1659,7 +1673,7 @@ a, b := func(q *gorm.DB) { _ = q }, func(q *gorm.DB) { _ = q }
 
 A same-line directive belongs to the innermost function whose `{` is before it on the line (#315). That can be a closure nested in a closure, or a closure in a declaration's body. `func outer(db *gorm.DB) { run(func(q *gorm.DB) { //gormreuse:pure` marks only the closure. The placement index keeps the closures' braces of each line for that check. The comment must also be inside the closure's body: in `a := func() {}; b := func() { //gormreuse:pure` it marks only `b` (#348).
 
-`immutable-input` accepts the same placements as `pure`. `ImmutableInputSet` places it with a `DirectiveFuncSet` that has no signature check. Closure directives are keyed by the `FuncLit` position, and `Callbacks` looks a closure up through `fn.Syntax()`. A method's key names its receiver's type from the type checker, so a method declared through an alias receiver (`type R = repo; func (r *R) With`) gets the key of `repo`'s method, which is what the lookup builds (#348). A comment attached to no function is reported as `not attached to a function or closure`.
+`immutable-input` accepts the same placements as `pure`. `ImmutableInputSet` places it with a `DirectiveFuncSet` that has no signature check. Closure directives are keyed by the `FuncLit` position, and `Callbacks` looks a closure up through `fn.Syntax()`. A method's key names its receiver's type from the type checker. So a method declared through an alias receiver (`type R = repo; func (r *R) With`) gets the key of `repo`'s method. That is the key the lookup builds (#348). A comment attached to no function is reported as `not attached to a function or closure`.
 
 <details><summary>History (#315, immutable-input placement)</summary>
 
@@ -1722,8 +1736,10 @@ Each directive is a promise the analyzer then trusts. The body checks keep the p
 | `pure` | `purity.Validator`: parameter-derived values must not be polluted or escape | No. A definitive violation revokes trust |
 | `immutable-return` | `purity.ImmutableReturnValidator`: no **provably** mutable return | Yes: anything it cannot prove mutable passes |
 | Inferred `immutable-return` | `purity.InferImmutableReturns`: every return **provably** immutable | No: positive proof only |
-| `immutable-param` | Caller-side: no mutable argument to a parameter the function branches | Calls with no static callee are not checked |
+| `immutable-param` | Caller-side: no mutable argument to a parameter the function branches. Body: no discarded chain on the parameter (#346) | Calls with no static callee are not checked |
+| Inferred `immutable-param` | `inferCallersPassImmutable`: every call passes an immutable value (#349) | No: positive proof only |
 | `immutable-input(name)` | `ValidateImmutableInputs`: no mutable value handed to the callback | No: escapes are reported |
+| Inferred `immutable-input(name)` | `purity.ProvesImmutableInput`: the body check passes (#349) | No: positive proof only |
 
 ### Pure contract
 
@@ -1742,8 +1758,6 @@ A violation is **definitive** (`Violation.Definitive`) when the argument is poll
 **Failure is transitive (#187).** `validatePureFuncs` in `internal/pure.go` validates the pure functions from a worklist until `PureVerdicts` stops changing, then reports from a final round. When a verdict changes, the pure functions that call or refer to that function (`pureCallers`, closures inside them included) are validated again. The failed set and each returned set only grow, and larger ones only add violations and returned parameters. So this ends, at the same verdicts in any order. A chain of `n` pure functions, each returning the next one's result, takes about `2n` validations. Repeating whole rounds took `n` rounds of `n` (#260).
 
 <details><summary>Decisions and limitations</summary>
-
-Decisions and limitations:
 
 - **The receiver is not seeded.** It usually holds the application's root handle, and the directive's signature check also ignores receivers (`OrmWrapper.GetDB` is reported unused). Seeding it would report every `r.db.Where(...)` in a pure method.
 - **Interfaces are not followed.** A `*gorm.DB` boxed in an `interface{}` is caught only when it is passed or stored directly (`pollutionsource.UnwrapGormDB`). Types that hold one only through an interface are not seeded.
@@ -1767,8 +1781,6 @@ A pure function does not pollute its argument, but it may return it: `func p(db 
 | Inside a pure function | Branching such a result branches the argument. `p(db).Find(nil)` inside a pure function is a definitive violation, and that function is no longer trusted at its call sites |
 
 <details><summary>Decisions and limitations</summary>
-
-Decisions and limitations:
 
 - **The argument wins when the result may be either.** A result that may be the argument or a fresh chain is treated as the argument. A branch from it is then counted against the argument, which can report a reuse on the fresh path. Treating it as fresh would miss the reuse on the other path.
 - **A Session-isolated result is not an alias.** `db.Session(&gorm.Session{}).Where(...)` gets its own Statement copy at the `Where` (`TestPureSessionResultIsolated` in `e2e/internal`). So the documented `withTenant` pattern keeps a fresh root, as the README says.
@@ -1807,8 +1819,6 @@ The arguments are traced in the same `visited` set as the rest of the search. Ea
 
 <details><summary>Decisions and limitations</summary>
 
-Decisions and limitations:
-
 - **Globals: check the package, not the benefit of the doubt.** The issue allowed either. An unexported variable can only be assigned in its package, so when every store there is mutable, every read is. One immutable store gives the benefit of the doubt, since a read may run after it. An example is `var db = x.Where(...)`, then `func init() { db = db.Session(...) }`. An exported variable may be assigned by another package, and a variable whose address escapes may be assigned through a pointer, so neither is reported.
 - **Named functions are not followed.** A call into an unmarked named helper stays the benefit of the doubt, as the README says. Only closures, whose body belongs to the function, are followed.
 - **Deferred writes are direct stores only.** A store made by a closure that the deferred closure calls is not seen. Neither is one made by a non-deferred closure (`f := func() { r = r.Where("x") }; f(); return`). A closure deferred through a local variable, `defer fix()`, is read through `FuncVars.LocalValue`, also when another closure captures `fix` (#348).
@@ -1828,24 +1838,22 @@ Decisions and limitations:
 | A `Call`, or an `Extract` of a tuple `Call` such as `gorm.Open`'s | `RootTracer.IsImmutableCall` accepts it with a tracer that has no immutable-return set. Its last call is `Session` (with a config literal whose `Initialized` is known false), `WithContext`, `Debug`, `Begin` or `gorm.Open`. Or the declared callee is trusted (declared, or imported from a fact) or already inferred |
 | The nil constant | Always |
 | A load of a local variable assigned once, such as one a closure captures (#308) | Its stored value is proved (`FuncVars.LocalValue`) |
-| A load of a local variable assigned more than once, such as one a `t.Cleanup` closure captures (#342) | Every value stored into it is proved, and every store is in its function: no closure stores into it, and its address is used only to load and store it (`callsite.LocalStores`) |
+| A load of a local variable assigned more than once, such as one a `t.Cleanup` closure captures (#342) | Every value stored into it is proved, and every store is in its function. No closure stores into it, and its address is used only to load and store it (`callsite.LocalStores`) |
 | A read of a field through a parameter or a receiver (#308). This covers any depth of fields and pointer fields, also when a closure captures the parameter. A read of a package-level variable counts too | Every store in the function that reaches the read is proved, through the roots `FindAllMutableRoots` finds. No store in the package assigns the variable a provably mutable value (`ImmutableReturnValidator.AssignedMutable`). With no store, the value is immutable, as reuse detection reads it. A read through the function's own parameter is also one of its [parameter reads](#parameter-reads) |
 | A type assertion, such as `ctx.Value(k).(*gorm.DB)` (#342) | What the interface holds is proved: a `MakeInterface` of a proved value, or a call that returns no `*gorm.DB`, which reuse detection reads as no root. An assertion of the function's own interface parameter is a parameter read |
 | A call to a function with parameter reads | Every value the reads select at the call is proved. When the argument is the function's own parameter, or a field read through it, the read is the function's own too: `func Conn(h *Holder) *gorm.DB { return h.DB() }` reads `h.db` |
 | Anything else. Examples are a `*gorm.DB` parameter, a field of a local struct, and a dynamic or interface call. A variable that a closure assigns is another, and a named result a deferred closure writes is one | Never |
 
-A function needs at least one such result, so a function that only panics is not inferred. Candidates are the analyzed functions and closures with a body and a `*gorm.DB` result, or a struct result whose `*gorm.DB` fields callers read as its `FieldRoot`s (#342), not in a skipped file, and without the directive.
+A function needs at least one such result, so a function that only panics is not inferred. Candidates are the analyzed functions and closures with a body, not in a skipped file, and without the directive. Each has a `*gorm.DB` result, or a struct result whose `*gorm.DB` fields callers read as its `FieldRoot`s (#342).
 
-**Struct results (#342).** `env := newEnv(); env.DB.Create(nil); env.DB.Find(nil)` was reported while the `*gorm.DB`-returning twin was not: the field of the call is a [`FieldRoot`](#struct-roots), and only a directive made it immutable. A struct result is now proved field by field. Its fields are the `*gorm.DB` fields of the struct and of the structs it holds by value (`ImmutableReturnFieldPaths`), the ones a `FieldRoot` names. The struct must be one of these:
+**Struct results (#342).** A struct result is proved field by field. So `env := newEnv(); env.DB.Create(nil); env.DB.Find(nil)` is read like its `*gorm.DB`-returning twin. Without the proof, the field of the call is a [`FieldRoot`](#struct-roots), and only a directive makes it immutable. Its fields are the `*gorm.DB` fields of the struct and of the structs it holds by value (`ImmutableReturnFieldPaths`), the ones a `FieldRoot` names. The struct must be one of these:
 
-- one the function builds (`&T{...}` or `T{...}`, also merged by a Phi), whose address is used only to fill in its fields, load them and return it;
-- one that an accepted callee returns.
+- One the function builds (`&T{...}` or `T{...}`, also merged by a Phi). Its address is used only to fill in its fields, load them and return it.
+- One that an accepted callee returns.
 
-Each field holds the values stored into it that reach the return, or nil. A struct passed to a call (`fill(env)`), stored elsewhere, kept in a variable a closure captures, or not built by the function (its parameter) rules the function out. So does a field that holds a parameter read: a `FieldRoot` has no argument to select from. A `FieldRoot` whose path passes through a pointer field, which only a getter's read makes, stays a root even for an immutable-return callee (`paramReadCrossesPointer`). The proof says nothing about it.
+Each field holds the values stored into it that reach the return, or nil. These rule the function out: a struct passed to a call (`fill(env)`), stored elsewhere, or kept in a variable a closure captures. So does a struct the function did not build, such as its parameter. So does a field that holds a parameter read: a `FieldRoot` has no argument to select from. A `FieldRoot` whose path passes through a pointer field, which only a getter's read makes, stays a root even for an immutable-return callee (`paramReadCrossesPointer`). The proof says nothing about it.
 
 <details><summary>Decisions</summary>
-
-Decisions:
 
 - **Positive proof, not the benefit of the doubt.** `ImmutableReturnValidator` reports only what is provably mutable, because a declared directive is the user's assertion. Inference has no assertion behind it, so it accepts only what is provably immutable. Between the two, a function stays unmarked.
 - **A least fixed point.** A worklist proves each candidate. A candidate that fails only on calls to other candidates waits on them, and is proved again once the last of them is added. So each candidate is proved at most twice. The set only grows, and a larger set only proves more, so the result is the least fixed point, whatever the order. `TestInferImmutableReturns` checks every rotation of the candidates, forwards and backwards.
@@ -1892,7 +1900,7 @@ Each removed report branched a `clone > 0` handle. No report was added. The coun
 
 ### Parameter reads
 
-Since #308 a getter such as `func (h *Holder) DB() *gorm.DB { return h.db }` is inferred, because a field read through a receiver is immutable where it is read. Until #342 the call was then trusted everywhere, also where the receiver holds the caller's mutable value:
+A getter such as `func (h *Holder) DB() *gorm.DB { return h.db }` is inferred (#308). A field read through a receiver is immutable where it is read. But the receiver may hold the caller's mutable value. So each call reads the field of its own receiver (#342). Trusting the call everywhere would miss both of these:
 
 ```go
 //gormreuse:pure
@@ -1901,7 +1909,7 @@ func Tenant(q *gorm.DB) { h := &Holder{db: q}; h.DB().Where("tenant = ?", 1) } /
 h := &Holder{db: mk(db)}; d := h.DB(); d.Find(nil); d.Count(nil)             // a reuse of mk(db)
 ```
 
-Both were missed, while the forms written in place, `h.db.Where(...)` and `h.db.Find(nil); h.db.Count(nil)`, were reported. `e2e/internal/getter_receiver_test.go` shows the first one running `... WHERE a = 1 AND tenant = ?`.
+Before #342 both were missed. The forms written in place, `h.db.Where(...)` and `h.db.Find(nil); h.db.Count(nil)`, were reported. `e2e/internal/getter_receiver_test.go` shows the first one running `... WHERE a = 1 AND tenant = ?`.
 
 A read through the function's own parameter does not make its result immutable. It makes the result what the caller's argument holds there. So inference records it as a `directive.ParamRead`: the parameter, and the path of fields a Go selector selects from it. `h.inner.db` is `h` with the indexes of `inner` and `db`, through pointers too. `DirectiveFuncSet.InferParamReads` keeps the reads with the inferred function, and `facts.Func.ParamReads` exports them with its `ImmutableReturn` fact. A function with no reads is immutable at every call, as before.
 
@@ -1916,11 +1924,11 @@ Each reader of an immutable-return call reads a function with reads as its selec
 
 <details><summary>Decisions and limitations</summary>
 
-- **The safe case is unchanged.** A receiver that is a parameter, or a struct with no store into the field before the call, has no stored value there. So the call is immutable, as `h.db` is. So is a receiver that holds a Session result.
-- **A getter of a field the package assigns a chain is still not inferred (#308).** With the reads, a call sees the stores that reach it in the caller, as detection does. The package-wide rule stays because neither sees a store in another method, such as `r.filter()` running `r.db = r.db.Where("x")`.
-- **Every read counts, also one that a store in the getter always overwrites.** `func (c *Conn) Reset() *gorm.DB { c.db = open(); return c.db }` still reads the caller's `c.db`. So a caller whose struct holds a chain is reported. Telling the two apart needs the reaching-store walk on a parameter's copy, and the shape is rare.
+- **The safe case is unchanged.** Take a receiver that is a parameter, or a struct with no store into the field before the call. It has no stored value there. So the call is immutable, as `h.db` is. So is a receiver that holds a Session result.
+- **Fields the package assigns (#308).** A getter of a field the package assigns a chain is not inferred. A call sees the stores that reach it in the caller, as detection does. The package-wide rule stays because neither sees a store in another method, such as `r.filter()` running `r.db = r.db.Where("x")`.
+- **Every read counts.** That includes a read that a store in the getter always overwrites. `func (c *Conn) Reset() *gorm.DB { c.db = open(); return c.db }` still reads the caller's `c.db`. So a caller whose struct holds a chain is reported. Telling the two apart needs the reaching-store walk on a parameter's copy, and the shape is rare.
 - **A struct result has no reads.** A helper whose returned struct holds a field of its parameter is not inferred ([Struct results](#inferred-immutable-return)).
-- **A field behind a pointer field that the getter writes is not seen.** `r.ptr = &Inner{db: q.Where("x")}; return r.ptr.db` loads `r.ptr` afresh, and no store matches that load, as in detection.
+- **A pointer field the getter writes is not followed.** Take `r.ptr = &Inner{db: q.Where("x")}; return r.ptr.db`. The return loads `r.ptr` afresh, and no store matches that load, as in detection.
 
 On the modules #308 measured (gorm's root and `tests`, new-api, gin-vue-admin), the diagnostics did not change. None of them calls a getter on a struct holding a chain, and their `ctx.Value(k).(*gorm.DB)` reads are written in place, where detection already read them as immutable. `TestAllocationGrowth` (`getterchain`) holds a chain of getters, each returning the one before it, to linear growth.
 
@@ -1942,7 +1950,7 @@ The check asks `handler.BreaksImmutableParam` of each argument: it is bound to a
 
 ### immutable-param body rule
 
-The callers of an `immutable-param` function pass an isolated value. So a statement that discards a non-finisher chain on the parameter, as in `tx.Where("t = 1")` or `tx.Where("t = 1").Limit(1)`, changes a copy and has no effect (#346). It is reported: `immutable-param declared but the result of tx.Where is discarded`. `reportImmutableParamDiscards` in `internal/immutable.go` finds them.
+The callers of an `immutable-param` function pass an isolated value. So a statement that discards a non-finisher chain on the parameter changes a copy, and has no effect (#346). Examples are `tx.Where("t = 1")` and `tx.Where("t = 1").Limit(1)`. It is reported: `immutable-param declared but the result of tx.Where is discarded`. `reportImmutableParamDiscards` in `internal/immutable.go` finds them.
 
 | Rule | Why |
 | --- | --- |
@@ -2010,7 +2018,7 @@ Helpers that only ever receive fresh handles were the main false positives left 
 
 **Least fixed points.** A larger set only proves more, so each worklist ends at the least fixed point, whatever the order of `funcs`.
 
-- `inferImmutableInputs` proves the candidates with one tracer. A proof that fails only on a call to a candidate waits on it: once that candidate is added, the candidates that call it (`dependents`) are proved again. A callback of an inferred function is immutable too. So when a pass added something, the immutable callbacks are collected again, with `CollectImmutableCallbacks`, `CollectImmutableInputCallbacks` and `DropReachableCallbacks` as in `RunSSA`, and the unproved candidates are proved again with a new tracer. The callbacks collected last are the ones every later pass uses.
+- `inferImmutableInputs` proves the candidates with one tracer. A proof that fails only on a call to a candidate waits on it. Once that candidate is added, the candidates that call it (`dependents`) are proved again. A callback of an inferred function is immutable too. So when a pass added something, the immutable callbacks are collected again, as in `RunSSA`. That takes `CollectImmutableCallbacks`, `CollectImmutableInputCallbacks` and `DropReachableCallbacks`. Then the unproved candidates are proved again with a new tracer. The callbacks collected last are the ones every later pass uses.
 - `inferImmutableParams` proves the candidates in rounds. A tracer remembers what it traced with the set it had, so each round has a new one. After a round, only the candidates that a newly inferred function calls, also from its closures, are proved again. A stale answer within a round is only ever "mutable", and the candidate is proved again in the next round.
 - A function is never proved by assuming itself. So `rec(tx, n-1)` inside `rec`, or a wrapper that hands `cb` to itself, is not inferred, as for [inferred immutable-return](#inferred-immutable-return).
 
@@ -2019,9 +2027,9 @@ Helpers that only ever receive fresh handles were the main false positives left 
 Decisions:
 
 - **Exported functions are never inferred.** Another package may call an exported `immutable-param` function, and its calls are not seen. An inferred function exports no fact, so another package treats it as unmarked.
-- **What detection reads as immutable, inference accepts.** The proof of an argument is the caller-side check of the directive, so a field read through a parameter or a package-level variable that the function only reads counts, as it does in detection.
+- **What detection reads as immutable, inference accepts.** The proof of an argument is the caller-side check of the directive. So a field read through a parameter counts, as it does in detection. So does a package-level variable that the function only reads.
 - **A discarded chain on the parameter turns `immutable-param` off.** `tx.Where("t = 1"); tx.Find(&a)` relies on changing the caller's value in place. On an immutable value the `Where` does nothing, so the function would run without its filter. `inferChangesParamInPlace` follows a chain from a parameter, or a free variable bound to one, through single uses, and refuses one that is discarded without a finisher.
-- **Test variants.** The variant of a package without its test files cannot see a caller in a test file, so it may infer a function that the test variant does not. The diagnostics of the two variants are reported together, and the test variant sees every caller, so the reuse is still reported. The [parameter-root fix](#parameter-root-fix) keeps the stricter rule of `reportSeesWholePackage`, so the fixes of the two variants agree. `TestInferredParamVariants` checks each variant on `testdata/src/paramvariants`.
+- **Test variants.** The variant of a package without its test files cannot see a caller in a test file. So it may infer a function that the test variant does not. The diagnostics of the two variants are reported together, and the test variant sees every caller, so the reuse is still reported. The [parameter-root fix](#parameter-root-fix) keeps the stricter rule of `reportSeesWholePackage`, so the fixes of the two variants agree. `TestInferredParamVariants` checks each variant on `testdata/src/paramvariants`.
 - **No caller check, no redundancy report.** `computeNeedsImmutableParam` and `reportRedundantImmutableParam` skip an inferred function: every call passes an immutable value, and there is no directive to report. The body check of `immutable-input` skips an inferred function too, since a report would say "declared".
 - **A callback the body never uses is not inferred.** It would hand the callback nothing, and the inference would only change what its callers' callbacks mean.
 - **A panic keeps what was proved.** Each inferred function was proved before the panic. After a panic in `inferImmutableInputs` the callbacks are collected again, so the functions inferred so far count.
@@ -2029,8 +2037,8 @@ Decisions:
 Limitations:
 
 - **One direction between the two.** `inferImmutableInputs` runs first. A callback called with the parameter of an inferred `immutable-param` function is not proved by it.
-- **Declared `immutable-param` parameters do not prove a call.** A declared function that does not branch its parameter is redundant and its callers are not checked, so its parameter may hold a mid-chain value.
-- **The parameter-root fix is reachable less often.** Its directive case needs every caller to pass an isolated value, so such a function is now inferred and not reported. A function that changes its parameter in place is not inferred, and the fix does not declare it either (`paramDiscardsChain`): the directive would make the discarded chain do nothing, and the body check would report it (#346). It gets no fix, as the [discarded statements on a parameter](#parameter-root-fix) rule says.
+- **Declared `immutable-param` parameters do not prove a call.** A declared function that does not branch its parameter is redundant. Its callers are not checked, so its parameter may hold a mid-chain value.
+- **The parameter-root fix is reachable less often.** Its directive case needs every caller to pass an isolated value. Such a function is inferred and not reported. A function that changes its parameter in place is not inferred. The fix does not declare it either (`paramDiscardsChain`). The directive would make the discarded chain do nothing, and the body check would report it (#346). It gets no fix, as the [discarded statements on a parameter](#parameter-root-fix) rule says.
 
 Measured with the command (#349), before and after:
 
@@ -2038,7 +2046,7 @@ Measured with the command (#349), before and after:
 | --- | --- | --- | --- |
 | gorm root | 69 | 65 | 4, in the callbacks of gorm's callMethod helper, which calls them with a `Session(&gorm.Session{NewDB: true})` result |
 | gorm `tests` | 14 | 7 | 7, in the callbacks of a local transaction wrapper in a nested-transaction test |
-| new-api | 31 | 19 | 7 on the parameter of a test helper that every caller passes `gorm.Open`'s result. 5 on helpers that get a `Transaction` `tx` or a package-level variable assigned `gorm.Open`'s result |
+| new-api | 31 | 19 | 7 on the parameter of a test helper. Every caller passes it `gorm.Open`'s result. 5 on helpers that get a `Transaction` `tx` or a package-level variable assigned `gorm.Open`'s result |
 | gin-vue-admin | 32 | 29 | 3 in two import helpers of the export template service, whose only caller passes a `Transaction` `tx` |
 
 Each removed report branched a `clone > 0` handle. No report was added.
@@ -2088,11 +2096,11 @@ Decisions:
 
 Before #195 the analyzer exported no facts. For a callee in another package, `DirectiveFuncSet` parsed the callee's source file from disk. It looked for the directive in the doc comment of a declaration with the same name. So:
 
-- a same-line directive and a generic instance (`GenF[int]`, whose name is not `GenF`) were missed;
-- a contract that the body broke was still trusted;
-- the `immutable-param` caller check never ran;
-- `immutable-input(name)` was ignored;
-- a package whose source the driver does not load had no directives at all.
+- A same-line directive and a generic instance (`GenF[int]`, whose name is not `GenF`) were missed.
+- A contract that the body broke was still trusted.
+- The `immutable-param` caller check never ran.
+- `immutable-input(name)` was ignored.
+- A package whose source the driver does not load had no directives at all.
 
 Before #259 a generated `immutable-return` function that returned `db.Where(...)` was exported as trusted. Before #315 a doc-comment `pure` or `immutable-return` in a generated file was read from `FuncDecl.Doc` and trusted, while a same-line `pure` and every `immutable-input` were not. Before #314, `//gormreuse:immutable-return func DeclaredViaBad(db) { return BadConn(db) }` exported the fact when `BadConn` broke its contract. So did an `immutable-input(cb)` function that handed `cb` to a broken one.
 
@@ -2129,10 +2137,10 @@ A callback's parameter stays exempt only while every function that calls it as a
 
 **The worklist.** It works like `validatePureFuncs`. The functions whose body breaks a contract are the seeds. When a function becomes distrusted, `distrustDependents` checks these again:
 
-- the functions that call it or refer to it, in their body or in a closure inside it;
-- the functions that create or are a callback it calls.
+- The functions that call it or refer to it, in their body or in a closure inside it.
+- The functions that create or are a callback it calls.
 
-The sets only grow, and a larger set only fails more checks, so this ends at the same sets in any order. `distrustGroups` splits the functions into the strongly connected components of the dependents graph, in topological order, and the worklist runs one group at a time (#350). So a function outside a cycle is checked again at most once, after every function it depends on is settled. Before #350 it was checked again once per function it depends on that became distrusted, with a cold tracer each time: a hub that calls each of a chain of `n` such functions took 0.22 s at `n = 800` (`distrusthub`, now 0.03 s). A package where no contract breaks skips it. `TestAllocationGrowth` (`distrustreturn`, `distrustinput`) holds a chain of `n` directive functions whose last breaks its contract to linear growth. Each function is in a file of its own there, since a directive lookup scans the comments of its file (#301).
+The sets only grow, and a larger set only fails more checks, so this ends at the same sets in any order. `distrustGroups` splits the functions into the strongly connected components of the dependents graph, in topological order, and the worklist runs one group at a time (#350). So a function outside a cycle is checked again at most once, after every function it depends on is settled. Before #350 it was checked again once per distrusted function it depends on, with a cold tracer each time. A hub that calls each of a chain of `n` such functions took 0.22 s at `n = 800` (`distrusthub`). It now takes 0.03 s. A package where no contract breaks skips it. `TestAllocationGrowth` (`distrustreturn`, `distrustinput`) holds a chain of `n` directive functions whose last breaks its contract to linear growth. Each function is in a file of its own there, since a directive lookup scans the comments of its file (#301).
 
 Decisions and limitations:
 
@@ -2156,11 +2164,13 @@ Decisions and limitations:
 | An unused or redundant directive | Delete the name | [Contract and directive fixes](#contract-and-directive-fixes) |
 
 > [!CAUTION]
-> A Session at a root makes later in-place changes hit a copy. The fixed code then drops a condition silently, and the linter is clean. So no fix is offered when it would lose an effect. That is a discarded statement it cannot reassign ([Discarded statements](#discarded-statements-under-a-session-fix)), a change made outside the variable ([In-place changes](#in-place-changes-outside-the-variable)), or `Attrs`, `Assign` or `InstanceSet` state that a Session drops ([Statement state a Session drops](#statement-state-a-session-drops)).
+> A Session at a root makes later in-place changes hit a copy. The fixed code then drops a condition silently, and the linter is clean. So no fix is offered when it would lose one of these effects:
+>
+> - A discarded statement it cannot reassign ([Discarded statements](#discarded-statements-under-a-session-fix))
+> - A change made outside the variable ([In-place changes](#in-place-changes-outside-the-variable))
+> - `Attrs`, `Assign` or `InstanceSet` state that a Session drops ([Statement state a Session drops](#statement-state-a-session-drops))
 
 <details><summary>Other diagnostics without a fix</summary>
-
-Other diagnostics without a fix:
 
 | Diagnostic | Section |
 | --- | --- |
@@ -2263,10 +2273,10 @@ q.Where("a").Session(s).Limit(1)
 
 A receiver that is not the target variable. Examples:
 
-- an alias `r := q`;
-- a method value `where := q.Where`;
-- a variable captured by a closure that is not called inline;
-- a use that #68 orders at a closure's call site.
+- An alias `r := q`.
+- A method value `where := q.Where`.
+- A variable captured by a closure that is not called inline.
+- A use that #68 orders at a closure's call site.
 
 </td><td>
 
@@ -2313,9 +2323,9 @@ After the reassignments, `simulateVirtualRoots` decides which root each use read
 
 **Every use must be known.** These rules need every use of the root, in the function that defines it. `usesOrdered` checks that:
 
-- the tracker records no use outside `AllUses` (`Violation.HiddenUses`): no deferred or spawned call, no read through a Session/Debug copy or a subquery, no loop-carried read;
-- the reported position is one of `AllUses`. A use through a Phi is filed under one edge only, so a diagnostic for another edge can have no use of its own;
-- every use is in the defining function. A use in a closure, such as the body of a range-over-func loop, has no CFG path from the definition.
+- The tracker records no use outside `AllUses` (`Violation.HiddenUses`): no deferred or spawned call, no read through a Session/Debug copy or a subquery, no loop-carried read.
+- The reported position is one of `AllUses`. A use through a Phi is filed under one edge only, so a diagnostic for another edge can have no use of its own.
+- Every use is in the defining function. A use in a closure, such as the body of a range-over-func loop, has no CFG path from the definition.
 
 When the check fails, a root gets a Session when it has a use other than the one reassignment that reads it. That is what the fix did before. Removing a Session from a reassignment never drops an effect: the statement is still reassigned, so #199 holds. `testdata/src/gormreuse/fix_paths.go.golden` pins the output. `TestFixesConverge` re-lints that golden. `TestFixPathsPreserveQueries` in `e2e/internal/fix_paths_test.go` compares the SQL before and after the fixes.
 
@@ -2323,7 +2333,7 @@ When the check fails, a root gets a Session when it has a use other than the one
 
 | Case | Example | Change |
 | --- | --- | --- |
-| A variable that a closure captures has no Phi: SSA keeps it in memory, and the tracer resolves every read to its first store. The other stores were meant to get a Session from a synthetic Phi, but its result had no referrers, so they never did. The re-lint was then clean, because it reads only the first store, while the other path still reused its root | `var q *gorm.DB; if c { q = db.Where("a") } else { q = db.Where("b") }; go func() { q.Find(nil); q.Count(nil) }()` got a Session on `"a"` only | `mergedEdges` gives a Session to each other store that may run before two of the root's uses. A use in a closure counts as after every store. `TestFixCapturedMergeNeedsEveryStore` in `e2e/internal/fix_one_pass_test.go` checks the leak at run time |
+| A variable that a closure captures has no Phi: SSA keeps it in memory, and the tracer resolves every read to its first store. The other stores were meant to get a Session from a synthetic Phi, but its result had no referrers, so they never did. The re-lint was then clean, because it reads only the first store, while the other path still reused its root | Two stores, `q = db.Where("a")` and `q = db.Where("b")`, read twice in a `go` closure. Only `"a"` got a Session | `mergedEdges` gives a Session to each other store that may run before two of the root's uses. A use in a closure counts as after every store. `TestFixCapturedMergeNeedsEveryStore` in `e2e/internal/fix_one_pass_test.go` checks the leak at run time |
 | A reassignment inside a closure writes the captured variable, and detection does not follow a store in a closure (`closureModifiesCaptured`). The uses after it still read the root | `func() { q.Where("a") }(); q.Find(nil); q.Count(nil)`, and the body of a range-over-func loop | The root gets a Session in the same pass (`reassignsInClosure`) |
 | Only the first diagnostic at a position was reported. A read-only argument that sees a change at the position of a reuse appeared only after the reuse's fix | `q = q.Where(r); q.Count(nil); r.Find(nil); q.Find(nil)` | A position has one reuse diagnostic and one of each other message (`reportKey` in `internal/report.go`) |
 
@@ -2350,7 +2360,16 @@ Before #343, only the edges of the first Phi got a Session. That made `Where("b"
 
 The walk back is needed because the reported root is not always the first value. With a loop between the filters, the root is the last filter's `Where`. The Model and the first filter reach it only through the loop-header Phi.
 
-The fix's checks (`changedElsewhere`, the discarded statements of `findReassignedChains`) see the uses of the root and of the Phis forward from it. They do not see the uses of a value that only the walk back finds. `mergeOnly` accepts such a value only when each referrer is a Phi, or a `*gorm.DB` method with the value as its receiver that runs a query, returns a copy, or returns a value accepted by the same rule. In `if a != "" { q = q.Where("a") }; applyTenant(q); for … { q = q.Where(x) }; if b != "" { q = q.Where("b") }`, a Session on the Model would make `applyTenant` add its filter to a copy. The walk stops at the Phi that `applyTenant` takes.
+The fix's checks (`changedElsewhere`, the discarded statements of `findReassignedChains`) see the uses of the root and of the Phis forward from it. They do not see the uses of a value that only the walk back finds. `mergeOnly` accepts such a value only when each referrer is a Phi, or a `*gorm.DB` method with the value as its receiver. The method must run a query, return a copy, or return a value that the same rule accepts. Take this code:
+
+```go
+if a != "" { q = q.Where("a") }
+applyTenant(q)
+for … { q = q.Where(x) }
+if b != "" { q = q.Where("b") }
+```
+
+A Session on the Model would make `applyTenant` add its filter to a copy. The walk stops at the Phi that `applyTenant` takes.
 
 Rejected: one `q = q.Session(&gorm.Session{})` before the first use of the last Phi. The statement must come before every use after the merge, in source order. SSA's blocks do not give that order back, and the rest of the fix appends to calls instead of adding lines.
 
@@ -2457,9 +2476,9 @@ Tests:
 
 `Generate` used to declare the function `//gormreuse:immutable-param` for every parameter root. That moved the duty to the callers, but:
 
-- callers in other packages are never checked (#195), so an exported function's reuse disappeared;
-- a function used as a value, such as `var scopes = []func(*gorm.DB) *gorm.DB{scope}`, has callers no check sees, so a real Scopes-callback reuse disappeared;
-- a caller in the package that passes a mid-chain value got the caller-side diagnostic, which had no fix, so `-fix` never reached zero. Since #248 that diagnostic has a fix of its own, which isolates the argument ([Contract and directive fixes](#contract-and-directive-fixes)). The parameter-root fix still uses the body Session for such a function, which fixes every caller at once.
+- Callers in other packages are never checked (#195), so an exported function's reuse disappeared.
+- A function used as a value, such as `var scopes = []func(*gorm.DB) *gorm.DB{scope}`, has callers no check sees, so a real Scopes-callback reuse disappeared.
+- A caller in the package that passes a mid-chain value got the caller-side diagnostic, which had no fix, so `-fix` never reached zero. Since #248 that diagnostic has a fix of its own, which isolates the argument ([Contract and directive fixes](#contract-and-directive-fixes)). The parameter-root fix still uses the body Session for such a function, which fixes every caller at once.
 
 Before #311 both parameter fixes needed a second pass for merged values. `mergedEdges` read only a root that is an instruction, and the directive was returned before the edges were asked.
 
@@ -2481,7 +2500,20 @@ The #199 rule covers a discarded statement written on the root's variable. Other
 | A defer statement changes the root in place, and another deferred call may see it (#309) | `defer q.Find(nil); defer q.Where("a")`, `defer applyTenant(q); defer q.Find(nil)`, `for … { defer applyTenant(q) }` | An `*ssa.Defer` that `statementRootChanges` says changes the root, when another `*ssa.Defer` uses the root, or the statement repeats (`useRepeatsAfter`). Deferred calls run after every other use, so only a deferred call sees the change. Their run order is not followed, so any other one is taken to |
 | The root is stored in a struct field that other code reaches (#310) | `s := &Svc{db: q}; s.apply()`, `applyP(params{db: q})`, `p.db = q; helper(&p)` | `holderChangesRoot`, over the stores that `holderStores` finds ([Struct stores](#struct-stores)) |
 
-The state reads and the go and defer statements of a function are indexed by root once (`changeStatementsOf`), and so are the calls of a file by Lparen (`callAtLparen`), the variables that calls are assigned to (`reassignLHS`), and the variables that each function's closures capture (`closureCaptures`). Before #350, each was scanned again for every root, so `n` roots, each used in a deferred call, took 0.33 s at `n = 800` (`rootsdefer`, now 0.02 s).
+These scans are indexed once (#350):
+
+| Index | Per |
+| --- | --- |
+| The state reads and the go and defer statements of a function, by root (`changeStatementsOf`) | Function |
+| The calls of a file by Lparen (`callAtLparen`) | File |
+| The variables that calls are assigned to (`reassignLHS`) | File |
+| The variables that each function's closures capture (`closureCaptures`) | Function |
+
+<details><summary>Before #350</summary>
+
+Each was scanned again for every root. So `n` roots, each used in a deferred call, took 0.33 s at `n = 800` (`rootsdefer`). They now take 0.02 s.
+
+</details>
 
 #### Helpers that only run queries
 
@@ -2494,7 +2526,7 @@ An escape to a helper that only runs queries on the root changes it only by the 
 
 Both need a plain static call (no go or defer statement, method value or method expression) of a function that returns no `*gorm.DB`. No other argument may hold the root (`PointeeRoots`, `GormDBFieldValues`) or code (a function, an interface or a type parameter, in a field or element too).
 
-`HandoffFinisherOnlyParams` summarises a function once per pass (`Generator.handoffs`). A parameter is listed when each of its uses starts a chain of `*gorm.DB` methods on the receiver that ends in a finisher or in `Session`, `WithContext` or `Debug`:
+`HandoffFinisherOnlyParams` summarises a function once per pass (`Generator.handoffs`). A parameter is listed when each of its uses starts a chain of `*gorm.DB` methods on the receiver. The chain must end in a finisher, or in `Session`, `WithContext` or `Debug`. These uses rule a parameter out:
 
 | Rejected | Example |
 | --- | --- |
@@ -2523,7 +2555,7 @@ The summary of an exported function travels as `facts.Func.FinisherOnly`, so a h
 
 #### Struct stores
 
-A store of the root into a struct field is not a use (#310). Since #341 the call that is handed a local struct is a branch of the root in detection too ([Pollution sources](#pollution-sources)). Detection reads the fields of a local struct as the value stored in them (#181), so `s.db.Find(&x)` is a use of `q`. The handler marks nothing at the store either, so `UsageInfo.Escapes` never covered it. `s := &Svc{db: q}; s.apply(); q.Find(&a); q.Find(&b)` got a Session at `q` that made `apply` add its filter to a copy.
+A store of the root into a struct field is not a use (#310). The call that is handed a local struct is also a branch of the root in detection (#341, [Pollution sources](#pollution-sources)). Detection reads the fields of a local struct as the value stored in them (#181), so `s.db.Find(&x)` is a use of `q`. The handler marks nothing at the store either, so `UsageInfo.Escapes` does not cover it. Without the check below, `s := &Svc{db: q}; s.apply(); q.Find(&a); q.Find(&b)` would get a Session at `q`. Then `apply` would add its filter to a copy.
 
 <details><summary>Where other code reaches a stored root, and tests</summary>
 
@@ -2539,7 +2571,7 @@ A store of the root into a struct field is not a use (#310). Since #341 the call
   | Instruction | Counts when |
   | --- | --- |
   | A `*gorm.DB` method | An argument other than the receiver can hold a function. `Connection`, `Transaction`, `FindInBatches` and `ToSQL` run theirs before they return. `Scopes` keeps its scopes for the finisher, so the `Scopes` call counts in its place, which is earlier |
-  | A static call into a package that does not reach gorm | An argument can run code of a package that does (`holderArgRunsCode`): a function, an interface, a type parameter, or a value of a type with methods declared in such a package, held directly or in a field, element or pointer. A value boxed in an interface is judged by its own type, and so is each value of a variadic argument built at the call. So `sort.Sort(byTenant(xs))` counts, and so does `json.Marshal(v)` when the type of `v` has methods. `fmt.Println(n)` does not |
+  | A static call into a package that does not reach gorm | An argument can run code of a package that does (`holderArgRunsCode`). That is a function, an interface, a type parameter, or a value of a type with methods declared in such a package. It may be held directly or in a field, element or pointer. A value boxed in an interface is judged by its own type, and so is each value of a variadic argument built at the call. So `sort.Sort(byTenant(xs))` counts, and so does `json.Marshal(v)` when the type of `v` has methods. `fmt.Println(n)` does not |
   | A call into `sync` or `sync/atomic`, a channel send or receive, a `select`, `close` | Always. They let a goroutine that is already running go on, and it may reach the memory |
   | Any other call, a dynamic call, a `go` statement | Always |
   | A deferred call, another builtin | Never. A deferred call runs after every use |
@@ -2548,17 +2580,17 @@ A store of the root into a struct field is not a use (#310). Since #341 the call
 - Code in a closure of the root's function is not ordered against the uses. An escape there, or a store there into memory that is not a local struct, is taken as seen.
 - The stores, the walks and the calls are memoized in `Generator.holders`, so a function with n such stores stays linear (`structescape` in the growth gate).
 - The rule withholds no fix that the existing golden fixtures had. Their struct stores go to one of these:
-  - a struct the function only reads;
-  - a package-level variable or receiver field with no call between the store and the uses (the builder idiom `r.db = r.db.Where(c)`);
-  - a captured struct whose closure only reads the field.
+  - A struct the function only reads.
+  - A package-level variable or receiver field with no call between the store and the uses (the builder idiom `r.db = r.db.Where(c)`).
+  - A captured struct whose closure only reads the field.
 
-Tests: `TestFixEscapePreservesQueries` in `e2e/internal/fix_escape_test.go` runs each case of the issue from `fixsql/before` and `fixsql/after` against real GORM. `TestFixEscapeDetectsSessionAtRoot` checks that the comparison fails for the fixes suggested before. `e2e/internal/fix_struct_escape_test.go` does the same for the struct cases of #310, including a parameter root whose body Session would drop the change. In `ErrorPropagation` a query runs only when `q.Error` holds the error of a failed query, so a lost error shows up as a missing query. `e2e/internal/fix_pointer_escape_test.go` does the same for #345: the address of `q` handed on, and `q` stored in a package-level struct before `Connection`, `Scopes` or `sort.Sort` runs code that reaches it. `testdata/src/gormreuse/fix_escape.go`, `fix_escape_struct.go` and `fix_escape_pointer.go` hold the fixtures with and without a fix.
+Tests: `TestFixEscapePreservesQueries` in `e2e/internal/fix_escape_test.go` runs each case of the issue from `fixsql/before` and `fixsql/after` against real GORM. `TestFixEscapeDetectsSessionAtRoot` checks that the comparison fails for the fixes suggested before. `e2e/internal/fix_struct_escape_test.go` does the same for the struct cases of #310, including a parameter root whose body Session would drop the change. In `ErrorPropagation` a query runs only when `q.Error` holds the error of a failed query, so a lost error shows up as a missing query. `e2e/internal/fix_pointer_escape_test.go` does the same for #345. It hands on the address of `q`. It also stores `q` in a package-level struct before `Connection`, `Scopes` or `sort.Sort` runs code that reaches it. `testdata/src/gormreuse/fix_escape.go`, `fix_escape_struct.go` and `fix_escape_pointer.go` hold the fixtures with and without a fix.
 
 </details>
 
 Limitations:
 
-- An escape before a later use withholds the fix even when the callee only reads the value, unless the callee only runs queries on it ([Helpers that only run queries](#helpers-that-only-run-queries)). An example is a `*gorm.DB` method argument (`base.Model(q)`). Mark a read-only helper `//gormreuse:pure`, or pass it an isolated value.
+- An escape before a later use withholds the fix even when the callee only reads the value. The exception is a callee that only runs queries on it ([Helpers that only run queries](#helpers-that-only-run-queries)). An example is a `*gorm.DB` method argument (`base.Model(q)`). Mark a read-only helper `//gormreuse:pure`, or pass it an isolated value.
 - A parameter's body Session still drops the in-place changes of the function's queries ([Parameter-root fix](#parameter-root-fix)).
 - A deferred call that takes the root, as in `defer applyTenant(q)`, keeps the fix when no other deferred call uses the root and it runs once. It runs after every use the fix orders, so only another deferred call could see its change. With another one, the fix is withheld even when that one runs first and cannot see it.
 - A `*gorm.DB` method can also run code through the model's hooks (such as AfterFind), a driver.Valuer or a registered callback. These are not counted: gorm runs them on every query, and counting them would withhold the fix after any query.
@@ -2570,7 +2602,13 @@ Limitations:
 
 The next call on a Session result clones the Statement, and gorm's `Statement.clone()` does not copy `attrs` (`Attrs`) or `assigns` (`Assign`). An `InstanceSet` entry is copied, but its key holds the old Statement's address, so `InstanceGet` on the clone misses it (#344). A Session after them changes what `FirstOrInit` and `FirstOrCreate` do: `q := db.Model(&User{}).Assign(User{Age: 77})`, reused with a Session, leaves `Age` at the row's value.
 
-`RootTracer.SessionDropsState` (`internal/ssa/tracer/state.go`) says a value may carry such state when its own chain, back to a Session-family call, calls one of the three; when a chain on it calls one and the value keeps the effect (a discarded `q.Assign(x)`, a merge back, or anything but a `*gorm.DB` receiver); or when it is a parameter that reaches `FirstOrInit` or `FirstOrCreate`. For such a value, `Generate` withholds the fix whenever it would write a Session (root, reassignment, merged edge, parameter body), and `GenerateIsolation` withholds the isolation. A fix with only `immutable-param` stays. The diagnostics end with "a Session would drop its Attrs, Assign or InstanceSet" in place of the Session advice.
+`RootTracer.SessionDropsState` (`internal/ssa/tracer/state.go`) says a value may carry such state in these cases:
+
+- Its own chain, back to a Session-family call, calls one of the three.
+- A chain on it calls one, and the value keeps the effect: a discarded `q.Assign(x)`, a merge back, or any use but a `*gorm.DB` receiver.
+- It is a parameter that reaches `FirstOrInit` or `FirstOrCreate`.
+
+For such a value, `Generate` withholds the fix whenever it would write a Session (root, reassignment, merged edge, parameter body). `GenerateIsolation` withholds the isolation. A fix with only `immutable-param` stays. The diagnostics end with "a Session would drop its Attrs, Assign or InstanceSet" in place of the Session advice.
 
 <details><summary>Every field clone() leaves out, decisions, limitations and tests</summary>
 
@@ -2586,7 +2624,7 @@ The next call on a Session result clones the Statement, and gorm's `Statement.cl
 
 Limitations:
 
-- Only a parameter root is checked for its callers' state. A local root built from a parameter, `q := tx.Where("a")` reused in `FirstOrInit`, keeps its Session fix: checking it would withhold most `FirstOrInit` fixes in functions that take `db`.
+- Only a parameter root is checked for its callers' state. A local root built from a parameter keeps its Session fix, as `q := tx.Where("a")` reused in `FirstOrInit` does. Checking it would withhold most `FirstOrInit` fixes in functions that take `db`.
 - A helper's result (`q := withAssign(db)`), a chain through a method value or in a closure, and a struct field root are not followed. A caller's `InstanceSet` on a parameter is not checked.
 
 `e2e/internal/uncloned_state_test.go` checks each field at run time against `statementCloned` and `statementUncloned`, and the runtime effects of `Attrs`, `Assign`, `InstanceSet` and the body Session. `TestGormStatementFieldsClassified` fails when gorm adds a Statement field neither list holds. `testdata/src/gormreuse/fix_uncloned_state.go` holds the fixtures.
@@ -2664,7 +2702,7 @@ The line test reads the file with `pass.ReadFile`. When it cannot read it, or th
 
 The test variant sees calls in `_test.go` files. For example, a direct call of a named Transaction callback makes its parameter mutable (#191) in that variant only. The non-test variant then reports the ignore unused, as it did before #248, and `-fix` would apply that variant's fix too. A pass sees only its own variant, so it cannot tell. The pass's own files are checked first, so the test variant withholds the fix too. Otherwise the directory is listed, and one that cannot be listed counts as having tests. An ignore in a `_test.go` file is analyzed only by the test variant, which sees the whole package, so it keeps its fix. `testdata/src/ignoretests` checks both, in both variants.
 
-Before #348 the variant without the test files still reported such an ignore. When only the test variant needed it, the `gormreuse` command, which runs both variants, could never run clean, while `go vet` and golangci-lint, which run only the test variant, were clean. That variant now leaves the report to the test variant. It decides from `go/build`'s `TestGoFiles` of the directory: external test files (`package x_test`) make no test variant of `x`, so they do not count. The cost: run with `-test=false`, an unused ignore in such a file is never reported.
+Before #348 the variant without the test files still reported such an ignore. Take an ignore that only the test variant needed. The `gormreuse` command runs both variants, so it could never run clean. `go vet` and golangci-lint run only the test variant, so they were clean. That variant now leaves the report to the test variant. It decides from `go/build`'s `TestGoFiles` of the directory: external test files (`package x_test`) make no test variant of `x`, so they do not count. The cost: run with `-test=false`, an unused ignore in such a file is never reported.
 
 **Redundant immutable-param.** One comment before `a, b := func..., func...` applies to both closures. The comment is edited only when no closure it covers keeps the directive: one that needs it (`needsImmutableParam`), or one that is also `pure`. Otherwise the redundant closure's diagnostic has no fix. A function that forwards its parameter once to another immutable-param function is reported redundant (see `computeNeedsImmutableParam`). Deleting its directive then exposes the caller-side diagnostic at the forwarding call, which a second pass fixes.
 
@@ -2695,8 +2733,8 @@ So `return q.Session(...).Where("x")` is safe, and `return other.Session(...)` l
 
 A Scopes call is skipped when its chain provably only reads (`scopeswarn.ReadsOnly`). Every use of its result, and of each chain method after it, must be the receiver of one of these:
 
-- a chain method: the chainable API, `Session`, `WithContext`, `Debug`;
-- a finisher that only reads: `Find`, `First`, `Take`, `Last`, `FirstOrInit`, `Count`, `Pluck`, `Scan`, `Row`, `Rows`, `Exec`.
+- A chain method: the chainable API, `Session`, `WithContext`, `Debug`.
+- A finisher that only reads: `Find`, `First`, `Take`, `Last`, `FirstOrInit`, `Count`, `Pluck`, `Scan`, `Row`, `Rows`, `Exec`.
 
 `CollectScopesOnlyCallbacks` reads only the other Scopes calls. A callback passed to one Scopes call that may write is still reported.
 
@@ -2734,8 +2772,6 @@ Returned, stored in a field, passed to a function or another method, or discarde
 </details>
 
 <details><summary>How the rule finds its input</summary>
-
-**How the rule finds its input.**
 
 | Input | How |
 | --- | --- |
@@ -2846,7 +2882,7 @@ A plain `go test` only compares these files. It never writes them, so CI fails w
 GORMREUSE_UPDATE_GOLDEN=1 go test -run TestGoldenFiles .
 ```
 
-This rewrites every `.golden` and `.diff` file, and deletes the ones whose source fixture is gone. Outside `gormreuse` it also deletes those of a file that no fix edits any more. `RunWithSuggestedFixes` does not catch that case: it ignores the golden file of a file without fixes. Before #316, two `linedirective` goldens kept a Session fix that #243 had withheld.
+This rewrites every `.golden` and `.diff` file, and deletes the ones whose source fixture is gone. Outside `gormreuse` it also deletes those of a file that no fix edits any more. `RunWithSuggestedFixes` does not catch that case: it ignores the golden file of a file without fixes. So a stale golden could keep a fix that is gone: two `linedirective` goldens kept a Session fix that #243 had withheld, until #316.
 
 > [!IMPORTANT]
 > Read each changed `.diff` before you commit it. It shows exactly what `-fix` now does to the fixture.
@@ -2878,7 +2914,16 @@ A fixture of `testdata/src/gormreuse` whose fixes must also converge is listed i
 | `growthCubic` | n, 2n | 9.0 | The steps of a shape whose code grows as n² (`inferexp2`) |
 | `growthExponential` | n, n+4 | 2.0 | Shapes that used to double their work per statement (about 16x) |
 
-The test counts the steps of the analyzer's searches too (#350): a value traced, a CFG block visited, a referrer that `isAssignment` or the Scopes chain check reads, a block that a store search walks back through, a pair of uses compared, and a `mayAlias` search. `internal/effort` counts them, only once a test has called `effort.Count`. The steps are held to the case's limit, or to its `steps` limit when its searches repeat work that allocates nothing. Each such case says why.
+The test counts the steps of the analyzer's searches too (#350). A step is one of these:
+
+- A value traced
+- A CFG block visited
+- A referrer that `isAssignment` or the Scopes chain check reads
+- A block that a store search walks back through
+- A pair of uses compared
+- A `mayAlias` search
+
+`internal/effort` counts them, only once a test has called `effort.Count`. The steps are held to the case's limit, or to its `steps` limit when its searches repeat work that allocates nothing. Each such case says why.
 
 <details><summary>How it measures, and the rejected time limit</summary>
 
@@ -2929,9 +2974,9 @@ The `e2e/internal/` directory holds tests that verify actual GORM SQL behavior w
 > [!IMPORTANT]
 > Every test asserts (`t.Errorf`). The suite guards the linter's core clone-semantics premise:
 >
-> - mid-chain (`clone==0`) reuse accumulates conditions;
-> - root, `Session()`, and `Transaction`- and `FindInBatches`-callback (`clone>0`) handles fork a fresh Statement and are safe;
-> - a `Connection`-callback handle is `clone==0` and accumulates.
+> - Mid-chain (`clone==0`) reuse accumulates conditions.
+> - Root, `Session()`, and `Transaction`- and `FindInBatches`-callback (`clone>0`) handles fork a fresh Statement and are safe.
+> - A `Connection`-callback handle is `clone==0` and accumulates.
 
 <details><summary>What each E2E file pins, and the gorm stub checks</summary>
 
@@ -2996,13 +3041,13 @@ Each fixture function marked `[LIMITATION]` under `testdata/src` pins one of the
 
 <details><summary>What TestKnownLimitationsListed checks</summary>
 
-- a marked function is not named in this section;
-- a fixture named here (in a Fixtures column, or after "Fixtures:") is not a marked function;
-- a marker comes after the last function of its file, so it marks none;
-- the README's section lacks one of the four kinds below, or a kind has a table in one file only;
-- a table has no rows, or a Markdown row has a different number of cells than its header (escape a `|` in a cell as `\|`);
-- the rows of a table differ from the README's, or are in another order. Each README row starts with a `<!-- fixtures: a, b -->` comment that names the fixtures of this section's row;
-- the README's summary table gives a kind another case count than its table has, or a count for a kind without a table (write `—`).
+- A marked function is not named in this section.
+- A fixture named here (in a Fixtures column, or after "Fixtures:") is not a marked function.
+- A marker comes after the last function of its file, so it marks none.
+- The README's section lacks one of the four kinds below, or a kind has a table in one file only.
+- A table has no rows, or a Markdown row has a different number of cells than its header (escape a `|` in a cell as `\|`).
+- The rows of a table differ from the README's, or are in another order. Each README row starts with a `<!-- fixtures: a, b -->` comment that names the fixtures of this section's row.
+- The README's summary table gives a kind another case count than its table has, or a count for a kind without a table (write `—`).
 
 </details>
 
@@ -3050,6 +3095,8 @@ Other limitations have no fixture marker. They are described with their design:
 
 - A call through an exported, reassigned or address-taken `var f = func(...)` does not honour the closure's directives ([Function variables](#function-variables)).
 - A getter of a field or a global is inferred `immutable-return` though another package, or code given the field's address, assigns it a chain ([Inferred immutable-return](#inferred-immutable-return)). A direct read of the field misses the same reuse. A store before the call, in the calling function, is seen ([Parameter reads](#parameter-reads)).
+- The limits of the inferred directives are in [Inferred immutable-return](#inferred-immutable-return) and [Inferred immutable-param and immutable-input](#inferred-immutable-param-and-immutable-input).
+- A callee in another package exports no fact for the [immutable-param body rule](#immutable-param-body-rule), so an argument to it still gets the isolation fix.
 - The limits of `-fix` are in [Suggested fixes](#suggested-fixes), from [Reassignment fix target](#reassignment-fix-target) to [Contract and directive fixes](#contract-and-directive-fixes).
 
 ## Related Projects
