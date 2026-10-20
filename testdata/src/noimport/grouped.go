@@ -11,7 +11,7 @@ import (
 // The fix should append gorm to the existing import group.
 func violationWithGroupedImport() {
 	fmt.Println("test")
-	q := internal.GetDB()
+	q := internal.GetQuery()
 	q.Find(nil)
 	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }

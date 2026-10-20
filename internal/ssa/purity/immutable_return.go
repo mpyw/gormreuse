@@ -2,11 +2,13 @@ package purity
 
 import (
 	"go/token"
+	"go/types"
 	"slices"
 
 	"golang.org/x/tools/go/ssa"
 
 	"github.com/mpyw/gormreuse/internal/directive"
+	"github.com/mpyw/gormreuse/internal/ssa/callsite"
 	"github.com/mpyw/gormreuse/internal/ssa/origin"
 	"github.com/mpyw/gormreuse/internal/ssa/tracer"
 	"github.com/mpyw/gormreuse/internal/typeutil"
@@ -44,12 +46,11 @@ type ImmutableReturnValidator struct {
 	set *directive.DirectiveFuncSet
 	rt  *tracer.RootTracer
 	// funcs are the package's source functions, scanned for the stores into a
-	// package-level variable.
+	// package-level variable or a struct field.
 	funcs []*ssa.Function
-	// globals holds the stores into each package-level variable, or nil for
-	// one whose address escapes. It is filled on first use, and the copies
+	// assigned holds those stores. It is filled on first use, and the copies
 	// that Distrusting makes share it.
-	globals *map[*ssa.Global][]ssa.Value
+	assigned *immutableReturnAssignments
 	// distrusted reports the functions whose results count as provably
 	// mutable (see Distrusting). It is nil for the body check.
 	distrusted func(*ssa.Function) bool
@@ -61,7 +62,7 @@ type ImmutableReturnValidator struct {
 // sources (including other immutable-return functions and immutable-param'd
 // parameters) correctly.
 func NewImmutableReturnValidator(funcs []*ssa.Function, set *directive.DirectiveFuncSet, rt *tracer.RootTracer) *ImmutableReturnValidator {
-	return &ImmutableReturnValidator{set: set, rt: rt, funcs: funcs, globals: new(map[*ssa.Global][]ssa.Value)}
+	return &ImmutableReturnValidator{set: set, rt: rt, funcs: funcs, assigned: &immutableReturnAssignments{}}
 }
 
 // Distrusting returns a validator like v that uses rt, a tracer that does not
@@ -208,6 +209,27 @@ func (v *ImmutableReturnValidator) rootMutable(root ssa.Value, seen map[ssa.Valu
 	return false
 }
 
+// AssignedMutable reports whether read, a load of a package-level variable or
+// of a struct field, reads a variable that the package may assign a provably
+// mutable value. Inference does not trust such a read (#308): a caller may
+// assign the chain before it calls the getter. It is true for a global whose
+// address escapes. A store in another package, or through a field address
+// that escapes, is not seen. Any other read has no stores.
+func (v *ImmutableReturnValidator) AssignedMutable(read *ssa.UnOp) bool {
+	a := v.assignments(read.Parent().Pkg)
+	var stores []ssa.Value
+	switch addr := read.X.(type) {
+	case *ssa.Global:
+		if a.escaped[addr] {
+			return true
+		}
+		stores = a.globals[addr]
+	case *ssa.FieldAddr:
+		stores = a.fields[immutableReturnField(addr.X.Type(), addr.Field)]
+	}
+	return slices.ContainsFunc(stores, func(val ssa.Value) bool { return v.valueMutable(val, make(map[ssa.Value]bool)) })
+}
+
 // globalMutable reports whether the package-level variable g provably holds a
 // mutable value: it is unexported, its address does not escape, it is assigned
 // at least once, and every value assigned to it is provably mutable. A read
@@ -218,52 +240,76 @@ func (v *ImmutableReturnValidator) globalMutable(g *ssa.Global, seen map[ssa.Val
 	if g.Object() == nil || g.Object().Exported() {
 		return false
 	}
-	stores := v.globalStores(g)
-	if len(stores) == 0 {
+	a := v.assignments(g.Pkg)
+	stores := a.globals[g]
+	if a.escaped[g] || len(stores) == 0 {
 		return false
 	}
 	return !slices.ContainsFunc(stores, func(val ssa.Value) bool { return !v.valueMutable(val, seen) })
 }
 
-// globalStores returns the values stored into g by the package, or nil when
-// g's address is used other than to load or store it.
-func (v *ImmutableReturnValidator) globalStores(g *ssa.Global) []ssa.Value {
-	if *v.globals == nil {
-		globals := make(map[*ssa.Global][]ssa.Value)
-		*v.globals = globals
-		escaped := make(map[*ssa.Global]bool)
-		for _, fn := range immutableReturnPackageFuncs(v.funcs, g.Pkg) {
-			for _, block := range fn.Blocks {
-				for _, instr := range block.Instrs {
-					switch x := instr.(type) {
-					case *ssa.Store:
-						if sg, ok := x.Addr.(*ssa.Global); ok {
-							globals[sg] = append(globals[sg], x.Val)
-						}
-						if sg, ok := x.Val.(*ssa.Global); ok {
-							escaped[sg] = true
-						}
-						continue
-					case *ssa.UnOp:
-						if x.Op == token.MUL {
-							continue
-						}
-					case *ssa.DebugRef:
+// immutableReturnAssignments are the stores of a package into its
+// package-level variables and into struct fields.
+type immutableReturnAssignments struct {
+	scanned bool
+	globals map[*ssa.Global][]ssa.Value
+	// escaped holds the globals whose address is used other than to load or
+	// store it.
+	escaped map[*ssa.Global]bool
+	fields  map[*types.Var][]ssa.Value
+}
+
+// assignments scans the package's functions for their stores once. pkg is
+// the package whose initializer is scanned too.
+func (v *ImmutableReturnValidator) assignments(pkg *ssa.Package) *immutableReturnAssignments {
+	a := v.assigned
+	if a.scanned {
+		return a
+	}
+	a.scanned = true
+	a.globals = make(map[*ssa.Global][]ssa.Value)
+	a.escaped = make(map[*ssa.Global]bool)
+	a.fields = make(map[*types.Var][]ssa.Value)
+	for _, fn := range immutableReturnPackageFuncs(v.funcs, pkg) {
+		for _, block := range fn.Blocks {
+			for _, instr := range block.Instrs {
+				switch x := instr.(type) {
+				case *ssa.Store:
+					switch addr := x.Addr.(type) {
+					case *ssa.Global:
+						a.globals[addr] = append(a.globals[addr], x.Val)
+					case *ssa.FieldAddr:
+						field := immutableReturnField(addr.X.Type(), addr.Field)
+						a.fields[field] = append(a.fields[field], x.Val)
+					}
+					if sg, ok := x.Val.(*ssa.Global); ok {
+						a.escaped[sg] = true
+					}
+					continue
+				case *ssa.UnOp:
+					if x.Op == token.MUL {
 						continue
 					}
-					for _, op := range instr.Operands(nil) {
-						if sg, ok := (*op).(*ssa.Global); ok {
-							escaped[sg] = true
-						}
+				case *ssa.DebugRef:
+					continue
+				}
+				for _, op := range instr.Operands(nil) {
+					if sg, ok := (*op).(*ssa.Global); ok {
+						a.escaped[sg] = true
 					}
 				}
 			}
 		}
-		for sg := range escaped {
-			globals[sg] = nil
-		}
 	}
-	return (*v.globals)[g]
+	return a
+}
+
+// immutableReturnField returns field i of the struct that t is or points to.
+func immutableReturnField(t types.Type, i int) *types.Var {
+	if ptr, ok := t.Underlying().(*types.Pointer); ok {
+		t = ptr.Elem()
+	}
+	return t.Underlying().(*types.Struct).Field(i)
 }
 
 // immutableReturnPackageFuncs returns funcs plus the package initializer, which
@@ -379,11 +425,19 @@ func immutableReturnStoreAlwaysRuns(store *ssa.Store) bool {
 //     Session config must be a literal that leaves Initialized unset or false
 //     (callsite.Site.SessionEffect);
 //   - a call to a function that trusted accepts, or to another function this
-//     returns.
+//     returns;
+//   - a local variable assigned once, such as one a closure captures, when
+//     its stored value is proved (#308);
+//   - a field read through a parameter or a receiver, or a read of a
+//     package-level variable, when every store in the function that reaches
+//     the read is proved, as reuse detection reads them (#308). With no such
+//     store the value is immutable. assignedMutable must not report the
+//     variable: it reports one that the package may assign a provably
+//     mutable value (ImmutableReturnValidator.AssignedMutable).
 //
-// Anything else, such as a parameter, a field, a captured variable or a call
-// the rule does not prove, rules the function out. So does a function with no
-// return that carries a *gorm.DB.
+// Anything else, such as a parameter, a field of a local struct, a variable
+// assigned more than once or a call the rule does not prove, rules the function
+// out. So does a function with no return that carries a *gorm.DB.
 //
 // The result is the least fixed point: a function is added only once its
 // body is proved with the functions already added, so a function never
@@ -391,7 +445,7 @@ func immutableReturnStoreAlwaysRuns(store *ssa.Store) bool {
 // result is the same in any order. rt must resolve builtins only: a tracer
 // without an immutable-return set, so that IsImmutableCall accepts only the
 // gorm builtins.
-func InferImmutableReturns(candidates []*ssa.Function, trusted func(*ssa.Function) bool, rt *tracer.RootTracer) map[*ssa.Function]bool {
+func InferImmutableReturns(candidates []*ssa.Function, trusted func(*ssa.Function) bool, rt *tracer.RootTracer, assignedMutable func(*ssa.UnOp) bool) map[*ssa.Function]bool {
 	inferred := make(map[*ssa.Function]bool)
 	accept := func(fn *ssa.Function) bool { return inferred[fn] || trusted(fn) }
 	// queue holds each candidate once, as candidates may repeat.
@@ -414,7 +468,7 @@ func InferImmutableReturns(candidates []*ssa.Function, trusted func(*ssa.Functio
 	for len(queue) > 0 {
 		fn := queue[0]
 		queue = queue[1:]
-		proved, blockers := immutableReturnProof(fn, accept, rt)
+		proved, blockers := immutableReturnProof(fn, accept, rt, assignedMutable)
 		if proved {
 			inferred[fn] = true
 			for _, w := range waiting[fn] {
@@ -451,7 +505,7 @@ func InferImmutableReturns(candidates []*ssa.Function, trusted func(*ssa.Functio
 // provably immutable when accept decides the functions it calls. When it is
 // not, blockers are the callees that accept refused and that alone kept the
 // proof from holding; they are nil when something else is unprovable.
-func immutableReturnProof(fn *ssa.Function, accept func(*ssa.Function) bool, rt *tracer.RootTracer) (proved bool, blockers []*ssa.Function) {
+func immutableReturnProof(fn *ssa.Function, accept func(*ssa.Function) bool, rt *tracer.RootTracer, assignedMutable func(*ssa.UnOp) bool) (proved bool, blockers []*ssa.Function) {
 	results := 0
 	unprovable := false
 	seen := make(map[ssa.Value]bool)
@@ -488,6 +542,28 @@ func immutableReturnProof(fn *ssa.Function, accept func(*ssa.Function) bool, rt 
 			} else {
 				unprovable = true
 			}
+		case *ssa.UnOp:
+			// A local variable assigned once, such as one a closure captures,
+			// holds its stored value (#308).
+			if stored := rt.FuncVars().LocalValue(x); stored != x {
+				prove(stored)
+				return
+			}
+			// A field read through a parameter, and a package-level
+			// variable, are immutable where no store in the function reaches
+			// the read, as reuse detection reads them (#308). A store that
+			// does reach it decides, through the roots the tracer finds.
+			if !immutableReturnReadsShared(x) || assignedMutable(x) {
+				unprovable = true
+				return
+			}
+			for _, root := range rt.FindAllMutableRoots(x, nil) {
+				if call, ok := root.(*ssa.Call); ok {
+					callProved(call)
+				} else {
+					unprovable = true
+				}
+			}
 		default:
 			unprovable = true
 		}
@@ -508,4 +584,52 @@ func immutableReturnProof(fn *ssa.Function, accept func(*ssa.Function) bool, rt 
 		return false, nil
 	}
 	return len(blockers) == 0, blockers
+}
+
+// immutableReturnReadsShared reports whether load reads a field through a
+// parameter, at any depth of fields and pointer fields, also when the
+// parameter is captured or copied into a variable assigned once, or reads a
+// package-level variable. Reuse detection treats both as immutable where no
+// store in the function reaches the read (see "Struct roots" and
+// "Package-level variables" in the design notes).
+func immutableReturnReadsShared(load *ssa.UnOp) bool {
+	if load.Op != token.MUL {
+		return false
+	}
+	var v ssa.Value
+	switch addr := load.X.(type) {
+	case *ssa.Global:
+		return true
+	case *ssa.FieldAddr:
+		v = addr.X
+	default:
+		// A load through a pointer parameter is not a field.
+		return false
+	}
+	for {
+		switch x := v.(type) {
+		case *ssa.UnOp:
+			// A pointer field, or a variable that holds the struct pointer.
+			if x.Op != token.MUL {
+				return false
+			}
+			v = x.X
+		case *ssa.FieldAddr:
+			v = x.X
+		case *ssa.FreeVar:
+			v = callsite.FreeVarBinding(x)
+		case *ssa.Alloc:
+			// A variable that holds a copy of a parameter, such as a value
+			// receiver whose field is read through its address.
+			stored := tracer.AllocStoredValues(x)
+			if len(stored) != 1 {
+				return false
+			}
+			v = stored[0]
+		case *ssa.Parameter:
+			return true
+		default:
+			return false
+		}
+	}
 }

@@ -191,6 +191,40 @@ func (t *RootTracer) traceClosureReturns(fn *ssa.Function, visited map[ssa.Value
 	return nil
 }
 
+// closureReturnsImmutable reports whether fn, a function literal, returns a
+// *gorm.DB and no return of it has a mutable root (#308):
+//
+//	conn := db.Session(&gorm.Session{})
+//	get := func() *gorm.DB { return conn }
+//	d := get()   // no root: get returns conn
+//
+// A nil root from traceClosureReturns means either this or several roots, and
+// the call used to be a root in both cases. Each return is searched on its
+// own, with every store and edge, since a single-root trace follows only the
+// first store into a variable. A closure being checked counts as not
+// immutable, so a recursive closure ends, and its calls stay roots.
+//
+//declscope:shared // root.go's traceCall and traceAll ask it about the closures they call
+func (t *RootTracer) closureReturnsImmutable(fn *ssa.Function) bool {
+	if immutable, ok := t.immutableClosures[fn]; ok {
+		return immutable
+	}
+	t.immutableClosures[fn] = false
+	returns := 0
+	for _, block := range fn.Blocks {
+		ret, ok := block.Instrs[len(block.Instrs)-1].(*ssa.Return)
+		if !ok || len(ret.Results) == 0 || !typeutil.IsGormDB(ret.Results[0].Type()) {
+			continue
+		}
+		if len(t.FindAllMutableRoots(ret.Results[0], nil)) > 0 {
+			return false
+		}
+		returns++
+	}
+	t.immutableClosures[fn] = returns > 0
+	return returns > 0
+}
+
 // traceAllClosureReturns is the multi-root version of traceClosureReturns.
 // It collects roots from ALL return statements in the closure.
 //

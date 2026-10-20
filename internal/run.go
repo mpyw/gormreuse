@@ -217,7 +217,9 @@ func RunSSA(
 	// results returned from Scopes callbacks. Deletable by removing the scopeswarn
 	// package and this block once the upstream fix ships in a supported release — see that package.
 	guard.runPackage("Scopes warnings", func() {
-		scopesOnly := callback.CollectScopesOnlyCallbacks(funcs, funcVars)
+		scopesOnly := callback.CollectScopesOnlyCallbacks(funcs, funcVars, func(site callsite.Site) bool {
+			return !scopeswarn.ReadsOnly(site, funcVars)
+		})
 		for _, w := range scopeswarn.Validate(scopesOnly, funcVars, skip) {
 			report(w.Pos, w.Message)
 		}

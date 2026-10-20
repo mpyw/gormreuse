@@ -12,6 +12,7 @@ import (
 
 	"github.com/mpyw/gormreuse/internal/ssa/callsite"
 	"github.com/mpyw/gormreuse/internal/ssa/tracer"
+	"github.com/mpyw/gormreuse/internal/typeutil"
 )
 
 // =============================================================================
@@ -32,6 +33,11 @@ import (
 // returns clone==0. So only a Session-family result that IS the return value
 // leaks, whichever *gorm.DB it was called on (#196,
 // e2e/internal/scopes_session_test.go).
+//
+// Only the create, update and delete callbacks begin a transaction. A Scopes
+// call whose chain provably ends in a finisher that only reads (Find, Count,
+// ...) does not leak, and its callbacks are not read (ReadsOnly, #308,
+// e2e/internal/scopes_finisher_test.go).
 //
 // **Removal condition**: once the upstream fix ships in a tagged GORM
 // release and gormreuse drops support for older versions, delete this
@@ -75,6 +81,58 @@ func Validate(callbacks map[*ssa.Function]bool, vars callsite.FuncVars, skip fun
 	}
 	slices.SortFunc(warnings, func(a, b Warning) int { return cmp.Compare(a.Pos, b.Pos) })
 	return warnings
+}
+
+// readFinishers are the gorm finishers that run the scopes and then only the
+// query, row or raw callbacks, none of which begins a transaction.
+var readFinishers = map[string]bool{
+	"Find": true, "First": true, "Take": true, "Last": true, "FirstOrInit": true,
+	"Count": true, "Pluck": true, "Scan": true, "Row": true, "Rows": true, "Exec": true,
+}
+
+// chainMethods are the gorm methods that return the chain with the scopes
+// still pending: the chainable API and the Session family.
+var chainMethods = map[string]bool{
+	"Model": true, "Clauses": true, "Table": true, "Distinct": true, "Select": true, "Omit": true,
+	"MapColumns": true, "Where": true, "Not": true, "Or": true, "Joins": true, "InnerJoins": true,
+	"Group": true, "Having": true, "Order": true, "Limit": true, "Offset": true, "Scopes": true,
+	"Preload": true, "Attrs": true, "Assign": true, "Unscoped": true, "Raw": true,
+	"Session": true, "WithContext": true, "Debug": true,
+}
+
+// ReadsOnly reports whether site, a Scopes call, provably runs its callbacks
+// only for a finisher that reads: every use of its result, and of each chain
+// method after it, is the receiver of another chain method or of a read
+// finisher, and the chain has a use. A result that is stored, passed, returned
+// or discarded may reach Create, Update or Delete, so it does not read only.
+func ReadsOnly(site callsite.Site, vars callsite.FuncVars) bool {
+	call, ok := site.Instr.(*ssa.Call)
+	return ok && chainReadsOnly(call, vars)
+}
+
+func chainReadsOnly(v *ssa.Call, vars callsite.FuncVars) bool {
+	refs := *v.Referrers()
+	if len(refs) == 0 {
+		return false
+	}
+	for _, ref := range refs {
+		call, ok := ref.(*ssa.Call)
+		if !ok {
+			return false
+		}
+		site := callsite.SiteOf(call, vars)
+		if !site.IsGormMethod() || site.Recv != ssa.Value(v) {
+			return false
+		}
+		method := site.Method()
+		if readFinishers[method] {
+			continue
+		}
+		if !chainMethods[method] || !typeutil.IsGormDB(call.Type()) || !chainReadsOnly(call, vars) {
+			return false
+		}
+	}
+	return true
 }
 
 // message returns the warning text for a Session-family method name.

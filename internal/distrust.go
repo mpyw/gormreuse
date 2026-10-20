@@ -112,8 +112,8 @@ func distrustContracts(src distrustSources, guard *panicGuard) distrustedContrac
 	// promise: a distrusted one may hand it a mutable value.
 	callbackDistrusted := func(fn *ssa.Function) bool { return slices.ContainsFunc(providers[fn], inputDistrusted) }
 	trusted := func(fn *ssa.Function) bool { return set.Contains(fn) && !returnDistrusted(fn) }
-	validator := purity.NewImmutableReturnValidator(src.funcs, set, nil)
 	builtins := tracer.NewRootTracer(nil, nil, nil, nil, nil, nil, src.funcVars)
+	validator := purity.NewImmutableReturnValidator(src.funcs, set, builtins)
 
 	// recheck checks fn again with the distrusted functions distrusted and
 	// reports whether it became distrusted. A check that panics distrusts
@@ -130,7 +130,7 @@ func distrustContracts(src distrustSources, guard *panicGuard) distrustedContrac
 			rt := src.tracer.Distrusting(returnDistrusted, callbackDistrusted)
 			if checkReturn {
 				if set.Inferred(fn) {
-					failedReturn = !purity.InferImmutableReturns([]*ssa.Function{fn}, trusted, builtins)[fn]
+					failedReturn = !purity.InferImmutableReturns([]*ssa.Function{fn}, trusted, builtins, validator.AssignedMutable)[fn]
 				} else {
 					failedReturn = len(validator.Distrusting(rt, returnDistrusted).Validate(fn)) > 0
 				}

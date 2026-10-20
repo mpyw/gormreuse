@@ -279,14 +279,14 @@
  	db.Scopes(func(q *gorm.DB) *gorm.DB {
  		session := q.Session
  		return session(&gorm.Session{}) // want `Session\(\) result returned from Scopes callback causes transaction leak`
- 	}).Find(nil)
+ 	}).Delete(nil)
  }
  
  func cbHolderScopesThroughMethodValue(db *gorm.DB) {
  	scopes := db.Scopes
  	scopes(func(q *gorm.DB) *gorm.DB {
  		return q.Debug() // want `Debug\(\) result returned from Scopes callback causes transaction leak`
- 	}).Find(nil)
+ 	}).Delete(nil)
  }
  
  var cbHolderSessionHelper = func(q *gorm.DB) *gorm.DB {
@@ -296,7 +296,7 @@
  func cbHolderScopesThroughVar(db *gorm.DB) {
  	db.Scopes(func(q *gorm.DB) *gorm.DB {
  		return cbHolderSessionHelper(q)
- 	}).Find(nil)
+ 	}).Delete(nil)
  }
  
  // --- A package-level variable that holds a method expression ---

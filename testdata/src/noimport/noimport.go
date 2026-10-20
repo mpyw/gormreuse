@@ -7,7 +7,7 @@ import internal "gormreuse"
 // violationWithoutGormImport demonstrates a violation in a file that doesn't import gorm.
 // The fix adds `.Session(&gorm.Session{})` which requires gorm import.
 func violationWithoutGormImport() {
-	q := internal.GetDB()
+	q := internal.GetQuery()
 	q.Find(nil)
 	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }

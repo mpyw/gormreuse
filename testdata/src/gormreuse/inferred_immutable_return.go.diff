@@ -1,6 +1,6 @@
 --- inferred_immutable_return.go	1970-01-01 00:00:00
 +++ inferred_immutable_return.go.golden	1970-01-01 00:00:00
-@@ -1,313 +1,313 @@
+@@ -1,317 +1,317 @@
  package internal
  
  import (
@@ -15,9 +15,11 @@
  // A function without //gormreuse:immutable-return is treated as if it had the
  // directive when every *gorm.DB it returns is provably immutable: the nil
  // constant, a Session, WithContext, Debug, Begin or gorm.Open result, or the
- // result of another immutable-return function, declared or inferred. Anything
- // the analyzer cannot prove leaves the function unmarked, so its result stays
- // a mutable root.
+ // result of another immutable-return function, declared or inferred. So is a
+ // value that reuse detection reads as immutable: a field read through a
+ // parameter, a package-level variable, or a local variable assigned once
+ // (#308). Anything the analyzer cannot prove leaves the function unmarked, so
+ // its result stays a mutable root.
  // =============================================================================
  
  type inferredRepo struct {
@@ -32,6 +34,18 @@
  	q := r.conn(context.Background())
  	q.Where("a").Find(nil)
  	q.Where("b").Find(nil) // OK: conn is inferred
+ }
+ 
+ // inferredField returns a field read through its parameter, which reuse
+ // detection treats as immutable where it is read (#308).
+ func inferredField(r *inferredRepo) *gorm.DB {
+ 	return r.db
+ }
+ 
+ func inferredFieldUse(r *inferredRepo) {
+ 	q := inferredField(r)
+ 	q.Find(nil)
+ 	q.Find(nil) // OK: inferredField is inferred
  }
  
  func inferredMethodValue(r *inferredRepo) {
@@ -204,10 +218,6 @@
  	return db
  }
  
- func notInferredField(r *inferredRepo) *gorm.DB {
- 	return r.db
- }
- 
  func notInferredOneEdge(db *gorm.DB, c bool) *gorm.DB {
  	if c {
  		return db.Session(&gorm.Session{})
@@ -256,13 +266,6 @@
  func notInferredParamUse() {
 -	q := notInferredParam(DB)
 +	q := notInferredParam(DB).Session(&gorm.Session{})
- 	q.Find(nil)
- 	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
- }
- 
- func notInferredFieldUse(r *inferredRepo) {
--	q := notInferredField(r)
-+	q := notInferredField(r).Session(&gorm.Session{})
  	q.Find(nil)
  	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  }

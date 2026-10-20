@@ -215,3 +215,70 @@ func preloadCallbackSessionClean(db *gorm.DB) {
 func notScopesSessionClean(q *gorm.DB) *gorm.DB {
 	return q.Session(&gorm.Session{}) // OK: never passed to Scopes
 }
+
+// ===== THE FINISHER (#308) =====
+//
+// Only the create, update and delete callbacks begin a transaction, so a
+// Scopes call whose chain provably ends in a finisher that reads does not
+// leak (e2e/internal/scopes_finisher_test.go).
+
+func scopesFinisherSession(q *gorm.DB) *gorm.DB {
+	return q.Session(&gorm.Session{}) // OK: every Scopes call that passes it reads
+}
+
+func scopesFinisherReads(conn *gorm.DB) error {
+	db := conn.Session(&gorm.Session{})
+	var n int64
+	db.Scopes(scopesFinisherSession).Find(nil)
+	db.Scopes(scopesFinisherSession).Where("x").Order("y").Count(&n)
+	q := db.Scopes(scopesFinisherSession)
+	q.First(nil)
+	db.Scopes(scopesFinisherSession).Debug().Pluck("name", nil)
+	return db.Scopes(scopesFinisherSession).Find(nil).Error
+}
+
+func scopesFinisherWriteSession(q *gorm.DB) *gorm.DB {
+	return q.Session(&gorm.Session{}) // want `Session\(\) result returned from Scopes callback causes transaction leak`
+}
+
+// One Scopes call that writes is enough.
+func scopesFinisherReadAndWrite(conn *gorm.DB) {
+	db := conn.Session(&gorm.Session{})
+	db.Scopes(scopesFinisherWriteSession).Find(nil)
+	db.Scopes(scopesFinisherWriteSession).Where("x").Delete(nil)
+}
+
+func scopesFinisherUpdate(db *gorm.DB) {
+	db.Scopes(func(q *gorm.DB) *gorm.DB {
+		return q.WithContext(context.Background()) // want `WithContext\(\) result returned from Scopes callback causes transaction leak`
+	}).Update("name", "x")
+}
+
+// A chain that leaves the function may reach any finisher.
+func scopesFinisherReturned(db *gorm.DB) *gorm.DB {
+	return db.Scopes(func(q *gorm.DB) *gorm.DB {
+		return q.Debug() // want `Debug\(\) result returned from Scopes callback causes transaction leak`
+	}).Where("x")
+}
+
+func scopesFinisherPassed(db *gorm.DB, use func(*gorm.DB)) {
+	use(db.Scopes(func(q *gorm.DB) *gorm.DB {
+		return q.Session(&gorm.Session{}) // want `Session\(\) result returned from Scopes callback causes transaction leak`
+	}))
+}
+
+// A finisher outside the read list, such as FirstOrCreate, may write.
+func scopesFinisherFirstOrCreate(db *gorm.DB) {
+	db.Scopes(func(q *gorm.DB) *gorm.DB {
+		return q.Session(&gorm.Session{}) // want `Session\(\) result returned from Scopes callback causes transaction leak`
+	}).FirstOrCreate(nil)
+}
+
+// A Scopes result handed to another method is not its receiver.
+func scopesFinisherArgument(conn *gorm.DB) {
+	db := conn.Session(&gorm.Session{})
+	sub := db.Scopes(func(q *gorm.DB) *gorm.DB {
+		return q.Session(&gorm.Session{}) // want `Session\(\) result returned from Scopes callback causes transaction leak`
+	})
+	db.Where("id IN (?)", sub).Find(nil)
+}
