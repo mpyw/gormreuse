@@ -91,6 +91,7 @@ func ordinaryHelperParamBranches(tx *gorm.DB) *gorm.DB {
 // (#173; guarded at runtime by e2e/internal TestCloneSemantics_ConnectionCallbackAccumulates).
 func connectionCallbackReported(db *gorm.DB) {
 	_ = db.Connection(func(tx *gorm.DB) error {
+		tx = tx.Session(&gorm.Session{})
 		tx.Where("a").Find(nil)
 		tx.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 		return nil

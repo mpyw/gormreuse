@@ -66,25 +66,46 @@ var fixsqlCases = []fixsqlCase{
 	{"MethodValueDiscarded", before.MethodValueDiscarded, after.MethodValueDiscarded},
 }
 
+// fixsqlTopicCases are case lists that a test file of one topic registers
+// with registerFixsqlCases, so that adding one edits no shared line.
+var fixsqlTopicCases []fixsqlCase
+
+// registerFixsqlCases adds lists to the cases TestFixsqlCasesCoverBefore
+// counts. Call it from a package-level var declaration of the topic's file.
+func registerFixsqlCases(lists ...[]fixsqlCase) bool {
+	for _, list := range lists {
+		fixsqlTopicCases = append(fixsqlTopicCases, list...)
+	}
+	return true
+}
+
 // TestFixsqlCasesCoverBefore checks that every exported function of
 // fixsql/before is a case of TestFixPreservesQueries or
 // TestFixPathsPreserveQueries, once, and that each case runs the functions it
 // is named for. The case lists are written by hand, so a new fixture would
-// otherwise run in no test (#264).
+// otherwise run in no test (#264). A topic's fixtures go in a file of their
+// own in fixsql/before, and its test file registers its cases with
+// registerFixsqlCases.
 func TestFixsqlCasesCoverBefore(t *testing.T) {
-	f, err := parser.ParseFile(token.NewFileSet(), filepath.Join("fixsql", "before", "before.go"), nil, 0)
+	files, err := filepath.Glob(filepath.Join("fixsql", "before", "*.go"))
 	if err != nil {
-		t.Fatalf("parse fixsql/before: %v", err)
+		t.Fatalf("list fixsql/before: %v", err)
 	}
 	var want []string
-	for _, decl := range f.Decls {
-		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Recv == nil && fn.Name.IsExported() {
-			want = append(want, fn.Name.Name)
+	for _, path := range files {
+		f, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", path, err)
+		}
+		for _, decl := range f.Decls {
+			if fn, ok := decl.(*ast.FuncDecl); ok && fn.Recv == nil && fn.Name.IsExported() {
+				want = append(want, fn.Name.Name)
+			}
 		}
 	}
 
 	var got []string
-	for _, tc := range slices.Concat(fixsqlCases, fixPathsCases, fixEscapeCases, laterLoopCases, paginateCases, fixStructEscapeCases) {
+	for _, tc := range slices.Concat(fixsqlCases, fixPathsCases, fixEscapeCases, laterLoopCases, paginateCases, fixStructEscapeCases, fixsqlTopicCases) {
 		for pkg, fn := range map[string]func(*gorm.DB){"before": tc.before, "after": tc.after} {
 			full := runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
 			if name := full[strings.LastIndex(full, "/")+1:]; name != pkg+"."+tc.name {

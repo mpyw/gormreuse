@@ -130,6 +130,7 @@ func namedCallbackTxOnly2(q *gorm.DB) error {
 
 func namedCallbackLiteralTwice(db *gorm.DB) {
 	cb := func(q *gorm.DB) error {
+		q = q.Session(&gorm.Session{})
 		q.Find(nil)
 		q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 		return nil
@@ -141,6 +142,7 @@ func namedCallbackLiteralTwice(db *gorm.DB) {
 // A capturing literal is a MakeClosure: the same rule applies to its uses.
 func namedCallbackClosureTwice(db *gorm.DB, n int) {
 	cb := func(q *gorm.DB) error {
+		q = q.Session(&gorm.Session{})
 		q.Where("n = ?", n).Find(nil)
 		q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 		return nil

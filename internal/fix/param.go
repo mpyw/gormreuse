@@ -20,9 +20,11 @@ import (
 //     the callback returns leaks gorm's transaction (go-gorm/gorm#7592);
 //   - the function returns a *gorm.DB and code this pass cannot see may call
 //     it (see calledOnlyDirectly). It may be a Scopes callback, as in
-//     `var scopes = []func(*gorm.DB) *gorm.DB{scope}`;
-//   - the enclosing function is not a named declaration (a closure/func literal) —
-//     directive placement on literals is left to the user.
+//     `var scopes = []func(*gorm.DB) *gorm.DB{scope}`. A closure has no
+//     name, so any code may call it: one with a *gorm.DB result gets no fix.
+//
+// A closure without a *gorm.DB result, such as a Transaction callback, gets
+// the body Session as a function declaration does (#313).
 //
 //declscope:shared // generator.go's Generate withholds a parameter's fix with it
 func (g *Generator) canFixParam(p *ssa.Parameter) bool {
@@ -30,10 +32,13 @@ func (g *Generator) canFixParam(p *ssa.Parameter) bool {
 	if g.scopesCallbacks[fn] {
 		return false
 	}
-	if _, ok := fn.Syntax().(*ast.FuncDecl); !ok {
-		return false
+	switch fn.Syntax().(type) {
+	case *ast.FuncDecl:
+		return !typeutil.HasGormDBResult(fn.Signature.Results()) || g.calledOnlyDirectly(fn)
+	case *ast.FuncLit:
+		return !typeutil.HasGormDBResult(fn.Signature.Results())
 	}
-	return !typeutil.HasGormDBResult(fn.Signature.Results()) || g.calledOnlyDirectly(fn)
+	return false
 }
 
 // paramCallersIsolate reports whether no call to the function that declares p
@@ -47,11 +52,16 @@ func (g *Generator) canFixParam(p *ssa.Parameter) bool {
 // callers it cannot see, or move it to a caller that the caller-side check
 // reports, so -fix would not end clean. The variant of a package without its
 // test files and the test variant both take the body Session for a function
-// outside the test files, so their fixes agree.
+// outside the test files, so their fixes agree. A closure is never declared,
+// since directive placement on a literal is left to the user. It takes the
+// body Session (#313).
 //
 //declscope:shared // generator.go's Generate chooses immutable-param with it
 func (g *Generator) paramCallersIsolate(p *ssa.Parameter) bool {
 	fn := origin.Declared(p.Parent())
+	if _, ok := fn.Syntax().(*ast.FuncDecl); !ok {
+		return false
+	}
 	if !g.seesAllCallers(fn.Pos()) || !g.calledOnlyDirectly(fn) {
 		return false
 	}
@@ -107,11 +117,18 @@ func (g *Generator) generateImmutableParamFix(p *ssa.Parameter) []analysis.Sugge
 
 // paramSessionSite makes p, a parameter, immutable by rebinding it at the top
 // of its function's body: `tx = tx.Session(&gorm.Session{})`. Every later use,
-// including one through an alias, then starts from the Session.
+// including one through an alias, then starts from the Session. The function
+// is a declaration or a closure (see canFixParam).
 //
 //declscope:shared // generator.go's Generate writes it with the other Sessions
 func (g *Generator) paramSessionSite(p *ssa.Parameter) sessionSite {
-	body := p.Parent().Syntax().(*ast.FuncDecl).Body
+	var body *ast.BlockStmt
+	switch fn := p.Parent().Syntax().(type) {
+	case *ast.FuncDecl:
+		body = fn.Body
+	case *ast.FuncLit:
+		body = fn.Body
+	}
 	// The parameter is used, so the body has a statement.
 	first := body.List[0]
 	sep := "; "

@@ -92,6 +92,7 @@ func cbHolderUseTxNamed(db *gorm.DB) error {
 
 // cbHolderTxAndCalled is also called directly with a mutable value.
 var cbHolderTxAndCalled = func(tx *gorm.DB) error {
+	tx = tx.Session(&gorm.Session{})
 	tx.Find(nil)
 	tx.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 	return nil
@@ -106,6 +107,7 @@ func cbHolderUseTxAndCalled(db *gorm.DB) error {
 // cbHolderTxAndPassed is also handed to a function that may call it with
 // anything.
 var cbHolderTxAndPassed = func(tx *gorm.DB) error {
+	tx = tx.Session(&gorm.Session{})
 	tx.Find(nil)
 	tx.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 	return nil
@@ -118,6 +120,7 @@ func cbHolderUseTxAndPassed(db *gorm.DB, apply func(func(*gorm.DB) error) error)
 
 // cbHolderTxReassigned is assigned twice, so a read may hold another function.
 var cbHolderTxReassigned = func(tx *gorm.DB) error {
+	tx = tx.Session(&gorm.Session{})
 	tx.Find(nil)
 	tx.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 	return nil
@@ -133,6 +136,7 @@ func cbHolderUseTxReassigned(db *gorm.DB) error {
 
 // CbHolderTxExported may be assigned or read by another package.
 var CbHolderTxExported = func(tx *gorm.DB) error {
+	tx = tx.Session(&gorm.Session{})
 	tx.Find(nil)
 	tx.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 	return nil
@@ -170,6 +174,7 @@ type cbHolderCalledService struct {
 
 func newCbHolderCalledService() *cbHolderCalledService {
 	return &cbHolderCalledService{cb: func(tx *gorm.DB) error {
+		tx = tx.Session(&gorm.Session{})
 		tx.Find(nil)
 		tx.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 		return nil
@@ -214,6 +219,7 @@ type cbHolderAddrService struct {
 
 func newCbHolderAddrService() *cbHolderAddrService {
 	return &cbHolderAddrService{cb: func(tx *gorm.DB) error {
+		tx = tx.Session(&gorm.Session{})
 		tx.Find(nil)
 		tx.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 		return nil

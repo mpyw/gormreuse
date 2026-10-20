@@ -1,6 +1,6 @@
 --- malformed_directive.go	1970-01-01 00:00:00
 +++ malformed_directive.go.golden	1970-01-01 00:00:00
-@@ -1,202 +1,204 @@
+@@ -1,202 +1,206 @@
  package internal
  
  import "gorm.io/gorm"
@@ -103,6 +103,7 @@
  
  func callsUnknownImmutableInput(db *gorm.DB) {
  	unknownImmutableInput(func(q *gorm.DB) {
++		q = q.Session(&gorm.Session{})
  		q.Find(nil)
  		q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  	}, db)
@@ -119,6 +120,7 @@
  
  func callsUnclosedImmutableInput(db *gorm.DB) {
  	unclosedImmutableInput(func(q *gorm.DB) {
++		q = q.Session(&gorm.Session{})
  		q.Find(nil)
  		q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  	}, db)

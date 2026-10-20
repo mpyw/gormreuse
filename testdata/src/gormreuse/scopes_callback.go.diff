@@ -1,6 +1,6 @@
 --- scopes_callback.go	1970-01-01 00:00:00
 +++ scopes_callback.go.golden	1970-01-01 00:00:00
-@@ -1,107 +1,108 @@
+@@ -1,107 +1,109 @@
  package internal
  
  import "gorm.io/gorm"
@@ -94,6 +94,7 @@
  // (#173; guarded at runtime by e2e/internal TestCloneSemantics_ConnectionCallbackAccumulates).
  func connectionCallbackReported(db *gorm.DB) {
  	_ = db.Connection(func(tx *gorm.DB) error {
++		tx = tx.Session(&gorm.Session{})
  		tx.Where("a").Find(nil)
  		tx.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  		return nil

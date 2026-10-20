@@ -97,6 +97,7 @@ func unknownImmutableInput(cb func(*gorm.DB), db *gorm.DB) {
 
 func callsUnknownImmutableInput(db *gorm.DB) {
 	unknownImmutableInput(func(q *gorm.DB) {
+		q = q.Session(&gorm.Session{})
 		q.Find(nil)
 		q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 	}, db)
@@ -113,6 +114,7 @@ func unclosedImmutableInput(cb func(*gorm.DB), db *gorm.DB) {
 
 func callsUnclosedImmutableInput(db *gorm.DB) {
 	unclosedImmutableInput(func(q *gorm.DB) {
+		q = q.Session(&gorm.Session{})
 		q.Find(nil)
 		q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 	}, db)

@@ -1,0 +1,91 @@
+--- callback_go_defer.go	1970-01-01 00:00:00
++++ callback_go_defer.go.golden	1970-01-01 00:00:00
+@@ -1,87 +1,88 @@
+ package internal
+ 
+ import "gorm.io/gorm"
+ 
+ // =============================================================================
+ // Callbacks passed under go / defer (#256)
+ //
+ // Transaction, FindInBatches and an immutable-input(name) function hand the
+ // callback a fresh value however the callee itself is invoked. A Scopes
+ // callback receives the mid-chain value under go / defer too, so the Session
+ // warning still applies.
+ // =============================================================================
+ 
+ // --- Transaction / FindInBatches ---
+ 
+ func callbackGoTransaction(db *gorm.DB) {
+ 	go db.Transaction(func(tx *gorm.DB) error {
+ 		tx.Find(nil)
+ 		tx.Find(nil) // OK: tx is fresh
+ 		return nil
+ 	})
+ }
+ 
+ func callbackDeferTransaction(db *gorm.DB) {
+ 	defer db.Transaction(func(tx *gorm.DB) error {
+ 		tx.Find(nil)
+ 		tx.Find(nil) // OK: tx is fresh
+ 		return nil
+ 	})
+ }
+ 
+ func callbackGoFindInBatches(db *gorm.DB) {
+ 	go db.FindInBatches(&[]int{}, 10, func(tx *gorm.DB, _ int) error {
+ 		tx.Find(nil)
+ 		tx.Find(nil) // OK: tx is fresh
+ 		return nil
+ 	})
+ }
+ 
+ func callbackDeferFindInBatches(db *gorm.DB) {
+ 	defer db.FindInBatches(&[]int{}, 10, func(tx *gorm.DB, _ int) error {
+ 		tx.Find(nil)
+ 		tx.Find(nil) // OK: tx is fresh
+ 		return nil
+ 	})
+ }
+ 
+ // --- immutable-input(name) ---
+ 
+ //gormreuse:immutable-input(cb)
+ func callbackWithFresh(db *gorm.DB, cb func(*gorm.DB)) {
+ 	cb(db.Session(&gorm.Session{}))
+ }
+ 
+ func callbackGoImmutableInput(db *gorm.DB) {
+ 	go callbackWithFresh(db, func(q *gorm.DB) {
+ 		q.Find(nil)
+ 		q.Find(nil) // OK: q is declared immutable
+ 	})
+ }
+ 
+ func callbackDeferImmutableInput(db *gorm.DB) {
+ 	defer callbackWithFresh(db, func(q *gorm.DB) {
+ 		q.Find(nil)
+ 		q.Find(nil) // OK: q is declared immutable
+ 	})
+ }
+ 
+ // --- Not a callback position: still reported ---
+ 
+ // Connection hands its callback a clone==0 value (#173), under defer too.
+ func callbackDeferConnection(db *gorm.DB) {
+ 	defer db.Connection(func(tx *gorm.DB) error {
++		tx = tx.Session(&gorm.Session{})
+ 		tx.Find(nil)
+ 		tx.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ 		return nil
+ 	})
+ }
+ 
+ // --- Scopes ---
+ 
+ // The callbacks are collected from a deferred Scopes call as from a plain one.
+ func callbackDeferScopesSession(db *gorm.DB) {
+ 	defer db.Scopes(func(q *gorm.DB) *gorm.DB {
+ 		return q.Session(&gorm.Session{}) // want `Session\(\) result returned from Scopes callback causes transaction leak`
+ 	})
+ }

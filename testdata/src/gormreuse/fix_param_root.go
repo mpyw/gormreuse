@@ -114,12 +114,52 @@ func FixParamExportedScope(tx *gorm.DB) *gorm.DB {
 	return tx.Where("b") // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
-// fixParamClosure: a closure parameter keeps no fix.
+// fixParamClosure: a closure parameter gets the body Session (#313). More
+// closures are in fix_closure_param.go.
 func fixParamClosure() func(*gorm.DB) {
 	return func(tx *gorm.DB) {
 		tx.Where("a").Find(nil)
 		tx.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 	}
+}
+
+// fixParamClosureResult returns a *gorm.DB, and a closure may be called by
+// any code, so it may be a Scopes callback. No fix.
+func fixParamClosureResult() func(*gorm.DB) *gorm.DB {
+	return func(tx *gorm.DB) *gorm.DB {
+		tx.Where("a").Find(nil)
+		return tx.Where("b") // want `\*gorm\.DB reused: second branch from mutable root`
+	}
+}
+
+// fixParamClosureScope is a Scopes callback. No fix.
+func fixParamClosureScope(db *gorm.DB) {
+	db.Scopes(func(tx *gorm.DB) *gorm.DB {
+		tx.Where("a").Find(nil)
+		return tx.Where("b") // want `\*gorm\.DB reused: second branch from mutable root`
+	}).Find(nil)
+}
+
+// fixParamClosureDiscarded changes its parameter in place, which the
+// caller's value also gets, and returns nothing to carry the change back.
+// No fix, as for a function declaration (#243).
+func fixParamClosureDiscarded() func(*gorm.DB) {
+	return func(tx *gorm.DB) {
+		tx.Where("a")
+		tx.Find(nil)  // want `\*gorm\.DB reused: second branch from mutable root`
+		tx.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	}
+}
+
+// fixParamClosureError reads the parameter's Error, which a Session would
+// move to a copy. No fix (#243).
+func fixParamClosureError(db *gorm.DB) error {
+	f := func(tx *gorm.DB) error {
+		tx.Where("a").Find(nil)
+		tx.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+		return tx.Error
+	}
+	return f(db)
 }
 
 // ===== PHI EDGES: the last call decides =====
