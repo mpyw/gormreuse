@@ -140,6 +140,8 @@ type RootTracer struct {
 	pointees pointeeMemo // What calls may store through a variable's address (#345)
 	//declscope:shared // elem.go keeps its ElemRoots and containers in it
 	elems elemMemo // The roots of reads from containers (#374)
+	//declscope:shared // state.go's SessionDropsState fills it
+	sessionDrops map[ssa.Value]bool // Memo of SessionDropsState (#377)
 }
 
 // NewRootTracer creates a new RootTracer.
@@ -180,6 +182,7 @@ func NewRootTracer(pureFuncs, immutableReturnFuncs, immutableParamFuncs *directi
 		stores:               newStoreMemo(),
 		cfgs:                 cfg.NewAnalyzer(),
 		immutableClosures:    make(map[*ssa.Function]bool),
+		sessionDrops:         make(map[ssa.Value]bool),
 	}
 }
 

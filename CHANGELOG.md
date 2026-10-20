@@ -35,6 +35,29 @@ A call through a receiver of a type parameter's type, and a closure that a call 
 | `-fix` in package `gorm.io/gorm` | The fix writes `&Session{}`. Before, it imported `gorm.io/gorm` into itself, which does not compile (#378) |
 | `-fix` adds one gorm import per file | When `gorm` is taken anywhere in the file, such as by a parameter, every fix in the file uses `gormio`. Before, one file could get both `"gorm.io/gorm"` and `gormio "gorm.io/gorm"` (staticcheck ST1019) (#378) |
 
+### Faster `-fix`
+
+`-fix` and the fixes that diagnostics carry are much faster on long functions and large packages (#377). The diagnostics and fixes do not change.
+
+<details>
+<summary>Times before and after #377</summary>
+
+These are the times of the analyzer's run on one package, without loading, from one run on a busy machine:
+
+| Code | Before | After |
+| --- | --- | --- |
+| `n = 400` optional filters, then a use in a loop | 13.5 s, 11 GB allocated | 0.29 s, 0.34 GB |
+| `n = 400` loops, each with an optional filter and a use | 74 s, 18.5 GB | 1.8 s, 1.0 GB |
+| `n = 400` loops with a `go` use, each followed by an optional filter | 34 s, 6.8 GB | 0.9 s, 0.5 GB |
+| An else-if ladder of `n = 800` filters | 3.4 s | 0.02 s |
+| `n = 3200` functions that reuse their parameter, in one file | 2.8 s | 0.09 s |
+| The same, one function per file | 4.1 s, 1.2 GB | 0.07 s, 41 MB |
+| `n = 3200` functions with an optional filter and a discarded chain | 3.9 s | 0.2 s |
+
+The growth test now holds each of these shapes. It counts the steps of the fix's lookups too, so a lookup that allocates little, as in the else-if ladder, fails it when it grows faster than allowed.
+
+</details>
+
 ## 0.23.0 (2026-10-20)
 
 gormreuse now follows a `*gorm.DB` through far more code. It also reads directives across packages. It infers `immutable-return` for most connection helpers, and `immutable-param` and `immutable-input` for most helpers that only get fresh handles. It no longer counts methods such as `AddError` as a branch. `-fix` offers fewer fixes, but each one compiles and keeps every condition.

@@ -8,7 +8,6 @@ import (
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/ssa"
 
-	"github.com/mpyw/gormreuse/internal/ssa/cfg"
 	"github.com/mpyw/gormreuse/internal/ssa/handler"
 	"github.com/mpyw/gormreuse/internal/ssa/origin"
 	"github.com/mpyw/gormreuse/internal/ssa/pollution"
@@ -67,28 +66,13 @@ func (g *Generator) paramCallersIsolate(p *ssa.Parameter) bool {
 	if !g.seesAllCallers(fn.Pos()) || !g.calledOnlyDirectly(fn) {
 		return false
 	}
-	for _, caller := range g.funcs {
-		var loopInfo *cfg.LoopInfo
-		for _, block := range caller.Blocks {
-			for _, instr := range block.Instrs {
-				call, ok := instr.(ssa.CallInstruction)
-				if !ok {
-					continue
-				}
-				site := g.tracer.Site(call)
-				if origin.Declared(site.Callee) != fn {
-					continue
-				}
-				if loopInfo == nil {
-					loopInfo = g.cfg.DetectLoops(caller)
-				}
-				// Every argument, not only p's: the caller-side check
-				// asks the same of each one (#245).
-				for i := range call.Common().Args {
-					if handler.BreaksImmutableParam(site, i, g.tracer, loopInfo) {
-						return false
-					}
-				}
+	for _, c := range g.callsOf(fn) {
+		loopInfo := g.cfg.DetectLoops(c.caller)
+		// Every argument, not only p's: the caller-side check asks the
+		// same of each one (#245).
+		for i := range c.call.Common().Args {
+			if handler.BreaksImmutableParam(c.site, i, g.tracer, loopInfo) {
+				return false
 			}
 		}
 	}

@@ -2703,7 +2703,7 @@ For such a value, `Generate` withholds the fix whenever it would write a Session
 | `Vars` | `Raw`, `Exec` | Copied only with a non-empty `SQL`, which these always set |
 | `BuildClauses`, `CurDestIndex` | a finisher's callbacks | None: each query sets them again |
 
-`WithContext`, and a Session with `Context`, `PrepareStmt` or `SkipHooks`, clone at once and drop the same fields. An immutable value never carries the state, since its next call clones: `db.Assign(x).Session(s).Where("a")` keeps its fix, and so does a chain that sets the state per branch, `q.Assign(x).FirstOrInit(&u)`. The analyzer asks once per reported root, and each walk follows a chain once (`phiroots` in the [growth gate](#allocation-growth-gate)).
+`WithContext`, and a Session with `Context`, `PrepareStmt` or `SkipHooks`, clone at once and drop the same fields. An immutable value never carries the state, since its next call clones: `db.Assign(x).Session(s).Where("a")` keeps its fix, and so does a chain that sets the state per branch, `q.Assign(x).FirstOrInit(&u)`. The analyzer asks once per reported root, and each walk follows a chain once (`phiroots` in the [growth gate](#allocation-growth-gate)). The answer is kept for each value, since the fix asks it of each value merged with each root (`filtersloopuse`, [Fix cost](#fix-cost)).
 
 Limitations:
 
@@ -2790,6 +2790,39 @@ Before #348 the variant without the test files still reported such an ignore. Ta
 **Redundant immutable-param.** One comment before `a, b := func..., func...` applies to both closures. The comment is edited only when no closure it covers keeps the directive: one that needs it (`needsImmutableParam`), or one that is also `pure`. Otherwise the redundant closure's diagnostic has no fix. A function that forwards its parameter once to another immutable-param function is reported redundant (see `computeNeedsImmutableParam`). Deleting its directive then exposes the caller-side diagnostic at the forwarding call, which a second pass fixes.
 
 `testdata/src/gormreuse/fix_directive_removal.go` and `fix_isolate_arg.go` pin the output. `testdata/src/converge/fix_directives.go` and `fix_isolate_arg.go` check that one pass converges. `internal/directive/removal_test.go` covers each comment shape.
+
+</details>
+
+### Fix cost
+
+One `Generator` serves the whole pass. What a fix looks up in a file, a function or the package is indexed there on first use, not scanned again for each root or use (#350, #377):
+
+| Index | Per | Used by |
+| --- | --- | --- |
+| The calls of a file by Lparen, and the Lparen of the first call that ends at each position (`fileCallsOf`) | File | `callAtLparen`, and `virtualRootEndsImmutable` for the end of a reassigned chain |
+| The statements of a file in preorder, with their ranges and enclosing statements (`stmtIndexOf`) | File | `findStmtAtPos` |
+| The SSA calls of a function by position | Function | `virtualRootEndsImmutable` |
+| The functions that the package refers to other than by a call | Package | `calledOnlyDirectly` |
+| The calls of the analysed functions and `init` by callee, in program order (`callsOf`) | Package | `paramCallersIsolate`, `everyCallUsesResult` |
+
+`RootTracer.SessionDropsState` keeps its answer for each value. The fix asks it of each value merged with each root (`mergedDropsState`), and each walk follows the whole Phi chain.
+
+`mergeReportFixes` keeps the edits it has seen in a map by range, so an edit that several roots need costs one lookup.
+
+<details><summary>How findStmtAtPos uses its index, the cost before #377, and what is still cubic</summary>
+
+**findStmtAtPos.** The innermost statement at a position is the narrowest statement whose range holds it. Of two with the same range, the outer one wins, as the scan before the index picked the first in preorder. The ranges of parsed syntax nest, so it is the last statement that starts at or before the position, or the first statement that encloses that one and holds the position. A binary search finds the first, and the walk up finds the second. If the starts are out of order, the index is scanned instead. An if statement's end is its else branch's end, found from the index: `IfStmt.End` walks down the else chain, so an else-if ladder of `n` cases cost `n²` per lookup.
+
+**Before #377.** Each of these was a scan per root or per use. The CHANGELOG gives the times:
+
+| Shape | Scan |
+| --- | --- |
+| `n` optional filters, then a use in a loop | `SessionDropsState` for each merged value of each root: cubic |
+| An else-if ladder of `n` filters | `findStmtAtPos` over every statement for each use: cubic |
+| `n` functions that reuse their parameter | `calledOnlyDirectly` over every identifier, and `paramCallersIsolate` over every instruction, for each parameter: quadratic |
+| `n` functions with a discarded chain | `virtualRootEndsImmutable` over every call of the file for each virtual root: quadratic |
+
+**Still cubic.** When `n` loops each hold an optional filter and a use, the use in loop `i` may see the roots of the `i` merges before it. The fix of each such root has a Session for each merge before it. So the diagnostic of loop `i` merges about `i²` edits into about `i` distinct ones, and the `n` diagnostics merge about `n³`. Each is a map lookup with no allocation. The allocations stay quadratic, and the growth gate holds the steps of `loopfilteruse`, `loopsfilters` and `goloopsfilters` to `growthCubic`. Interning the edits of each root fix once would make each merge an array lookup, which is a constant factor only.
 
 </details>
 
@@ -2994,7 +3027,7 @@ A fixture of `testdata/src/gormreuse` whose fixes must also converge is listed i
 | `growthLinear` | n, 2n | 2.5 | Many small functions, or one function whose work is linear |
 | `growthNearLinear` | n, 2n | 3.0 | Shapes that grow a little faster than n (about 2.3x, 2.5x with the race detector), such as one large function |
 | `growthQuadratic` | n, 2n | 4.5 | Shapes that are quadratic today |
-| `growthCubic` | n, 2n | 9.0 | The steps of a shape whose code grows as n² (`inferexp2`) |
+| `growthCubic` | n, 2n | 9.0 | The steps of a shape whose code grows as n² (`inferexp2`), or whose diagnostics each merge a quadratic number of edits (`loopfilteruse`, [Fix cost](#fix-cost)) |
 | `growthExponential` | n, n+4 | 2.0 | Shapes that used to double their work per statement (about 16x) |
 
 The test counts the steps of the analyzer's searches too (#350). A step is one of these:
@@ -3005,6 +3038,8 @@ The test counts the steps of the analyzer's searches too (#350). A step is one o
 - A block that a store search walks back through
 - A pair of uses compared
 - A `mayAlias` search
+- A syntax node or an instruction that a fix's index reads, and a statement that `findStmtAtPos` walks up through (#377)
+- An edit that `mergeReportFixes` merges (#377)
 
 `internal/effort` counts them, only once a test has called `effort.Count`. The steps are held to the case's limit, or to its `steps` limit when its searches repeat work that allocates nothing. Each such case says why.
 
