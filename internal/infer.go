@@ -2,6 +2,7 @@ package internal
 
 import (
 	"go/ast"
+	"go/token"
 	"go/types"
 	"slices"
 
@@ -9,8 +10,6 @@ import (
 
 	"github.com/mpyw/gormreuse/internal/directive"
 	"github.com/mpyw/gormreuse/internal/ssa/callsite"
-	"github.com/mpyw/gormreuse/internal/ssa/cfg"
-	"github.com/mpyw/gormreuse/internal/ssa/handler"
 	"github.com/mpyw/gormreuse/internal/ssa/origin"
 	"github.com/mpyw/gormreuse/internal/ssa/purity"
 	"github.com/mpyw/gormreuse/internal/ssa/tracer"
@@ -32,7 +31,9 @@ import (
 // the callbacks collected after each step that added one. newTracer builds
 // the tracer that proves the values handed to a callback, for the callbacks
 // of the step. The returned callbacks are the ones collected last, after the
-// last function was added.
+// last function was added. Each value handed to a callback must be proved
+// (tracer.RootTracer.ProvesImmutable, #371), and globals holds the
+// package-level variables a proof may read.
 //
 // Like inferImmutableReturns, this is a least fixed point. A function is
 // proved without its own callbacks in the set, so a function that hands cb to
@@ -47,6 +48,7 @@ func inferImmutableInputs(
 	callbacks map[*ssa.Function]bool,
 	collect func() map[*ssa.Function]bool,
 	newTracer func(callbacks map[*ssa.Function]bool) *tracer.RootTracer,
+	globals tracer.ProvenGlobals,
 	skip func(*ssa.Function) bool,
 ) map[*ssa.Function]bool {
 	type candidate struct {
@@ -104,7 +106,7 @@ func inferImmutableInputs(
 			var added []*ssa.Function
 			for _, i := range queue {
 				c := candidates[i]
-				if proved[i] || !purity.ProvesImmutableInput(c.fn, c.cb, set, rt) {
+				if proved[i] || !purity.ProvesImmutableInput(c.fn, c.cb, set, rt, globals) {
 					continue
 				}
 				proved[i] = true
@@ -134,16 +136,21 @@ func inferImmutableInputs(
 // every caller passes immutable *gorm.DB values, as
 // //gormreuse:immutable-param asks of them (#349): a Session-family or
 // gorm.Open result, an immutable-return result, a Transaction callback's tx,
-// or the parameter of another inferred function. init is the package
-// initializer, whose calls count too.
+// or the parameter of another inferred function. Only such a proof counts
+// (tracer.RootTracer.ProvesImmutable): a value the tracer cannot follow, or
+// the parameter of a declared immutable-param function, proves nothing
+// (#371). init is the package initializer, whose calls count too.
 //
 // The function must be called only directly, so that no caller in the pass
 // is missed. A caller in a test file is not seen by the variant of the
 // package without its test files, which may then infer the function. The
 // test variant sees it and does not, so the function is still reported
-// there. A function that changes its parameter in
-// place, with a discarded chain statement such as tx.Where("a"), is not
-// inferred: the change would be lost on an immutable value.
+// there. A function that changes its parameter in place, with a discarded
+// chain statement such as tx.Where("a"), or through a helper or a closure
+// that does, is not inferred (inferChangesInPlace): the change would be lost
+// on an immutable value. finisherOnly returns the finisher-only parameters
+// of a function of another package, from its fact. globals holds the
+// package-level variables a proof may read.
 //
 // newTracer builds a tracer with the current set. A larger set only proves
 // more, so a function whose callers did not prove it is proved again once one
@@ -157,13 +164,15 @@ func inferImmutableParams(
 	init *ssa.Function,
 	set *directive.DirectiveFuncSet,
 	newTracer func() *tracer.RootTracer,
-	cfgs *cfg.Analyzer,
+	finisherOnly func(*ssa.Function) []int,
+	globals tracer.ProvenGlobals,
 	skip func(*ssa.Function) bool,
 ) {
+	changes := inferChangesInPlace(funcs, finisherOnly)
 	candidates := make(map[*ssa.Function]bool)
 	var order []*ssa.Function
 	for _, fn := range funcs {
-		if inferable(fn, skip) && !set.Contains(fn) && inferHasGormDBParam(fn) && !inferChangesParamInPlace(fn) {
+		if inferable(fn, skip) && !set.Contains(fn) && inferHasGormDBParam(fn) && !changes[fn] {
 			candidates[fn] = true
 			order = append(order, fn)
 		}
@@ -197,7 +206,7 @@ func inferImmutableParams(
 		rt := newTracer()
 		var added []*ssa.Function
 		for _, fn := range queue {
-			if !set.Inferred(fn) && inferCallersPassImmutable(fn, sites[fn], rt, cfgs) {
+			if !set.Inferred(fn) && inferCallersPassImmutable(fn, sites[fn], rt, set, globals) {
 				set.Infer(fn)
 				added = append(added, fn)
 			}
@@ -284,19 +293,21 @@ func inferHasGormDBParam(fn *ssa.Function) bool {
 }
 
 // inferCallersPassImmutable reports whether each call in calls passes fn
-// immutable values at its *gorm.DB parameters, as the caller-side check of
-// immutable-param asks (handler.BreaksImmutableParam).
-func inferCallersPassImmutable(fn *ssa.Function, calls []ssa.CallInstruction, rt *tracer.RootTracer, cfgs *cfg.Analyzer) bool {
+// values proved immutable at its *gorm.DB parameters
+// (tracer.RootTracer.ProvesImmutable). The parameter of a function proves a
+// call only when set inferred it. A declared immutable-param function's
+// callers are checked only while it branches the parameter, and it would
+// stop branching once its helpers are inferred (#371).
+func inferCallersPassImmutable(fn *ssa.Function, calls []ssa.CallInstruction, rt *tracer.RootTracer, set *directive.DirectiveFuncSet, globals tracer.ProvenGlobals) bool {
 	params := fn.Signature.Params()
 	for _, call := range calls {
 		site := rt.Site(call)
-		loopInfo := cfgs.DetectLoops(call.Parent())
-		for i := range call.Common().Args {
+		for i, arg := range call.Common().Args {
 			p := site.ArgParam(i)
 			if p < 0 || p >= params.Len() || !typeutil.IsGormDB(params.At(p).Type()) {
 				continue
 			}
-			if handler.BreaksImmutableParam(site, i, rt, loopInfo) {
+			if !rt.ProvesImmutable(arg, set.Inferred, globals) {
 				return false
 			}
 		}
@@ -304,37 +315,260 @@ func inferCallersPassImmutable(fn *ssa.Function, calls []ssa.CallInstruction, rt
 	return true
 }
 
-// inferChangesParamInPlace reports whether fn, or a closure in it, discards a
-// chain that starts at one of fn's *gorm.DB parameters and does not end in a
-// finisher, such as tx.Where("a") or tx.Where("a").Order("b"). On a mutable
-// value that changes the caller's value in place; on an immutable one it does
-// nothing. The chain is read as the immutable-param discard report reads it
-// (immutableParamDiscardedChain, #346).
-func inferChangesParamInPlace(fn *ssa.Function) bool {
-	held := make(map[ssa.Value]bool)
+// inferChangesInPlace returns the declared functions of funcs that may change
+// one of their *gorm.DB parameters in place. On a mutable value such a change
+// reaches the caller's value; on an immutable one it does nothing, so the
+// function relies on its callers passing a mutable value. A function changes
+// its parameter when it, or a closure in it, does any of these with it
+// (inferParamUses):
+//
+//   - discards a chain that does not end in a finisher, such as tx.Where("a")
+//     or tx.Where("a").Order("b"), as the immutable-param discard report reads
+//     it (immutableParamDiscardedChain, #346);
+//   - passes it to a function of funcs that changes it (#371), or to a
+//     function of another package that reaches gorm, unless its fact says the
+//     parameter only runs finishers;
+//   - passes it to a dynamic or interface call, stores it outside a local
+//     variable, boxes it, or uses it in another way the check does not
+//     follow.
+//
+// A parameter captured by a closure, or held in a local variable, is followed
+// through the variable, and a closure called with it gets it as its own.
+func inferChangesInPlace(funcs []*ssa.Function, finisherOnly func(*ssa.Function) []int) map[*ssa.Function]bool {
+	declared := make(map[*ssa.Function]bool)
+	for _, fn := range funcs {
+		if _, ok := fn.Syntax().(*ast.FuncDecl); ok {
+			declared[fn] = true
+		}
+	}
+	changes := make(map[*ssa.Function]bool)
+	callers := make(map[*ssa.Function][]*ssa.Function)
+	var queue []*ssa.Function
+	for _, fn := range funcs {
+		if !declared[fn] {
+			continue
+		}
+		own, callees := inferParamUses(fn, declared, finisherOnly)
+		if own {
+			changes[fn] = true
+			queue = append(queue, fn)
+		}
+		for _, callee := range callees {
+			callers[callee] = append(callers[callee], fn)
+		}
+	}
+	for len(queue) > 0 {
+		fn := queue[len(queue)-1]
+		queue = queue[:len(queue)-1]
+		for _, caller := range callers[fn] {
+			if !changes[caller] {
+				changes[caller] = true
+				queue = append(queue, caller)
+			}
+		}
+	}
+	return changes
+}
+
+// inferParamUses reads how fn and its closures use fn's *gorm.DB parameters
+// (see inferChangesInPlace). own reports a use that may change one in place.
+// callees are the functions of declared that get one as an argument: fn
+// changes it when one of them does.
+func inferParamUses(fn *ssa.Function, declared map[*ssa.Function]bool, finisherOnly func(*ssa.Function) []int) (own bool, callees []*ssa.Function) {
+	tree := make(map[*ssa.Function]bool)
+	var instrs []ssa.Instruction
+	callsite.WalkInstrs([]*ssa.Function{fn}, func(instr ssa.Instruction) {
+		tree[instr.Parent()] = true
+		instrs = append(instrs, instr)
+	})
+	held, vars := inferHeldParams(fn, instrs, tree)
+
+	for v := range vars {
+		for _, ref := range *v.Referrers() {
+			switch ref := ref.(type) {
+			case *ssa.DebugRef, *ssa.MakeClosure:
+			case *ssa.UnOp:
+				own = own || ref.Op != token.MUL
+			case *ssa.Store:
+				own = own || ref.Addr != v
+			default:
+				own = true
+			}
+		}
+	}
+	for v := range held {
+		for _, ref := range *v.Referrers() {
+			switch ref := ref.(type) {
+			case *ssa.DebugRef, *ssa.Phi, *ssa.ChangeType, *ssa.BinOp, *ssa.Return, *ssa.MakeClosure:
+			case *ssa.Store:
+				own = own || !vars[ref.Addr]
+			case *ssa.FieldAddr:
+				own = own || !inferReadsField(ref)
+			case ssa.CallInstruction:
+				changes, callee := inferCallChangesParam(ref, v, tree, declared, finisherOnly)
+				own = own || changes
+				if callee != nil {
+					callees = append(callees, callee)
+				}
+			default:
+				own = true
+			}
+		}
+	}
+	return own, callees
+}
+
+// inferHeldParams returns the values in instrs, the instructions of fn and of
+// the closures in tree, that hold one of fn's *gorm.DB parameters, and the
+// addresses of the variables that hold one: a parameter a closure captures
+// lives in one.
+func inferHeldParams(fn *ssa.Function, instrs []ssa.Instruction, tree map[*ssa.Function]bool) (held, vars map[ssa.Value]bool) {
+	held = make(map[ssa.Value]bool)
+	vars = make(map[ssa.Value]bool)
 	for _, p := range fn.Params {
 		if typeutil.IsGormDB(p.Type()) {
 			held[p] = true
 		}
 	}
-	changes := false
-	callsite.WalkInstrs([]*ssa.Function{fn}, func(instr ssa.Instruction) {
-		switch instr := instr.(type) {
-		case *ssa.MakeClosure:
-			closure, ok := instr.Fn.(*ssa.Function)
-			if !ok {
-				return
-			}
-			for i, b := range instr.Bindings {
-				if held[b] && i < len(closure.FreeVars) {
-					held[closure.FreeVars[i]] = true
-				}
-			}
-		case *ssa.Call:
-			if !changes && len(instr.Call.Args) > 0 && held[instr.Call.Args[0]] {
-				_, changes = immutableParamDiscardedChain(instr, instr.Call.Args[0])
+	for changed := true; changed; {
+		changed = false
+		for _, instr := range instrs {
+			changed = inferHoldStep(instr, held, vars, tree) || changed
+		}
+	}
+	return held, vars
+}
+
+// inferHoldStep adds to held and vars what instr makes hold a parameter, and
+// reports whether it added anything (see inferHeldParams).
+func inferHoldStep(instr ssa.Instruction, held, vars map[ssa.Value]bool, tree map[*ssa.Function]bool) bool {
+	added := false
+	mark := func(m map[ssa.Value]bool, v ssa.Value) {
+		if !m[v] {
+			m[v] = true
+			added = true
+		}
+	}
+	switch instr := instr.(type) {
+	case *ssa.Store:
+		// A store anywhere else is a use of its own.
+		switch instr.Addr.(type) {
+		case *ssa.Alloc, *ssa.FreeVar:
+			if held[instr.Val] {
+				mark(vars, instr.Addr)
 			}
 		}
+	case *ssa.UnOp:
+		if instr.Op == token.MUL && vars[instr.X] {
+			mark(held, instr)
+		}
+	case *ssa.Phi:
+		if slices.ContainsFunc(instr.Edges, func(e ssa.Value) bool { return held[e] }) {
+			mark(held, instr)
+		}
+	case *ssa.ChangeType:
+		if held[instr.X] {
+			mark(held, instr)
+		}
+	case *ssa.MakeClosure:
+		closure, _ := instr.Fn.(*ssa.Function)
+		for i, b := range instr.Bindings {
+			if closure == nil || i >= len(closure.FreeVars) {
+				break
+			}
+			if held[b] {
+				mark(held, closure.FreeVars[i])
+			}
+			if vars[b] {
+				mark(vars, closure.FreeVars[i])
+			}
+		}
+	case ssa.CallInstruction:
+		// A closure called with a parameter gets it as its own.
+		callee := instr.Common().StaticCallee()
+		if callee == nil || !tree[callee] || len(callee.Params) != len(instr.Common().Args) {
+			return false
+		}
+		for i, arg := range instr.Common().Args {
+			if held[arg] {
+				mark(held, callee.Params[i])
+			}
+		}
+	}
+	return added
+}
+
+// inferReadsField reports whether fa, a field of a *gorm.DB, is only read,
+// as in tx.Error or tx.Dialector. The Statement is a pointer that a write
+// through it changes in place, so only the reads of its own fields count, as
+// in tx.Statement.Context.
+func inferReadsField(fa *ssa.FieldAddr) bool {
+	ptr, ok := fa.X.Type().Underlying().(*types.Pointer)
+	if !ok {
+		return false
+	}
+	st, ok := ptr.Elem().Underlying().(*types.Struct)
+	if !ok || fa.Field >= st.NumFields() {
+		return false
+	}
+	statement := st.Field(fa.Field).Name() == "Statement"
+	return inferOnlyLoads(fa, func(load *ssa.UnOp) bool {
+		return !statement || !slices.ContainsFunc(*load.Referrers(), func(ref ssa.Instruction) bool {
+			field, isField := ref.(*ssa.FieldAddr)
+			_, debug := ref.(*ssa.DebugRef)
+			return !debug && (!isField || !inferOnlyLoads(field, nil))
+		})
 	})
-	return changes
+}
+
+// inferOnlyLoads reports whether every use of addr is a load, for which ok,
+// when it is not nil, holds.
+func inferOnlyLoads(addr ssa.Value, ok func(*ssa.UnOp) bool) bool {
+	return !slices.ContainsFunc(*addr.Referrers(), func(ref ssa.Instruction) bool {
+		if _, debug := ref.(*ssa.DebugRef); debug {
+			return false
+		}
+		load, isLoad := ref.(*ssa.UnOp)
+		return !isLoad || load.Op != token.MUL || ok != nil && !ok(load)
+	})
+}
+
+// inferCallChangesParam reports whether call, which gets v, a parameter, as
+// its receiver or an argument, may change it in place. callee is the function
+// of declared that gets it, whose own uses decide.
+func inferCallChangesParam(call ssa.CallInstruction, v ssa.Value, tree, declared map[*ssa.Function]bool, finisherOnly func(*ssa.Function) []int) (changes bool, callee *ssa.Function) {
+	common := call.Common()
+	if b, ok := common.Value.(*ssa.Builtin); ok {
+		return b.Name() == "append", nil
+	}
+	fn := common.StaticCallee()
+	if fn == nil {
+		return true, nil // a dynamic or interface call
+	}
+	if recv := fn.Signature.Recv(); recv != nil && typeutil.IsGormDB(recv.Type()) {
+		if c, ok := call.(*ssa.Call); ok && common.Args[0] == v {
+			_, changes = immutableParamDiscardedChain(c, v)
+		}
+		return changes, nil
+	}
+	if tree[fn] || fn.Pkg != nil && typeutil.IsGormPackage(fn.Pkg.Pkg) {
+		return false, nil // a closure of the function, or a gorm function
+	}
+	decl := origin.Declared(fn)
+	if declared[decl] {
+		return false, decl
+	}
+	if decl.Pkg != nil && !typeutil.ReachesGorm(decl.Pkg.Pkg) {
+		return false, nil
+	}
+	var only []int
+	if finisherOnly != nil {
+		only = finisherOnly(decl)
+	}
+	for i, arg := range common.Args {
+		if arg == v && !slices.Contains(only, i) {
+			return true, nil
+		}
+	}
+	return false, nil
 }

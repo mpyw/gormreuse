@@ -224,6 +224,7 @@ gormreuse/
 │       │   ├── pointee.go       # PointeeRoot, PointeeRoots: what a call given a variable's address may store there (#345)
 │       │   ├── elem.go          # ElemRoot: a value read from a slice, an array, a map, a channel or a pointer parameter (#374)
 │       │   ├── param_read.go    # ParamReadValues: a getter's call reads the field of its own argument (#342)
+│       │   ├── prove.go         # ProvesImmutable, ProvenGlobalsOf: positive proofs for the inferences (#371)
 │       │   ├── freevar.go       # traceFreeVar: roots through a closure's captured variables
 │       │   ├── phi.go           # Phi edges, loop variable swaps through Phis
 │       │   ├── pure.go          # PureVerdicts, IsPureFunction: pure calls and the arguments they return
@@ -2093,8 +2094,8 @@ Helpers that only ever receive fresh handles were the main false positives left 
 | | `inferImmutableInputs` | `inferImmutableParams` |
 | --- | --- | --- |
 | Adds | `ImmutableInputSet.Infer` for one callback parameter | `DirectiveFuncSet.Infer` on the immutable-param set |
-| Candidates | A function or method with an unexported name, or a closure, with no declared `immutable-input`. The callback has a `*gorm.DB` parameter, is not variadic, and the body uses it | A function or method with an unexported name and a `*gorm.DB` parameter, without the directive, that does not change a parameter in place (`inferChangesParamInPlace`) |
-| Proof | `purity.ProvesImmutableInput`: the body check of the directive, without the function's own callbacks in the set | `inferCallersPassImmutable`: for every call, `handler.BreaksImmutableParam` holds for no `*gorm.DB` parameter, as the caller-side check asks |
+| Candidates | A function or method with an unexported name, or a closure, with no declared `immutable-input`. The callback has a `*gorm.DB` parameter, is not variadic, and the body uses it | A function or method with an unexported name and a `*gorm.DB` parameter, without the directive, that does not change a parameter in place (`inferChangesInPlace`) |
+| Proof | `purity.ProvesImmutableInput`: the body check of the directive, without the function's own callbacks in the set. Each `*gorm.DB` the callback gets must be proved (`ProvesImmutable`) | `inferCallersPassImmutable`: for every call, every `*gorm.DB` argument is proved (`ProvesImmutable`) |
 | Callers | Not needed: the promise is about the body | Every reference is the function of a call (instances included). A bound or thunk wrapper, a store or an argument turns it off. For a method, no interface call in the package has its name. The package initializer counts. At least one call |
 
 <details><summary>The fixed points, decisions and limitations</summary>
@@ -2110,8 +2111,19 @@ Helpers that only ever receive fresh handles were the main false positives left 
 Decisions:
 
 - **Exported functions are never inferred.** Another package may call an exported `immutable-param` function, and its calls are not seen. An inferred function exports no fact, so another package treats it as unmarked.
-- **What detection reads as immutable, inference accepts.** The proof of an argument is the caller-side check of the directive. So a field read through a parameter counts, as it does in detection. So does a package-level variable that the function only reads.
-- **A discarded chain on the parameter turns `immutable-param` off.** `tx.Where("t = 1"); tx.Find(&a)` relies on changing the caller's value in place. On an immutable value the `Where` does nothing, so the function would run without its filter. `inferChangesParamInPlace` follows a chain from a parameter, or a free variable bound to one, through single uses, and refuses one that is discarded without a finisher.
+- **Positive proof only (#371).** `tracer.RootTracer.ProvesImmutable` accepts a value only when it knows where every value it may hold comes from. A value that `FindMutableRoot` finds no root for is not enough: the tracer loses values it cannot follow, and detection reads such a value as immutable. Before #371 the proof was the caller-side check of the directive, so a channel receive, a map or slice element, `ctx.Value(k).(*gorm.DB)`, `*p` and a field read through the function's own parameter (`cb(s.db)`) all proved a call. The values it accepts:
+
+  | Value | Proved when |
+  | --- | --- |
+  | `nil` | Always |
+  | A call, or the `Extract` of its tuple | The tracer's immutable source (`isImmutableSource`): a Session-family builtin that does not return a `clone == 0` handle, `gorm.Open`, `Begin`, or an `immutable-return` function whose result reads no parameter. A getter with [reads](#parameter-reads) proves nothing |
+  | A parameter | The `tx` of a Transaction or `immutable-input` callback (not distrusted), or the parameter of an inferred `immutable-param` function. A Scopes or Connection callback's parameter never |
+  | A Phi, `ChangeType`, `MakeInterface`, `TypeAssert`, or a `FreeVar` bound by value | Every operand is proved |
+  | A load of a local variable, also through a closure's `FreeVar` | The address goes only to loads, stores and closures, and every value stored into it, in the function or in a closure, before or after the load, is proved. So `f := func() { q = q.Where("x") }; f(); h(q)` is not |
+  | A load of a package-level variable | Every value the package stores into it is proved, there is one store at least, and the package uses its address for nothing else (`ProvenGlobalsOf`, over every function and the initializer) |
+
+- **A declared `immutable-param` parameter does not prove a call (#371).** `computeNeedsImmutableParam` checks the callers of a declared function only while the function branches the parameter. A function that hands it to a helper does not branch it, so its directive is redundant and its callers pass anything. Before #371 the helper was inferred through the declared parameter. Then the reuse in the helper went unreported, and so did a mid-chain value that a caller passed. Now the helper is reported, and the directive is reported redundant, as in 0.22.0: without it, the helper's report stays.
+- **A change in place turns `immutable-param` off.** `tx.Where("t = 1"); tx.Find(&a)` relies on changing the caller's value in place. On an immutable value the `Where` does nothing, so the function would run without its filter. `inferChangesInPlace` reads every use of a parameter in the function and its closures (`inferParamUses`), through local variables, captured variables and closures called with it. It refuses a function that discards a chain without a finisher, hands the parameter to a function of the package that changes its own (a fixed point over the package), or to a function of another package that reaches gorm unless its fact makes that parameter finisher-only (#347). A dynamic or interface call, a store outside a local variable, a box and any other use the check does not follow refuse it too. A read of a field counts as a read, except a use of `Statement` other than a read of its fields. Before #371 only the chains of the function itself counted, so `applyTenant(tx); tx.Find(&a)` and `func() { tx.Where("t") }()` were inferred, and a Session caller lost the filter.
 - **Test variants.** The variant of a package without its test files cannot see a caller in a test file. So it may infer a function that the test variant does not. The diagnostics of the two variants are reported together, and the test variant sees every caller, so the reuse is still reported. The [parameter-root fix](#parameter-root-fix) keeps the stricter rule of `reportSeesWholePackage`, so the fixes of the two variants agree. `TestInferredParamVariants` checks each variant on `testdata/src/paramvariants`.
 - **No caller check, no redundancy report.** `computeNeedsImmutableParam` and `reportRedundantImmutableParam` skip an inferred function: every call passes an immutable value, and there is no directive to report. The body check of `immutable-input` skips an inferred function too, since a report would say "declared".
 - **A callback the body never uses is not inferred.** It would hand the callback nothing, and the inference would only change what its callers' callbacks mean.
@@ -2120,7 +2132,9 @@ Decisions:
 Limitations:
 
 - **One direction between the two.** `inferImmutableInputs` runs first. A callback called with the parameter of an inferred `immutable-param` function is not proved by it.
-- **Declared `immutable-param` parameters do not prove a call.** A declared function that does not branch its parameter is redundant. Its callers are not checked, so its parameter may hold a mid-chain value.
+- **The proof follows less than detection.** A value in a struct field, a slice, a map or a channel, a field of a struct a call returned, and a package-level variable of another package prove nothing, even when they hold a fresh handle. So does a local variable whose address goes to a call. Their helpers are reported as before #349.
+- **An exported package-level variable may be assigned in another package.** `ProvenGlobalsOf` sees only the package's own stores. A test in another package that assigns the variable a chain is not seen.
+- **The in-place check is coarse.** A parameter passed to a func value (`fn(tx)`), or stored in a struct such as `&gorm.Statement{DB: tx}`, turns inference off, even when nothing changes it. A helper of the package that changes any of its parameters counts as changing the one it was passed.
 - **The parameter-root fix is reachable less often.** Its directive case needs every caller to pass an isolated value. Such a function is inferred and not reported. A function that changes its parameter in place is not inferred. The fix does not declare it either (`paramDiscardsChain`). The directive would make the discarded chain do nothing, and the body check would report it (#346). It gets no fix, as the [discarded statements on a parameter](#parameter-root-fix) rule says.
 
 Measured with the command (#349), before and after:
@@ -2133,6 +2147,17 @@ Measured with the command (#349), before and after:
 | gin-vue-admin | 32 | 29 | 3 in two import helpers of the export template service, whose only caller passes a `Transaction` `tx` |
 
 Each removed report branched a `clone > 0` handle. No report was added.
+
+#371 measured again with `gormreuse -test ./...`, on gorm v1.31.2 and on the heads of new-api and gin-vue-admin in October 2026:
+
+| Module | Before #349 | 0.23.0 | #371 |
+| --- | --- | --- | --- |
+| gorm root | 69 | 65 | 65 |
+| gorm `tests` | 14 | 7 | 7 |
+| new-api | 168 | 98 | 107 |
+| gin-vue-admin | 32 | 29 | 29 |
+
+No report was added or removed against the reports before #349. The 9 new-api reports that came back are on helpers that get the package-level `DB` (assigned `gorm.Open`'s result) and then hand it to a func value or store it in a `gorm.Statement`, and on a test helper that gets a package-level variable of another package. Each still branches a `clone > 0` handle. The spot-checked removals that stay get a `Transaction` `tx`, a test helper's `gorm.Open` result, or the package-level `DB`.
 
 </details>
 
@@ -2499,7 +2524,7 @@ A parameter root has no call to append a Session to. `Generate` in `internal/fix
 | Check | Fix |
 | --- | --- |
 | `canFixParam` fails: a Scopes/Preload callback, a closure with a `*gorm.DB` result, or a function declaration with a `*gorm.DB` result that `calledOnlyDirectly` rejects | None |
-| `paramCallersIsolate` holds. The function is a declaration. The pass sees every file of the package (`reportSeesWholePackage`). `calledOnlyDirectly` holds. `handler.BreaksImmutableParam` holds for no argument of any call to the function in the analysed functions | `//gormreuse:immutable-param`. Such a function is [inferred](#inferred-immutable-param-and-immutable-input) and not reported (#349). A use of the parameter that is a discarded chain (`paramDiscardsChain`) withholds the directive, since the immutable-param body check would report the chain (#346) |
+| `paramCallersIsolate` holds. The function is a declaration. The pass sees every file of the package (`reportSeesWholePackage`). `calledOnlyDirectly` holds. `handler.BreaksImmutableParam` holds for no argument of any call to the function in the analysed functions | `//gormreuse:immutable-param`. Such a function is often [inferred](#inferred-immutable-param-and-immutable-input) and not reported (#349). A use of the parameter that is a discarded chain (`paramDiscardsChain`) withholds the directive, since the immutable-param body check would report the chain (#346) |
 | Otherwise | `tx = tx.Session(&gorm.Session{})` before the body's first statement (`paramSessionSite`), then the rest of the local-root fix. It is written by `sessionEdits`, with the same gorm name resolution and import as every other Session |
 
 <details><summary>Callers, test variants, merged values, discarded statements, Scopes callbacks and closures</summary>

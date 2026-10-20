@@ -980,13 +980,22 @@ func (t *RootTracer) isMutableParam(p *ssa.Parameter) bool {
 	if t.scopesCallbacks[fn] {
 		return true
 	}
-	if t.immutableCallbacks[fn] && (t.distrustedCallback == nil || !t.distrustedCallback(fn)) {
+	if t.isExemptCallback(fn) {
 		return false
 	}
 	if t.immutableParamFuncs != nil && t.immutableParamFuncs.Contains(fn) {
 		return false
 	}
 	return true
+}
+
+// isExemptCallback reports whether the *gorm.DB parameter of fn is a fresh
+// handle: fn is a Transaction, FindInBatches or immutable-input callback that
+// is not distrusted, and not a Scopes or Connection callback.
+//
+//declscope:shared // prove.go proves a callback's parameter with it
+func (t *RootTracer) isExemptCallback(fn *ssa.Function) bool {
+	return !t.scopesCallbacks[fn] && t.immutableCallbacks[fn] && (t.distrustedCallback == nil || !t.distrustedCallback(fn))
 }
 
 // isImmutableSource checks if a value is an immutable source (no mutable root).
@@ -1002,6 +1011,8 @@ func (t *RootTracer) isMutableParam(p *ssa.Parameter) bool {
 //
 // Note: User-defined pure functions (without immutable-return) are NOT immutable sources -
 // they may return mutable values.
+//
+//declscope:shared // prove.go proves a call with it
 func (t *RootTracer) isImmutableSource(v ssa.Value) bool {
 	switch val := v.(type) {
 	case *ssa.Parameter:

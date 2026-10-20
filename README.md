@@ -1739,9 +1739,12 @@ Every `*gorm.DB` argument of every call must be one of these:
 
 | Argument | Example |
 | --- | --- |
-| A value with no mutable root, as reuse detection reads it. That is a `Session`-family, `Begin` or `gorm.Open` result, or the result of an `immutable-return` function. It is also a field read through a parameter, or a package-level variable | `helper(db.Session(&gorm.Session{}))` |
+| A `Session`-family, `Begin` or `gorm.Open` result, or the result of an `immutable-return` function | `helper(db.Session(&gorm.Session{}))` |
 | The `tx` of a `Transaction` or `FindInBatches` callback, or of a callback that an `immutable-input` function calls, declared or [inferred](#inferred-immutable-input) | `db.Transaction(func(tx *gorm.DB) error { return helper(tx) })` |
-| The parameter of another inferred function | `func outer(tx *gorm.DB) { helper(tx) }` |
+| The parameter of another inferred function. The parameter of a declared `immutable-param` function does not count | `func outer(tx *gorm.DB) { helper(tx) }` |
+| A local variable, or a package-level variable of the package, when every value the package stores into it is one of these | `var db, _ = gorm.Open(dsn)` then `helper(db)` |
+
+gormreuse must prove the value. A value it cannot follow is not enough, even when reuse detection reads it as safe. Examples are a channel receive, a map or slice element, `ctx.Value(k).(*gorm.DB)`, `*p`, a field read through a parameter, and a variable that a closure reassigns a chain.
 
 The function must be one of these:
 
@@ -1753,7 +1756,8 @@ Anything else turns inference off:
 
 - no call at all, or one caller that passes a mid-chain value
 - a call to itself with its own parameter. Recursion is not inferred
-- a discarded chain statement on the parameter, such as `tx.Where("a")`. On a mid-chain value it changes the caller's value in place, and on an immutable one it does nothing
+- a discarded chain statement on the parameter, such as `tx.Where("a")`. On a mid-chain value it changes the caller's value in place, and on an immutable one it does nothing. The same holds in a closure, as in `func() { tx.Where("a") }()`, and in a helper the function passes the parameter to, as in `applyTenant(tx)`
+- a use of the parameter that gormreuse cannot follow: a call of a func value, an interface method or a function of another package that may change it, or a store into a struct
 - a declared `immutable-param`. Its caller check and redundancy report stay as they are
 
 | Also note | Detail |
@@ -1877,6 +1881,7 @@ Anything else turns inference off:
 - a function or method with an exported name
 - a callback the body never uses, or a variadic one
 - a mid-chain value handed to the callback, or a flow the body check cannot follow
+- a value handed to the callback that gormreuse cannot prove immutable, such as `cb(s.db)` with `s` a parameter, `cb(*p)` or `cb(dbs[0])`. The values that count are the ones [inferred immutable-param](#inferred-immutable-param) accepts
 - a call to itself with its own callback. Recursion is not inferred
 - a declared `immutable-input` on any parameter of the function
 

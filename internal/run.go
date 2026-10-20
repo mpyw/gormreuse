@@ -198,6 +198,12 @@ func RunSSA(
 		callback.DropReachableCallbacks(funcs, funcVars, immutableInputSet, callbacks)
 		return callbacks
 	}
+	// The inferences read a package-level variable as the values the package
+	// stores into it (#371). After a panic none is read.
+	var globals tracer.ProvenGlobals
+	guard.runPackage("package-level variables", func() {
+		globals = tracer.ProvenGlobalsOf(append(slices.Clone(funcs), ssaInfo.Pkg.Func("init")))
+	})
 	// A function is then treated as immutable-input(cb) when its body hands
 	// cb only immutable values (#349), and its callbacks join the set. After
 	// a panic there the functions inferred so far are kept, each proved, and
@@ -210,7 +216,7 @@ func RunSSA(
 	} else if !guard.runPackage("immutable-input inference", func() {
 		immutableCallbacks = inferImmutableInputs(funcs, funcVars, immutableInputSet, immutableCallbacks, collectImmutableCallbacks, func(callbacks map[*ssa.Function]bool) *tracer.RootTracer {
 			return tracer.NewRootTracer(pureFuncs, immutableReturnFuncs, immutableParamFuncs, pureVerdicts, mutableCallbacks, callbacks, funcVars)
-		}, skip)
+		}, globals, skip)
 	}) && !guard.runPackage("immutable callbacks", func() {
 		immutableCallbacks = collectImmutableCallbacks()
 	}) {
@@ -224,7 +230,7 @@ func RunSSA(
 	guard.runPackage("immutable-param inference", func() {
 		inferImmutableParams(funcs, ssaInfo.Pkg.Func("init"), immutableParamFuncs, func() *tracer.RootTracer {
 			return tracer.NewRootTracer(pureFuncs, immutableReturnFuncs, immutableParamFuncs, pureVerdicts, mutableCallbacks, immutableCallbacks, funcVars)
-		}, cfgs, skip)
+		}, func(fn *ssa.Function) []int { return table.Of(fn).FinisherOnly }, globals, skip)
 	})
 
 	// Enforce the body-side immutable-input contract (#62 cases 2.3/2.4) and
