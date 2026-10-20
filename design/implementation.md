@@ -222,6 +222,7 @@ gormreuse/
 │       │   ├── store.go         # AllocStoredValues, FieldStoredValues: which stores reach a load
 │       │   ├── field.go         # FieldRoot, SameField: field paths and roots of returned structs
 │       │   ├── pointee.go       # PointeeRoot, PointeeRoots: what a call given a variable's address may store there (#345)
+│       │   ├── elem.go          # ElemRoot: a value read from a slice, an array, a map, a channel or a pointer parameter (#374)
 │       │   ├── param_read.go    # ParamReadValues: a getter's call reads the field of its own argument (#342)
 │       │   ├── freevar.go       # traceFreeVar: roots through a closure's captured variables
 │       │   ├── phi.go           # Phi edges, loop variable swaps through Phis
@@ -415,7 +416,7 @@ A call, a `go` statement and a `defer` statement are each one `callsite.Site`. `
 | `SiteThunk` | `T.m(r, x)`, `(*T).m(r, x)` | The declared method (`origin.Declared` of the `m$thunk` wrapper) | `Recv` is the first argument; `Args` the rest |
 | `SiteFuncVar` | `var f = func(...)`, then `f(x)` | The closure the variable holds | As written |
 | `SiteClosure` | `func() {...}()` | The function literal | As written |
-| `SiteInvoke` | `i.m(x)` | None | An interface method: an unknown callee |
+| `SiteInvoke` | `i.m(x)` | None, or the `*gorm.DB` method when `i` boxes a `*gorm.DB` right before the call ([Interface method calls](#interface-method-calls)) | An interface method: an unknown callee. `Recv` is the boxed `*gorm.DB` when there is one |
 | `SiteDynamic` | A func-typed parameter, field or merged func value | None | An unknown callee |
 | `SiteBuiltin` | `append`, `len` | None | |
 
@@ -436,6 +437,8 @@ A call can resolve to a stand-in for the function the directive is written on (#
 </details>
 
 The directive sets, and the maps keyed by `*ssa.Function` (`PureVerdicts.Failed`, `needsImmutableParam`, the Scopes and immutable callback sets), are keyed by the declared function. `origin.Declared` maps a stand-in to it: an instance to its `Origin()`, a bound wrapper or a thunk to the declared method (`Prog.FuncValue`).
+
+`Prog.FuncValue` finds only the methods of the packages that the program created. buildssa creates the analyzed package and its direct imports. So a package that reaches gorm only through another package has no gorm method in the program, and `w := q.Where` gave a wrapper that was no gorm method. Each call through it was missed, and `-fix` rewrote the other uses as if `w` were not there (#374). go/ssa builds such a method from type information when the wrapper calls it, so `origin.Declared` then takes the wrapper's callee (`wrappedMethod`).
 
 <details><summary>Every lookup that goes through it</summary>
 
@@ -460,8 +463,12 @@ The tracer resolves a call `w(x)` through a method value `w := r.m` as the call 
 | `f := r.build; f()` | A call of the user method `build`, like `r.build()` |
 | `f := o.open; q, err := f()` | The call is a mutable root, as for a tuple result of `o.open()` (#176) |
 | `f := h.same; f(q)`, `same` pure and returning its argument | An alias of `q`'s root, as for `h.same(q)` (#188) |
+| `firstPage(q.Find)`, also through a variable that holds `q.Find` | A branch of `q`'s root at the call, as for a closure that calls `q.Find` (#374) |
+| `j := job{find: q.Find}`, `[]finder{q.Find}`, `m[k] = q.Find`, `ch <- q.Find` | A branch of `q`'s root at the store or the send (#374). A store into a local variable is not: `FuncVars` reads the calls through it |
 
 </details>
+
+**A method value handed on (#374).** A method value passed to a function, or stored anywhere but in a local variable, may be called there. The call through it is no call site of `q`: it is a dynamic call, or a call in another function. So the hand-off is the branch, as `helper(q)` is (`boundGormReceiver`, `handOn`). It is reported when it runs again, as in a loop. Before #374 `firstPage(q.Find); q.Count(&n)` and `j := job{find: q.Find}; j.find(&a); q.Count(&n)` were missed, while the same code with a closure was reported. `-fix` offers no fix for such a root, as for any hand-off.
 
 <details><summary>Interface method values, wrappers and the position guard</summary>
 
@@ -497,6 +504,15 @@ So every directive of `m` applies: pure, immutable-return, immutable-param, immu
 | An interface method expression | No declared method, so it is a call of an unknown function |
 
 </details>
+
+### Interface method calls
+
+An interface method call `i.m(x)` has no declared callee. When `i` boxes a `*gorm.DB` right before the call (the receiver is a `MakeInterface` of a `*gorm.DB`), the call runs that value's method. `callsite.SiteOf` then gives the site that method as `Declared`, and the boxed value as `Recv` (`siteBoxedMethod`, #374). So `var qi Querier = q; qi.Where("a").Find(&us); q.Find(&us)` is a second branch of `q`, and `qi.Session(...)` reads `q` as `q.Session(...)` does. Before #374 the call was no use of `q`.
+
+Limitations:
+
+- An interface value that comes from elsewhere, such as a parameter or a field, has no known dynamic type. A call through it stays an unknown call.
+- A receiver whose type is a type parameter (`func twice[T interface{ Find(any, ...any) *gorm.DB }](q T)`) is not a `*gorm.DB` in the generic body, so its calls are missed (`irGenericReceiver`).
 
 ### Function variables
 
@@ -745,7 +761,7 @@ A use that may run more than once for one run of its root's definition reuses th
 
 | Asked by | For |
 | --- | --- |
-| The handler | Every root of a branch, of a call, a `go` or a `defer` (#306) |
+| The handler | Every root of a branch, of a call, a `go` or a `defer` (#306), a send or a store (#374) |
 | The suggested fixes | `usedAgainInLoop`, `changeSeenAfterEscape`, the Session of a reassignment in a loop. So a fix and the diagnostic agree |
 | `RunsAgain(block)` | Only whether a block can run after itself, for a loop-carried read (`mergedStoreReadTwice`) |
 
@@ -1221,6 +1237,39 @@ Neither was seen. `applyP(&q); q.Find(&a)` was not reported, and `-fix` added a 
 
 </details>
 
+### Reads from containers
+
+A `*gorm.DB` read from a container is a `tracer.ElemRoot` (#374). The reads are an element of a slice or an array (through `IndexAddr` or `Index`, also in a range loop), a value of a map (`Lookup`, also comma-ok, and the values of a range loop), a value received from a channel (`<-ch`, also comma-ok and in a range loop), and what a pointer parameter points to (`*pq` for `pq **gorm.DB`).
+
+Storing a value into a container is already a branch of it ([Pollution sources](#pollution-sources)). So a read is not traced to what was stored: with the store, every read would be a second branch. A read is a root of its own instead:
+
+| Read | Root |
+| --- | --- |
+| Two reads of one element: `s[0]` twice, `m["k"]` twice, `*pq` twice | One `ElemRoot`, interned by (container, key). A constant key is compared by value |
+| An element written after a read, as in `s[0] = s[0].Where("b")` or `*pq = (*pq).Where("t")` | A root per read. A write before every read, such as the one that fills a composite literal, does not count (`elemWrittenBetween`) |
+| A receive, or a step of a range loop over a map | A root per read |
+| A container that holds no mutable value | No root |
+
+`elemContainerHoldsMutable` decides the last row. It collects the values that may be the container itself (`elemContainerAliases`): what it is made from, slices of it, merges, the results of `append`, a local variable that holds it, and a closure's capture of it. The container may hold a mutable value when:
+
+- one of them is a parameter or the result of a call, whose elements come from code not seen here;
+- one of them is passed to a function that may reach gorm, which may store into it. A function in a package that does not reach gorm, such as `slices.Reverse`, makes no `*gorm.DB`, and `append`, `copy` and `len` are builtins; or
+- a value stored into one of them (`containerElems`), sent on it or appended to it has a mutable root.
+
+The answer is kept for every value of the set. The reads and writes of a container's elements are found in one pass over its referrers (`elemAccessOf`), so `n` reads of a map literal's `n` keys are linear (`mapreads` in the growth gate). No fix is offered for an `ElemRoot`: the call that made the value is not known.
+
+Decisions:
+
+- **A container read from a field or a package-level variable is not followed.** It gives no root, as a field read through a parameter does not (`crFieldContainer`). Most such containers are registries of connections, whose values are immutable.
+- **A parameter's container is mutable**, as a `*gorm.DB` parameter is. `func run(qs []*gorm.DB) { for _, q := range qs { q.Count(&n); q.Find(&us) } }` is reported.
+- **Rejected: trace a read to the values stored.** `m := map[string]*gorm.DB{"k": q}; m["k"].Find(&us)` would then be a second branch of `q`, after the store.
+
+<details><summary>Before #374</summary>
+
+The tracer gave every such read no root, and no root reads as immutable. So `q := m["adult"]; q.Count(&n); q.Find(&us)`, `for _, q := range qs { q.Where("a").Find(&us); q.Where("b").Find(&us) }`, `q := <-ch` and `(*pq).Find(nil); (*pq).Count(nil)` were all missed. An inferred `immutable-param` also took such an argument as immutable (#371).
+
+</details>
+
 ### Package-level variables
 
 A package-level variable reaches the analysis in two ways. It can be a `*gorm.DB` that a function loads and stores. It can be a `var f = func(...)` closure ([Function variables](#function-variables)).
@@ -1467,9 +1516,10 @@ On the safe side, the linter marks a `*gorm.DB` as polluted in these cases:
 | Case | Example | Note |
 | --- | --- | --- |
 | Interface method call | | Assumed to pollute: it cannot be analyzed statically |
-| Channel send | `ch <- db` | |
-| Slice or array storage | `[]*gorm.DB{db}` | |
-| Map storage | `map[string]*gorm.DB{"k": db}` | |
+| Channel send | `ch <- db` | A branch of every root the value may hold, reported when it runs again (#374) |
+| Slice or array storage, `append` | `[]*gorm.DB{db}`, `qs = append(qs, db)` | The same |
+| Map storage | `map[string]*gorm.DB{"k": db}` | The same |
+| A method value handed on (#374) | `firstPage(q.Find)`, `job{find: q.Find}` | A branch of the receiver ([Method values](#method-values)) |
 | Interface conversion | `interface{}(db)` | A type assertion may extract it. A read-only argument of a query method is the exception (#185) |
 | Function argument | `helper(db)` | A branch when the callee is not trusted as pure. A `*gorm.DB` result assigned back in a merge is an assignment, as for a gorm method |
 | A struct that holds it, handed to a call (#341) | `useDeps(deps{DB: q})`, `r := &repo{db: q}; r.active()` | A branch of each root that the struct's `*gorm.DB` fields hold, as for `helper(q)`. See below |
@@ -1477,6 +1527,8 @@ On the safe side, the linter marks a `*gorm.DB` as polluted in these cases:
 
 > [!NOTE]
 > A struct literal store alone (`_ = &S{db: q}`) does NOT pollute. The linter tracks actual use through struct fields, not the store.
+
+**Sends and stores (#374).** A send, a store into a slice element or a map, and `append` are handled as a call that takes the value (`handOn`, through `siteUse.branch`). The first root gets the branch, every other root of a merge gets a may branch, and a hand-off that runs again for one run of its root is reported (`cfg.Repeats`). Before #374 they only marked the first root (`FindMutableRoot`) polluted. So `for … { ch <- q }`, `qs = append(qs, q)`, `qs[i] = q` and `m[k] = q` in a loop were missed, while `for … { use1(q) }` was reported. `q := a; if c { q = b }; ch <- q; b.Find(&us)` marked only `a`.
 
 **Structs handed on (#341).** A callee that gets a struct can reach the `*gorm.DB` inside it as well as one passed directly. So `useDeps(deps{DB: q}); q.Find(&us)` is a reuse. At run time the helper's condition reaches the later query (`e2e/internal/handoff_test.go`). `-fix` takes these hand-offs as escapes ([Struct stores](#struct-stores)), and `handleHolders` makes them branches:
 
@@ -2525,7 +2577,7 @@ The #199 rule covers a discarded statement written on the root's variable. Other
 
 | Case | Example | How it is found |
 | --- | --- | --- |
-| The root is handed to other code, and a later use may see the change | `applyTenant(q)`, `apply(q)` for a closure, `_ = withTenant(q)`, `qs := []*gorm.DB{q}`, `m["q"] = q`, `ch <- q` | `UsageInfo.Escapes`, set by `Tracker.MarkPolluted` (a call argument, slice or map store, send) and by `q = helper(q)`. `changeSeenAfterEscape` decides whether a later use exists |
+| The root is handed to other code, and a later use may see the change | `applyTenant(q)`, `apply(q)` for a closure, `_ = withTenant(q)`, `qs := []*gorm.DB{q}`, `m["q"] = q`, `ch <- q` | `UsageInfo.Escapes`, set on the branch of a call argument, a slice or map store or a send (`handOn`), and by `q = helper(q)`. `changeSeenAfterEscape` decides whether a later use exists |
 | The `Error`, `RowsAffected` or `Statement` field is read from the root, or from a chain on it that runs no query | `return q.Error`, `if err := q.Where("a").Error; ...`, `q.Where("a").Limit(1).Statement` | A `FieldAddr` in the root's function or its closures, whose operand `changeCarryingRoots` walks down a chain of non-finisher, non-Session-family `*gorm.DB` methods to the root |
 | A go statement hands the root to a call | `go applyTenant(q)`, `go q.Where("a")` | An `*ssa.Go` whose argument traces to the root (`statementRootChanges`). The goroutine may change it while the uses after the statement run |
 | A defer statement changes the root in place, and another deferred call may see it (#309) | `defer q.Find(nil); defer q.Where("a")`, `defer applyTenant(q); defer q.Find(nil)`, `for … { defer applyTenant(q) }` | An `*ssa.Defer` that `statementRootChanges` says changes the root, when another `*ssa.Defer` uses the root, or the statement repeats (`useRepeatsAfter`). Deferred calls run after every other use, so only a deferred call sees the change. Their run order is not followed, so any other one is taken to |
@@ -3097,10 +3149,12 @@ Each fixture function marked `[LIMITATION]` under `testdata/src` pins one of the
 | A field rebuilt in a loop after it was copied: `p.db = q; for … { p.db = p.db.Where(c) }; q.Find(nil)` | `fsoLoopRebuildOfAliasedValue` | `isLoopFieldRebuild` makes the rebuild an assignment, so the first iteration's read of `q` is not a branch (#182) |
 | A pure function that returns a `Session` copy of its argument | `paCopyHidden` | The copy is not in `PureVerdicts.Returned` ([Session and Debug copies](#session-and-debug-copies)) |
 | A `*gorm.DB` global assigned in another function, a closure or the initializer | `pvInitializedAtPackageLevel`, `pvStoreInClosure` | A load sees only the stores in its own function ([Package-level variables](#package-level-variables)) |
-| A struct field read through a parameter or a receiver: `s.db` twice | `fieldOfStructParam` | The field is not a mutable root ([Struct roots](#struct-roots)) |
+| A struct field read through a parameter or a receiver: `s.db` twice, or `s.dbs[0]` twice | `fieldOfStructParam`, `crFieldContainer` | The field is not a mutable root ([Struct roots](#struct-roots)). Nor is a container read from it ([Reads from containers](#reads-from-containers)) |
 | The `immutable-param` caller contract through an interface or a func-typed parameter | `contractInterface` | No static callee |
 | A method expression of a method promoted through an embedded `*gorm.DB`: `W.Find(w, nil)` twice | `exprPromoted` | The thunk selects the field in its body, and the receiver `w` is not followed to it ([Method expressions](#method-expressions)) |
 | The address of a struct field handed to a helper that changes it: `applyP(&s.db); s.db.Find(nil)` | `fixEscapePointerFieldAddr` | Only the address of a variable is a branch and a `PointeeRoot` ([Addresses of variables](#addresses-of-variables)). The fix is still withheld: the struct is handed on ([Struct stores](#struct-stores)) |
+| A call through a receiver of a type parameter's type: `func twice[T interface{ Find(any, ...any) *gorm.DB }](q T) { q.Find(nil); q.Find(nil) }` | `irGenericReceiver` | The generic body has no `*gorm.DB`: `q` is a `T`, and the call is an interface call with no declared method ([Interface method calls](#interface-method-calls)) |
+| A closure that a call returns, called twice: `load := loader(q); load("a"); load("b")`, or `g := mk(); g(); g()` | `cfReturnedClosureOfParam`, `cfReturnedClosureOfCapture` | A call through the returned func value has no callee. The closure's sites are its uses in the function that makes it, and a return is none ([Uses that run more than once](#uses-that-run-more-than-once)) |
 
 **Extra reports (false positives).**
 

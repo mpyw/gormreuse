@@ -237,3 +237,99 @@ func boundMethodValueCapturedImmutable(db *gorm.DB) {
 	func() { find(nil) }()
 	q.Count(nil)
 }
+
+// =============================================================================
+// A method value handed on (#374)
+//
+// A method value passed to a function, or stored in a field, a slice or a
+// map, hands its receiver on, as a closure that calls the method does. It is
+// a branch of the receiver where it is handed on.
+// =============================================================================
+
+type boundFinder func(dest any, conds ...any) *gorm.DB
+
+func boundFirstPage(find boundFinder) { find(nil) }
+
+type boundJob struct{ find boundFinder }
+
+// ===== SHOULD REPORT =====
+
+// boundPassedAsArgument: boundFirstPage runs q.Find, a branch of q.
+func boundPassedAsArgument(db *gorm.DB) {
+	q := db.Where("x")
+	boundFirstPage(q.Find)
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// boundPassedThroughVariable: the same through a variable that holds the
+// method value.
+func boundPassedThroughVariable(db *gorm.DB) {
+	q := db.Where("x")
+	find := q.Find
+	boundFirstPage(find)
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// boundPassedCapturedVariable: the same through a variable that a closure
+// captures.
+func boundPassedCapturedVariable(db *gorm.DB) {
+	q := db.Where("x")
+	find := q.Find
+	func() { boundFirstPage(find) }()
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// boundPassedInLoop: each iteration hands q on again.
+func boundPassedInLoop(db *gorm.DB, items []string) {
+	q := db.Where("x")
+	for range items {
+		boundFirstPage(q.Find) // want `\*gorm\.DB reused: second branch from mutable root`
+	}
+}
+
+// boundStoredInField: the field holds q.Find, and the call through it is a
+// branch of q.
+func boundStoredInField(db *gorm.DB) {
+	q := db.Where("x")
+	j := boundJob{find: q.Find}
+	j.find(nil)
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// boundStoredInSlice: the same for a slice element.
+func boundStoredInSlice(db *gorm.DB) {
+	q := db.Where("x")
+	finds := []boundFinder{q.Find}
+	finds[0](nil)
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// boundStoredInMap: the same for a map value.
+func boundStoredInMap(db *gorm.DB) {
+	q := db.Where("x")
+	finds := map[string]boundFinder{"all": q.Find}
+	finds["all"](nil)
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// boundSentOnChannel: the same for a send.
+func boundSentOnChannel(db *gorm.DB, ch chan boundFinder) {
+	q := db.Where("x")
+	ch <- q.Find
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// ===== SHOULD NOT REPORT =====
+
+// boundPassedOnImmutable: a method value of an immutable receiver.
+func boundPassedOnImmutable(db *gorm.DB) {
+	q := db.Session(&gorm.Session{})
+	boundFirstPage(q.Find)
+	q.Count(nil)
+}
+
+// boundPassedOnce: one hand-off is one branch.
+func boundPassedOnce(db *gorm.DB) {
+	q := db.Where("x")
+	boundFirstPage(q.Find)
+}

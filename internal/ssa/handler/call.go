@@ -571,6 +571,14 @@ func (u siteUse) handleArgs() {
 			u.branch(roots, pollution.UsageInfo{Block: u.block, Pos: u.pos, Escapes: true}, func(ssa.Value) bool { return false })
 			continue
 		}
+		// A method value such as q.Find hands its receiver on, as a closure
+		// that calls q.Find does (#374).
+		if recv := boundGormReceiver(arg, ctx); recv != nil {
+			if roots := u.roots(recv); roots != nil {
+				u.branch(roots, pollution.UsageInfo{Block: u.block, Pos: u.pos, Escapes: true}, func(ssa.Value) bool { return false })
+			}
+			continue
+		}
 		// Check if arg is *gorm.DB (directly or wrapped in MakeInterface).
 		// Note: We don't skip gorm methods here because we need to pollute
 		// *gorm.DB arguments passed through interface{} (e.g., base.Model(q)).
@@ -734,64 +742,91 @@ func immutableParamContractMessage(name string, dropsState bool) string {
 	return msg + "; isolate it with .Session(&gorm.Session{}) before passing"
 }
 
+// boundGormReceiver returns the receiver of v when v is a method value of a
+// *gorm.DB method, as q.Find is, also converted to a named func type or held
+// by a local variable (callsite.FuncVars.LocalValue). It is nil otherwise.
+func boundGormReceiver(v ssa.Value, ctx *Context) ssa.Value {
+	for {
+		v = ctx.RootTracer.FuncVars().LocalValue(v)
+		ct, ok := v.(*ssa.ChangeType)
+		if !ok {
+			break
+		}
+		v = ct.X
+	}
+	mc, ok := v.(*ssa.MakeClosure)
+	if !ok {
+		return nil
+	}
+	if site, ok := callsite.BoundSite(mc); ok && site.IsGormMethod() {
+		return site.Recv
+	}
+	return nil
+}
+
+// handOn records v, handed on by instr, as a branch of every root it may
+// hold: a send, or a store into a slice, a map or memory. Other code may use
+// what it was handed, so the hand-off is a branch like a call that takes v
+// (#374). It is reported when it runs again, as in a loop, and the roots of a
+// merge besides the first get a branch through it.
+func handOn(instr ssa.Instruction, v ssa.Value, ctx *Context) {
+	u := siteUse{ctx: ctx, block: instr.Block(), pos: ctx.pos(instr.Pos())}
+	if roots := u.roots(v); roots != nil {
+		u.branch(roots, pollution.UsageInfo{Block: u.block, Pos: u.pos, Escapes: true}, func(ssa.Value) bool { return false })
+	}
+}
+
+// handsOnMethodValue reports whether a store into addr hands a method value
+// on: any store but one into a local variable, whose calls FuncVars resolves.
+func handsOnMethodValue(addr ssa.Value) bool {
+	switch addr.(type) {
+	case *ssa.Alloc, *ssa.FreeVar:
+		return false
+	}
+	return true
+}
+
 // sendHandler handles *ssa.Send instructions.
 type sendHandler struct{}
 
-// handle marks *gorm.DB sent to channels as polluted.
-// Handles both direct sends and sends through MakeInterface (chan interface{}).
+// handle branches a *gorm.DB sent on a channel, also through MakeInterface
+// (chan interface{}), and the receiver of a method value sent.
 func (h *sendHandler) handle(send *ssa.Send, ctx *Context) {
-	gormVal, kind := pollutionsource.Leak(send, ctx.RootTracer.FuncVars())
-	if kind == pollutionsource.KindNone {
-		return
+	if gormVal, kind := pollutionsource.Leak(send, ctx.RootTracer.FuncVars()); kind != pollutionsource.KindNone {
+		handOn(send, gormVal, ctx)
+	} else if recv := boundGormReceiver(send.X, ctx); recv != nil {
+		handOn(send, recv, ctx)
 	}
-
-	root := ctx.RootTracer.FindMutableRoot(gormVal, ctx.LoopInfo)
-	if root == nil {
-		return
-	}
-
-	ctx.Tracker.MarkPolluted(root, send.Block(), ctx.pos(send.Pos()))
 }
 
 // storeHandler handles *ssa.Store instructions.
 type storeHandler struct{}
 
-// handle marks *gorm.DB stored to slice elements as polluted.
-// Handles both direct stores and stores through MakeInterface ([]interface{}).
+// handle branches a *gorm.DB stored into a slice or array element, also
+// through MakeInterface ([]interface{}), and the receiver of a method value
+// stored anywhere but in a local variable.
 //
 // The read-only variadic stdlib exemption (fmt.Println(q), log.Printf, t.Logf)
 // lives in pollutionsource.Leak so the purity validator honors it too.
 func (h *storeHandler) handle(store *ssa.Store, ctx *Context) {
-	gormVal, kind := pollutionsource.Leak(store, ctx.RootTracer.FuncVars())
-	if kind == pollutionsource.KindNone {
-		return
+	if gormVal, kind := pollutionsource.Leak(store, ctx.RootTracer.FuncVars()); kind != pollutionsource.KindNone {
+		handOn(store, gormVal, ctx)
+	} else if recv := boundGormReceiver(store.Val, ctx); recv != nil && handsOnMethodValue(store.Addr) {
+		handOn(store, recv, ctx)
 	}
-
-	root := ctx.RootTracer.FindMutableRoot(gormVal, ctx.LoopInfo)
-	if root == nil {
-		return
-	}
-
-	ctx.Tracker.MarkPolluted(root, store.Block(), ctx.pos(store.Pos()))
 }
 
 // mapUpdateHandler handles *ssa.MapUpdate instructions.
 type mapUpdateHandler struct{}
 
-// handle marks *gorm.DB stored in maps as polluted.
-// Handles both direct stores and stores through MakeInterface (map[K]interface{}).
+// handle branches a *gorm.DB stored in a map, also through MakeInterface
+// (map[K]interface{}), and the receiver of a method value stored in one.
 func (h *mapUpdateHandler) handle(mapUpdate *ssa.MapUpdate, ctx *Context) {
-	gormVal, kind := pollutionsource.Leak(mapUpdate, ctx.RootTracer.FuncVars())
-	if kind == pollutionsource.KindNone {
-		return
+	if gormVal, kind := pollutionsource.Leak(mapUpdate, ctx.RootTracer.FuncVars()); kind != pollutionsource.KindNone {
+		handOn(mapUpdate, gormVal, ctx)
+	} else if recv := boundGormReceiver(mapUpdate.Value, ctx); recv != nil {
+		handOn(mapUpdate, recv, ctx)
 	}
-
-	root := ctx.RootTracer.FindMutableRoot(gormVal, ctx.LoopInfo)
-	if root == nil {
-		return
-	}
-
-	ctx.Tracker.MarkPolluted(root, mapUpdate.Block(), ctx.pos(mapUpdate.Pos()))
 }
 
 // makeInterfaceHandler handles *ssa.MakeInterface instructions.

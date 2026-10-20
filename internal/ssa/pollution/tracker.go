@@ -315,13 +315,6 @@ func (t *Tracker) runsWith(root ssa.Value, a, b UsageInfo) bool {
 	return t.reaches(root, a, b) || t.reaches(root, b, a)
 }
 
-// MarkPolluted records a polluting usage that hands the root to other code
-// (a function argument, channel send, slice storage, etc). See
-// UsageInfo.Escapes. Caller must ensure root is not nil.
-func (t *Tracker) MarkPolluted(root ssa.Value, block *ssa.BasicBlock, pos token.Pos) {
-	t.pollutingUses[root] = append(t.pollutingUses[root], UsageInfo{Block: block, Pos: pos, Escapes: true})
-}
-
 // AddContractViolation records a violation of the caller-side immutable-param
 // contract (Phase 1b stage 2b): call passes a mutable *gorm.DB to parameter
 // param of a //gormreuse:immutable-param function. It has a fixed message and

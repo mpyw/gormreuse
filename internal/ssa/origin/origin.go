@@ -26,6 +26,11 @@ import (
 // declared method (callsite.Site does): a bound wrapper takes no receiver
 // argument, and a thunk takes the receiver as its first parameter. fn may be
 // nil.
+//
+// The method of a package that the program did not create, such as gorm's in
+// a package that reaches gorm only through another package, is not a member
+// of the program. go/ssa builds it from type information when the wrapper
+// calls it, so it is found as the wrapper's callee instead (#374).
 func Declared(fn *ssa.Function) *ssa.Function {
 	if fn == nil {
 		return nil
@@ -40,6 +45,33 @@ func Declared(fn *ssa.Function) *ssa.Function {
 		if method := fn.Prog.FuncValue(obj.Origin()); method != nil {
 			return method
 		}
+		if method := wrappedMethod(fn, obj.Origin()); method != nil {
+			return method
+		}
 	}
 	return fn
+}
+
+// wrappedMethod returns the function of method that the wrapper fn calls, or
+// nil when it calls none, as the wrapper of an interface method does.
+func wrappedMethod(fn *ssa.Function, method *types.Func) *ssa.Function {
+	for _, b := range fn.Blocks {
+		for _, instr := range b.Instrs {
+			call, ok := instr.(ssa.CallInstruction)
+			if !ok {
+				continue
+			}
+			callee := call.Common().StaticCallee()
+			if callee == nil {
+				continue
+			}
+			if origin := callee.Origin(); origin != nil {
+				callee = origin
+			}
+			if obj, ok := callee.Object().(*types.Func); ok && obj.Origin() == method {
+				return callee
+			}
+		}
+	}
+	return nil
 }

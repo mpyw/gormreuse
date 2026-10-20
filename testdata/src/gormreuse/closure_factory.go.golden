@@ -187,3 +187,29 @@ func cfRebindEscapes(db *gorm.DB) {
 }
 
 func cfRun(f func()) { f() }
+
+// cfReturnedClosureOfParam is missed: loader returns a closure over its
+// parameter, so each call of load branches q. A call through the returned
+// func value has no callee, and the closure's sites are only those in loader
+// (#374). [LIMITATION]
+func cfReturnedClosureOfParam(db *gorm.DB) {
+	load := cfLoader(db.Session(&gorm.Session{}).Where("age > ?", 18))
+	load("a")
+	load("b")
+}
+
+func cfLoader(q *gorm.DB) func(name string) {
+	return func(name string) { q.Where("name = ?", name).Find(nil) }
+}
+
+// cfReturnedClosureOfCapture is missed: the same for a closure that a local
+// factory returns. [LIMITATION]
+func cfReturnedClosureOfCapture(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("age > ?", 18)
+	mk := func() func() {
+		return func() { q.Find(nil) }
+	}
+	g := mk()
+	g()
+	g()
+}
