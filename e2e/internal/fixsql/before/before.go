@@ -340,3 +340,95 @@ func paginateIsolated(db *gorm.DB, name string) {
 	db.Count(&total)
 	db.Offset(10).Limit(10).Find(&[]User{})
 }
+
+// tenantSvc holds a *gorm.DB that its method changes in place (#310).
+type tenantSvc struct{ db *gorm.DB }
+
+// apply adds the tenant filter to s.db in place.
+func (s *tenantSvc) apply() { s.db.Where("tenant_id = ?", 7) }
+
+// tenantParams holds a *gorm.DB for applyTenantParams (#310).
+type tenantParams struct{ db *gorm.DB }
+
+// applyTenantParams adds the tenant filter to p.db in place.
+func applyTenantParams(p tenantParams) { p.db.Where("tenant_id = ?", 7) }
+
+// applyTenantParamsPtr adds the tenant filter to p.db in place.
+func applyTenantParamsPtr(p *tenantParams) { p.db.Where("tenant_id = ?", 7) }
+
+// tenantOuter nests tenantParams (#310).
+type tenantOuter struct{ in tenantParams }
+
+// applyTenantOuter adds the tenant filter to o.in.db in place.
+func applyTenantOuter(o tenantOuter) { o.in.db.Where("tenant_id = ?", 7) }
+
+// StructReceiver stores q in a struct whose method changes it in place
+// (#310).
+func StructReceiver(db *gorm.DB) {
+	q := db.Model(&User{})
+	s := &tenantSvc{db: q}
+	s.apply()
+	q.Where("name = ?", "x").Find(&[]User{})
+	q.Where("name = ?", "y").Find(&[]User{})
+}
+
+// StructLiteral passes a struct literal holding q by value (#310).
+func StructLiteral(db *gorm.DB) {
+	q := db.Model(&User{})
+	applyTenantParams(tenantParams{db: q})
+	q.Where("name = ?", "x").Find(&[]User{})
+	q.Where("name = ?", "y").Find(&[]User{})
+}
+
+// StructPointerLiteral passes a pointer to a struct literal holding q
+// (#310).
+func StructPointerLiteral(db *gorm.DB) {
+	q := db.Model(&User{})
+	applyTenantParamsPtr(&tenantParams{db: q})
+	q.Where("name = ?", "x").Find(&[]User{})
+	q.Where("name = ?", "y").Find(&[]User{})
+}
+
+// StructFieldStore stores q into a field of a struct declared before
+// (#310).
+func StructFieldStore(db *gorm.DB) {
+	q := db.Model(&User{})
+	var p tenantParams
+	p.db = q
+	applyTenantParamsPtr(&p)
+	q.Where("name = ?", "x").Find(&[]User{})
+	q.Where("name = ?", "y").Find(&[]User{})
+}
+
+// StructNested passes q inside a nested struct (#310).
+func StructNested(db *gorm.DB) {
+	q := db.Model(&User{})
+	applyTenantOuter(tenantOuter{in: tenantParams{db: q}})
+	q.Where("name = ?", "x").Find(&[]User{})
+	q.Where("name = ?", "y").Find(&[]User{})
+}
+
+// structParamQueries stores its parameter in a struct whose method changes
+// it in place. StructParam passes a mid-chain value, so tx cannot be
+// declared immutable-param, and the fix would be a Session at the top of the
+// body (#310).
+func structParamQueries(tx *gorm.DB) {
+	s := &tenantSvc{db: tx}
+	s.apply()
+	tx.Where("name = ?", "x").Find(&[]User{})
+	tx.Where("name = ?", "y").Find(&[]User{})
+}
+
+// StructParam calls structParamQueries with a mid-chain value (#310).
+func StructParam(db *gorm.DB) {
+	structParamQueries(db.Model(&User{}))
+}
+
+// StructAfterLastUse passes a struct holding q after its last query. Nothing
+// sees what applyTenantParams changes, so the root gets a Session (#310).
+func StructAfterLastUse(db *gorm.DB) {
+	q := db.Model(&User{})
+	q.Where("name = ?", "x").Find(&[]User{})
+	q.Where("name = ?", "y").Find(&[]User{})
+	applyTenantParams(tenantParams{db: q})
+}

@@ -29,7 +29,7 @@ func reassignsInClosure(root ssa.Value, uses []pollution.UsageInfo, reassigned m
 
 // withClosures returns fn and the closures it declares, at any depth.
 //
-//declscope:shared // change.go's changedElsewhere scans each of them
+//declscope:shared // change.go's changedElsewhere and holder.go's holderChangesRoot scan each of them
 func withClosures(fn *ssa.Function) []*ssa.Function {
 	fns := []*ssa.Function{fn}
 	for i := 0; i < len(fns); i++ {

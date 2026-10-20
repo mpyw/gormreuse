@@ -25,7 +25,10 @@ import (
 //     a chain whose only result is the field, as in
 //     `if err := q.Where("a").Error; ...`;
 //   - a go statement hands the root to a call, as in `go applyTenant(q)`. The
-//     goroutine may change it while the uses after the statement run.
+//     goroutine may change it while the uses after the statement run;
+//   - the root is stored into a struct field or an element that other code
+//     can reach, as in `s := &Svc{db: q}; s.apply()` (see
+//     holderChangesRoot, #310).
 //
 // A Session at the root makes each of them see a copy (#243).
 //
@@ -36,6 +39,9 @@ func (g *Generator) changedElsewhere(v pollution.Violation) bool {
 		if use.Escapes && changeSeenAfterEscape(g.cfg, tracer.RootBlock(v.Root), use, v.AllUses, ordered, g.tracer.FuncVars()) {
 			return true
 		}
+	}
+	if g.holderChangesRoot(v, ordered) {
+		return true
 	}
 	for _, f := range withClosures(v.Root.Parent()) {
 		loopInfo := g.cfg.DetectLoops(f)
@@ -69,6 +75,8 @@ func (g *Generator) changedElsewhere(v pollution.Violation) bool {
 // use, as in `q.Find(&a); render(q)`, keeps its fix. def is the block that
 // defines the root: an escape runs again when the checker's cfg.Repeats says
 // so. vars resolves calls through package-level function variables.
+//
+//declscope:shared // holder.go's holderStoreChangesRoot takes each point where a struct holding the root is reached as an escape
 func changeSeenAfterEscape(a *cfg.Analyzer, def *ssa.BasicBlock, escape pollution.UsageInfo, uses []pollution.UsageInfo, ordered bool, vars callsite.FuncVars) bool {
 	if !ordered || useRepeatsAfter(a, escape.Block, def) || changeSeenThroughResult(escape, vars) {
 		return true
@@ -94,23 +102,34 @@ func changeSeenThroughResult(use pollution.UsageInfo, vars callsite.FuncVars) bo
 }
 
 // carriesRootChanges reports whether x, a *gorm.DB whose state field is read,
-// is root or a chain on root of *gorm.DB methods that runs no query. The
-// tracer makes each call its own root, so the chain is walked down its
-// receivers. The walk stops at a finisher, whose result holds its own query's
-// outcome, as in q.Where("a").Find(&x).Error, and at a Session-family call,
-// whose result is a copy.
+// is root or a chain on root of *gorm.DB methods that runs no query (see
+// changeCarryingRoots).
 func (g *Generator) carriesRootChanges(root, x ssa.Value, loopInfo *cfg.LoopInfo) bool {
+	return slices.Contains(g.changeCarryingRoots(x, loopInfo), root)
+}
+
+// changeCarryingRoots returns the roots whose in-place changes x, a *gorm.DB,
+// carries: its own root, and the roots of the receivers of a chain of
+// *gorm.DB methods that runs no query. The tracer makes each call its own
+// root, so the chain is walked down its receivers. The walk stops at a
+// finisher, whose result holds its own query's outcome, as in
+// q.Where("a").Find(&x).Error, and at a Session-family call, whose result is
+// a copy.
+//
+//declscope:shared // holder.go's holderStores keys the struct stores by them
+func (g *Generator) changeCarryingRoots(x ssa.Value, loopInfo *cfg.LoopInfo) []ssa.Value {
+	var roots []ssa.Value
 	for {
-		if g.tracer.FindMutableRoot(x, loopInfo) == root {
-			return true
+		if root := g.tracer.FindMutableRoot(x, loopInfo); root != nil {
+			roots = append(roots, root)
 		}
 		call, ok := x.(*ssa.Call)
 		if !ok {
-			return false
+			return roots
 		}
 		site := g.tracer.Site(call)
 		if !site.IsGormMethod() || isGormFinisher(site.Method()) || typeutil.IsImmutableReturningBuiltin(site.Method()) {
-			return false
+			return roots
 		}
 		x = site.Recv
 	}
