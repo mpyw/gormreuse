@@ -1,0 +1,254 @@
+--- fix_handoff.go	1970-01-01 00:00:00
++++ fix_handoff.go.golden	1970-01-01 00:00:00
+@@ -1,244 +1,246 @@
+ package internal
+ 
+ import "gorm.io/gorm"
+ 
+ // Fixtures for issue #347: a root handed to a helper that only runs queries
+ // on it, or to a recursive call of the function whose parameter it is, keeps
+ // its fix. The helper's only in-place change to the root is the pollution of
+ // its queries, which the fix removes.
+ 
+ // ===== FIX: the helper only runs queries =====
+ 
+ func hoDeleteByID(db *gorm.DB, id int) error {
+ 	return db.Where("id = ?", id).Delete(&User{}).Error
+ }
+ 
+ func hoGroupName(tx *gorm.DB, id int) (string, error) {
+ 	var name string
+ 	err := tx.Model(&User{}).Where("id = ?", id).Select("name").Find(&name).Error
+ 	return name, err
+ }
+ 
+ func hoRawCount(tx *gorm.DB) int64 {
+ 	var n int64
+ 	tx.Raw("SELECT count(*) FROM users").Scan(&n)
+ 	return n
+ }
+ 
+ func hoSessionCount(tx *gorm.DB) int64 {
+ 	var n int64
+ 	tx.Session(&gorm.Session{}).Count(&n)
+ 	return n
+ }
+ 
+ func hoUnused(tx *gorm.DB) {}
+ 
+ // hoFinisherHelper: hoDeleteByID runs its own query on q.
+ func hoFinisherHelper(db *gorm.DB) {
+-	q := db.Model(&User{}).Where("tenant_id = ?", 1)
++	q := db.Model(&User{}).Where("tenant_id = ?", 1).Session(&gorm.Session{})
+ 	_ = hoDeleteByID(q, 7)
+ 	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // hoSelectHelper: the helper's chain ends in Find, and its Error is read.
+ func hoSelectHelper(db *gorm.DB) {
+-	q := db.Where("tenant_id = ?", 1)
++	q := db.Where("tenant_id = ?", 1).Session(&gorm.Session{})
+ 	_, _ = hoGroupName(q, 7)
+ 	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // hoRawHelper: Raw(...).Scan(...) is a chain that ends in a finisher.
+ func hoRawHelper(db *gorm.DB) {
+-	q := db.Where("tenant_id = ?", 1)
++	q := db.Where("tenant_id = ?", 1).Session(&gorm.Session{})
+ 	hoRawCount(q)
+ 	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // hoSessionHelper: the helper takes a Session copy first.
+ func hoSessionHelper(db *gorm.DB) {
+-	q := db.Where("tenant_id = ?", 1)
++	q := db.Where("tenant_id = ?", 1).Session(&gorm.Session{})
+ 	hoSessionCount(q)
+ 	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // hoUnusedHelper: the helper does not use its parameter at all.
+ func hoUnusedHelper(db *gorm.DB) {
+-	q := db.Where("tenant_id = ?", 1)
++	q := db.Where("tenant_id = ?", 1).Session(&gorm.Session{})
+ 	hoUnused(q)
+ 	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // hoParamHelper: a parameter handed to such a helper and used again gets its
+ // fix, here immutable-param, since no caller passes a mutable value.
++//gormreuse:immutable-param
+ func hoParamHelper(tx *gorm.DB) error {
+ 	if err := hoDeleteByID(tx, 1); err != nil {
+ 		return err
+ 	}
+ 	return tx.Find(&[]User{}).Error // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // ===== FIX: a recursive call of the parameter's own function =====
+ 
+ type hoMenu struct {
+ 	ID       uint
+ 	Children []hoMenu
+ }
+ 
+ // hoCreateMenus calls itself with tx. The body Session rebinds tx in every
+ // call, so the callee changes only its own copy.
+ func hoCreateMenus(tx *gorm.DB, menus []hoMenu) error {
++	tx = tx.Session(&gorm.Session{})
+ 	for i := range menus {
+ 		if err := tx.Create(&menus[i]).Error; err != nil { // want `\*gorm\.DB reused: second branch from mutable root`
+ 			return err
+ 		}
+ 		if err := hoCreateMenus(tx, menus[i].Children); err != nil { // want `\*gorm\.DB reused: second branch from mutable root`
+ 			return err
+ 		}
+ 	}
+ 	return nil
+ }
+ 
+ // ===== NO FIX: the helper changes the root, or reaches it otherwise =====
+ 
+ var hoSaved *gorm.DB
+ 
+ func hoReadsError(tx *gorm.DB) error {
+ 	tx.Find(&[]User{})
+ 	return tx.Error
+ }
+ 
+ func hoReadsChainError(tx *gorm.DB) error {
+ 	return tx.Where("a = 1").Error
+ }
+ 
+ func hoStores(tx *gorm.DB) {
+ 	hoSaved = tx
+ }
+ 
+ func hoForwards(tx *gorm.DB) {
+ 	fixEscapeApplyTenant(tx, 1)
+ }
+ 
+ func hoScopes(tx *gorm.DB, scope func(*gorm.DB) *gorm.DB) {
+ 	tx.Scopes(scope).Find(&[]User{})
+ }
+ 
+ func hoReturns(tx *gorm.DB) *gorm.DB {
+ 	return tx.Find(&[]User{})
+ }
+ 
+ func hoAddsError(tx *gorm.DB) {
+ 	tx.AddError(nil)
+ }
+ 
+ func hoCaptures(tx *gorm.DB) {
+ 	func() { tx.Find(&[]User{}) }()
+ }
+ 
+ func hoMidChainDiscarded(tx *gorm.DB) {
+ 	tx.Find(&[]User{}).Where("a = 1")
+ }
+ 
+ func hoWithCallback(tx *gorm.DB, f func()) {
+ 	tx.Find(&[]User{})
+ 	f()
+ }
+ 
+ // hoNoFixReadsError: the helper reads the errors the root carries.
+ func hoNoFixReadsError(db *gorm.DB) {
+ 	q := db.Where("tenant_id = ?", 1)
+ 	_ = hoReadsError(q)
+ 	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // hoNoFixReadsChainError: the helper reads the Error of a chain that runs no
+ // query.
+ func hoNoFixReadsChainError(db *gorm.DB) {
+ 	q := db.Where("tenant_id = ?", 1)
+ 	_ = hoReadsChainError(q)
+ 	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // hoNoFixStores: the helper stores the root.
+ func hoNoFixStores(db *gorm.DB) {
+ 	q := db.Where("tenant_id = ?", 1)
+ 	hoStores(q)
+ 	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // hoNoFixForwards: the helper hands the root to a helper that changes it.
+ func hoNoFixForwards(db *gorm.DB) {
+ 	q := db.Where("tenant_id = ?", 1)
+ 	hoForwards(q)
+ 	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // hoNoFixScopes: a scope may change the Statement it is given.
+ func hoNoFixScopes(db *gorm.DB) {
+ 	q := db.Where("tenant_id = ?", 1)
+ 	hoScopes(q, func(d *gorm.DB) *gorm.DB { return d })
+ 	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // hoNoFixReturns: the helper returns the root.
+ func hoNoFixReturns(db *gorm.DB) {
+ 	q := db.Where("tenant_id = ?", 1)
+ 	_ = hoReturns(q)
+ 	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // hoNoFixAddsError: AddError changes the root's Error in place.
+ func hoNoFixAddsError(db *gorm.DB) {
+ 	q := db.Where("tenant_id = ?", 1)
+ 	hoAddsError(q)
+ 	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // hoNoFixCaptures: the helper captures the root in a closure.
+ func hoNoFixCaptures(db *gorm.DB) {
+ 	q := db.Where("tenant_id = ?", 1)
+ 	hoCaptures(q)
+ 	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // hoNoFixMidChainDiscarded: a chain on the query's result is discarded.
+ func hoNoFixMidChainDiscarded(db *gorm.DB) {
+ 	q := db.Where("tenant_id = ?", 1)
+ 	hoMidChainDiscarded(q)
+ 	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // hoNoFixCallbackArg: the function passed with the root may change it.
+ func hoNoFixCallbackArg(db *gorm.DB) {
+ 	q := db.Where("tenant_id = ?", 1)
+ 	hoWithCallback(q, func() { q.Where("a = 1") }) // want `\*gorm\.DB reused: second branch from mutable root`
+ 	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // hoNoFixGo: a goroutine runs the helper while the query after it runs.
+ func hoNoFixGo(db *gorm.DB) {
+ 	q := db.Where("tenant_id = ?", 1)
+ 	go hoUnused(q) // want `\*gorm\.DB reused: second branch from mutable root`
+ 	q.Find(&[]User{})
+ 	q.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // hoRecursesWithDiscarded changes tx in place before it calls itself, so
+ // its callers may rely on the change.
+ func hoRecursesWithDiscarded(tx *gorm.DB, n int) {
+ 	tx.Where("a = 1")
+ 	if n > 0 {
+ 		hoRecursesWithDiscarded(tx, n-1) // want `\*gorm\.DB reused: second branch from mutable root`
+ 	}
+ 	tx.Find(&[]User{}) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // hoSwaps passes its parameters to each other's position. b is handed on,
+ // not only queried, so a's change through it is not ruled out.
+ func hoSwaps(a, b *gorm.DB, n int) {
+ 	a.Find(&[]User{})
+ 	if n > 0 {
+ 		hoSwaps(b, a, n-1) // want `\*gorm\.DB reused: second branch from mutable root`
+ 	}
+ 	a.Count(new(int64)) // want `\*gorm\.DB reused: second branch from mutable root`
+ }

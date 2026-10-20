@@ -561,7 +561,8 @@
  // passQDirectlyToNonPure demonstrates passing q directly to non-pure function.
  // Non-pure function pollutes its argument, so q is polluted after the call.
  func passQDirectlyToNonPure(db *gorm.DB) {
- 	q := db.Where("base")
+-	q := db.Where("base")
++	q := db.Where("base").Session(&gorm.Session{})
  	voidFunc(q)
  	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  }
@@ -590,7 +591,8 @@
  
  // passQDirectlyToMixedFunctions demonstrates passing q to both pure and non-pure functions.
  func passQDirectlyToMixedFunctions(db *gorm.DB) {
- 	q := db.Where("base")
+-	q := db.Where("base")
++	q := db.Where("base").Session(&gorm.Session{})
  	pureReturnsDB(q) // OK: pure doesn't pollute
  	voidFunc(q)      // Pollutes q
  	q.Find(nil)      // want `\*gorm\.DB reused: second branch from mutable root`

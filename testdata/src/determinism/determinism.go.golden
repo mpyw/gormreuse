@@ -37,9 +37,9 @@ func twoRootsSwapped(db *gorm.DB) {
 //
 //gormreuse:immutable-param
 func threeRoots(db *gorm.DB) {
-	p := db.Where("a")
-	q := db.Where("b")
-	r := db.Where("c")
+	p := db.Where("a").Session(&gorm.Session{})
+	q := db.Where("b").Session(&gorm.Session{})
+	r := db.Where("c").Session(&gorm.Session{})
 	p.Find(nil)
 	q.Find(nil)
 	r.Find(nil)

@@ -1,0 +1,26 @@
+--- handoff_use.go	1970-01-01 00:00:00
++++ handoff_use.go.golden	1970-01-01 00:00:00
+@@ -1,22 +1,22 @@
+ package externalpure
+ 
+ import (
+ 	"gorm.io/gorm"
+ 
+ 	"purelib"
+ )
+ 
+ // purelib.DeleteByID only runs a query on q, as its fact says, so q keeps
+ // its fix (#347).
+ func finisherOnlyAcrossPackages(db *gorm.DB) {
+-	q := db.Where("x = ?", 1)
++	q := db.Where("x = ?", 1).Session(&gorm.Session{})
+ 	_ = purelib.DeleteByID(q, 7)
+ 	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // purelib.ApplyTenant changes q in place: no fix.
+ func changedAcrossPackages(db *gorm.DB) {
+ 	q := db.Where("x = ?", 1)
+ 	purelib.ApplyTenant(q, 7)
+ 	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }

@@ -545,6 +545,8 @@ These do not count:
 
 - The receiver of a query (`go q.Count(&n)`). With the Session, the query runs on a copy.
 - A subquery (`db.Where("id IN (?)", q)`). It only reads `q`.
+- An argument of a function that only runs queries on it (#347), as in `func deleteByID(db *gorm.DB, id int) error { return db.Where("id = ?", id).Delete(&User{}).Error }`. Each use of the parameter must start a chain that ends in a finisher or in `Session`, `WithContext` or `Debug`. The function must not read the parameter's `Error`, other than the `Error` or `RowsAffected` of a query's result. It must not store it, return a `*gorm.DB`, capture it in a closure, hand it to another call, or pass a function to a method of the chain. The call must be a plain call by name, and no other argument may hold `q` or a function. A function in another package counts when its package's analysis found the same.
+- A parameter passed to a recursive call of its own function, as in `createMenus(tx, m.Children)` inside `createMenus`, when no discarded statement is reassigned (#347). The body Session rebinds the parameter in every call.
 
 </td></tr>
 <tr><td>

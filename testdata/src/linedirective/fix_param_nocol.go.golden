@@ -7,7 +7,7 @@ import "gorm.io/gorm"
 // (issue #244).
 
 //line gen.go:10
-func ExportedParamNoColumn(tx *gorm.DB) {
+func ExportedParamNoColumn(tx *gorm.DB) { // want ExportedParamNoColumn:`gormreuse finisher-only\[0\]`
 	tx = tx.Session(&gorm.Session{})
 	tx.Find(nil)
 	tx.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`

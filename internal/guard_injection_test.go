@@ -36,10 +36,12 @@ func TestPanicInjection(t *testing.T) {
 		t.Fatal(err)
 	}
 	const (
-		pureFact      = "gormreuse pure"
-		inferredFact  = "gormreuse immutable-return"
-		inputFact     = "gormreuse immutable-input(cb)"
-		branchFact    = "gormreuse immutable-param"
+		pureFact     = "gormreuse pure finisher-only[0]"
+		inferredFact = "gormreuse immutable-return"
+		inputFact    = "gormreuse immutable-input(cb) finisher-only[0]"
+		branchFact   = "gormreuse immutable-param finisher-only[0]"
+		// What Each exports when its contract is not trusted (#347).
+		eachQueries   = "gormreuse finisher-only[0]"
 		reused        = "*gorm.DB reused"
 		internalError = "gormreuse: internal error"
 	)
@@ -73,9 +75,9 @@ func TestPanicInjection(t *testing.T) {
 		wantFacts map[string]string
 	}{
 		{"", "", "", nil, baseFacts},
-		{"pure", "Peek", "", []string{internalError + " analyzing Peek", reused}, with(map[string]string{"Peek": "gormreuse pure pure-failed"})},
+		{"pure", "Peek", "", []string{internalError + " analyzing Peek", reused}, with(map[string]string{"Peek": "gormreuse pure pure-failed finisher-only[0]"})},
 		{"immutable-return", "Conn", "", []string{internalError + " analyzing Conn"}, with(map[string]string{"Conn": "", "ConnVia": ""})},
-		{"immutable-input", "Each", "", []string{internalError + " analyzing Each"}, with(map[string]string{"Each": ""})},
+		{"immutable-input", "Each", "", []string{internalError + " analyzing Each"}, with(map[string]string{"Each": eachQueries})},
 		{"immutable-param", "Branch", "", []string{internalError + " analyzing Branch"}, baseFacts},
 		{"reuse", "usePeek", "", []string{internalError + " analyzing usePeek"}, baseFacts},
 		{"facts", "Conn", "", []string{internalError + " analyzing Conn"}, with(map[string]string{"Conn": ""})},
@@ -84,7 +86,7 @@ func TestPanicInjection(t *testing.T) {
 		{"Scopes callbacks", "", "", []string{internalError + " in Scopes callbacks"}, baseFacts},
 		{"immutable callbacks", "", "", []string{internalError + " in immutable callbacks", reused}, baseFacts},
 		{"Scopes warnings", "", "", []string{internalError + " in Scopes warnings"}, baseFacts},
-		{"distrusted contracts", "", "", []string{internalError + " in distrusted contracts"}, with(map[string]string{"Conn": "", "ConnVia": "", "Fresh": "", "Each": ""})},
+		{"distrusted contracts", "", "", []string{internalError + " in distrusted contracts"}, with(map[string]string{"Conn": "", "ConnVia": "", "Fresh": "", "Each": eachQueries})},
 		{"function variables", "", "", []string{internalError + " in function variables"}, baseFacts},
 		{"unused immutable-input", "", "", []string{internalError + " in unused immutable-input"}, baseFacts},
 		{"package initializer", "", "", []string{internalError + " in package initializer"}, baseFacts},

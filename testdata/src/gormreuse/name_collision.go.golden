@@ -26,10 +26,10 @@ func collisionFreeFuncOpen(db *gorm.DB) {
 
 // Debug is a user-defined package-level function sharing a name with the gorm
 // Debug method. It pollutes its argument; the discarded call must pollute q.
-func Debug(db *gorm.DB) { db.Find(&[]User{}) }
+func Debug(db *gorm.DB) { db.Find(&[]User{}) } // want Debug:`gormreuse finisher-only\[0\]`
 
 func collisionFreeFuncDebug(db *gorm.DB) {
-	q := db.Where("x = ?", 1)
+	q := db.Where("x = ?", 1).Session(&gorm.Session{})
 	Debug(q)
 	q.Count(new(int64)) // want `\*gorm\.DB reused: second branch from mutable root`
 }

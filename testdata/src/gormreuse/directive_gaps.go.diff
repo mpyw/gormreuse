@@ -93,7 +93,8 @@
  	a := func(q *gorm.DB) { q.Find(nil) }; b := func(q *gorm.DB) { //gormreuse:pure
  		_ = q.Session(&gorm.Session{})
  	}
- 	q := db.Where("x")
+-	q := db.Where("x")
++	q := db.Where("x").Session(&gorm.Session{})
  	a(q)
  	b(q)
  	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`

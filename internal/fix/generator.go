@@ -75,6 +75,10 @@ type Generator struct {
 	cfg *cfg.Analyzer // the CFG cache of the pass, shared with the checker (#299)
 	//declscope:shared // holder.go memoizes the struct stores of each function in it for change.go
 	holders holderCache
+	//declscope:shared // handoff.go memoizes the finisher-only parameters of each function in it
+	handoffs handoffCache
+	//declscope:shared // handoff.go reads the finisher-only parameters of another package's functions with it
+	importedFinisherOnly func(*ssa.Function) []int // from the facts of other packages
 
 	files   map[*token.File]*ast.File      // token.File -> ast.File mapping
 	cursors map[*ast.File]inspector.Cursor // file cursors in the pass inspector
@@ -96,7 +100,10 @@ type Generator struct {
 // diagnostic share the answers (#299). discardsParam are the immutable-param
 // functions that discard a chain on a parameter: no fix isolates an argument
 // to one of them, since the isolation would drop the change (#346).
-func NewGenerator(pass *analysis.Pass, scopesCallbacks map[*ssa.Function]bool, rt *tracer.RootTracer, funcs []*ssa.Function, seesAllCallers func(token.Pos) bool, cfgs *cfg.Analyzer, discardsParam map[*ssa.Function]bool) *Generator {
+// importedFinisherOnly returns the finisher-only parameters of a function of
+// another package, from its fact (see HandoffFinisherOnlyParams, #347); it
+// may be nil.
+func NewGenerator(pass *analysis.Pass, scopesCallbacks map[*ssa.Function]bool, rt *tracer.RootTracer, funcs []*ssa.Function, seesAllCallers func(token.Pos) bool, cfgs *cfg.Analyzer, discardsParam map[*ssa.Function]bool, importedFinisherOnly func(*ssa.Function) []int) *Generator {
 	// Build token.File -> ast.File mapping
 	files := make(map[*token.File]*ast.File)
 	for _, f := range pass.Files {
@@ -123,6 +130,8 @@ func NewGenerator(pass *analysis.Pass, scopesCallbacks map[*ssa.Function]bool, r
 		seesAllCallers:  seesAllCallers,
 		cfg:             cfgs,
 		discardsParam:   discardsParam,
+
+		importedFinisherOnly: importedFinisherOnly,
 	}
 }
 
@@ -182,12 +191,6 @@ func (g *Generator) Generate(v pollution.Violation) []analysis.SuggestedFix {
 		return fallback // No uses to fix
 	}
 
-	// Code that changes the root in place, other than a discarded statement on
-	// its variable, would change a copy once the root gets a Session (#243).
-	if g.changedElsewhere(v) {
-		return fallback
-	}
-
 	// The variable a reassignment rewrites. nil means no reassignment is safe,
 	// and the fix falls back to a Session at the root.
 	target := g.findReassignTarget(root, allUses)
@@ -195,6 +198,12 @@ func (g *Generator) Generate(v pollution.Violation) []analysis.SuggestedFix {
 	// Phase 1: Identify non-finisher uses that need reassignment
 	reassigned, ok := g.findReassignedChains(allUses, target)
 	if !ok {
+		return fallback
+	}
+
+	// Code that changes the root in place, other than a discarded statement on
+	// its variable, would change a copy once the root gets a Session (#243).
+	if g.changedElsewhere(v, len(reassigned) == 0) {
 		return fallback
 	}
 

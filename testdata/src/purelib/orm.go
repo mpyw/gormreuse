@@ -52,7 +52,7 @@ func Inspect(db *gorm.DB) { // want Inspect:"gormreuse pure"
 }
 
 // Unmarked has no directive, so callers treat it as polluting db.
-func Unmarked(db *gorm.DB) {
+func Unmarked(db *gorm.DB) { // want Unmarked:`gormreuse finisher-only\[0\]`
 	_ = db
 }
 

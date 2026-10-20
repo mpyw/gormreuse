@@ -73,7 +73,7 @@ func closureNoPure(db *gorm.DB) {
 		_ = q
 	}
 
-	q := db.Where("base")
+	q := db.Where("base").Session(&gorm.Session{})
 	impureHelper(q)
 	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
@@ -475,7 +475,7 @@ func multiAssign05(db *gorm.DB) {
 	a(q)
 	q.Find(nil) // OK - a is pure
 
-	q2 := db.Where("base2")
+	q2 := db.Where("base2").Session(&gorm.Session{})
 	b(q2)
 	q2.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
@@ -490,7 +490,7 @@ func multiAssign06(db *gorm.DB) {
 	a(q)
 	q.Find(nil) // OK - a is pure
 
-	q2 := db.Where("base2")
+	q2 := db.Where("base2").Session(&gorm.Session{})
 	b(q2)
 	q2.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
@@ -562,7 +562,7 @@ func multiAssign09(db *gorm.DB) {
 	a(q1)
 	q1.Find(nil) // OK - a is pure
 
-	q2 := db.Where("base2")
+	q2 := db.Where("base2").Session(&gorm.Session{})
 	b(q2)
 	q2.Find(nil) // want "reused"
 

@@ -11,7 +11,7 @@ import (
 // and a Session on a Phi edge whose last call is a chain method.
 
 // ParamExported can be called from another package.
-func ParamExported(tx *gorm.DB) {
+func ParamExported(tx *gorm.DB) { // want ParamExported:`gormreuse finisher-only\[0\]`
 	tx.Where("a").Find(nil)
 	tx.Where("b").Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }

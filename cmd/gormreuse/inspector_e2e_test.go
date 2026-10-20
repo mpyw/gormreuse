@@ -252,7 +252,13 @@ const inspectorDiff = `--- $DIR/app.go (old)
  func unusedIgnore() {}
  
  //gormreuse:pure
-@@ -35,7 +34,6 @@
+@@ -30,12 +29,11 @@
+ }
+ 
+ func usesNotPure(db *gorm.DB) {
+-	q := db.Where("x")
++	q := db.Where("x").Session(&gorm.Session{})
+ 	notPureHelper(q)
  	q.Find(nil)
  }
  
@@ -260,7 +266,7 @@ const inspectorDiff = `--- $DIR/app.go (old)
  func pureWithoutDB(n int) {}
  
  func closures(db *gorm.DB) {
-@@ -44,7 +42,8 @@
+@@ -44,10 +38,11 @@
  	g := func(q *gorm.DB) { //gormreuse:pure
  	}
  	//gormreuse:pure
@@ -269,8 +275,12 @@ const inspectorDiff = `--- $DIR/app.go (old)
 +	c := func(q *gorm.DB) {}
  	h := func(q *gorm.DB) {}
  	_, _ = b, c
- 	q := db.Where("x")
-@@ -56,14 +55,13 @@
+-	q := db.Where("x")
++	q := db.Where("x").Session(&gorm.Session{})
+ 	f(q)
+ 	g(q)
+ 	a(q)
+@@ -56,14 +49,13 @@
  }
  
  func trailing() {
@@ -286,7 +296,7 @@ const inspectorDiff = `--- $DIR/app.go (old)
  func noReturn(db *gorm.DB) {}
  
  func usesBase(db *gorm.DB) {
-@@ -79,17 +71,18 @@
+@@ -79,17 +65,18 @@
  }
  
  func nested(db *gorm.DB, run func(func())) {
