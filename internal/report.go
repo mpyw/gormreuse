@@ -25,10 +25,28 @@ import (
 //
 // Positions are compared by file name and offset, not as token.Pos: the
 // loader parses files concurrently, so their order in the file set can vary.
+//
+// It also drops the suggested fixes of a diagnostic in a file of cmd/cgo's
+// output (#346). The fix's offsets are offsets in that file, while drivers
+// name the user's file in -json output, through the //line directive cgo
+// writes. A consumer that applied them to the user's file would corrupt it.
 func ReportInOrder(pass *analysis.Pass) (flush func()) {
 	report := pass.Report
 	var diags []analysis.Diagnostic
-	pass.Report = func(d analysis.Diagnostic) { diags = append(diags, d) }
+	cgoFiles := make(map[*token.File]bool)
+	for _, file := range pass.Files {
+		if IsCgoOutput(file) {
+			cgoFiles[pass.Fset.File(file.Pos())] = true
+		}
+	}
+	pass.Report = func(d analysis.Diagnostic) {
+		if len(cgoFiles) > 0 && slices.ContainsFunc(d.SuggestedFixes, func(f analysis.SuggestedFix) bool {
+			return slices.ContainsFunc(f.TextEdits, func(e analysis.TextEdit) bool { return cgoFiles[pass.Fset.File(e.Pos)] })
+		}) {
+			d.SuggestedFixes = nil
+		}
+		diags = append(diags, d)
+	}
 	return func() {
 		pass.Report = report
 		slices.SortStableFunc(diags, func(a, b analysis.Diagnostic) int {

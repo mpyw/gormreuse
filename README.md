@@ -340,7 +340,7 @@ The command exits with status `3` when it reports a diagnostic. It exits with `0
 | --- | --- | --- | --- |
 | `*_test.go` | Unless `-test=false` | Checked | Yes |
 | Generated (contains `// Code generated ... DO NOT EDIT.`) | Never. They cannot be opted in | Not checked, so not trusted. At any call, in the same package or another, a function in a generated file counts as unmarked, whatever directive it carries | No |
-| Files that import `"C"` | Yes. The header that cgo adds to its output does not count | Checked | No. The driver treats cgo's output as generated |
+| Files that import `"C"` | Yes. The header that cgo adds to its output does not count | Checked | No. Their diagnostics carry no fix: the offsets would be in cgo's output, not in your file |
 
 | Where gormreuse fails | Report |
 | --- | --- |
@@ -475,7 +475,7 @@ A root that still has two or more branches on one path gets `.Session(&gorm.Sess
 
 - Each diagnostic's fix carries its own import edit. So an editor can apply one quick fix alone.
 - Every diagnostic of a root carries the same fix.
-- A root with a diagnostic that `//gormreuse:ignore` suppresses gets **no fix**. The ignore says that reuse is meant. The fix would change it too, so the next run would report the ignore as unused.
+- A root with a diagnostic that `//gormreuse:ignore` suppresses gets **no fix**. The ignore says that reuse is meant. The fix would change it too, so the next run would report the ignore as unused. This holds when the ignore is in another function, such as a closure stored in a variable.
 
 </details>
 
@@ -680,7 +680,7 @@ A mutable argument to an [`immutable-param`](#gormreuseimmutable-param) paramete
 
 | Diagnostic | Fix |
 | --- | --- |
-| Mutable `*gorm.DB` passed to an `immutable-param` parameter | Append `.Session(&gorm.Session{})` to the argument. An argument such as `*p` is wrapped first: `(*p).Session(...)`. When a call passes several mutable arguments, the fix isolates all of them. `Session` is named and imported as in [Strategy 2](#strategy-2-session-making-roots-immutable) |
+| Mutable `*gorm.DB` passed to an `immutable-param` parameter | Append `.Session(&gorm.Session{})` to the argument. An argument such as `*p` is wrapped first: `(*p).Session(...)`. When a call passes several mutable arguments, the fix isolates all of them. `Session` is named and imported as in [Strategy 2](#strategy-2-session-making-roots-immutable). No fix when the function [discards a chain on its parameter](#gormreuseimmutable-param): the Session would drop that condition |
 | Unused `pure`, `immutable-return`, `immutable-param` or `immutable-input(name)` | Delete that name from the comment |
 | Redundant `immutable-param` | Delete `immutable-param` from the function's comment. A comment before `a, b := func..., func...` covers both closures. So it gets no fix while another closure still needs it |
 | Unused `ignore` | Delete `ignore` from the comment |
@@ -1937,9 +1937,23 @@ Fix it by passing an isolated value (`root.Session(&gorm.Session{})`). Or make t
 | Direct calls, function and method values, method expressions and generic instances | Yes |
 | The same calls under `go` and `defer` | Yes |
 | A function in another package | Yes |
+| A call in a package-level initializer, such as `var n = count(DB.Where("x"))` | Yes |
 | A call through an interface or a func-typed parameter | No. The callee is unknown |
 
 **Tip:** combine with `//gormreuse:pure` when a helper both leaves its argument unpolluted and expects an isolated value. If the `pure` check fails, the caller check still applies.
+
+A statement that **discards a chain** on the parameter is reported, because the parameter is isolated and the call changes a copy:
+
+```go
+//gormreuse:immutable-param
+func applyTenant(tx *gorm.DB) {
+    // VIOLATION: immutable-param declared but the result of tx.Where is discarded
+    tx.Where("tenant_id = ?", 1)
+    tx.Find(&users)
+}
+```
+
+Without the directive this statement adds the condition to the caller's value, and the function's own `Find` sees it. So a mutable argument to such a function gets no fix: a Session would drop the condition. Assign the result (`tx = tx.Where(...)`), or remove the directive.
 
 `immutable-param` does not exempt the parameter of a function passed to `Scopes`, `Preload` or `Connection`. gorm passes these callbacks a `clone == 0` handle, so their reuse is still reported.
 

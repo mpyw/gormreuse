@@ -35,6 +35,18 @@ func fixIgnoredRootNextLine(db *gorm.DB) {
 	q.Count(nil)
 }
 
+// fixIgnoredRootStoredClosure: the ignored reuse is in a stored closure,
+// which is analyzed as a function of its own (#346).
+func fixIgnoredRootStoredClosure(db *gorm.DB) {
+	q := db.Where("x")
+	f := func() {
+		q.Find(nil)
+		q.Count(nil) //gormreuse:ignore
+	}
+	f()
+	q.First(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
 // ===== FIXED =====
 
 // fixIgnoredRootOther: the ignore covers r's reuse, not q's, so q keeps its

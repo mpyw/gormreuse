@@ -52,6 +52,7 @@ import (
 	"github.com/mpyw/gormreuse/internal/ssa/callback"
 	"github.com/mpyw/gormreuse/internal/ssa/callsite"
 	"github.com/mpyw/gormreuse/internal/ssa/cfg"
+	"github.com/mpyw/gormreuse/internal/ssa/pollution"
 	"github.com/mpyw/gormreuse/internal/ssa/purity"
 	"github.com/mpyw/gormreuse/internal/ssa/tracer"
 )
@@ -249,7 +250,16 @@ func RunSSA(
 	// before it suggests immutable-param (#201, #245).
 	// The checker and the fixes ask one CFG cache about the functions (#299).
 	cfgs := cfg.NewAnalyzer()
-	fixGen := fix.NewGenerator(pass, scopesCallbacks, inputTracer, funcs, reportSeesWholePackage(pass), cfgs)
+	// The package initializer is a caller too (#346).
+	callers := funcs
+	if init := ssaInfo.Pkg.Func("init"); init != nil {
+		callers = append(slices.Clone(funcs), init)
+	}
+	// An immutable-param function that discards a chain on its parameter
+	// relies on changing its caller's value, so no fix isolates an argument
+	// to it (#346).
+	discardsParam := reportImmutableParamDiscards(funcs, immutableParamFuncs, pureFuncs, skip, report, guard)
+	fixGen := fix.NewGenerator(pass, scopesCallbacks, inputTracer, callers, reportSeesWholePackage(pass), cfgs, discardsParam)
 
 	// Determine which //gormreuse:immutable-param functions actually rely on
 	// immutability — they would reuse a *gorm.DB parameter if it were treated as
@@ -270,13 +280,38 @@ func RunSSA(
 	// (#325). Its memos depend only on the values asked about, since the sets it
 	// holds are final by now.
 	checkTracer := tracer.NewRootTracer(pureFuncs, immutableReturnFuncs, immutableParamFuncs, pureVerdicts, mutableCallbacks, immutableCallbacks, funcVars)
+	chk := newChecker(pass, ignores, checkTracer, branchesImmutableParam, globalReported, fixGen, cfgs)
+	// Every function is analyzed before any is reported: an ignore in one
+	// function, such as a stored closure, withholds the fix of a root that
+	// another function reports (#346).
+	analyzed := make([]runFuncViolations, 0, len(funcs))
 	for _, fn := range funcs {
 		if skip(fn) {
 			continue
 		}
-
-		chk := newChecker(pass, ignores, checkTracer, branchesImmutableParam, globalReported, fixGen, cfgs)
-		guard.run("reuse", fn, func() { chk.checkFunction(fn) })
+		var violations []pollution.Violation
+		if guard.run("reuse", fn, func() { violations = chk.analyze(fn) }) {
+			analyzed = append(analyzed, runFuncViolations{fn, violations})
+		}
+	}
+	for _, a := range analyzed {
+		guard.run("reuse", a.fn, func() { chk.report(a.violations) })
+	}
+	// The package initializer calls functions too, as in
+	// `var n = count(DB.Where("x"))`. buildssa leaves it out of SrcFuncs.
+	// Its reuse is not checked, but its arguments to an immutable-param
+	// function are, as any caller's are (#346). It has no position, so a
+	// panic is reported for the package.
+	if init := ssaInfo.Pkg.Func("init"); init != nil {
+		guard.runPackage("package initializer", func() {
+			var calls []pollution.Violation
+			for _, v := range chk.analyze(init) {
+				if v.Call != nil && !skipFiles[pass.Fset.PositionFor(v.Pos, false).Filename] {
+					calls = append(calls, v)
+				}
+			}
+			chk.report(calls)
+		})
 	}
 
 	// Report immutable-param directives that are signature-valid but have no
@@ -345,3 +380,9 @@ func runFuncs(ssaInfo *buildssa.SSA) []*ssa.Function {
 // =============================================================================
 // SSA Checker
 // =============================================================================
+
+// runFuncViolations is a function and the violations its analysis found.
+type runFuncViolations struct {
+	fn         *ssa.Function
+	violations []pollution.Violation
+}

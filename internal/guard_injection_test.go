@@ -87,6 +87,7 @@ func TestPanicInjection(t *testing.T) {
 		{"distrusted contracts", "", "", []string{internalError + " in distrusted contracts"}, with(map[string]string{"Conn": "", "ConnVia": "", "Fresh": "", "Each": ""})},
 		{"function variables", "", "", []string{internalError + " in function variables"}, baseFacts},
 		{"unused immutable-input", "", "", []string{internalError + " in unused immutable-input"}, baseFacts},
+		{"package initializer", "", "", []string{internalError + " in package initializer"}, baseFacts},
 		{"directive reports", "", "", []string{internalError + " in directive reports"}, baseFacts},
 		{"unused ignores", "", "", []string{internalError + " in unused ignores"}, baseFacts},
 	}

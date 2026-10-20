@@ -102,7 +102,7 @@ func fixTargetArgumentBeforeUse(db, base *gorm.DB) {
 func fixTargetArgumentOfReceiver(db *gorm.DB) {
 	q := db.Where("x").Session(&gorm.Session{})
 	q.Where("b").Find(nil)
-	db.Model(q) // want `\*gorm\.DB reused: second branch from mutable root`
+	db.Model(q).Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // fixTargetGoroutine: q is captured by a goroutine. Writing q inside it while

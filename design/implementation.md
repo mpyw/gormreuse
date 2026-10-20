@@ -161,10 +161,11 @@ gormreuse/
 │
 ├── internal/
 │   ├── run.go                   # RunSSA: every package-level pass, in order
-│   ├── checker.go               # checker: one function's tracking, detection and reports
+│   ├── checker.go               # checker: every function's analysis, then its reports and fixes
 │   ├── report.go                # The order of reports, unused directives and ignores, and merging fixes
+│   ├── cgo.go                   # IsCgoOutput: the files of cmd/cgo's output, whose fixes are dropped (#346)
 │   ├── pure.go                  # validatePureFuncs: the pure functions' contracts, to a fixed point
-│   ├── immutable.go             # Inferring and checking immutable-return, and the need for immutable-param
+│   ├── immutable.go             # Inferring and checking immutable-return, and the need for immutable-param and its body rule
 │   ├── fact.go                  # exportFacts: the facts importing packages read
 │   ├── distrust.go              # distrustContracts: contracts that rely on a broken one stay out of the facts (#314)
 │   ├── guard.go                 # panicGuard: one function's panic does not abort the package
@@ -335,7 +336,7 @@ The same input must give the same diagnostics and fixes on every run (#184). Gol
 | Roots are visited in a fixed order | `Tracker.DetectViolations` never uses map order. The order is root position, then earliest use, then SSA name, function and instruction text. The later keys matter only for roots without a position, such as Phi nodes |
 | Each position is reported once | Several roots can be reused at one position (`use2(q, r)`). The diagnostic then takes the message of the first root in that order: the root that appears first in the source. It carries the fixes of every root there, merged into one `SuggestedFix`, because drivers apply only the first fix of a diagnostic |
 | Every diagnostic of a root carries the root's fix (#246) | Each fix is complete on its own (#200), so the copies are identical, and drivers apply a shared edit once. The checker generates each root's fix once and reuses it |
-| An ignored root gets no fix (#312) | A root with a diagnostic that an ignore suppresses gets no fix at all. The checker asks `Ignores.Covers`, which marks nothing used, for every violation of the function before it builds a fix |
+| An ignored root gets no fix (#312) | A root with a diagnostic that an ignore suppresses gets no fix at all. `checker.analyze` runs on every function of the package before `checker.report` reports any. It asks `Ignores.Covers`, which marks nothing used, of each violation, and collects the roots that an ignore covers (#346) |
 | Reports are sorted (#273) | `internal.ReportInOrder` holds back every diagnostic of the pass and reports them sorted by file name, offset and message |
 
 <details><summary>Tests</summary>
@@ -351,7 +352,7 @@ The same input must give the same diagnostics and fixes on every run (#184). Gol
 
 - **Merged fixes (#184).** Before, the first violation in map order won the position, and the fixes of the other roots were dropped. So `-fix` needed several passes.
 - **Every diagnostic carries the fix (#246).** Before, the root was marked fixed on its first violation. That happened even when an ignore suppressed that diagnostic, or another function had already reported the position, so the fix was lost. An editor also offered the quick fix only on the first diagnostic.
-- **No fix for an ignored root (#312).** The ignore says that the reuse is meant. The fix changes it too: it isolates the root, or reassigns the ignored statement. The next run would then report the ignore as unused. Deleting the ignore in the same fix was rejected. The fix would have to know that the ignore covers no other diagnostic, of any kind or variant. It would also have to know that it resolves every diagnostic of the root, before the pass has reported them all. `testdata/src/gormreuse/fix_ignored_root.go` holds the cases. `testdata/src/converge/fix_escape.go` checks that the fix of another root leaves the ignore used.
+- **No fix for an ignored root (#312).** The ignore says that the reuse is meant. The fix changes it too: it isolates the root, or reassigns the ignored statement. The next run would then report the ignore as unused. Deleting the ignore in the same fix was rejected. The fix would have to know that the ignore covers no other diagnostic, of any kind or variant. It would also have to know that it resolves every diagnostic of the root, before the pass has reported them all. `testdata/src/gormreuse/fix_ignored_root.go` holds the cases. Before #346 the checker asked only the violations of the function it reported. A stored closure is a function of its own, so an ignore in `f := func() { q.Find(nil); q.Count(nil) //gormreuse:ignore }` left the fix on `q.First` in the enclosing function, and the next run reported the ignore unused. `testdata/src/converge/fix_escape.go` checks that the fix of another root leaves the ignore used.
 - **Sorted reports (#273).** `RunSSA` and the directive checks do not report in position order: the unused-directive reports come from map ranges. The text output is sorted by the driver anyway, but `-json` lists diagnostics in report order. File names are compared, not `token.Pos`, because the loader parses files concurrently and their order in the file set can vary.
 
 </details>
@@ -391,7 +392,7 @@ A package that imports `"C"` reaches the analyzer as cmd/cgo's output, not as th
 
 So when that header is followed by a `//line` directive before the package clause, the header is ignored, and the user's own comments decide. A user file marked `// Code generated ... DO NOT EDIT.` is still skipped. cgo's own files, such as `_cgo_gotypes.go`, have no such `//line` directive and are still skipped. All positions still come from `PositionFor(pos, false)`, so the file keys are the cgo output files, consistently. `testdata/src/cgofile` covers this with a real cgo build, and is skipped without a C compiler.
 
-The `-fix` drivers do not apply fixes in cgo files. They skip every fix that edits a file `ast.IsGenerated` reports, and the cgo output carries cgo's header. The diagnostics are still reported.
+A diagnostic in a cgo file has no fix (#346). Its edits would be offsets in cgo's output, while `-json` names the user's file through the `//line` directive, so a consumer that applied them to that file would corrupt it. `ReportInOrder` drops the fixes of a diagnostic with an edit in a file that `IsCgoOutput` reports. The diagnostics are still reported. The `-fix` drivers already skipped those fixes, since they skip every fix that edits a file `ast.IsGenerated` reports. `TestCgoFileHasNoFixes` checks it.
 
 Before #186 a panic was dropped with every diagnostic of the function. Since #190 an ignored function is analyzed too, so a `panicGuard` report can come from one.
 
@@ -1928,9 +1929,23 @@ When a function marked `//gormreuse:immutable-param` actually branches such a pa
 | A direct call, a function or method value, a generic instance | Yes |
 | The same calls under `go` and `defer` (#192) | Yes. A `go`/`defer` statement goes through the same `handleSite` as a call ([One handler for every call site](#one-handler-for-every-call-site)) |
 | A callee in another package | Yes, through its package's fact ([Directives across packages](#directives-across-packages)) |
+| A call in a package-level initializer, as in `var n = count(DB.Where("x"))` (#346) | Yes. The initializer belongs to the synthetic `init`, which is not in `SrcFuncs`. `RunSSA` analyzes it after the other functions and reports only its contract violations. Its reuse is not checked |
 | An interface method call, or a call through a func-typed parameter | No: there is no static callee (`contractInterface`) |
 
 The check asks `handler.BreaksImmutableParam` of each argument: it is bound to a parameter, and its `*gorm.DB`, directly or in an interface, has a mutable root. The parameter-root fix asks the same before it declares a function `immutable-param` (#245). `computeNeedsImmutableParam` decides whether the function branches the parameter, with counterfactual analyses.
+
+### immutable-param body rule
+
+The callers of an `immutable-param` function pass an isolated value. So a statement that discards a non-finisher chain on the parameter, as in `tx.Where("t = 1")` or `tx.Where("t = 1").Limit(1)`, changes a copy and has no effect (#346). It is reported: `immutable-param declared but the result of tx.Where is discarded`. `reportImmutableParamDiscards` in `internal/immutable.go` finds them.
+
+| Rule | Why |
+| --- | --- |
+| Each call of the chain is a `*gorm.DB` method that returns a `*gorm.DB`, and is not a finisher, a Session-family or a state-only method (`immutableParamDiscardedChain`) | A finisher runs a query. A discarded `tx.Session(...)` changes nothing either way |
+| The whole chain is one expression statement (`immutableParamExprStmts`) | `q = tx.Where("a")` with `q` never read is dead code of another kind. A chain through a variable is not a discarded statement |
+| A `pure` function is not checked | The pure check reports the same statement as pollution |
+| The fix that isolates an argument to such a function is withheld (`GenerateIsolation`) | Without the directive the statement changes the caller's value, and the function's own queries see it. After `applyT(q.Session(&gorm.Session{}))` they would not, and the re-lint would be clean |
+
+Limitation: a callee in another package exports no such fact, so the isolation fix of an argument to it is still offered.
 
 ### immutable-input body contract
 
@@ -2096,6 +2111,8 @@ Other diagnostics without a fix:
 | A tuple root | [Results the tracer cannot see through](#results-the-tracer-cannot-see-through) |
 | A `FieldRoot` | [Struct roots](#struct-roots) |
 | A root whose diagnostic an ignore suppresses | [Deterministic reporting](#deterministic-reporting) |
+| A diagnostic in a cgo file | [Skipped files and internal errors](#skipped-files-and-internal-errors) |
+| A mutable argument to an `immutable-param` function that discards a chain on its parameter | [immutable-param body rule](#immutable-param-body-rule) |
 
 </details>
 
@@ -2330,7 +2347,7 @@ A parameter root has no call to append a Session to. `Generate` in `internal/fix
 
 **The callers.**
 
-- `paramCallersIsolate` checks every argument of each call with the caller-side check's own predicate, not only the argument of the reused parameter. Declaring the function covers all its `*gorm.DB` parameters. It scans the analysed functions (`runFuncs`), so a caller in a package-level closure counts (#183, #245).
+- `paramCallersIsolate` checks every argument of each call with the caller-side check's own predicate, not only the argument of the reused parameter. Declaring the function covers all its `*gorm.DB` parameters. It scans the analysed functions (`runFuncs`) and the package `init`, so a caller in a package-level closure or initializer counts (#183, #245, #346).
 - `calledOnlyDirectly` needs an unexported function, not a method (a method can be called through an interface). Every reference must be the function of a call (`f(x)`, `f[T](x)`, `(f)(x)`).
 - In the Session case the parameter is the reassignment target (`varToReassign` returns its variable). So a discarded `tx.Where("a")` becomes `tx = tx.Where("a")` and keeps its effect inside the function. The Session goes at the top of the body, so it also covers uses through an alias.
 
@@ -2340,7 +2357,7 @@ A parameter root has no call to append a Session to. `Generate` in `internal/fix
 
 **Discarded statements on a parameter (#312).** A discarded statement on a parameter also changes the caller's value. A helper such as `func applyTenant(tx *gorm.DB) { tx.Where("tenant_id = ?", t) }` exists for exactly that. Reassigning it keeps the change inside the function only. It also makes the helper lint-clean, so nothing reports the change a caller's Session then drops (#243). `Generate` therefore offers no Session-case fix for a parameter with a discarded statement, with one exception. The function has a `*gorm.DB` result that can carry the change back to the caller, and every caller reads it.
 
-- `everyCallUsesResult` checks each call in the analysed functions. Its result, or a `*gorm.DB` element of its tuple, must have a referrer. A go or defer call has none.
+- `everyCallUsesResult` checks each call in the analysed functions and the package `init` (#346). Its result, or a `*gorm.DB` element of its tuple, must have a referrer. A go or defer call has none.
 - `canFixParam` already requires `calledOnlyDirectly` for such a function, and the pass must see every file of the package, as for `paramCallersIsolate`. So no call is missed, and both variants agree.
 - A caller may read the result but go on using its argument, as in `r := applyTenant(q); q.Find(&a); r.Find(&b)`. That is not checked: only the result carries the change.
 
@@ -2538,7 +2555,8 @@ Five diagnostics get a mechanical fix (#248):
 
 - The index counts no receiver, and neither does `ast.CallExpr.Args` for `r.m(x)`, a method value or a method expression, so it indexes the AST arguments. Only a variadic parameter differs, and a `*gorm.DB` passed to one is packed into a slice that the check never sees.
 - The fix checks that the argument is a `*gorm.DB` expression. It wraps an operand that is not a primary expression (`*p` becomes `(*p).Session(...)`). It writes the Session through `sessionEdits`, so it takes its gorm name and import from `gormNameAt` as every other Session does (#200).
-- Several mutable arguments of one call give one diagnostic, because the reports share the position and the message (see `reportKey`). `checkFunction` gives that diagnostic the fixes of every violation in its group with the same message.
+- Several mutable arguments of one call give one diagnostic, because the reports share the position and the message (see `reportKey`). `checker.report` gives that diagnostic the fixes of every violation in its group with the same message.
+- No fix isolates an argument to a function that discards a chain on its parameter ([immutable-param body rule](#immutable-param-body-rule)).
 - The Session result is immutable, so one pass resolves the diagnostic. The caller's own reuse of the value is a separate diagnostic with its own fix.
 
 **Deleting a directive.** `directive.Removals` holds every diagnostic whose fix deletes a directive part, and reports them in `Flush`, at the end of `RunSSA`. A diagnostic suppressed by an ignore is never recorded. The rewrite of a comment takes out the parts of every diagnostic recorded for it, not only its own. `//gormreuse:pure,immutable-return` on a function with no `*gorm.DB` has two diagnostics. Two different rewrites of the one comment would conflict under `-fix`, so their fixes are the same edit, which the drivers apply once. A fix is still complete alone, as #200 requires.
