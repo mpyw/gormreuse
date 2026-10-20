@@ -83,7 +83,7 @@ func TestFixsqlCasesCoverBefore(t *testing.T) {
 	}
 
 	var got []string
-	for _, tc := range slices.Concat(fixsqlCases, fixPathsCases, fixEscapeCases) {
+	for _, tc := range slices.Concat(fixsqlCases, fixPathsCases, fixEscapeCases, laterLoopCases, paginateCases) {
 		for pkg, fn := range map[string]func(*gorm.DB){"before": tc.before, "after": tc.after} {
 			full := runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
 			if name := full[strings.LastIndex(full, "/")+1:]; name != pkg+"."+tc.name {

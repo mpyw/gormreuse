@@ -22,7 +22,7 @@ var wantComment = regexp.MustCompile(`(?m)[ \t]*// want .*$`)
 // re-lints their committed .golden, which TestGoldenFiles keeps equal to the
 // current fixes, so the fixture is not copied into testdata/src/converge
 // (#264).
-var convergeGormreuseFixtures = []string{"fix_paths.go", "fix_isolate_arg.go"}
+var convergeGormreuseFixtures = []string{"fix_paths.go", "fix_isolate_arg.go", "fix_later_loop_merge.go"}
 
 // TestFixesConverge is the convergence harness for #71: it applies ONE pass of
 // the suggested fixes to every fixture in testdata/src/converge, then RE-LINTS

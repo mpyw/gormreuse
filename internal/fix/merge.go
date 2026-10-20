@@ -23,13 +23,14 @@ import (
 // So in `if c { q = db.Where("a") } else { q = db.Where("b") }` with q read
 // twice in a goroutine, both stores get a Session, not only the root's (#247).
 //
-//declscope:shared // session.go's sessionPositionsForRoot gives each one a Session
+//declscope:shared // session.go gives each one a Session
 func mergedEdges(a *cfg.Analyzer, root ssa.Value, uses []pollution.UsageInfo) []ssa.Value {
-	instr, ok := root.(ssa.Instruction)
-	if !ok {
+	// A parameter merges like a local root, as in `if c { db = db.Where("a") }`
+	// with db read twice after the if (#311).
+	fn := root.Parent()
+	if fn == nil {
 		return nil
 	}
-	fn := instr.Parent()
 	for _, block := range fn.Blocks {
 		for _, instr := range block.Instrs {
 			if phi, ok := instr.(*ssa.Phi); ok && slices.Contains(phi.Edges, root) {
