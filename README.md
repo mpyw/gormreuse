@@ -17,16 +17,26 @@ A Go linter that detects unsafe [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB)
 
 ```go
 q := db.Where("active = ?", true)
-q.Find(&users)  // SELECT * FROM users WHERE active = true
-q.Find(&admins) // Bug: Conditions accumulate unexpectedly
+
+// SELECT * FROM users WHERE active = true
+q.Find(&users)
+
+// Bug: conditions accumulate unexpectedly
+q.Find(&admins)
 ```
 
 </td><td>
 
 ```go
-q := db.Where("active = ?", true).Session(&gorm.Session{})
-q.Find(&users)  // OK: q is immutable
-q.Find(&admins) // OK: a fresh chain from q
+q := db.
+    Where("active = ?", true).
+    Session(&gorm.Session{})
+
+// OK: q is immutable
+q.Find(&users)
+
+// OK: a fresh chain from q
+q.Find(&admins)
 ```
 
 </td></tr>
@@ -36,14 +46,100 @@ q.Find(&admins) // OK: a fresh chain from q
 
 ### What it reports
 
-| Report | Example | Details |
-| --- | --- | --- |
-| A second branch from a mutable `*gorm.DB` | `q := db.Where("x"); q.Find(&a); q.Count(&n)` | [Detection Model](#detection-model-mutable-branching) |
-| One use that runs more than once | `for _, id := range ids { q.Where("id = ?", id).Find(&u) }` | [Examples](#examples) |
-| A `Session`/`Debug` copy used after its root changed | `c := q.Session(&gorm.Session{}); q.Where("a").Find(&x); c.Count(&n)` | [Session and Debug copies](#session-and-debug-copies) |
-| A subquery changed before the outer query runs | `x := db.Where("id IN (?)", sub); sub.Where("a").Find(&y); x.Find(&z)` | [Subqueries](#subqueries-and-condition-arguments) |
-| A directive whose contract the code breaks | `//gormreuse:pure` on a function that calls `db.Where` | [Directives](#directives) |
-| A `Session` result returned from a `Scopes` callback whose chain may write (GORM bug) | `return q.Session(&gorm.Session{})` | [Temporary rule](#temporary-rule-sessionwithcontextdebug-returned-from-scopes-callbacks) |
+<table>
+<tr><th>Report</th><th>Example</th></tr>
+<tr><td>
+
+**[A second branch from a mutable `*gorm.DB`](#detection-model-mutable-branching)**
+
+</td><td>
+
+```go
+q := db.Where("x")
+q.Find(&a)
+
+// VIOLATION: second branch from q
+q.Count(&n)
+```
+
+</td></tr>
+<tr><td>
+
+**[One use that runs more than once](#examples)**
+
+</td><td>
+
+```go
+q := db.Where("x")
+for _, id := range ids {
+    // VIOLATION: runs on every iteration
+    q.Where("id = ?", id).Find(&u)
+}
+```
+
+</td></tr>
+<tr><td>
+
+**[A `Session`/`Debug` copy used after its root changed](#session-and-debug-copies)**
+
+</td><td>
+
+```go
+q := db.Where("x")
+c := q.Session(&gorm.Session{})
+q.Where("a").Find(&x)
+
+// VIOLATION: c sees the change to q
+c.Count(&n)
+```
+
+</td></tr>
+<tr><td>
+
+**[A subquery changed before the outer query runs](#subqueries-and-condition-arguments)**
+
+</td><td>
+
+```go
+sub := db.Model(&User{}).Select("id")
+x := db.Where("id IN (?)", sub)
+sub.Where("a").Find(&y)
+
+// VIOLATION: the subquery has a
+x.Find(&z)
+```
+
+</td></tr>
+<tr><td>
+
+**[A directive whose contract the code breaks](#directives)**
+
+</td><td>
+
+```go
+//gormreuse:pure
+func scope(db *gorm.DB) {
+    // VIOLATION: pollutes the argument
+    db.Where("x")
+}
+```
+
+</td></tr>
+<tr><td>
+
+**[A `Session` result returned from a `Scopes` callback whose chain may write (GORM bug)](#temporary-rule-sessionwithcontextdebug-returned-from-scopes-callbacks)**
+
+</td><td>
+
+```go
+db.Scopes(func(q *gorm.DB) *gorm.DB {
+    // WARNING: leaks the transaction
+    return q.Session(&gorm.Session{})
+}).Delete(&User{})
+```
+
+</td></tr>
+</table>
 
 ### Quick start
 
@@ -257,42 +353,84 @@ Please [open an issue](https://github.com/mpyw/gormreuse/issues) with the code. 
 
 ## Automatic Fixes
 
-`-fix` repairs most reuse with two strategies. Both can apply to one root:
+`-fix` repairs most reuse with two strategies. Both can apply to one root. Each change below is `gormreuse -fix -diff` output:
 
-| Strategy | Change | Used for |
-| --- | --- | --- |
-| [Reassignment](#strategy-1-reassignment-creating-new-roots) | `q.Where("a")` becomes `q = q.Where("a")` | A chain statement whose result is discarded |
-| [Session](#strategy-2-session-making-roots-immutable) | `.Session(&gorm.Session{})` at the end of the root's chain | A root that still branches more than once |
-| [Parameter roots](#parameter-roots) | `//gormreuse:immutable-param`, or `tx = tx.Session(&gorm.Session{})` at the top of the body | A reused `*gorm.DB` parameter |
-| [Contract and directive fixes](#contract-and-directive-fixes) | Isolate an argument, or delete a directive name | Directive diagnostics |
+<table>
+<tr><th>Strategy</th><th>Change</th></tr>
+<tr><td>
+
+**[Reassignment](#strategy-1-reassignment-creating-new-roots)**
+
+For a chain statement whose result is discarded
+
+</td><td>
+
+```diff
+ q := db.Where("base")
+-q.Where("a")
++q = q.Where("a")
+ q.Where("b").Find(nil)
+```
+
+</td></tr>
+<tr><td>
+
+**[Session](#strategy-2-session-making-roots-immutable)**
+
+For a root that still branches more than once
+
+</td><td>
+
+```diff
+-q := db.Where("base")
++q := db.Where("base").Session(&gorm.Session{})
+ q.Where("a").Find(nil)
+ q.Where("b").Find(nil)
+```
+
+</td></tr>
+<tr><td>
+
+**[Parameter roots](#parameter-roots)**
+
+For a reused `*gorm.DB` parameter. Some helpers get `//gormreuse:immutable-param` instead
+
+</td><td>
+
+```diff
+ func List(tx *gorm.DB) {
++    tx = tx.Session(&gorm.Session{})
+     tx.Where("a").Find(&users)
+     tx.Where("b").Find(&users)
+ }
+```
+
+</td></tr>
+<tr><td>
+
+**[Contract and directive fixes](#contract-and-directive-fixes)**
+
+For directive diagnostics. It isolates an argument, or deletes an unused directive name
+
+</td><td>
+
+```diff
+ func caller(db *gorm.DB) {
+     q := db.Where("x")
+-    apply(q)
++    apply(q.Session(&gorm.Session{}))
+ }
+```
+
+</td></tr>
+</table>
 
 > [!IMPORTANT]
 > A fix never drops a condition. When it cannot keep every change the code makes, the diagnostic has **no fix**. See [When there is no fix](#when-there-is-no-fix).
 
 ### Strategy 1: Reassignment (Creating New Roots)
 
-A discarded chain statement on the local variable that holds the root becomes a reassignment. That creates a new mutable root at each step:
-
-<table>
-<tr><th>Before</th><th>After <code>-fix</code></th></tr>
-<tr><td>
-
-```go
-q := db.Where("base")
-q.Where("a")           // first branch (non-finisher): changes q in place
-q.Where("b").Find(nil) // VIOLATION: second branch
-```
-
-</td><td>
-
-```go
-q := db.Where("base")
-q = q.Where("a")       // ← Reassignment creates new root
-q.Where("b").Find(nil) // OK: first branch from new root
-```
-
-</td></tr>
-</table>
+A discarded chain statement on the local variable that holds the root becomes a reassignment. That creates a new mutable root at each step. In the [example](#automatic-fixes), `q.Where("a")` is the first branch, and it changes `q` in place. After the fix, `q.Where("b")` is the first branch from the new root.
 
 <details>
 <summary>When a reassignment is applied</summary>
@@ -308,28 +446,7 @@ q.Where("b").Find(nil) // OK: first branch from new root
 
 ### Strategy 2: Session (Making Roots Immutable)
 
-A root that still has two or more branches on one path gets `.Session(&gorm.Session{})` at the end of its chain:
-
-<table>
-<tr><th>Before</th><th>After <code>-fix</code></th></tr>
-<tr><td>
-
-```go
-q := db.Where("base")
-q.Where("a").Find(nil) // First branch
-q.Where("b").Find(nil) // VIOLATION: second branch
-```
-
-</td><td>
-
-```go
-q := db.Where("base").Session(&gorm.Session{})  // ← Immutable root
-q.Where("a").Find(nil) // OK: independent chain from immutable root
-q.Where("b").Find(nil) // OK: independent chain from immutable root
-```
-
-</td></tr>
-</table>
+A root that still has two or more branches on one path gets `.Session(&gorm.Session{})` at the end of its chain. In the [example](#automatic-fixes), the root becomes immutable. So each branch from it is an independent chain.
 
 <details>
 <summary>Where a Session goes</summary>
@@ -364,30 +481,22 @@ q.Where("b").Find(nil) // OK: independent chain from immutable root
 <details>
 <summary>Combined example: both strategies on one root</summary>
 
-<table>
-<tr><th>Before</th><th>After <code>-fix</code> (both strategies applied)</th></tr>
-<tr><td>
+The `b`, `c` and `d` lines are reported:
 
-```go
-q := db.Where("base")
-q.Where("a")           // first branch
-q.Where("b").Find(nil) // VIOLATION
-q.Where("c")           // VIOLATION
-q.Where("d").Find(nil) // VIOLATION
+```diff
+ q := db.Where("base")
+-q.Where("a")
++q = q.Where("a").Session(&gorm.Session{})
+ q.Where("b").Find(nil)
+-q.Where("c")
++q = q.Where("c")
+ q.Where("d").Find(nil)
 ```
 
-</td><td>
-
-```go
-q := db.Where("base")
-q = q.Where("a").Session(&gorm.Session{})  // Reassignment + Session: used by b and c
-q.Where("b").Find(nil)
-q = q.Where("c")                            // Reassignment: used once, by d
-q.Where("d").Find(nil)
-```
-
-</td></tr>
-</table>
+| Line | Fix | Why |
+| --- | --- | --- |
+| `a` | Reassignment and Session | `b` and `c` both use the new root |
+| `c` | Reassignment only | Only `d` uses the new root |
 
 When several roots are reused at the same place, such as `use(q, r)`:
 
@@ -572,15 +681,29 @@ A mutable argument to an [`immutable-param`](#gormreuseimmutable-param) paramete
 | Redundant `immutable-param` | Delete `immutable-param` from the function's comment. A comment before `a, b := func..., func...` covers both closures. So it gets no fix while another closure still needs it |
 | Unused `ignore` | Delete `ignore` from the comment |
 
-A fix deletes only the name it is about. The comment keeps its other names and its reason:
+A fix deletes only the name it is about. The comment keeps its other names and its reason. A directive on its own line is deleted with its line. Here every `ignore` is unused:
 
-| Before | After |
-| --- | --- |
-| `//gormreuse:ignore,pure // why` | `//gormreuse:pure // why` |
-| `//gormreuse:ignore // why` | `// why` |
-| `q.Find(nil) //gormreuse:ignore //nolint:errcheck` | `q.Find(nil) //nolint:errcheck` |
-| `//gormreuse:ignore` on its own line | The line is deleted |
-| `q.Find(nil) //gormreuse:ignore` | `q.Find(nil)` |
+```diff
+-//gormreuse:ignore,pure // why
++//gormreuse:pure // why
+ func peek(q *gorm.DB) { _ = q }
+ 
+-//gormreuse:ignore // why
++// why
+ func a(db *gorm.DB) {
+     q := db.Where("x")
+-    q.Find(nil) //gormreuse:ignore //nolint:errcheck
+-    //gormreuse:ignore
++    q.Find(nil) //nolint:errcheck
+     peek(q)
+ }
+ 
+ func b(db *gorm.DB) {
+     q := db.Where("x")
+-    q.Find(nil) //gormreuse:ignore
++    q.Find(nil)
+ }
+```
 
 There is no fix when the reason would become a directive itself, as in `//gormreuse:ignore //gormreuse:pure`.
 
@@ -665,9 +788,15 @@ In these examples, `db` is the value that `gorm.Open` returned, which is immutab
 > **Chaining without reassignment is a violation!** Each statement using the same variable creates a separate branch:
 > ```go
 > q := db.Where("base")
-> q.Where("a")           // first branch - OK
-> q.Where("b")           // VIOLATION: second branch
-> q.Find(&users)         // VIOLATION: third branch
+>
+> // OK: first branch
+> q.Where("a")
+>
+> // VIOLATION: second branch
+> q.Where("b")
+>
+> // VIOLATION: third branch
+> q.Find(&users)
 > ```
 > **Solution**: Reassign the result or use method chaining in a single expression:
 > ```go
@@ -675,10 +804,16 @@ In these examples, `db` is the value that `gorm.Open` returned, which is immutab
 > q := db.Where("base")
 > q = q.Where("a")
 > q = q.Where("b")
-> q.Find(&users)         // OK - first branch from final q
+>
+> // OK: first branch from final q
+> q.Find(&users)
 >
 > // Option 2: Single chained expression
-> db.Where("base").Where("a").Where("b").Find(&users)  // OK - single chain
+> // OK: single chain
+> db.Where("base").
+>     Where("a").
+>     Where("b").
+>     Find(&users)
 > ```
 
 <details>
@@ -689,10 +824,16 @@ In these examples, `db` is the value that `gorm.Open` returned, which is immutab
 <tr><td>
 
 ```go
-// Session at end creates immutable - safe to branch multiple times
-q := db.Where("active = ?", true).Session(&gorm.Session{})
-q.Count(&count)  // OK - first branch from q
-q.Find(&users)   // OK - q is immutable, can branch freely
+// A Session at the end makes q immutable, so it may branch many times
+q := db.
+    Where("active = ?", true).
+    Session(&gorm.Session{})
+
+// OK: first branch from q
+q.Count(&count)
+
+// OK: q is immutable, can branch freely
+q.Find(&users)
 ```
 
 </td><td>No</td><td>
@@ -704,8 +845,12 @@ Each branch from an immutable value creates an independent mutable chain.
 
 ```go
 q := db.Where("base").Session(&gorm.Session{})
-q.Where("a").Find(&users1)  // OK - branch 1 (independent chain)
-q.Where("b").Find(&users2)  // OK - branch 2 (independent chain)
+
+// OK: branch 1 (independent chain)
+q.Where("a").Find(&users1)
+
+// OK: branch 2 (independent chain)
+q.Where("b").Find(&users2)
 ```
 
 </td><td>No</td><td>
@@ -716,9 +861,16 @@ Same as above.
 <tr><td>
 
 ```go
-where := db.Where("base").Session(&gorm.Session{}).Where
-where("a").Find(&users1)    // OK - same as q.Where("a")
-where("b").Find(&users2)    // OK - same as q.Where("b")
+where := db.
+    Where("base").
+    Session(&gorm.Session{}).
+    Where
+
+// OK: same as q.Where("a")
+where("a").Find(&users1)
+
+// OK: same as q.Where("b")
+where("b").Find(&users2)
 ```
 
 </td><td>No</td><td>
@@ -729,9 +881,14 @@ A call through a method value is the same as the direct call.
 <tr><td>
 
 ```go
-q := db.Where("active = ?", true)  // q is mutable
-q.Find(&users)   // first branch from q - OK
-q.Count(&count)  // VIOLATION: second branch from q
+// q is mutable
+q := db.Where("active = ?", true)
+
+// OK: first branch from q
+q.Find(&users)
+
+// VIOLATION: second branch from q
+q.Count(&count)
 ```
 
 </td><td><b>Yes</b></td><td>
@@ -743,8 +900,12 @@ The second branch from a mutable value is a violation.
 
 ```go
 q := db.Where("x")
-q.Where("a")     // first branch from q - OK
-q.Where("b")     // VIOLATION: second branch from q
+
+// OK: first branch from q
+q.Where("a")
+
+// VIOLATION: second branch from q
+q.Where("b")
 ```
 
 </td><td><b>Yes</b></td><td>
@@ -757,8 +918,12 @@ Not only a "finisher": any method creates a branch.
 ```go
 q := db.Where("x")
 where := q.Where
-where("a").Find(&users1) // first branch from q - OK
-where("b").Find(&users2) // VIOLATION: second branch from q
+
+// OK: first branch from q
+where("a").Find(&users1)
+
+// VIOLATION: second branch from q
+where("b").Find(&users2)
 ```
 
 </td><td><b>Yes</b></td><td>
@@ -771,7 +936,9 @@ A method value of a mutable value branches it on each call.
 ```go
 q := db.Where("x")
 find := q.Find
-defer find(&users) // VIOLATION: runs after q.Count
+
+// VIOLATION: runs after q.Count
+defer find(&users)
 q.Count(&count)
 ```
 
@@ -787,8 +954,12 @@ q := b
 if condition {
     q = a
 }
-q.Find(&users)   // first branch from a or b - OK
-a.Find(&admins)  // VIOLATION: second branch from a when condition holds
+
+// OK: first branch from a or b
+q.Find(&users)
+
+// VIOLATION: second branch from a when condition holds
+a.Find(&admins)
 ```
 
 </td><td><b>Yes</b></td><td>
@@ -799,9 +970,14 @@ A variable that may hold one of two roots branches both.
 <tr><td>
 
 ```go
-q := db.Session(&gorm.Session{}).Where("x")  // q is mutable!
-q.Find(&users)   // first branch - OK
-q.Count(&count)  // VIOLATION: second branch
+// q is mutable!
+q := db.Session(&gorm.Session{}).Where("x")
+
+// OK: first branch
+q.Find(&users)
+
+// VIOLATION: second branch
+q.Count(&count)
 ```
 
 </td><td><b>Yes</b></td><td>
@@ -813,8 +989,12 @@ A Session in the middle doesn't help. The result is still mutable.
 
 ```go
 q := db.Where("x")
-q.Find(&users)                       // first branch - OK
-q.Session(&gorm.Session{}).Count(&c) // VIOLATION: second branch from q
+
+// OK: first branch
+q.Find(&users)
+
+// VIOLATION: second branch from q
+q.Session(&gorm.Session{}).Count(&c)
 ```
 
 </td><td><b>Yes</b></td><td>
@@ -836,7 +1016,8 @@ An immutable-returning method on a polluted value is a branch too.
 ```go
 q := db.Where("x")
 for v := range slices.Values(ids) {
-    q.Where("id = ?", v).Find(&users) // VIOLATION: reused on every iteration
+    // VIOLATION: reused on every iteration
+    q.Where("id = ?", v).Find(&users)
 }
 ```
 
@@ -849,15 +1030,20 @@ A loop body runs more than once, so one use inside it is reuse. Range-over-func 
 
 ```go
 q := db.Where("x")
-f := func() { q.Find(&users) } // VIOLATION: f runs twice
+
+// VIOLATION: f runs twice
+f := func() { q.Find(&users) }
 f()
 f()
 for _, id := range ids {
     g.Go(func() error {
-        return q.Where("id = ?", id).Find(&users).Error // VIOLATION: one closure per iteration
+        // VIOLATION: one closure per iteration
+        return q.Where("id = ?", id).Find(&users).Error
     })
 }
-update := func(id int) { q.Where("id = ?", id).Find(&users) } // VIOLATION: run calls it in a loop
+
+// VIOLATION: run calls it in a loop
+update := func(id int) { q.Where("id = ?", id).Find(&users) }
 run := func() {
     for _, id := range ids {
         update(id)
@@ -878,7 +1064,8 @@ for _, it := range items {
     q := db.Where("id = ?", it.ID)
     save := func() error { return q.Updates(it).Error }
     if it.New {
-        err = save() // OK: each closure runs once
+        // OK: each closure runs once
+        err = save()
     } else {
         err = save()
     }
@@ -898,7 +1085,8 @@ if org != nil {
     q = q.Where("org = ?", *org)
 }
 for _, id := range ids {
-    q.Where("id = ?", id).Find(&users) // VIOLATION: the fix adds a Session to both roots
+    // VIOLATION: the fix adds a Session to both roots
+    q.Where("id = ?", id).Find(&users)
 }
 ```
 
@@ -921,16 +1109,25 @@ A variable reassignment creates a **new mutable root**. So the variable can be u
 <tr><td>
 
 ```go
-db, err := gorm.Open(dialector) // immutable: safe to branch more than once
+// immutable: safe to branch more than once
+db, err := gorm.Open(dialector)
 
 q := db.Where("x")
-q.Find(&users)        // first branch from original q - OK
 
-q = db.Where("y")     // reassignment creates NEW mutable root
-q.Find(&admins)       // first branch from new q - OK
+// OK: first branch from original q
+q.Find(&users)
 
-q = db.Where("z")     // another reassignment
-q.Count(&count)       // first branch from newest q - OK
+// reassignment creates NEW mutable root
+q = db.Where("y")
+
+// OK: first branch from new q
+q.Find(&admins)
+
+// another reassignment
+q = db.Where("z")
+
+// OK: first branch from newest q
+q.Count(&count)
 ```
 
 </td><td>No</td><td>
@@ -942,8 +1139,11 @@ Each reassignment is a new root.
 
 ```go
 for _, filter := range filters {
-    q := db.Where(filter)  // new mutable root each iteration
-    q.Find(&results)       // OK - first branch in this iteration
+    // new mutable root each iteration
+    q := db.Where(filter)
+
+    // OK: first branch in this iteration
+    q.Find(&results)
 }
 ```
 
@@ -957,9 +1157,12 @@ Reassignment in loops is also safe.
 ```go
 q := db.Where("base")
 if condition {
-    q = db.Where("alt")    // reassignment on this path
+    // reassignment on this path
+    q = db.Where("alt")
 }
-q.Find(&users)             // OK - first branch from whichever root
+
+// OK: first branch from whichever root
+q.Find(&users)
 ```
 
 </td><td>No</td><td>
@@ -973,9 +1176,13 @@ A conditional reassignment.
 q = db.Where("base")
 if condition {
     where := q.Where
-    q = where("alt")       // reassignment of q
+
+    // reassignment of q
+    q = where("alt")
 }
-q.Find(&users)             // OK
+
+// OK
+q.Find(&users)
 ```
 
 </td><td>No</td><td>
@@ -989,9 +1196,12 @@ The same through a method value.
 q := db.Where("x")
 var q2 *gorm.DB
 if condition {
-    q2 = q.Where("a")      // first branch from q
+    // first branch from q
+    q2 = q.Where("a")
 }
-q.Count(&count)            // VIOLATION: second branch from q
+
+// VIOLATION: second branch from q
+q.Count(&count)
 ```
 
 </td><td><b>Yes</b></td><td>
@@ -1010,11 +1220,20 @@ Each safe example above branches `db` more than once. That is safe only because 
 On a mutable value, [`Session(&gorm.Session{})`](https://pkg.go.dev/gorm.io/gorm#DB.Session) and [`Debug()`](https://pkg.go.dev/gorm.io/gorm#DB.Debug) return a copy that **points at the same `Statement`**. Using the copy does not change the original. But a change to the original after the copy was taken shows up in every later use of the copy. A change by reassignment (`q = q.Where(...)`) counts too, since it changes a mutable `Statement` in place:
 
 ```go
-q := db.Model(&User{}).Where("tenant = 1") // q is mutable
-countQ := q.Session(&gorm.Session{})       // countQ shares q's Statement
-countQ.Count(&before)                      // OK - q has not changed yet
-q.Where("active = 1").Find(&users)         // first branch - changes q in place
-countQ.Count(&n)                           // VIOLATION: runs WHERE tenant = 1 AND active = 1
+// q is mutable
+q := db.Model(&User{}).Where("tenant = 1")
+
+// countQ shares q's Statement
+countQ := q.Session(&gorm.Session{})
+
+// OK: q has not changed yet
+countQ.Count(&before)
+
+// first branch: changes q in place
+q.Where("active = 1").Find(&users)
+
+// VIOLATION: runs WHERE tenant = 1 AND active = 1
+countQ.Count(&n)
 ```
 
 To fix it, end the root's chain with `.Session(&gorm.Session{})` before you copy it. Or take the copy with an option that clones the `Statement`.
@@ -1044,8 +1263,12 @@ GORM builds a subquery from a copy of the argument's `Statement`. So passing a `
 ```go
 sub := db.Model(&User{}).Select("id")
 x := db.Where("id IN (?)", sub)
-sub.Where("age > 18").Find(&adults)    // changes sub in place
-x.Find(&users)                          // VIOLATION: the subquery has age > 18
+
+// changes sub in place
+sub.Where("age > 18").Find(&adults)
+
+// VIOLATION: the subquery has age > 18
+x.Find(&users)
 ```
 
 To fix it, end the argument's chain with `.Session(&gorm.Session{})` before you pass it.
@@ -1058,10 +1281,17 @@ To fix it, end the argument's chain with `.Session(&gorm.Session{})` before you 
 <tr><td>
 
 ```go
-sub := db.Model(&User{}).Select("id") // sub is mutable
-db.Where("id IN (?)", sub).Find(&users)     // OK - reads sub
-db.Where("id NOT IN (?)", sub).Find(&others) // OK - reads sub again
-sub.Find(&ids)                               // OK - first branch of sub
+// sub is mutable
+sub := db.Model(&User{}).Select("id")
+
+// OK: reads sub
+db.Where("id IN (?)", sub).Find(&users)
+
+// OK: reads sub again
+db.Where("id NOT IN (?)", sub).Find(&others)
+
+// OK: first branch of sub
+sub.Find(&ids)
 ```
 
 </td><td>No</td><td>
@@ -1073,8 +1303,12 @@ You can pass one subquery to several queries.
 
 ```go
 sub := db.Model(&User{}).Select("id")
-sub.Where("age > 18").Find(&adults)    // first branch - changes sub in place
-db.Where("id IN (?)", sub).Find(&users) // VIOLATION: the subquery has age > 18
+
+// first branch: changes sub in place
+sub.Where("age > 18").Find(&adults)
+
+// VIOLATION: the subquery has age > 18
+db.Where("id IN (?)", sub).Find(&users)
 ```
 
 </td><td><b>Yes</b></td><td>
@@ -1117,8 +1351,11 @@ The [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) passed to a [`Scopes`](http
 
 ```go
 db.Scopes(func(tx *gorm.DB) *gorm.DB {
-    tx.Where("a").Find(&users) // first branch from tx - OK
-    return tx.Where("b")       // VIOLATION: second branch from tx
+    // OK: first branch from tx
+    tx.Where("a").Find(&users)
+
+    // VIOLATION: second branch from tx
+    return tx.Where("b")
 })
 ```
 
@@ -1128,8 +1365,11 @@ A [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) **parameter** is a mutable ro
 
 ```go
 func helper(tx *gorm.DB) *gorm.DB {
-    tx.Where("a").Find(&users) // first branch from tx - OK
-    return tx.Where("b")       // VIOLATION: second branch from tx
+    // OK: first branch from tx
+    tx.Where("a").Find(&users)
+
+    // VIOLATION: second branch from tx
+    return tx.Where("b")
 }
 ```
 
@@ -1200,9 +1440,11 @@ A use inside a closure counts where the closure is called.
 q := db.Where("x")
 f := func() { q.Find(&users) }
 if condition {
-    f()               // first branch from q - OK
+    // OK: first branch from q
+    f()
 } else {
-    q.Count(&count)   // OK - f() never runs on this path
+    // OK: f() never runs on this path
+    q.Count(&count)
 }
 ```
 
@@ -1216,7 +1458,9 @@ The two uses are on paths that cannot both run.
 ```go
 db = db.WithContext(ctx)
 db.Find(&users)
-func() { db.Count(&count) }() // OK - reads the WithContext result
+
+// OK: reads the WithContext result
+func() { db.Count(&count) }()
 ```
 
 </td><td>No</td><td>
@@ -1229,7 +1473,8 @@ A closure reads a captured variable as it is at the closure's calls. So rebindin
 ```go
 db = db.WithContext(ctx)
 for _, id := range ids {
-    g.Go(func() error { return db.First(&User{}, id).Error }) // OK - reads the WithContext result
+    // OK: reads the WithContext result
+    g.Go(func() error { return db.First(&User{}, id).Error })
 }
 ```
 
@@ -1243,8 +1488,12 @@ Some closures may run at any point after they are created. That is a closure tha
 ```go
 db = db.Session(&gorm.Session{})
 base := func() *gorm.DB { return db.Model(&User{}) }
-base().Where("c").Find(&users) // OK
-base().Where("d").Find(&users) // OK - a new chain
+
+// OK
+base().Where("c").Find(&users)
+
+// OK: a new chain
+base().Where("d").Find(&users)
 ```
 
 </td><td>No</td><td>
@@ -1256,9 +1505,13 @@ A closure that builds a new chain from an immutable value on each call is a fact
 
 ```go
 q := db.Where("x")
-base := func() *gorm.DB { return q.Where("y") } // VIOLATION: base runs twice
+
+// VIOLATION: base runs twice
+base := func() *gorm.DB { return q.Where("y") }
 base().Find(&users)
-base().Find(&admins) // VIOLATION: second branch
+
+// VIOLATION: second branch
+base().Find(&admins)
 ```
 
 </td><td><b>Yes</b></td><td>
@@ -1282,8 +1535,12 @@ var Global *gorm.DB
 
 func F(db *gorm.DB) {
     Global = db.Session(&gorm.Session{}).Where("tenant")
-    Global.Where("a").Find(&users) // first branch - OK
-    Global.Where("b").Find(&users) // VIOLATION: second branch from the stored chain
+
+    // OK: first branch
+    Global.Where("a").Find(&users)
+
+    // VIOLATION: second branch from the stored chain
+    Global.Where("b").Find(&users)
 }
 ```
 
@@ -1299,8 +1556,12 @@ func F(db *gorm.DB) {
 peek := func(q *gorm.DB) { ... }
 q := db.Where("x")
 peek(q)
-q.Find(&users)          // OK - peek is pure
-func() { peek(nil) }()  // the capture does not change that
+
+// OK: peek is pure
+q.Find(&users)
+
+// the capture does not change that
+func() { peek(nil) }()
 ```
 
 </details>
@@ -1373,7 +1634,9 @@ A comment after code covers that line only:
 
 ```go
 q.Count(&count) //gormreuse:ignore // Suppressed
-q.Delete(&User{})                  // Still reported
+
+// Still reported
+q.Delete(&User{})
 ```
 
 A function:
@@ -1410,15 +1673,17 @@ q.
 
 Mark a function or closure as not polluting its [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) argument. Passing an argument to it is then not a branch. Without the directive, `helper(q)` branches `q`.
 
+> [!WARNING]
+> **Body contract.** A pure function must not call a chain method on an argument (`db.Where("x")`). It must not let an argument escape, or pass it to a function that is not pure. It may return a mutable value. So `q := withTenant(db, 1)` is still mutable.
+
 ```go
 //gormreuse:pure
 func withTenant(db *gorm.DB, tenantID int) *gorm.DB {
-    return db.Session(&gorm.Session{}).Where("tenant_id = ?", tenantID)
+    return db.
+        Session(&gorm.Session{}).
+        Where("tenant_id = ?", tenantID)
 }
 ```
-
-> [!WARNING]
-> gormreuse checks the body. A pure function must not call a chain method on an argument (`db.Where("x")`), let it escape, or pass it to a function that is not pure. It may return a mutable value: `q := withTenant(db, 1)` is still mutable.
 
 <details>
 <summary>Placement, calls without the directive, and the full contract</summary>
@@ -1449,7 +1714,8 @@ gormreuse validates that functions marked `//gormreuse:pure` actually satisfy th
 ```go
 //gormreuse:pure
 func badPure(db *gorm.DB) {
-    db.Where("x")  // ERROR: pure function pollutes *gorm.DB argument by calling Where
+    // ERROR: pure function pollutes *gorm.DB argument by calling Where
+    db.Where("x")
 }
 ```
 
@@ -1472,9 +1738,14 @@ Passing the argument to a function that is not marked pure is reported inside th
 A pure function MAY return a mutable [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB). Callers must treat the return value as potentially mutable:
 
 ```go
-q := withTenant(db, 1)  // q is mutable!
-q.Find(&users)          // first branch - OK
-q.Count(&count)         // VIOLATION - second branch from mutable q
+// q is mutable!
+q := withTenant(db, 1)
+
+// OK: first branch
+q.Find(&users)
+
+// VIOLATION: second branch from mutable q
+q.Count(&count)
 ```
 
 A pure function MAY also return its argument. Its result is then the same value as the argument, so a branch from the result is a branch from the argument:
@@ -1484,8 +1755,12 @@ A pure function MAY also return its argument. Its result is then the same value 
 func same(db *gorm.DB) *gorm.DB { return db }
 
 q := db.Where("x")
-same(q).Find(&users)    // first branch from q - OK
-q.Count(&count)         // VIOLATION - second branch from q
+
+// OK: first branch from q
+same(q).Find(&users)
+
+// VIOLATION: second branch from q
+q.Count(&count)
 ```
 
 A result that comes only from immutable values, like `withTenant`'s `db.Session(...).Where(...)`, is a new chain and does not share the argument. This holds for a pure function in another package too.
@@ -1496,15 +1771,15 @@ A result that comes only from immutable values, like `withTenant`'s `db.Session(
 
 Mark a function as returning an **immutable** [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) (like builtin [`Session`](https://pkg.go.dev/gorm.io/gorm#DB.Session), [`WithContext`](https://pkg.go.dev/gorm.io/gorm#DB.WithContext)). Callers can then reuse its result freely. It also covers a `*gorm.DB` in a multi-value result, such as `func Open() (*gorm.DB, error)`. The body contract applies to that result. Most helpers need no directive: see [Inferred immutable-return](#inferred-immutable-return).
 
+> [!WARNING]
+> **Body contract.** A function that returns a provably *mutable* value is reported at the declaration. Put `Session` at the **end** of the chain (`globalDB.Where("x").Session(&gorm.Session{})`), not before a `Where`.
+
 ```go
 //gormreuse:immutable-return
 func GetDB() *gorm.DB {
     return globalDB.Session(&gorm.Session{})
 }
 ```
-
-> [!WARNING]
-> **Body contract.** A function that returns a provably *mutable* value is reported at the declaration. Put `Session` at the **end** of the chain (`globalDB.Where("x").Session(&gorm.Session{})`), not before a `Where`.
 
 <details>
 <summary>A full example, and what the body check reports</summary>
@@ -1518,7 +1793,9 @@ func GetDB() *gorm.DB {
 func useIt() {
     db := GetDB()
     db.Where("x").Find(&users)
-    db.Where("y").Find(&admins) // OK - GetDB returns immutable
+
+    // OK: GetDB returns immutable
+    db.Where("y").Find(&admins)
 }
 ```
 
@@ -1527,7 +1804,8 @@ Without the check, gormreuse would trust a false directive, and silently allow u
 ```go
 //gormreuse:immutable-return // VIOLATION: returns mutable *gorm.DB
 func GetDB() *gorm.DB {
-    return globalDB.Session(&gorm.Session{}).Where("x") // trailing Where re-forks a fresh clone==0 Statement
+    // trailing Where re-forks a fresh clone==0 Statement
+    return globalDB.Session(&gorm.Session{}).Where("x")
 }
 ```
 
@@ -1549,7 +1827,8 @@ A function or closure without the directive is treated as `immutable-return` whe
 
 ```go
 func (r *repo) conn(ctx context.Context) *gorm.DB {
-    return r.db.WithContext(ctx) // inferred: callers may branch the result twice
+    // inferred: callers may branch the result twice
+    return r.db.WithContext(ctx)
 }
 ```
 
@@ -1572,7 +1851,9 @@ func OpenTestConnection(cfg *gorm.Config) (db *gorm.DB, err error) {
 func useIt(r *repo, ctx context.Context) {
     q := r.conn(ctx)
     q.Where("a").Find(&users)
-    q.Where("b").Find(&admins) // OK - conn is inferred immutable-return
+
+    // OK: conn is inferred immutable-return
+    q.Where("b").Find(&admins)
 }
 ```
 
@@ -1608,18 +1889,21 @@ Anything else turns inference off for the function:
 
 ### `//gormreuse:immutable-param`
 
-Opt a function's [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) **parameters** out of the default mutable treatment. They are treated as immutable inside the function. The caller becomes responsible for passing an isolated value:
+Opt a function's [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) **parameters** out of the default mutable treatment. They are treated as immutable inside the function. The caller becomes responsible for passing an isolated value.
+
+> [!WARNING]
+> **Caller-side contract.** When the function actually branches such a parameter, passing a *mutable* `*gorm.DB` at a call site is reported. The suggested fix appends `.Session(&gorm.Session{})` to the argument.
 
 ```go
 //gormreuse:immutable-param
 func applyFilters(tx *gorm.DB) {
-    tx.Where("a").Find(&users) // OK - tx is treated as immutable here
-    tx.Where("b").Find(&more)  // OK
+    // OK: tx is treated as immutable here
+    tx.Where("a").Find(&users)
+
+    // OK
+    tx.Where("b").Find(&more)
 }
 ```
-
-> [!WARNING]
-> **Caller-side contract.** When the function actually branches such a parameter, passing a *mutable* `*gorm.DB` at a call site is reported. The suggested fix appends `.Session(&gorm.Session{})` to the argument.
 
 <details>
 <summary>The caller check in detail</summary>
@@ -1628,8 +1912,11 @@ The callee's internal branching would interfere, because the value is not isolat
 
 ```go
 func caller(root *gorm.DB) {
-    q := root.Session(&gorm.Session{}).Where("x") // mutable
-    applyFilters(q) // VIOLATION: mutable *gorm.DB passed to immutable-param parameter
+    // mutable
+    q := root.Session(&gorm.Session{}).Where("x")
+
+    // VIOLATION: mutable *gorm.DB passed to immutable-param parameter
+    applyFilters(q)
 }
 ```
 
@@ -1650,17 +1937,18 @@ A **redundant** `immutable-param` is reported. See [Unused and redundant directi
 
 ### `//gormreuse:immutable-input(name)`
 
-Declare that the function passes an **immutable** [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) to its callback parameter `name`. It is a user-defined equivalent of gorm's [`Transaction`](https://pkg.go.dev/gorm.io/gorm#DB.Transaction)/[`FindInBatches`](https://pkg.go.dev/gorm.io/gorm#DB.FindInBatches). The named callback's `*gorm.DB` parameter is then treated as immutable, so reuse inside the callback is allowed:
+Declare that the function passes an **immutable** [`*gorm.DB`](https://pkg.go.dev/gorm.io/gorm#DB) to its callback parameter `name`. It is a user-defined equivalent of gorm's [`Transaction`](https://pkg.go.dev/gorm.io/gorm#DB.Transaction)/[`FindInBatches`](https://pkg.go.dev/gorm.io/gorm#DB.FindInBatches). The named callback's `*gorm.DB` parameter is then treated as immutable, so reuse inside the callback is allowed.
+
+> [!WARNING]
+> **Body contract.** A function that hands the callback a mutable value is reported. So is a callback that escapes where gormreuse cannot follow it.
 
 ```go
 //gormreuse:immutable-input(cb)
 func withFreshDB(cb func(*gorm.DB) error, db *gorm.DB) error {
-    return cb(db.Session(&gorm.Session{})) // hands the callback an isolated value
+    // hands the callback an isolated value
+    return cb(db.Session(&gorm.Session{}))
 }
 ```
-
-> [!WARNING]
-> **Body contract.** A function that hands the callback a mutable value is reported. So is a callback that escapes where gormreuse cannot follow it.
 
 <details>
 <summary>A caller, placement, the body check, and unused cases</summary>
@@ -1669,7 +1957,9 @@ func withFreshDB(cb func(*gorm.DB) error, db *gorm.DB) error {
 func useIt(db *gorm.DB) {
     _ = withFreshDB(func(q *gorm.DB) error {
         q.Find(&users)
-        q.Count(&count) // OK — q is declared immutable input
+
+        // OK: q is declared immutable input
+        q.Count(&count)
         return nil
     }, db)
 }
@@ -1692,7 +1982,9 @@ A mutable value handed to the callback is reported:
 //gormreuse:immutable-input(cb)
 func bad(cb func(*gorm.DB) error, db *gorm.DB) error {
     q := db.Where("x")
-    return cb(q) // VIOLATION: immutable-input(cb) declared but mutable *gorm.DB passed to callback
+
+    // VIOLATION: immutable-input(cb) declared but mutable *gorm.DB passed to callback
+    return cb(q)
 }
 ```
 
@@ -1729,14 +2021,20 @@ gorm's built-in `Transaction` and `FindInBatches` already pass a fresh handle to
 
 ### `//gormreuse:pure,immutable-return`
 
-The recommended pattern for DB connection helpers. It combines both guarantees, so each one needs its own `Session`:
+The recommended pattern for DB connection helpers. It combines both guarantees.
+
+> [!WARNING]
+> **Body contract.** Both contracts apply, so each one needs its own `Session`. The first one keeps `db` unpolluted, for `pure`. The last one isolates the result, for `immutable-return`.
 
 ```go
 //gormreuse:pure,immutable-return
 func GetTenantDB(db *gorm.DB, tenantID int) *gorm.DB {
-    return db.Session(&gorm.Session{}).       // pure: Where runs on a copy, not on db
+    return db.
+        // pure: Where runs on a copy, not on db
+        Session(&gorm.Session{}).
         Where("tenant_id = ?", tenantID).
-        Session(&gorm.Session{})              // immutable-return: the result is isolated
+        // immutable-return: the result is isolated
+        Session(&gorm.Session{})
 }
 ```
 
@@ -1747,10 +2045,18 @@ func GetTenantDB(db *gorm.DB, tenantID int) *gorm.DB {
 func useIt(db *gorm.DB) {
     tenant1 := GetTenantDB(db, 1)
     tenant2 := GetTenantDB(db, 2)
-    tenant1.Where("x").Find(&users)   // OK
-    tenant2.Where("y").Find(&admins)  // OK
-    tenant1.Count(&count)             // OK - immutable-return
-    db.Find(&all)                     // OK - pure (db not polluted)
+
+    // OK
+    tenant1.Where("x").Find(&users)
+
+    // OK
+    tenant2.Where("y").Find(&admins)
+
+    // OK: immutable-return
+    tenant1.Count(&count)
+
+    // OK: pure (db not polluted)
+    db.Find(&all)
 }
 ```
 
@@ -1785,7 +2091,8 @@ A [`Scopes`](https://pkg.go.dev/gorm.io/gorm#DB.Scopes) callback that **returns*
 
 ```go
 db.Scopes(func(q *gorm.DB) *gorm.DB {
-    return q.Session(&gorm.Session{}) // WARNING: Session() result returned from Scopes callback causes transaction leak
+    // WARNING: Session() result returned from Scopes callback causes transaction leak
+    return q.Session(&gorm.Session{})
 })
 ```
 
