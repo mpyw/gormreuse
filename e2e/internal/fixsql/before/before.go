@@ -282,3 +282,61 @@ func ErrorPropagation(db *gorm.DB) {
 		db.Model(&User{}).Where("failed = ?", true).Find(&[]User{})
 	}
 }
+
+// LaterLoop discards a statement, then queries in a later loop. The fix
+// reassigns the statement and gives it a Session, or each query adds its id
+// to the ones before (#311).
+func LaterLoop(db *gorm.DB) {
+	q := db.Model(&User{}).Where("tenant_id = ?", 7)
+	q.Where("age > ?", 20)
+	for _, id := range []int{1, 2, 3} {
+		q.Where("id = ?", id).Find(&[]User{})
+	}
+}
+
+// LaterLoopInIf is LaterLoop with the discarded statement in an if (#311).
+func LaterLoopInIf(db *gorm.DB) {
+	laterLoopInIf(db, true)
+}
+
+func laterLoopInIf(db *gorm.DB, adults bool) {
+	q := db.Model(&User{}).Where("tenant_id = ?", 7)
+	if adults {
+		q.Where("age > ?", 20)
+	}
+	for _, id := range []int{1, 2, 3} {
+		q.Where("id = ?", id).Find(&[]User{})
+	}
+}
+
+// Paginate counts and lists the users that match name, as a list endpoint
+// does. The Where in the if merges with db, which is read twice, so it needs
+// a Session of its own besides the one at the top of the body, or Count's
+// Select and Model leak into Find (#311).
+func Paginate(db *gorm.DB) {
+	paginate(db.Model(&User{}), "x")
+}
+
+func paginate(db *gorm.DB, name string) {
+	var total int64
+	if name != "" {
+		db = db.Where("name = ?", name)
+	}
+	db.Count(&total)
+	db.Offset(10).Limit(10).Find(&[]User{})
+}
+
+// PaginateIsolated is Paginate with an isolated caller, so the fix declares
+// the parameter immutable-param, and the Where still needs a Session (#311).
+func PaginateIsolated(db *gorm.DB) {
+	paginateIsolated(db.Model(&User{}).Session(&gorm.Session{}), "x")
+}
+
+func paginateIsolated(db *gorm.DB, name string) {
+	var total int64
+	if name != "" {
+		db = db.Where("name = ?", name)
+	}
+	db.Count(&total)
+	db.Offset(10).Limit(10).Find(&[]User{})
+}

@@ -76,6 +76,12 @@ func (g *Generator) sessionEdits(sites []sessionSite) []analysis.TextEdit {
 // new root, so `for ... { q = q.Where(x) }; q.Find(nil)` needs no Session on
 // the original root.
 //
+// A use in a loop that does not hold the root's block reads the same root on
+// each iteration, so it branches the root by itself. That holds for a virtual
+// root as for the original one (#311): in `q.Where("t"); for ... {
+// q.Where("id").Find(nil) }` the reassignment q = q.Where("t") needs a
+// Session, or each iteration adds its id to the one before.
+//
 // The simulation orders uses by position, so it misses the uses that a loop's
 // next iteration makes of a virtual root created in the loop body. Such a root
 // always gets a Session (#199): in `for { q.Where("id").Find(nil); q = q.Where("age") }`
@@ -102,7 +108,7 @@ func (g *Generator) findRootsNeedingSession(virtualUses map[virtualRootKey][]pol
 			needs = true
 		case !ordered:
 			needs = len(uses) >= 2 || len(uses) == 1 && (!root.isOriginal || !reassigned[uses[0].Pos].IsValid())
-		case root.isOriginal && usedAgainInLoop(g.cfg, root.block, uses, reassigned):
+		case usedAgainInLoop(g.cfg, root.block, uses, reassigned):
 			needs = true
 		default:
 			needs = usesConflict(g.cfg, uses, reassigned)
@@ -139,7 +145,21 @@ func (g *Generator) sessionPositionsForRoot(pos token.Pos, root ssa.Value, uses 
 	if end := g.sessionEndAfterCall(pos); end.IsValid() {
 		positions = append(positions, end)
 	}
-	return append(positions, g.edgeSessionPositions(mergedEdges(g.cfg, root, uses))...)
+	return append(positions, g.mergedSessionPositions(root, uses)...)
+}
+
+// mergedSessionPositions returns where Sessions go on the other values that
+// the uses of root may read instead of it (see mergedEdges). A parameter
+// root needs them as a local root does: its Session at the top of the body
+// does not reach a value merged with it, as in standard pagination (#311):
+//
+//	if f.Name != "" { db = db.Where("name = ?", f.Name) }
+//	db.Model(&User{}).Count(&total)
+//	db.Offset(10).Limit(10).Find(&users)
+//
+//declscope:shared // generator.go's Generate places a parameter root's merged Sessions with it
+func (g *Generator) mergedSessionPositions(root ssa.Value, uses []pollution.UsageInfo) []token.Pos {
+	return g.edgeSessionPositions(mergedEdges(g.cfg, root, uses))
 }
 
 // edgeSessionPositions returns where Sessions go on edges, the values that

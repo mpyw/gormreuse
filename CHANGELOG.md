@@ -95,7 +95,7 @@ Most added reports in the root module are a `*gorm.DB` parameter branched in a l
 | No fix that drops a condition (#199, #243) | A discarded statement such as `q.Where("a")` must be reassigned. When it cannot be, or when other code changes the root in place, there is no fix |
 | The right variable (#198) | A reassignment rebinds the variable that holds the reused root, never an outer receiver |
 | Parameter roots (#201, #245) | An exported function, a method or a function value gets `tx = tx.Session(&gorm.Session{})` at the top of the body. `immutable-param` is added only when every caller is checked |
-| Sessions by control flow (#202, #247) | Sessions go where the paths need them. One pass of fixes resolves the diagnostics |
+| Sessions by control flow (#202, #247, #311) | Sessions go where the paths need them, also for a reassignment read in a later loop and for a value merged with a parameter. One pass of fixes resolves the diagnostics |
 | New fixes (#248) | Isolate an argument passed to an `immutable-param` parameter. Delete an unused or redundant directive, or an unused ignore |
 | Every diagnostic carries its root's fix (#246) | A quick fix works on each diagnostic, also when another one is ignored |
 | Same output on every run (#184, #273) | `-json` lists diagnostics in position order |

@@ -129,13 +129,23 @@ func (g *Generator) Generate(v pollution.Violation) []analysis.SuggestedFix {
 	// //gormreuse:immutable-param, which the caller-side check (stage 2b) then
 	// keeps true. Otherwise the parameter gets a Session at the top of the
 	// body, and the rest of the fix proceeds as for a local root (#201).
+	//
+	// Neither makes a value that the parameter merges with immutable, as in
+	// `if c { db = db.Where("a") }` with db read twice after the if. Such a
+	// value gets its own Session, as for a local root (#311). With the
+	// directive, the rest of the fix proceeds for those Sessions, and the
+	// directive alone is the fallback when it offers none.
 	p, isParam := root.(*ssa.Parameter)
+	var fallback []analysis.SuggestedFix
 	if isParam {
 		if !g.canFixParam(p) {
 			return nil
 		}
 		if g.paramCallersIsolate(p) {
-			return g.generateImmutableParamFix(p)
+			fallback = g.generateImmutableParamFix(p)
+			if len(g.mergedSessionPositions(p, v.AllUses)) == 0 {
+				return fallback
+			}
 		}
 	}
 
@@ -143,25 +153,25 @@ func (g *Generator) Generate(v pollution.Violation) []analysis.SuggestedFix {
 	// value is not the *gorm.DB itself (#176). Appending Session() to it would
 	// not compile, so no fix is offered.
 	if !typeutil.IsGormDB(root.Type()) {
-		return nil
+		return fallback
 	}
 
 	// A field of a struct a call returned (#181) has no chain expression to
 	// append Session() to: the call returns the struct, not a *gorm.DB. The fix
 	// belongs where the function builds the struct, so none is offered.
 	if _, ok := root.(*tracer.FieldRoot); ok {
-		return nil
+		return fallback
 	}
 
 	allUses := v.AllUses
 	if len(allUses) == 0 {
-		return nil // No uses to fix
+		return fallback // No uses to fix
 	}
 
 	// Code that changes the root in place, other than a discarded statement on
 	// its variable, would change a copy once the root gets a Session (#243).
 	if g.changedElsewhere(v) {
-		return nil
+		return fallback
 	}
 
 	// The variable a reassignment rewrites. nil means no reassignment is safe,
@@ -171,7 +181,7 @@ func (g *Generator) Generate(v pollution.Violation) []analysis.SuggestedFix {
 	// Phase 1: Identify non-finisher uses that need reassignment
 	reassigned, ok := g.findReassignedChains(allUses, target)
 	if !ok {
-		return nil
+		return fallback
 	}
 
 	// A discarded statement on a parameter also changes the caller's value,
@@ -179,7 +189,7 @@ func (g *Generator) Generate(v pollution.Violation) []analysis.SuggestedFix {
 	// parameter, unless the function returns a *gorm.DB that can carry the
 	// change back (#243).
 	if isParam && len(reassigned) > 0 && !typeutil.HasGormDBResult(p.Parent().Signature.Results()) {
-		return nil
+		return fallback
 	}
 
 	// Phase 2: Simulate reassignments and find roots needing Session
@@ -189,8 +199,14 @@ func (g *Generator) Generate(v pollution.Violation) []analysis.SuggestedFix {
 		rootsNeedingSession = append(rootsNeedingSession, virtualRootKey{isOriginal: true, pos: root.Pos()})
 	}
 
-	// Generate TextEdits
+	// Generate TextEdits. A parameter declared immutable-param keeps its
+	// directive.
 	var edits []analysis.TextEdit
+	message := "Add reassignment and Session to fix reuse"
+	if fallback != nil {
+		edits = append(edits, fallback[0].TextEdits...)
+		message = "Declare //gormreuse:immutable-param and add Session to the values merged with the parameter"
+	}
 
 	// PHASE 1: Add reassignments for non-finisher uses (Rule 1)
 	for _, pos := range slices.Sorted(maps.Keys(reassigned)) {
@@ -207,7 +223,12 @@ func (g *Generator) Generate(v pollution.Violation) []analysis.SuggestedFix {
 	for _, vr := range rootsNeedingSession {
 		switch {
 		case vr.isOriginal && isParam:
-			sites = append(sites, g.paramSessionSite(p))
+			if fallback == nil {
+				sites = append(sites, g.paramSessionSite(p))
+			}
+			for _, pos := range g.mergedSessionPositions(p, allUses) {
+				sites = append(sites, sessionSite{pos: pos})
+			}
 		case vr.isOriginal:
 			for _, pos := range g.sessionPositionsForRoot(vr.pos, root, allUses) {
 				sites = append(sites, sessionSite{pos: pos})
@@ -237,7 +258,7 @@ func (g *Generator) Generate(v pollution.Violation) []analysis.SuggestedFix {
 
 	return []analysis.SuggestedFix{
 		{
-			Message:   "Add reassignment and Session to fix reuse",
+			Message:   message,
 			TextEdits: edits,
 		},
 	}

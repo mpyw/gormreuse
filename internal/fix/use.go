@@ -99,11 +99,11 @@ func usesConflict(a *cfg.Analyzer, uses []pollution.UsageInfo, reassigned map[to
 }
 
 // usedAgainInLoop reports whether one of uses, other than a reassignment,
-// runs again on the same value of a root defined in block def: the use is in
-// a loop that does not define the root again, as in
-// `q := db.Where("x"); for ... { q.Find(nil) }`. A reassignment reads the
-// root only on the first iteration; later ones read its result. The uses are
-// in def's function.
+// runs again on the same value of a root defined in block def, the original
+// root or a reassignment: the use is in a loop that does not define the root
+// again, as in `q := db.Where("x"); for ... { q.Find(nil) }`. A reassignment
+// reads the root only on the first iteration; later ones read its result.
+// The uses are in def's function.
 //
 //declscope:shared // session.go's findRootsNeedingSession asks it
 func usedAgainInLoop(a *cfg.Analyzer, def *ssa.BasicBlock, uses []pollution.UsageInfo, reassigned map[token.Pos]token.Pos) bool {
