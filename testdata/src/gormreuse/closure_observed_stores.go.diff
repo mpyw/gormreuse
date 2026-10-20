@@ -1,6 +1,6 @@
 --- closure_observed_stores.go	1970-01-01 00:00:00
 +++ closure_observed_stores.go.golden	1970-01-01 00:00:00
-@@ -1,167 +1,167 @@
+@@ -1,204 +1,204 @@
  package internal
  
  import (
@@ -91,9 +91,46 @@
  func cosNested(ctx context.Context, db *gorm.DB) {
  	db = db.WithContext(ctx)
  	go func() {
- 		defer func() { db.Where("a = 1").Find(nil) }()
+ 		func() { db.Where("a = 1").Find(nil) }()
  		db.Where("b = 2").Find(nil)
  	}()
+ }
+ 
+ // cosFieldNested: the same for a field read through a captured pointer.
+ func cosFieldNested(ctx context.Context, db *gorm.DB) {
+ 	d := &cosDeps{db: db}
+ 	d.db = d.db.WithContext(ctx)
+ 	go func() {
+ 		func() { d.db.Where("a = 1").Find(nil) }()
+ 		d.db.Where("b = 2").Find(nil)
+ 	}()
+ }
+ 
+ // cosMk returns a fresh struct holding a chain.
+ func cosMk(db *gorm.DB) *cosDeps { return &cosDeps{db: db.Where("x")} }
+ 
+ // cosReturnedInLoop: a closure in a loop reads the field of the struct this
+ // iteration's call returned. The walk after the closure stops at the call,
+ // which returns a new struct on the next iteration.
+ func cosReturnedInLoop(db *gorm.DB, ids []int) {
+ 	s := db.Session(&gorm.Session{})
+ 	var g cosGroup
+ 	for range ids {
+ 		p := cosMk(s)
+ 		g.Go(func() error { return p.db.Find(nil).Error })
+ 	}
+ }
+ 
+ // cosReturnedReassigned: [LIMITATION] the closure may read either struct, and
+ // the walk after it stops at the second call. The last read sees only the
+ // second struct, but a load of a reassigned pointer variable is resolved to
+ // every pointer stored in it, so it is matched to the first struct too.
+ func cosReturnedReassigned(db *gorm.DB) {
+ 	s := db.Session(&gorm.Session{})
+ 	p := cosMk(s)
+ 	go func() { p.db.Find(nil) }()
+ 	p = cosMk(s)
+ 	p.db.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  }
  
  // cosFieldCalled: a field read through a captured pointer, in a closure that

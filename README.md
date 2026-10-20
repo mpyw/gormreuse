@@ -1124,6 +1124,7 @@ gormreuse reports a reuse only when it can follow the value. These cases are kno
 | --- | --- |
 | `a, b := pair(db)`, where `pair` returns two new chains, then `a.Find(nil); b.Find(nil)` | Both results of one call share the call as their root |
 | `G = db.Where("x"); if c { G = G.Where("a") }; G.Find(nil)` for a global or a field `G` | A store is not a merge point, so `Where("a")` counts as a branch of the stored root |
+| `p := mk(s); go func() { p.db.Find(nil) }(); p = mk(s); p.db.Count(nil)`, where `mk` returns a new struct | A pointer variable that a closure captures and that is reassigned may point to either struct, so the last read is matched to the first one too |
 | A recursive helper whose every path ends in `Session(...)`, branched twice | A function that returns its own result is never [inferred](#inferred-immutable-return) `immutable-return`. Add the directive |
 
 **Wrong position:** a use inside a deferred closure runs at function exit. gormreuse orders it by its source position. So `defer func() { q.Count(nil) }(); q.Find(nil)` is reported at `q.Find`, which runs first.

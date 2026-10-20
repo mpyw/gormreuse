@@ -44,9 +44,6 @@ func (t *RootTracer) traceAllocStore(alloc *ssa.Alloc, load ssa.Instruction, vis
 // before.
 func allocReachingStoreValues(alloc *ssa.Alloc, load ssa.Instruction) []ssa.Value {
 	fn := alloc.Parent()
-	if fn == nil {
-		return nil
-	}
 	stores, _ := observedFieldStores(fn, storeTarget{root: alloc}, nil, load)
 	vals := make([]ssa.Value, 0, len(stores))
 	for _, store := range stores {
