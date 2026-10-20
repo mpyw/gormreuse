@@ -1016,11 +1016,12 @@ func badPureImmutablePassesNonPure(db *gorm.DB) *gorm.DB {
 
 // PIR201: Only immutable-return (no pure) - can pollute argument
 // This function pollutes its argument but that's allowed without pure directive.
-// The return value is still treated as immutable.
+// The return value is still treated as immutable. immutable-param says the
+// argument is isolated, so the discarded Where has no effect (#346).
 //
 //gormreuse:immutable-return,immutable-param
 func immutableOnlyPollutes(db *gorm.DB) *gorm.DB {
-	db.Where("pollute") // No error - not marked as pure
+	db.Where("pollute") // want `immutable-param declared but the result of db\.Where is discarded`
 	return db.Session(&gorm.Session{})
 }
 

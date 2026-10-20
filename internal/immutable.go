@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"go/ast"
 	"go/token"
 	"slices"
 
@@ -225,4 +226,131 @@ func reportRedundantImmutableParam(
 		}
 		report(fn.Pos(), "redundant gormreuse:immutable-param directive: no *gorm.DB parameter is reused", targets...)
 	}
+}
+
+// reportImmutableParamDiscards enforces a body-side rule of
+// //gormreuse:immutable-param (#346): the function's callers pass an
+// isolated *gorm.DB, so a statement that discards a non-finisher chain on a
+// parameter, such as `tx.Where("t = 1")`, changes a copy and has no effect.
+// Without the directive the same statement would change the caller's value
+// in place, so it is a sign that the function relies on that. It returns the
+// functions that have such a statement. The fix that isolates an argument to
+// one of them is withheld, since it would drop the change. A pure function
+// is left to the pure check, which reports such a statement as pollution.
+//
+//declscope:shared // run.go reports them, and the fix generator withholds an isolation for them
+func reportImmutableParamDiscards(
+	funcs []*ssa.Function,
+	immutableParamFuncs, pureFuncs *directive.DirectiveFuncSet,
+	skip func(*ssa.Function) bool,
+	report func(token.Pos, string),
+	guard *panicGuard,
+) map[*ssa.Function]bool {
+	discards := make(map[*ssa.Function]bool)
+	if immutableParamFuncs == nil {
+		return discards
+	}
+	for _, fn := range funcs {
+		if skip(fn) || !immutableParamFuncs.Contains(fn) || (pureFuncs != nil && pureFuncs.Contains(fn)) {
+			continue
+		}
+		// A function whose check panicked counts as one with a discard, so
+		// no fix isolates an argument to it.
+		if !guard.run("immutable-param", fn, func() {
+			var stmts map[token.Pos]*ast.ExprStmt
+			for _, p := range fn.Params {
+				if !typeutil.IsGormDB(p.Type()) {
+					continue
+				}
+				for _, ref := range *p.Referrers() {
+					first, ok := ref.(*ssa.Call)
+					if !ok {
+						continue
+					}
+					last, ok := immutableParamDiscardedChain(first, p)
+					if !ok {
+						continue
+					}
+					if stmts == nil {
+						stmts = immutableParamExprStmts(fn.Syntax())
+					}
+					// The whole chain is one expression statement, so no
+					// variable holds a part of it.
+					if stmt := stmts[last.Pos()]; stmt == nil || first.Pos() < stmt.Pos() {
+						continue
+					}
+					discards[fn] = true
+					report(first.Pos(), "immutable-param declared but the result of "+p.Name()+"."+first.Call.StaticCallee().Name()+" is discarded: "+p.Name()+" is isolated, so the call has no effect; assign the result or remove the call")
+				}
+			}
+		}) {
+			discards[fn] = true
+		}
+	}
+	return discards
+}
+
+// immutableParamDiscardedChain reports whether call is the first call of a chain of
+// *gorm.DB methods on v whose result nothing reads, as in v.Where("a") or
+// v.Where("a").Limit(1), and returns the chain's last call. Each call of the
+// chain is a *gorm.DB method that returns a *gorm.DB and is neither a
+// finisher nor a Session-family or state-only method (see
+// typeutil.IsImmutableReturningBuiltin).
+func immutableParamDiscardedChain(call *ssa.Call, v ssa.Value) (*ssa.Call, bool) {
+	for recv := v; ; {
+		if !immutableParamChainCall(call, recv) {
+			return nil, false
+		}
+		var next *ssa.Call
+		for _, ref := range *call.Referrers() {
+			switch ref := ref.(type) {
+			case *ssa.DebugRef:
+			case *ssa.Call:
+				if next != nil {
+					return nil, false
+				}
+				next = ref
+			default:
+				return nil, false
+			}
+		}
+		if next == nil {
+			return call, true
+		}
+		recv, call = call, next
+	}
+}
+
+// immutableParamChainCall reports whether call calls, with receiver recv, a *gorm.DB
+// method that returns a *gorm.DB and only adds to the receiver's Statement.
+func immutableParamChainCall(call *ssa.Call, recv ssa.Value) bool {
+	callee := call.Call.StaticCallee()
+	if callee == nil || callee.Signature.Recv() == nil || !typeutil.IsGormDB(callee.Signature.Recv().Type()) {
+		return false
+	}
+	args := call.Call.Args
+	if len(args) == 0 || args[0] != recv || slices.Contains(args[1:], recv) || !typeutil.IsGormDB(call.Type()) {
+		return false
+	}
+	name := callee.Name()
+	return !typeutil.IsFinisher(name) && !typeutil.IsImmutableReturningBuiltin(name)
+}
+
+// immutableParamExprStmts returns the expression statements in syntax whose expression
+// is a call, by the position of the call's left parenthesis, which is the
+// position of its SSA call.
+func immutableParamExprStmts(syntax ast.Node) map[token.Pos]*ast.ExprStmt {
+	stmts := make(map[token.Pos]*ast.ExprStmt)
+	if syntax == nil {
+		return stmts
+	}
+	ast.Inspect(syntax, func(n ast.Node) bool {
+		if stmt, ok := n.(*ast.ExprStmt); ok {
+			if call, ok := ast.Unparen(stmt.X).(*ast.CallExpr); ok {
+				stmts[call.Lparen] = stmt
+			}
+		}
+		return true
+	})
+	return stmts
 }

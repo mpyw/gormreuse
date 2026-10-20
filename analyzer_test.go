@@ -62,6 +62,33 @@ func TestAnalyzer(t *testing.T) {
 	}
 }
 
+// TestCgoFileHasNoFixes checks that the diagnostics in a cgo package carry no
+// suggested fix (#346). The fix's offsets are offsets in cmd/cgo's output,
+// while -json names the user's file, so a consumer that applied them would
+// corrupt it.
+func TestCgoFileHasNoFixes(t *testing.T) {
+	t.Parallel()
+	if reason := cgoUnavailable(); reason != "" {
+		t.Skip(reason)
+	}
+	results := analysistest.Run(goldentest.NoopT{}, analysistest.TestData(), gormreuse.Analyzer, "cgofile")
+	reports := 0
+	for _, result := range results {
+		if result.Err != nil {
+			t.Fatalf("analyze: %v", result.Err)
+		}
+		for _, diag := range result.Diagnostics {
+			reports++
+			if len(diag.SuggestedFixes) > 0 {
+				t.Errorf("%s: %s has a suggested fix", result.Pass.Fset.Position(diag.Pos), diag.Message)
+			}
+		}
+	}
+	if reports == 0 {
+		t.Error("no diagnostics in cgofile")
+	}
+}
+
 // TestIgnoreFixWithTestFiles checks that an unused ignore in a non-test file
 // of a package with test files is reported only by the test variant, without a
 // fix, while one in a test file gets the fix (#248). The variant without the

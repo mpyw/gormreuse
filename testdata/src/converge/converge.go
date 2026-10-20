@@ -28,8 +28,8 @@ func simpleReuse(db *gorm.DB) {
 //gormreuse:immutable-param
 func nestedArg(db, base *gorm.DB) {
 	q := db.Where("base")
-	base.Or(q.Where("y"))
-	base.Or(q.Where("z")) // want `\*gorm\.DB reused: second branch from mutable root`
+	base.Or(q.Where("y")).Find(nil)
+	base.Or(q.Where("z")).Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // multiBranchReassign exposes defect 2: after Phase-1 reassignments the

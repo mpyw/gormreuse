@@ -68,7 +68,7 @@ type Generator struct {
 	//declscope:shared // change.go, param.go, session.go and virtual.go ask it what is immutable
 	tracer *tracer.RootTracer // the analysis' mutability rule
 	//declscope:shared // param.go's paramCallersIsolate scans them
-	funcs []*ssa.Function // the analysed functions, to find callers
+	funcs []*ssa.Function // the analysed functions and the package initializer, to find callers
 	//declscope:shared // param.go's paramCallersIsolate asks it
 	seesAllCallers func(token.Pos) bool // whether this variant sees every caller of code at a position
 	//declscope:shared // the fixes ask it about loops, reachability and repeats
@@ -78,20 +78,25 @@ type Generator struct {
 
 	files   map[*token.File]*ast.File      // token.File -> ast.File mapping
 	cursors map[*ast.File]inspector.Cursor // file cursors in the pass inspector
+
+	discardsParam map[*ssa.Function]bool // immutable-param functions that discard a chain on a parameter (#346)
 }
 
 // NewGenerator creates a new fix Generator. scopesCallbacks lists
 // Scopes/Preload callback functions, whose *gorm.DB parameters cannot be made
 // immutable-param, so the parameter-root fix is withheld for them (stage 2c);
 // it may be nil. rt decides which values are already immutable, and funcs
-// are the analysed functions, package-level closures included, whose calls
-// are checked before a parameter is declared immutable-param (#201, #245).
+// are the analysed functions, package-level closures and the package
+// initializer included (#346), whose calls are checked before a parameter is
+// declared immutable-param (#201, #245).
 // seesAllCallers reports whether the pass sees every file that may call a
 // function declared at a position: not so for a file other than a test file
 // in a package with test files, which the pass without them cannot see
 // (#245). cfgs is the CFG cache that the checker asks too, so a fix and its
-// diagnostic share the answers (#299).
-func NewGenerator(pass *analysis.Pass, scopesCallbacks map[*ssa.Function]bool, rt *tracer.RootTracer, funcs []*ssa.Function, seesAllCallers func(token.Pos) bool, cfgs *cfg.Analyzer) *Generator {
+// diagnostic share the answers (#299). discardsParam are the immutable-param
+// functions that discard a chain on a parameter: no fix isolates an argument
+// to one of them, since the isolation would drop the change (#346).
+func NewGenerator(pass *analysis.Pass, scopesCallbacks map[*ssa.Function]bool, rt *tracer.RootTracer, funcs []*ssa.Function, seesAllCallers func(token.Pos) bool, cfgs *cfg.Analyzer, discardsParam map[*ssa.Function]bool) *Generator {
 	// Build token.File -> ast.File mapping
 	files := make(map[*token.File]*ast.File)
 	for _, f := range pass.Files {
@@ -117,6 +122,7 @@ func NewGenerator(pass *analysis.Pass, scopesCallbacks map[*ssa.Function]bool, r
 		funcs:           funcs,
 		seesAllCallers:  seesAllCallers,
 		cfg:             cfgs,
+		discardsParam:   discardsParam,
 	}
 }
 
@@ -319,6 +325,12 @@ func (g *Generator) GenerateIsolation(v pollution.Violation) []analysis.Suggeste
 		}
 	}
 	if arg == nil {
+		return nil
+	}
+	// The callee discards a chain on its parameter, which changes this
+	// argument in place today. Under the Session it would change a copy, so
+	// the callee's own queries would lose the condition (#346).
+	if g.discardsParam[origin.Declared(g.tracer.Site(v.Call).Callee)] {
 		return nil
 	}
 	// The Session would drop the Attrs, Assign or InstanceSet state the

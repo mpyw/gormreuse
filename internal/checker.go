@@ -26,11 +26,13 @@ type checker struct {
 	rootTracer          *tracer.RootTracer       // Tracer of the pass, shared by every function (#325)
 	needsImmutableParam func(*ssa.Function) bool // immutable-param fns that branch a param (2b caller check)
 	reported            map[reportKey]bool       // Deduplication of reports
+	ignoredRoots        map[ssa.Value]bool       // Roots with a diagnostic an ignore suppresses, in any function (#346)
 	fixGen              *fix.Generator           // Cached fix generator for all violations
 	cfgs                *cfg.Analyzer            // CFG cache of the pass, shared with fixGen (#299)
 }
 
-// newChecker creates a new checker for a specific file.
+// newChecker creates the checker of a package, which analyzes and reports
+// every function.
 // The reported map is shared across all functions to deduplicate violations
 // across parent functions and their closures.
 // The fixGen is shared to avoid recreating the generator for each violation.
@@ -43,18 +45,31 @@ func newChecker(pass *analysis.Pass, ignores *directive.Ignores, rootTracer *tra
 		rootTracer:          rootTracer,
 		needsImmutableParam: needsImmutableParam,
 		reported:            reported,
+		ignoredRoots:        make(map[ssa.Value]bool),
 		fixGen:              fixGen,
 		cfgs:                cfgs,
 	}
 }
 
-// checkFunction runs SSA analysis on a single function and reports violations.
+// analyze runs SSA analysis on a single function and returns its
+// violations. It records the roots of the violations an ignore directive
+// suppresses: such a root gets no fix in any function (see report).
 //
-//declscope:shared // run.go checks every function with it
-func (c *checker) checkFunction(fn *ssa.Function) {
-	analyzer := ssautil.NewAnalyzer(fn, c.rootTracer, c.needsImmutableParam, c.cfgs)
-	violations := analyzer.Analyze()
+//declscope:shared // run.go analyzes every function with it before reporting
+func (c *checker) analyze(fn *ssa.Function) []pollution.Violation {
+	violations := ssautil.NewAnalyzer(fn, c.rootTracer, c.needsImmutableParam, c.cfgs).Analyze()
+	for _, v := range violations {
+		if v.Root != nil && c.ignores.Covers(v.Pos) {
+			c.ignoredRoots[v.Root] = true
+		}
+	}
+	return violations
+}
 
+// report reports the violations of a function that analyze returned.
+//
+//declscope:shared // run.go reports every function with it
+func (c *checker) report(violations []pollution.Violation) {
 	// Every diagnostic of a root carries the root's fix, not only the first:
 	// the first may be already reported, and an editor offers a quick fix
 	// only on the diagnostic that carries it (#246). Each fix is complete on
@@ -66,14 +81,14 @@ func (c *checker) checkFunction(fn *ssa.Function) {
 	// A root with a diagnostic that an ignore directive suppresses gets no
 	// fix (#312). The ignore says that reuse is meant, and the fix would
 	// change it too: it isolates the root or reassigns the ignored statement,
-	// so the next run would report the ignore as unused.
+	// so the next run would report the ignore as unused. The diagnostic may
+	// belong to another function, such as a stored closure that uses the
+	// root, so analyze collects the roots of every function first (#346).
 	fixes := make(map[ssa.Value][]analysis.SuggestedFix)
-	for _, v := range violations {
-		if v.Root != nil && c.ignores.Covers(v.Pos) {
-			fixes[v.Root] = nil
-		}
-	}
 	fixOf := func(v pollution.Violation) []analysis.SuggestedFix {
+		if c.ignoredRoots[v.Root] {
+			return nil
+		}
 		f, ok := fixes[v.Root]
 		if !ok {
 			f = c.fixGen.Generate(v)

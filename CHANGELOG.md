@@ -556,7 +556,7 @@ The message is `unused gormreuse:immutable-input directive: not attached to a fu
 </td></tr>
 <tr><td>
 
-`immutable-param` caller contract in more calls (#192, #195, #258, #304)
+`immutable-param` caller contract in more calls (#192, #195, #258, #304, #346)
 
 </td><td>
 
@@ -565,10 +565,30 @@ The message is `unused gormreuse:immutable-input directive: not attached to a fu
 - `pkg.Apply(q)`
 - `Repo.apply(r, q)`
 - `f := apply; func() { f(q) }()`
+- `var n = apply(DB.Where("x"))`
 
 </td><td>
 
 `-fix` appends `.Session(&gorm.Session{})` to the argument
+
+</td></tr>
+<tr><td>
+
+An `immutable-param` function that discards a chain on its parameter (#346)
+
+</td><td>
+
+```go
+//gormreuse:immutable-param
+func applyT(tx *gorm.DB) {
+    tx.Where("t = 1")
+    tx.Find(nil)
+}
+```
+
+</td><td>
+
+The parameter is isolated, so the `Where` has no effect. The message is `immutable-param declared but the result of tx.Where is discarded: ...`. Assign the result, or remove the directive. Until then, a mutable argument to the function gets no fix
 
 </td></tr>
 </table>
@@ -579,7 +599,7 @@ The message is `unused gormreuse:immutable-input directive: not attached to a fu
 | --- | --- | --- |
 | A trailing ignore no longer covers the next line (#189) | `q.Find(nil) //gormreuse:ignore` followed by `q.Count(nil)` | Put the ignore on the line it suppresses |
 | A function-level ignore that suppresses nothing (#190) | `//gormreuse:ignore` on a clean function | Reported unused. Delete it |
-| Files that import `"C"` (#186) | Any reuse in a cgo file | They are analyzed now. `-fix` does not edit them |
+| Files that import `"C"` (#186, #346) | Any reuse in a cgo file | They are analyzed now. Their diagnostics carry no fix, since its offsets would be in cgo's output |
 | A panic inside the analyzer (#186, #315) | `gormreuse: internal error analyzing <func>: ...`, or `gormreuse: internal error in <stage> of package <path>: ...` at the package clause | Please [open an issue](https://github.com/mpyw/gormreuse/issues) with the code. A function whose directive check panicked is not trusted |
 
 </details>
@@ -901,7 +921,8 @@ Directives now work across packages, through method expressions and function var
 | Parameter roots (#201, #245, #313) | An exported function, a method, a function value or a closure without a `*gorm.DB` result gets `tx = tx.Session(&gorm.Session{})` at the top of the body. A `Transaction` wrapper's callback is such a closure. `immutable-param` is added only when every caller of a function declaration is checked |
 | Sessions by control flow (#202, #247, #306, #311, #343) | Sessions go where the paths need them. That includes a reassignment read in a later loop, a value merged with a parameter, every root that a merge may hold, and every filter of a chain of conditional filters. One pass of fixes resolves the diagnostics |
 | New fixes (#248) | Isolate an argument passed to an `immutable-param` parameter. Delete an unused or redundant directive, or an unused ignore |
-| Every diagnostic carries its root's fix (#246, #312) | A quick fix works on each diagnostic. A root with an ignored diagnostic gets no fix, so the fix cannot make the ignore unused |
+| Every diagnostic carries its root's fix (#246, #312, #346) | A quick fix works on each diagnostic. A root with an ignored diagnostic gets no fix, so the fix cannot make the ignore unused. That includes an ignore in a closure stored in a variable |
+| Callers in package-level initializers (#346) | `var n = count(DB.Where("x"))` is a caller. A parameter it passes a mutable value to gets the body Session, not `immutable-param`, and a helper that changes its parameter keeps no fix when the initializer discards its result |
 | Same output on every run (#184, #273) | `-json` lists diagnostics in position order |
 
 <details>
