@@ -1,0 +1,25 @@
+--- shadowed.go	1970-01-01 00:00:00
++++ shadowed.go.golden	1970-01-01 00:00:00
+@@ -1,19 +1,20 @@
+ package noimport
+ 
+ import internal "gormreuse"
++import gormio "gorm.io/gorm"
+ 
+ // violationWithGormParam has a parameter named gorm, so the import the fix
+ // adds cannot be named gorm here.
+ func violationWithGormParam(gorm string) {
+-	q := internal.GetQuery().Where("x = ?", gorm)
++	q := internal.GetQuery().Where("x = ?", gorm).Session(&gormio.Session{})
+ 	q.Find(nil)
+ 	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // violationBesideGormParam is in the same file, so its fix adds the same
+ // import under the same name, not a second import of gorm.io/gorm (#378).
+ func violationBesideGormParam() {
+-	q := internal.GetQuery().Where("y")
++	q := internal.GetQuery().Where("y").Session(&gormio.Session{})
+ 	q.Find(nil)
+ 	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }

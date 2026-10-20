@@ -13,7 +13,8 @@ import (
 
 // TestGormNameAt covers the name the Session fix uses for gorm.io/gorm where
 // it inserts a Session: an aliased or dot import (issue #71, defect 3), and a
-// name that is blank, shadowed or taken by another package (#200). Each
+// name that is blank, shadowed or taken by another package (#200), a name
+// taken elsewhere in the file, and package gorm itself (#378). Each
 // source marks the insertion point with "HERE".
 func TestGormNameAt(t *testing.T) {
 	t.Parallel()
@@ -33,6 +34,9 @@ func TestGormNameAt(t *testing.T) {
 		{"other package", `package p; import gorm "other"; var _ = gorm.X; func f() { _ = "HERE" }`, "gormio.", "gormio"},
 		{"both names taken", `package p; import gorm "other"; var gormio int; func f() { _ = "HERE"; _ = gorm.X }`, "gormio2.", "gormio2"},
 		{"declared later", `package p; import "gorm.io/gorm"; var _ = gorm.DB{}; func f() { _ = "HERE"; gorm := 1; _ = gorm }`, "gorm.", ""},
+		{"not imported, shadowed elsewhere", `package p; func a(gorm int) {}; func f() { _ = "HERE" }`, "gormio.", "gormio"},
+		{"not imported, declared later", `package p; func f() { _ = "HERE"; gorm := 1; _ = gorm }`, "gormio.", "gormio"},
+		{"package gorm itself", `package gorm; type Session struct{}; func f() { _ = "HERE" }`, "", ""},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -48,7 +52,7 @@ func TestGormNameAt(t *testing.T) {
 
 // checkGormNameSource type-checks src against stubs of gorm.io/gorm and of a
 // package "other", and returns a Generator for it, the file, and the position
-// of "HERE".
+// of "HERE". A source of package gorm is checked as gorm.io/gorm itself.
 func checkGormNameSource(t *testing.T, src string) (*Generator, *ast.File, token.Pos) {
 	t.Helper()
 	fset := token.NewFileSet()
@@ -79,7 +83,11 @@ func checkGormNameSource(t *testing.T, src string) (*Generator, *ast.File, token
 		Scopes:    make(map[ast.Node]*types.Scope),
 	}
 	conf := types.Config{Importer: gormStubImporter(func(path string) (*types.Package, error) { return imported[path], nil })}
-	pkg, err := conf.Check("p", fset, []*ast.File{file}, info)
+	path := "p"
+	if file.Name.Name == "gorm" {
+		path = gormImportPath
+	}
+	pkg, err := conf.Check(path, fset, []*ast.File{file}, info)
 	if err != nil {
 		t.Fatalf("check: %v", err)
 	}

@@ -20,6 +20,14 @@ These notes say what changes for users in each release, and what to do about it.
 | `defer` statements on exclusive branches (#375). A deferred call now conflicts only with uses that may run in the same call of the function | `if c { defer q.Find(&us) } else { defer q.Count(&n) }` |
 | `Commit` and `Rollback` as branches (#375). They touch no clause. They return their receiver, so a chain on the result is still a branch of it | `tx.Where("id = ?", 1).Update("name", "x"); tx.Rollback(); tx.Commit()` |
 
+### Fixes
+
+| Change | Effect |
+| --- | --- |
+| Root of a range-over-func variable | `for d := range seq` names the `d` line as `root at`. Before, it named the declaration of `iter.Seq` in the standard library, or the parameter's type (#378) |
+| `-fix` in package `gorm.io/gorm` | The fix writes `&Session{}`. Before, it imported `gorm.io/gorm` into itself, which does not compile (#378) |
+| `-fix` adds one gorm import per file | When `gorm` is taken anywhere in the file, such as by a parameter, every fix in the file uses `gormio`. Before, one file could get both `"gorm.io/gorm"` and `gormio "gorm.io/gorm"` (staticcheck ST1019) (#378) |
+
 ## 0.23.0 (2026-10-20)
 
 gormreuse now follows a `*gorm.DB` through far more code. It also reads directives across packages. It infers `immutable-return` for most connection helpers, and `immutable-param` and `immutable-input` for most helpers that only get fresh handles. It no longer counts methods such as `AddError` as a branch. `-fix` offers fewer fixes, but each one compiles and keeps every condition.

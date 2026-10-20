@@ -384,3 +384,28 @@ func rangeFuncBodyStoreAfterIf(db *gorm.DB, c bool, seq iter.Seq2[string, any]) 
 	q.Find(nil)
 	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
+
+// rangeFuncSeqOfDBRoot: a *gorm.DB range variable is a mutable root. The
+// report names the range variable, not the declaration of iter.Seq (#378).
+func rangeFuncSeqOfDBRoot(s iter.Seq[*gorm.DB]) {
+	for d := range s {
+		d.Find(nil)
+		d.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root \(root at range_func\.go:390, first branch at range_func\.go:391\)`
+	}
+}
+
+// rangeFuncSeq2ValueRoot: the value variable of a two-variable loop.
+func rangeFuncSeq2ValueRoot(s iter.Seq2[int, *gorm.DB]) {
+	for _, d := range s {
+		d.Find(nil)
+		d.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root \(root at range_func\.go:398, first branch at range_func\.go:399\)`
+	}
+}
+
+// rangeFuncPlainFuncRoot: a plain func type names the range variable too.
+func rangeFuncPlainFuncRoot(s func(func(*gorm.DB) bool)) {
+	for d := range s {
+		d.Find(nil)
+		d.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root \(root at range_func\.go:406, first branch at range_func\.go:407\)`
+	}
+}
