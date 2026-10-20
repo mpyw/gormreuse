@@ -453,6 +453,12 @@ func (t *RootTracer) traceCall(call *ssa.Call, visited map[ssa.Value]bool, loopI
 		}
 	}
 
+	// An inferred getter, a closure too, returns what its argument holds
+	// (#342). Everything else it returns is immutable.
+	if reads := t.paramReads(site.Declared); len(reads) > 0 && typeutil.HasGormDBResult(call.Type()) {
+		return t.traceParamReads(site, reads, visited, loopInfo)
+	}
+
 	// Handle closures (IIFE)
 	if site.Kind == callsite.SiteClosure {
 		if root := t.traceClosureReturns(site.Callee, visited, loopInfo); root != nil {
@@ -615,7 +621,7 @@ type fieldRootKey struct {
 // the call returns immutable values (a builtin or //gormreuse:immutable-return
 // function).
 func (t *RootTracer) internFieldRoot(r *FieldRoot) ssa.Value {
-	if t.returnsImmutable(t.Site(r.Call).Declared) {
+	if t.returnsImmutable(t.Site(r.Call).Declared) && !paramReadCrossesPointer(r) {
 		return nil
 	}
 	key := fieldRootKey{call: r.Call, path: r.pathString()}
@@ -812,6 +818,10 @@ func (t *RootTracer) traceAllUnvisited(v ssa.Value, search *allRootsSearch, loop
 		if len(argRoots) > 0 || rooted {
 			return argRoots
 		}
+		// An inferred getter returns what its argument holds (#342).
+		if reads := t.paramReads(site.Declared); len(reads) > 0 && typeutil.IsGormDB(val.Type()) {
+			return t.traceAllParamReads(site, reads, search, loopInfo)
+		}
 		// Handle closure calls (IIFE) - collect ALL roots from all returns. A
 		// call through a method value is a call of its own (see traceCall).
 		if site.Kind == callsite.SiteClosure {
@@ -958,6 +968,8 @@ func (t *RootTracer) IsImmutableCall(v ssa.Value) bool {
 // *gorm.DB result — either a gorm builtin (Session, WithContext, Debug, Open,
 // Begin, Transaction) or a function marked //gormreuse:immutable-return. Such
 // results are not mutable roots and can be reused freely. callee may be nil.
+// An inferred function that may return what its argument holds is immutable
+// only where the argument is (paramReads), so it is not one.
 func (t *RootTracer) returnsImmutable(callee *ssa.Function) bool {
 	if t.isImmutableReturningBuiltin(callee) {
 		return true
@@ -965,5 +977,25 @@ func (t *RootTracer) returnsImmutable(callee *ssa.Function) bool {
 	if t.distrustedReturn != nil && callee != nil && t.distrustedReturn(origin.Declared(callee)) {
 		return false
 	}
-	return t.immutableReturnFuncs != nil && t.immutableReturnFuncs.Contains(callee)
+	return t.immutableReturnFuncs != nil && t.immutableReturnFuncs.Contains(callee) && len(t.paramReads(callee)) == 0
+}
+
+// paramReads returns the reads of its parameters that a trusted
+// immutable-return callee may return (#342), or nil when its results are
+// immutable at every call. A getter such as
+//
+//	func (h *Holder) DB() *gorm.DB { return h.db }
+//
+// is inferred immutable-return because a field read through a receiver is
+// immutable where it is read. That holds only where the caller's struct holds
+// an immutable value, so a call of it is traced as the selector h.db written
+// at the call: `h := &Holder{db: q.Where("x")}; h.DB()` has q.Where's root.
+func (t *RootTracer) paramReads(callee *ssa.Function) []directive.ParamRead {
+	if callee == nil || t.immutableReturnFuncs == nil || t.isImmutableReturningBuiltin(callee) {
+		return nil
+	}
+	if t.distrustedReturn != nil && t.distrustedReturn(origin.Declared(callee)) {
+		return nil
+	}
+	return t.immutableReturnFuncs.ParamReads(callee)
 }

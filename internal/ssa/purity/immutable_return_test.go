@@ -38,7 +38,7 @@ func TestInferImmutableReturns(t *testing.T) {
 	slices.SortFunc(candidates, func(a, b *ssa.Function) int { return strings.Compare(a.Name(), b.Name()) })
 
 	want := []string{
-		"inferredBegin", "inferredBranches", "inferredDebug", "inferredEither", "inferredField", "inferredInner", "inferredMiddle",
+		"inferredBegin", "inferredBranches", "inferredCommaOk", "inferredDebug", "inferredEither", "inferredField", "inferredInner", "inferredMiddle",
 		"inferredOuter", "inferredSessionAfterChain", "openTestConnection", "setupDB", "viaBroken", "viaDeclared",
 	}
 	builtins := tracer.NewRootTracer(nil, nil, nil, nil, nil, nil, callsite.FuncVars{})
@@ -51,7 +51,7 @@ func TestInferImmutableReturns(t *testing.T) {
 				slices.Reverse(order)
 			}
 			var got []string
-			for fn := range purity.InferImmutableReturns(order, declared.Contains, builtins, assigned.AssignedMutable) {
+			for fn := range purity.InferImmutableReturns(order, declared.Contains, declared.ParamReads, builtins, assigned.AssignedMutable) {
 				got = append(got, fn.Name())
 			}
 			slices.Sort(got)
@@ -137,10 +137,10 @@ func immutableReturnInferenceAllocs(t *testing.T, src string) float64 {
 	declared := directive.NewImmutableReturnFuncSet(nil, nil)
 	builtins := tracer.NewRootTracer(nil, nil, nil, nil, nil, nil, callsite.FuncVars{})
 	assigned := purity.NewImmutableReturnValidator(nil, declared, builtins)
-	if got, want := len(purity.InferImmutableReturns(candidates, declared.Contains, builtins, assigned.AssignedMutable)), len(candidates); got != want {
+	if got, want := len(purity.InferImmutableReturns(candidates, declared.Contains, declared.ParamReads, builtins, assigned.AssignedMutable)), len(candidates); got != want {
 		t.Fatalf("inferred %d functions, want %d", got, want)
 	}
 	return testing.AllocsPerRun(1, func() {
-		purity.InferImmutableReturns(candidates, declared.Contains, builtins, assigned.AssignedMutable)
+		purity.InferImmutableReturns(candidates, declared.Contains, declared.ParamReads, builtins, assigned.AssignedMutable)
 	})
 }

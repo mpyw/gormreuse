@@ -334,9 +334,14 @@ func (v *Validator) callResultDerived(call *ssa.Call) bool {
 
 	common, callee := &call.Call, site.Callee
 
-	// Like Session, an immutable-return function hands back a fresh handle.
+	// Like Session, an immutable-return function hands back a fresh handle,
+	// except that an inferred getter returns what its argument holds (#342):
+	// h := &Holder{db: db}; h.DB() is db.
 	if v.immutableReturnFuncs != nil && v.immutableReturnFuncs.Contains(callee) {
-		return false
+		return slices.ContainsFunc(v.immutableReturnFuncs.ParamReads(callee), func(read directive.ParamRead) bool {
+			arg := site.ParamArg(read.Param)
+			return arg != nil && v.isDerivedArg(arg)
+		})
 	}
 
 	// A closure may return what it captures: func() *gorm.DB { return db }(),

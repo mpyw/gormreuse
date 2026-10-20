@@ -142,6 +142,7 @@ func RunSSA(
 	table := facts.NewTable(pass)
 	pureFuncs.Import(func(fn *ssa.Function) bool { return table.Of(fn).Pure })
 	immutableReturnFuncs.Import(func(fn *ssa.Function) bool { return table.Of(fn).ImmutableReturn })
+	immutableReturnFuncs.ImportParamReads(func(fn *ssa.Function) []directive.ParamRead { return table.Of(fn).ParamReads })
 	immutableInputSet.Import(func(fn *ssa.Function) []directive.ImmutableInputCallback { return table.Of(fn).ImmutableInput })
 	// Only the immutable-param functions that branch a parameter export a
 	// fact, and only those matter to a caller (#255).

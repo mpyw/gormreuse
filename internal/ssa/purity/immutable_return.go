@@ -417,7 +417,8 @@ func immutableReturnStoreAlwaysRuns(store *ssa.Store) bool {
 
 // InferImmutableReturns returns the functions of candidates whose every
 // *gorm.DB result is provably immutable, so that they can be treated as
-// //gormreuse:immutable-return without the directive (#261). A result is
+// //gormreuse:immutable-return without the directive (#261), each with the
+// reads of its parameters that its results may be (#342). A result is
 // provably immutable when it is, through Phi edges:
 //   - the nil constant;
 //   - a call, or a result of a call such as gorm.Open's (*gorm.DB, error),
@@ -425,19 +426,26 @@ func immutableReturnStoreAlwaysRuns(store *ssa.Store) bool {
 //     Session config must be a literal that leaves Initialized unset or false
 //     (callsite.Site.SessionEffect);
 //   - a call to a function that trusted accepts, or to another function this
-//     returns;
-//   - a local variable assigned once, such as one a closure captures, when
-//     its stored value is proved (#308);
+//     returns. The reads of its parameters (trustedReads, or what this found)
+//     select from the arguments of the call, and every value they select
+//     there is proved;
+//   - a local variable, such as one a closure captures, whose every store is
+//     in its function and proved (#308, #342);
 //   - a field read through a parameter or a receiver, or a read of a
 //     package-level variable, when every store in the function that reaches
 //     the read is proved, as reuse detection reads them (#308). With no such
 //     store the value is immutable. assignedMutable must not report the
 //     variable: it reports one that the package may assign a provably
-//     mutable value (ImmutableReturnValidator.AssignedMutable).
+//     mutable value (ImmutableReturnValidator.AssignedMutable). A field read
+//     through the function's own parameter is one of its reads: it holds
+//     what the caller's argument holds;
+//   - a type assertion of a value with no *gorm.DB root, such as
+//     ctx.Value(k).(*gorm.DB), as reuse detection reads it (#342). An
+//     assertion of the function's own parameter is one of its reads.
 //
-// Anything else, such as a parameter, a field of a local struct, a variable
-// assigned more than once or a call the rule does not prove, rules the function
-// out. So does a function with no return that carries a *gorm.DB.
+// Anything else, such as a *gorm.DB parameter, a field of a local struct or a
+// call the rule does not prove, rules the function out. So does a function
+// with no return that carries a *gorm.DB.
 //
 // The result is the least fixed point: a function is added only once its
 // body is proved with the functions already added, so a function never
@@ -445,9 +453,18 @@ func immutableReturnStoreAlwaysRuns(store *ssa.Store) bool {
 // result is the same in any order. rt must resolve builtins only: a tracer
 // without an immutable-return set, so that IsImmutableCall accepts only the
 // gorm builtins.
-func InferImmutableReturns(candidates []*ssa.Function, trusted func(*ssa.Function) bool, rt *tracer.RootTracer, assignedMutable func(*ssa.UnOp) bool) map[*ssa.Function]bool {
-	inferred := make(map[*ssa.Function]bool)
-	accept := func(fn *ssa.Function) bool { return inferred[fn] || trusted(fn) }
+func InferImmutableReturns(candidates []*ssa.Function, trusted func(*ssa.Function) bool, trustedReads func(*ssa.Function) []directive.ParamRead, rt *tracer.RootTracer, assignedMutable func(*ssa.UnOp) bool) map[*ssa.Function][]directive.ParamRead {
+	inferred := make(map[*ssa.Function][]directive.ParamRead)
+	accept := func(fn *ssa.Function) bool {
+		_, ok := inferred[fn]
+		return ok || trusted(fn)
+	}
+	readsOf := func(fn *ssa.Function) []directive.ParamRead {
+		if reads, ok := inferred[fn]; ok {
+			return reads
+		}
+		return trustedReads(fn)
+	}
 	// queue holds each candidate once, as candidates may repeat.
 	isCandidate := make(map[*ssa.Function]bool, len(candidates))
 	var queue []*ssa.Function
@@ -468,9 +485,9 @@ func InferImmutableReturns(candidates []*ssa.Function, trusted func(*ssa.Functio
 	for len(queue) > 0 {
 		fn := queue[0]
 		queue = queue[1:]
-		proved, blockers := immutableReturnProof(fn, accept, rt, assignedMutable)
-		if proved {
-			inferred[fn] = true
+		p := &immutableReturnProof{fn: fn, accept: accept, readsOf: readsOf, rt: rt, assignedMutable: assignedMutable, seen: make(map[ssa.Value]bool)}
+		if p.run() {
+			inferred[fn] = p.reads
 			for _, w := range waiting[fn] {
 				if pending[w]--; pending[w] == 0 {
 					queue = append(queue, w)
@@ -479,8 +496,11 @@ func InferImmutableReturns(candidates []*ssa.Function, trusted func(*ssa.Functio
 			delete(waiting, fn)
 			continue
 		}
-		distinct := make(map[*ssa.Function]bool, len(blockers))
-		for _, callee := range blockers {
+		if p.unprovable {
+			continue
+		}
+		distinct := make(map[*ssa.Function]bool, len(p.blockers))
+		for _, callee := range p.blockers {
 			if !isCandidate[callee] {
 				distinct = nil
 				break
@@ -491,7 +511,7 @@ func InferImmutableReturns(candidates []*ssa.Function, trusted func(*ssa.Functio
 			continue
 		}
 		pending[fn] = len(distinct)
-		for _, callee := range blockers {
+		for _, callee := range p.blockers {
 			if distinct[callee] {
 				delete(distinct, callee)
 				waiting[callee] = append(waiting[callee], fn)
@@ -501,74 +521,30 @@ func InferImmutableReturns(candidates []*ssa.Function, trusted func(*ssa.Functio
 	return inferred
 }
 
-// immutableReturnProof reports whether every *gorm.DB result of fn is
-// provably immutable when accept decides the functions it calls. When it is
-// not, blockers are the callees that accept refused and that alone kept the
-// proof from holding; they are nil when something else is unprovable.
-func immutableReturnProof(fn *ssa.Function, accept func(*ssa.Function) bool, rt *tracer.RootTracer, assignedMutable func(*ssa.UnOp) bool) (proved bool, blockers []*ssa.Function) {
+// immutableReturnProof proves that every *gorm.DB result of fn is immutable
+// when accept decides the functions it calls.
+type immutableReturnProof struct {
+	fn              *ssa.Function
+	accept          func(*ssa.Function) bool
+	readsOf         func(*ssa.Function) []directive.ParamRead
+	rt              *tracer.RootTracer
+	assignedMutable func(*ssa.UnOp) bool
+	seen            map[ssa.Value]bool
+
+	// unprovable is set when something other than a callee that accept
+	// refused keeps the proof from holding.
+	unprovable bool
+	// blockers are the callees that accept refused.
+	blockers []*ssa.Function
+	// reads are the reads of fn's parameters that its results may be.
+	reads []directive.ParamRead
+}
+
+// run reports whether the proof holds. When it does not, blockers are the
+// callees that alone kept it from holding, unless unprovable is set.
+func (p *immutableReturnProof) run() bool {
 	results := 0
-	unprovable := false
-	seen := make(map[ssa.Value]bool)
-	callProved := func(call *ssa.Call) {
-		if rt.IsImmutableCall(call) {
-			return
-		}
-		callee := origin.Declared(rt.Site(call).Declared)
-		switch {
-		case callee == nil:
-			unprovable = true
-		case !accept(callee):
-			blockers = append(blockers, callee)
-		}
-	}
-	var prove func(v ssa.Value)
-	prove = func(v ssa.Value) {
-		if seen[v] || unprovable {
-			return
-		}
-		seen[v] = true
-		switch x := v.(type) {
-		case *ssa.Phi:
-			for _, edge := range x.Edges {
-				prove(edge)
-			}
-		case *ssa.Const:
-			// nil: there is no handle to reuse.
-		case *ssa.Call:
-			callProved(x)
-		case *ssa.Extract:
-			if call, ok := x.Tuple.(*ssa.Call); ok {
-				callProved(call)
-			} else {
-				unprovable = true
-			}
-		case *ssa.UnOp:
-			// A local variable assigned once, such as one a closure captures,
-			// holds its stored value (#308).
-			if stored := rt.FuncVars().LocalValue(x); stored != x {
-				prove(stored)
-				return
-			}
-			// A field read through a parameter, and a package-level
-			// variable, are immutable where no store in the function reaches
-			// the read, as reuse detection reads them (#308). A store that
-			// does reach it decides, through the roots the tracer finds.
-			if !immutableReturnReadsShared(x) || assignedMutable(x) {
-				unprovable = true
-				return
-			}
-			for _, root := range rt.FindAllMutableRoots(x, nil) {
-				if call, ok := root.(*ssa.Call); ok {
-					callProved(call)
-				} else {
-					unprovable = true
-				}
-			}
-		default:
-			unprovable = true
-		}
-	}
-	for _, block := range fn.Blocks {
+	for _, block := range p.fn.Blocks {
 		ret, ok := block.Instrs[len(block.Instrs)-1].(*ssa.Return)
 		if !ok {
 			continue
@@ -576,14 +552,307 @@ func immutableReturnProof(fn *ssa.Function, accept func(*ssa.Function) bool, rt 
 		for _, res := range ret.Results {
 			if typeutil.IsGormDB(res.Type()) {
 				results++
-				prove(res)
+				p.prove(res)
+			} else if paths := ImmutableReturnFieldPaths(res.Type()); len(paths) > 0 {
+				results++
+				p.proveStruct(res, paths, ret)
 			}
 		}
 	}
-	if unprovable || results == 0 {
-		return false, nil
+	if results == 0 {
+		p.unprovable = true
 	}
-	return len(blockers) == 0, blockers
+	return !p.unprovable && len(p.blockers) == 0
+}
+
+// prove checks that v is immutable, adding to reads the reads of fn's
+// parameters it may be.
+func (p *immutableReturnProof) prove(v ssa.Value) {
+	if p.seen[v] || p.unprovable {
+		return
+	}
+	p.seen[v] = true
+	switch x := v.(type) {
+	case *ssa.Phi:
+		for _, edge := range x.Edges {
+			p.prove(edge)
+		}
+	case *ssa.Const:
+		// nil: there is no handle to reuse.
+	case *ssa.Call:
+		p.proveCall(x)
+	case *ssa.Extract:
+		switch tuple := x.Tuple.(type) {
+		case *ssa.Call:
+			p.proveCall(tuple)
+		case *ssa.TypeAssert:
+			p.prove(tuple)
+		default:
+			p.unprovable = true
+		}
+	case *ssa.TypeAssert:
+		// ctx.Value(k).(*gorm.DB) is what the interface holds (#342).
+		p.prove(x.X)
+	case *ssa.MakeInterface:
+		p.prove(x.X)
+	case *ssa.Parameter:
+		// Only an interface reaches here, through a type assertion, and it
+		// holds what the caller passes. A *gorm.DB parameter may be mutable.
+		if !types.IsInterface(x.Type()) || x.Parent() != p.fn {
+			p.unprovable = true
+			return
+		}
+		p.reads = append(p.reads, directive.ParamRead{Param: slices.Index(p.fn.Params, x)})
+	case *ssa.UnOp:
+		p.proveLoad(x)
+	default:
+		p.unprovable = true
+	}
+}
+
+// proveLoad checks a load: of a local variable, a field or a package-level
+// variable.
+func (p *immutableReturnProof) proveLoad(x *ssa.UnOp) {
+	// A local variable assigned once, such as one a closure captures,
+	// holds its stored value (#308).
+	if stored := p.rt.FuncVars().LocalValue(x); stored != x {
+		p.prove(stored)
+		return
+	}
+	// One assigned more than once holds one of its stored values, when
+	// every store is in its function (#342).
+	if vals, ok := immutableReturnLocalStores(x); ok {
+		for _, val := range vals {
+			p.prove(val)
+		}
+		return
+	}
+	// A field read through a parameter, and a package-level variable, are
+	// immutable where no store in the function reaches the read, as reuse
+	// detection reads them (#308). A store that does reach it decides,
+	// through the roots the tracer finds.
+	if !immutableReturnReadsShared(x) || p.assignedMutable(x) {
+		p.unprovable = true
+		return
+	}
+	for _, root := range p.rt.FindAllMutableRoots(x, nil) {
+		if call, ok := root.(*ssa.Call); ok {
+			p.proveCall(call)
+		} else {
+			p.unprovable = true
+		}
+	}
+	// A field read through fn's own parameter holds what the caller's
+	// argument holds there (#342).
+	if param, path, ok := immutableReturnSelector(x); ok && param.Parent() == p.fn {
+		p.reads = append(p.reads, directive.ParamRead{Param: slices.Index(p.fn.Params, param), Path: path})
+	}
+}
+
+// proveCall checks a call: an immutable builtin, or a callee that accept
+// takes, whose parameter reads select proved values at the call.
+func (p *immutableReturnProof) proveCall(call *ssa.Call) {
+	if p.rt.IsImmutableCall(call) {
+		return
+	}
+	// A call that returns no *gorm.DB, such as ctx.Value(k), has no root,
+	// as reuse detection reads it (#342). Only a type assertion reaches it.
+	if !typeutil.HasGormDBResult(call.Type()) {
+		return
+	}
+	site := p.rt.Site(call)
+	callee := origin.Declared(site.Declared)
+	switch {
+	case callee == nil:
+		p.unprovable = true
+	case !p.accept(callee):
+		p.blockers = append(p.blockers, callee)
+	default:
+		for _, read := range p.readsOf(callee) {
+			p.proveRead(site, read)
+		}
+	}
+}
+
+// proveRead checks what a callee's parameter read selects at site: the
+// values stored there that reach the call, and, when the argument is
+// selected from fn's own parameter, the read of it that the call makes.
+func (p *immutableReturnProof) proveRead(site callsite.Site, read directive.ParamRead) {
+	for _, val := range p.rt.ParamReadValues(site, read) {
+		p.prove(val)
+	}
+	if len(read.Path) == 0 {
+		// The argument itself, proved above.
+		return
+	}
+	if param, path, ok := immutableReturnSelector(site.ParamArg(read.Param)); ok && param.Parent() == p.fn {
+		p.reads = append(p.reads, directive.ParamRead{Param: slices.Index(p.fn.Params, param), Path: append(path, read.Path...)})
+	}
+}
+
+// proveStruct checks the *gorm.DB fields of v, a struct or a pointer to one
+// that fn returns at ret: paths are the fields, as ImmutableReturnFieldPaths
+// lists them. The struct must be one that fn builds, or one that a callee it
+// accepts returns, so that what fn stored is what the caller reads. Its fields
+// hold the values stored into them that reach ret, or nil. A field that holds
+// a read of fn's parameter rules fn out: a caller reads such a field as the
+// call's FieldRoot, which has no argument to select from (#342).
+func (p *immutableReturnProof) proveStruct(v ssa.Value, paths [][]int, ret *ssa.Return) {
+	if p.seen[v] || p.unprovable {
+		return
+	}
+	p.seen[v] = true
+	switch x := v.(type) {
+	case *ssa.Phi:
+		for _, edge := range x.Edges {
+			p.proveStruct(edge, paths, ret)
+		}
+	case *ssa.Const:
+		// A nil pointer or a zero struct holds no handle.
+	case *ssa.Call:
+		p.proveStructCall(x)
+	case *ssa.Extract:
+		if call, ok := x.Tuple.(*ssa.Call); ok {
+			p.proveStructCall(call)
+		} else {
+			p.unprovable = true
+		}
+	case *ssa.Alloc, *ssa.UnOp:
+		// &T{...}, or the T{...} that a load of a local variable copies. A
+		// pointer that a captured variable holds is stored into it, which
+		// immutableReturnBuiltStruct does not accept.
+		p.proveBuiltStruct(x, paths, ret)
+	default:
+		p.unprovable = true
+	}
+}
+
+// proveBuiltStruct checks the fields of a struct that fn builds, an Alloc or
+// a load of one.
+func (p *immutableReturnProof) proveBuiltStruct(x ssa.Value, paths [][]int, ret *ssa.Return) {
+	if !immutableReturnBuiltStruct(x, p.fn) {
+		p.unprovable = true
+		return
+	}
+	reads := len(p.reads)
+	for _, path := range paths {
+		for _, val := range p.rt.ParamReadSelected(x, path, ret) {
+			p.prove(val)
+		}
+	}
+	if len(p.reads) > reads {
+		p.unprovable = true
+	}
+}
+
+// proveStructCall checks a call that returns a struct holding a *gorm.DB: its
+// callee must be accepted. A struct result has no parameter reads.
+func (p *immutableReturnProof) proveStructCall(call *ssa.Call) {
+	switch callee := origin.Declared(p.rt.Site(call).Declared); {
+	case callee == nil:
+		p.unprovable = true
+	case !p.accept(callee):
+		p.blockers = append(p.blockers, callee)
+	}
+}
+
+// ImmutableReturnFieldPaths returns the paths of the *gorm.DB fields of t, a
+// struct or a pointer to one, that reuse detection reads as the FieldRoot of
+// a call returning t (#181, #250): the fields of the struct and of the structs
+// it holds by value. A field behind a pointer field is not one. It is nil for
+// any other type.
+func ImmutableReturnFieldPaths(t types.Type) [][]int {
+	if ptr, ok := t.Underlying().(*types.Pointer); ok {
+		t = ptr.Elem()
+	}
+	st, ok := t.Underlying().(*types.Struct)
+	if !ok {
+		return nil
+	}
+	var paths [][]int
+	for i := range st.NumFields() {
+		ft := st.Field(i).Type()
+		if typeutil.IsGormDB(ft) {
+			paths = append(paths, []int{i})
+			continue
+		}
+		if _, isStruct := ft.Underlying().(*types.Struct); isStruct {
+			for _, sub := range ImmutableReturnFieldPaths(ft) {
+				paths = append(paths, append([]int{i}, sub...))
+			}
+		}
+	}
+	return paths
+}
+
+// immutableReturnBuiltStruct reports whether v is a struct that fn builds
+// and only fills in: an Alloc of fn, or a load of one, whose address is used
+// only to store into its fields, to load them and to return it. A struct
+// passed to a call or stored elsewhere may be changed where fn cannot see it.
+func immutableReturnBuiltStruct(v ssa.Value, fn *ssa.Function) bool {
+	if load, ok := v.(*ssa.UnOp); ok {
+		// A load of a pointer variable is not the struct: the pointer was
+		// stored into the variable, where fn cannot follow it.
+		if _, isPtr := load.Type().Underlying().(*types.Pointer); load.Op != token.MUL || isPtr {
+			return false
+		}
+		v = load.X
+	}
+	alloc, ok := v.(*ssa.Alloc)
+	if !ok || alloc.Parent() != fn {
+		return false
+	}
+	var used func(addr ssa.Value, seen map[ssa.Value]bool) bool
+	used = func(addr ssa.Value, seen map[ssa.Value]bool) bool {
+		if seen[addr] {
+			return true
+		}
+		seen[addr] = true
+		for _, ref := range *addr.Referrers() {
+			switch r := ref.(type) {
+			case *ssa.Store:
+				if r.Val == addr {
+					return false
+				}
+			case *ssa.FieldAddr:
+				if !used(r, seen) {
+					return false
+				}
+			case *ssa.Phi:
+				if !used(r, seen) {
+					return false
+				}
+			case *ssa.UnOp, *ssa.Return, *ssa.DebugRef:
+			default:
+				return false
+			}
+		}
+		return true
+	}
+	return used(alloc, make(map[ssa.Value]bool))
+}
+
+// immutableReturnLocalStores returns the values stored into the local
+// variable that load reads, directly or through the free variables of
+// closures, when every store into it is in its function
+// (callsite.LocalStores).
+func immutableReturnLocalStores(load *ssa.UnOp) ([]ssa.Value, bool) {
+	if load.Op != token.MUL {
+		return nil, false
+	}
+	addr := load.X
+	for {
+		fv, ok := addr.(*ssa.FreeVar)
+		if !ok {
+			break
+		}
+		addr = callsite.FreeVarBinding(fv)
+	}
+	alloc, ok := addr.(*ssa.Alloc)
+	if !ok {
+		return nil, false
+	}
+	return callsite.LocalStores(alloc)
 }
 
 // immutableReturnReadsShared reports whether load reads a field through a
@@ -596,26 +865,42 @@ func immutableReturnReadsShared(load *ssa.UnOp) bool {
 	if load.Op != token.MUL {
 		return false
 	}
-	var v ssa.Value
-	switch addr := load.X.(type) {
+	switch load.X.(type) {
 	case *ssa.Global:
 		return true
 	case *ssa.FieldAddr:
-		v = addr.X
-	default:
-		// A load through a pointer parameter is not a field.
-		return false
+		_, _, ok := immutableReturnSelector(load)
+		return ok
 	}
+	// A load through a pointer parameter is not a field.
+	return false
+}
+
+// immutableReturnSelector returns the parameter that v is selected from and
+// the path of fields the selector reads, as a directive.ParamRead holds it:
+// r.inner.db is r with the indexes of inner and db. It looks through loads of
+// fields, the free variables of closures, and variables assigned once, such
+// as the copy of a value receiver. ok is false for anything else.
+func immutableReturnSelector(v ssa.Value) (param *ssa.Parameter, path []int, ok bool) {
 	for {
 		switch x := v.(type) {
+		case *ssa.Parameter:
+			slices.Reverse(path)
+			return x, path, true
+		case *ssa.FieldAddr:
+			path = append(path, x.Field)
+			v = x.X
 		case *ssa.UnOp:
 			// A pointer field, or a variable that holds the struct pointer.
 			if x.Op != token.MUL {
-				return false
+				return nil, nil, false
 			}
-			v = x.X
-		case *ssa.FieldAddr:
-			v = x.X
+			switch x.X.(type) {
+			case *ssa.FieldAddr, *ssa.Alloc, *ssa.FreeVar:
+				v = x.X
+			default:
+				return nil, nil, false
+			}
 		case *ssa.FreeVar:
 			v = callsite.FreeVarBinding(x)
 		case *ssa.Alloc:
@@ -623,13 +908,11 @@ func immutableReturnReadsShared(load *ssa.UnOp) bool {
 			// receiver whose field is read through its address.
 			stored := tracer.AllocStoredValues(x)
 			if len(stored) != 1 {
-				return false
+				return nil, nil, false
 			}
 			v = stored[0]
-		case *ssa.Parameter:
-			return true
 		default:
-			return false
+			return nil, nil, false
 		}
 	}
 }

@@ -42,6 +42,10 @@ type Func struct {
 	// ImmutableReturn is set when the function is marked
 	// //gormreuse:immutable-return and its body keeps the contract.
 	ImmutableReturn bool
+	// ParamReads holds, for an inferred immutable-return function, the reads
+	// of its parameters that its results may be (#342). A caller reads the
+	// same selector of its own argument at each call.
+	ParamReads []directive.ParamRead
 	// BranchesImmutableParam is set when the function is marked
 	// //gormreuse:immutable-param and branches a *gorm.DB parameter, so a
 	// caller must pass it an isolated value.
@@ -67,6 +71,9 @@ func (f *Func) String() string {
 	add(len(f.Returned) > 0, fmt.Sprintf("returns%v", f.Returned))
 	add(f.ReturnsOnlyParams, "returns-only-params")
 	add(f.ImmutableReturn, "immutable-return")
+	for _, r := range f.ParamReads {
+		add(true, fmt.Sprintf("reads%d%v", r.Param, r.Path))
+	}
 	add(f.BranchesImmutableParam, "immutable-param")
 	for _, cb := range f.ImmutableInput {
 		add(true, "immutable-input("+cb.ParamName+")")
@@ -77,7 +84,7 @@ func (f *Func) String() string {
 // isZero reports whether f says nothing.
 func (f *Func) isZero() bool {
 	return !f.Pure && !f.PureFailed && len(f.Returned) == 0 && !f.ReturnsOnlyParams &&
-		!f.ImmutableReturn && !f.BranchesImmutableParam && len(f.ImmutableInput) == 0
+		!f.ImmutableReturn && len(f.ParamReads) == 0 && !f.BranchesImmutableParam && len(f.ImmutableInput) == 0
 }
 
 // Table reads the facts of functions declared in other packages. A nil Table

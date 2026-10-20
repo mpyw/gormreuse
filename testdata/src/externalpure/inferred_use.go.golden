@@ -1,7 +1,10 @@
 package externalpure
 
-import "purelib"
-import "gorm.io/gorm"
+import (
+	"gorm.io/gorm"
+
+	"purelib"
+)
 
 // Functions of purelib inferred immutable-return export the fact, so their
 // results are immutable here too (#261).
@@ -35,4 +38,25 @@ func inferredThroughBrokenContract() {
 	n := purelib.NotInferred().Session(&gorm.Session{})
 	n.Find(nil)
 	n.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// A getter of purelib returns what the caller's receiver holds (#342).
+func getterAcrossPackages(h *purelib.Holder, db *gorm.DB) {
+	d := h.Get()
+	d.Find(nil)
+	d.Find(nil) // OK: a field read through a parameter
+
+	m := &purelib.Holder{Conn: db.Where("x = ?", 1)}
+	g := m.Get()
+	g.Find(nil)
+	g.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// getterOfChain returns the getter's result on a receiver holding a chain,
+// which breaks its contract.
+//
+//gormreuse:immutable-return
+func getterOfChain(db *gorm.DB) *gorm.DB { // want `immutable-return declared but function returns mutable \*gorm\.DB`
+	h := &purelib.Holder{Conn: db.Where("x = ?", 1)}
+	return h.Get()
 }

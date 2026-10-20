@@ -153,36 +153,11 @@ func (vars FuncVars) globalFuncVar(v ssa.Value) *ssa.Function {
 // captures it, or its address is used another way than to load and store it,
 // in its function or in a closure that captures it at any depth.
 func funcVarSoleStore(alloc *ssa.Alloc) ssa.Value {
-	var val ssa.Value
-	var visit func(addr ssa.Value) bool
-	visit = func(addr ssa.Value) bool {
-		for _, ref := range *addr.Referrers() {
-			switch r := ref.(type) {
-			case *ssa.Store:
-				// A store in a closure may run at any point.
-				if r.Addr != addr || addr != ssa.Value(alloc) || val != nil {
-					return false
-				}
-				val = r.Val
-			case *ssa.MakeClosure:
-				closure := r.Fn.(*ssa.Function)
-				for i, binding := range r.Bindings {
-					if binding == addr && !visit(closure.FreeVars[i]) {
-						return false
-					}
-				}
-			case *ssa.UnOp, *ssa.DebugRef:
-				// A load: an address has no other unary operation.
-			default:
-				return false
-			}
-		}
-		return true
-	}
-	if !visit(alloc) {
+	vals, ok := LocalStores(alloc)
+	if !ok || len(vals) != 1 {
 		return nil
 	}
-	return val
+	return vals[0]
 }
 
 // varOf returns the package-level variable that holds fn, or nil when no

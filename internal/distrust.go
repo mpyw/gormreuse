@@ -130,7 +130,8 @@ func distrustContracts(src distrustSources, guard *panicGuard) distrustedContrac
 			rt := src.tracer.Distrusting(returnDistrusted, callbackDistrusted)
 			if checkReturn {
 				if set.Inferred(fn) {
-					failedReturn = !purity.InferImmutableReturns([]*ssa.Function{fn}, trusted, builtins, validator.AssignedMutable)[fn]
+					_, inferred := purity.InferImmutableReturns([]*ssa.Function{fn}, trusted, set.ParamReads, builtins, validator.AssignedMutable)[fn]
+					failedReturn = !inferred
 				} else {
 					failedReturn = len(validator.Distrusting(rt, returnDistrusted).Validate(fn)) > 0
 				}

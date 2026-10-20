@@ -26,13 +26,13 @@
  
  // --- 1. getters of a field ---
  
- func (r *iwRepo) DB() *gorm.DB { return r.db } // want DB:"gormreuse immutable-return"
+ func (r *iwRepo) DB() *gorm.DB { return r.db } // want DB:`gormreuse immutable-return reads0\[0\]`
  
- func (r iwRepo) ValueDB() *gorm.DB { return r.db } // want ValueDB:"gormreuse immutable-return"
+ func (r iwRepo) ValueDB() *gorm.DB { return r.db } // want ValueDB:`gormreuse immutable-return reads0\[0\]`
  
- func (r *iwRepo) InnerDB() *gorm.DB { return r.inner.db } // want InnerDB:"gormreuse immutable-return"
+ func (r *iwRepo) InnerDB() *gorm.DB { return r.inner.db } // want InnerDB:`gormreuse immutable-return reads0\[1 0\]`
  
- func (r *iwRepo) PtrDB() *gorm.DB { return r.ptr.db } // want PtrDB:"gormreuse immutable-return"
+ func (r *iwRepo) PtrDB() *gorm.DB { return r.ptr.db } // want PtrDB:`gormreuse immutable-return reads0\[2 0\]`
  
  func iwFieldOf(r *iwRepo) *gorm.DB { return r.db }
  

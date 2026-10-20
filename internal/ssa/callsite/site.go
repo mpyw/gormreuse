@@ -208,6 +208,18 @@ func (s Site) ArgParam(i int) int {
 	return i - (len(s.Instr.Common().Args) - len(s.Args))
 }
 
+// ParamArg returns the argument passed to parameter i of Declared, the
+// receiver first. Declared must not be nil.
+func (s Site) ParamArg(i int) ssa.Value {
+	if s.Declared.Signature.Recv() != nil {
+		if i == 0 {
+			return s.Recv
+		}
+		i--
+	}
+	return s.Args[i]
+}
+
 // isSiteWrapper reports whether fn is a synthetic wrapper with the given name
 // suffix, such as "$bound" for a method value.
 func isSiteWrapper(fn *ssa.Function, suffix string) bool {

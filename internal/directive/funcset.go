@@ -24,12 +24,16 @@ type DirectiveFuncSet struct {
 	known map[FuncKey]struct{}
 	// placement finds the function each directive comment is written on.
 	placement
-	typesInfo           *types.Info                 // Type info for signature validation
-	imported            func(fn *ssa.Function) bool // Directive of a function without syntax (another package)
-	inferred            map[*ssa.Function]bool      // Functions the analysis proved to keep the contract (#261)
-	validateSignature   signatureValidator          // Checks if signature is valid for this directive
-	invalidDirectives   map[token.Pos]struct{}      // Directives on functions with invalid signatures
-	processedDirectives map[token.Pos]struct{}      // All directive positions processed by this set
+	typesInfo *types.Info                 // Type info for signature validation
+	imported  func(fn *ssa.Function) bool // Directive of a function without syntax (another package)
+	inferred  map[*ssa.Function]bool      // Functions the analysis proved to keep the contract (#261)
+	//declscope:shared // param_read.go keeps the reads of inferred functions in it
+	paramReads map[*ssa.Function][]ParamRead // Parameter reads of inferred functions (#342)
+	//declscope:shared // param_read.go reads the reads of another package's functions through it
+	importedParamReads  func(fn *ssa.Function) []ParamRead // Parameter reads from facts (#342)
+	validateSignature   signatureValidator                 // Checks if signature is valid for this directive
+	invalidDirectives   map[token.Pos]struct{}             // Directives on functions with invalid signatures
+	processedDirectives map[token.Pos]struct{}             // All directive positions processed by this set
 	// contains remembers what Contains found for each declared function
 	// without an inferred directive, hits and misses alike. Add and Import
 	// clear it (#301). containsMu guards it: tests share a set across

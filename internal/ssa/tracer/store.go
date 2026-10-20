@@ -244,6 +244,8 @@ func (m *storeMemo) fieldValueStoredValues(f *ssa.Field) []ssa.Value {
 
 // structFieldStoredValues returns the values of the field that path selects
 // from the struct value x. seen stops Phi cycles through loops.
+//
+//declscope:shared // param_read.go selects the fields of a struct argument with it
 func (m *storeMemo) structFieldStoredValues(x ssa.Value, path []int, seen map[ssa.Value]bool) []ssa.Value {
 	for {
 		field, ok := x.(*ssa.Field)
@@ -287,6 +289,8 @@ func (m *storeMemo) structFieldStoredValues(x ssa.Value, path []int, seen map[ss
 // that load observes (see observedFieldStores): a load in a closure of the
 // defining function, reached through a captured pointer, sees the stores that
 // reach the closure's calls or creation and those that run after it (#303).
+//
+//declscope:shared // param_read.go selects the fields of a pointer argument with it
 func (m *storeMemo) fieldStoredValuesAt(fn *ssa.Function, root ssa.Value, path []int, load ssa.Instruction) []ssa.Value {
 	var vals []ssa.Value
 	for _, base := range fieldBaseAddrs(root, make(map[ssa.Value]bool)) {
