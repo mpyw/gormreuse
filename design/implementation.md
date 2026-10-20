@@ -83,7 +83,7 @@ The name-based "immutable-returning" class is not exact. In GORM v1.31, `Session
 
 **Rejected: one shared `visited` set for the whole search.** It visits each value once, but through a loop it visits roots in a different order, and the order of alias uses picks the message when two reports share a position.
 
-`TestPerformance` in `performance_test.go` times the analyzer on generated functions with 400 reassignments, 400 reassignments through `Session` copies, and a chain of 400 pure functions.
+`TestAllocationGrowth` in `growth_test.go` holds these shapes (`filters`, `sessfilters`, `purechain`) to quadratic growth. See [Allocation-growth gate](#allocation-growth-gate-302).
 
 Alias violations carry no suggested fix. The reuse-fix strategies rewrite the root's branches, and the right fix (`.Session(&gorm.Session{})` at the end of the root's chain, or an isolating copy) depends on intent.
 
@@ -243,7 +243,7 @@ gormreuse/
 ├── convergence_test.go          # TestFixesConverge: one pass of fixes leaves no diagnostic
 ├── determinism_test.go          # TestDeterministicDiagnostics: same output on every run
 ├── limitation_test.go           # Known Limitations lists every [LIMITATION] fixture; these notes name only code that exists
-├── performance_test.go          # TestPerformance: analysis time on generated worst cases (#260)
+├── growth_test.go               # TestAllocationGrowth: allocation growth on generated shapes (#302)
 ├── cmd/gormreuse/
 │   ├── main.go                  # CLI entry point (singlechecker)
 │   └── *_test.go                # Build the command and run it (go vet, //line, facts, inspector paths)
@@ -793,7 +793,7 @@ Decisions and limitations:
 - **A tuple result follows the same rule (#176).** `Validator.ReturnedParams` already looks at every operand of each `Return`, so `return db, nil` records `db`. `pureReturnedArgs` accepts a tuple result, and `pureReturnsOnlyParams` checks every `*gorm.DB` operand, in any position. The `*gorm.DB` elements of one tuple share the call as their root (see [Results the tracer cannot see through](#results-the-tracer-cannot-see-through-176)), so they are all traced to the returned arguments.
 - **Across packages.** `ReturnedParams` needs the callee's body, so the declaring package exports the summary and `pureReturnsOnlyParams` in its fact (#195, `pureReturnedArg` in `testdata/src/externalpure/use.go`).
 - **The receiver.** The receiver is not seeded, so a pure method that returns `r.db` is not an alias of anything.
-- **Cost (#297).** The arguments are traced in the same `visited` set as the rest of the search. Each one used to get a copy of it, so the other edge of a Phi walked the same values again. With `n` statements `if c { q = p(q) } else { side() }` that doubled the work at each one: 20 s and 2.5 GB at `n = 24`. In `trace`, sharing changes no answer: an argument whose search ends without a root leaves only values that have no root from any edge. In `traceAll`, `allRootsSearch.rooted` records the values that the search has finished, and whether each found a root. A pure call whose argument is finished with a root adds nothing, because those roots are in the result already, and it is not a root of its own. Before, such a call (`if c { q = p(q) }`, where the search reaches `q` first) was added as an extra root that nothing branches. An argument that is still being traced (a loop) or has no root makes the call its own root, as before. `TestPurePhiAllocationGrowth` checks that the allocations grow at most twofold from `n = 16` to `n = 20`.
+- **Cost (#297).** The arguments are traced in the same `visited` set as the rest of the search. Each one used to get a copy of it, so the other edge of a Phi walked the same values again. With `n` statements `if c { q = p(q) } else { side() }` that doubled the work at each one: 20 s and 2.5 GB at `n = 24`. In `trace`, sharing changes no answer: an argument whose search ends without a root leaves only values that have no root from any edge. In `traceAll`, `allRootsSearch.rooted` records the values that the search has finished, and whether each found a root. A pure call whose argument is finished with a root adds nothing, because those roots are in the result already, and it is not a root of its own. Before, such a call (`if c { q = p(q) }`, where the search reaches `q` first) was added as an extra root that nothing branches. An argument that is still being traced (a loop) or has no root makes the call its own root, as before. `TestAllocationGrowth` (`purephi`, `purephiimm`) checks that the allocations grow at most twofold from `n = 16` to `n = 20`. The shapes without the `else` (`purephisafe`) and with loops (`pureloops`) still grow like `filters`, about 3x per doubling.
 
 ## Immutable-return body contract (#194)
 
@@ -866,7 +866,7 @@ A function needs at least one such result, so a function that only panics is not
 Decisions:
 
 - **Positive proof, not the benefit of the doubt.** `ImmutableReturnValidator` reports only what is provably mutable, because a declared directive is the user's assertion. Inference has no assertion behind it, so it accepts only what is provably immutable. Between the two, a function stays unmarked.
-- **A least fixed point.** A worklist proves each candidate. A candidate that fails only on calls to other candidates waits on them, and is proved again once the last of them is added, so each candidate is proved at most twice. Proving it again whenever any one of them was added, and queuing it once per failed proof, grew exponentially with a caller that switches over a chain `c0 → c1 → … → ck` (17.7 s at k = 32, #298). `TestInferImmutableReturnsGrowth` holds the allocations near linear. The set only grows, and a larger set only proves more, so the result is the least fixed point, whatever the order. A function is never added on the strength of itself, which is why recursion is not inferred: `if n > 0 { return rec(n-1) }; return db.Session(...)` is immutable, but proving it needs a greatest fixed point, and an assumed-true cycle is harder to trust. `TestInferImmutableReturns` checks every rotation of the candidates, forwards and backwards.
+- **A least fixed point.** A worklist proves each candidate. A candidate that fails only on calls to other candidates waits on them, and is proved again once the last of them is added, so each candidate is proved at most twice. Proving it again whenever any one of them was added, and queuing it once per failed proof, grew exponentially with a caller that switches over a chain `c0 → c1 → … → ck` (17.7 s at k = 32, #298). `TestAllocationGrowth` (`inferexp`) holds the allocations near linear, and `TestInferImmutableReturnsGrowth` does the same for inference alone on a dense chain, where each `ci` switches over every later `cj`. The set only grows, and a larger set only proves more, so the result is the least fixed point, whatever the order. A function is never added on the strength of itself, which is why recursion is not inferred: `if n > 0 { return rec(n-1) }; return db.Session(...)` is immutable, but proving it needs a greatest fixed point, and an assumed-true cycle is harder to trust. `TestInferImmutableReturns` checks every rotation of the candidates, forwards and backwards.
 - **A broken declared contract: trusted at home, not abroad.** A declared `immutable-return` whose body breaks the contract is trusted in its package (see [Directives across packages](#directives-across-packages-195)). A function that returns its result is inferred there too, so the mistake is still reported once. `distrustedImmutableReturns` proves the inferred functions again with the broken ones distrusted, and the ones that no longer hold export no fact, like the broken function itself. The broken contracts are known only after the pure pass, which inference must precede, so this is a second, smaller fixed point and not a single one.
 - **A declared directive stays used.** An inferable function with the directive is not a candidate, keeps its body check, and its directive is not reported unused or redundant. It documents the intent, and a later change to the body is reported at the declaration instead of turning into reports at the call sites.
 - **`Validate` skips inferred functions.** Their bodies were proved, and a report would say "declared" about a function without the directive.
@@ -1153,6 +1153,29 @@ A fixture of `testdata/src/gormreuse` whose fixes must also converge is listed i
 > The intentional exceptions are `testdata/src/filefilter/code_test.go`, which
 > exists specifically to test the analyzer's `-test` flag handling, and
 > `testdata/src/ignoretests/code_test.go`, which gives its package test files.
+
+### Allocation-growth gate (#302)
+
+`TestAllocationGrowth` in `growth_test.go` generates each case at two sizes, runs the analyzer on them, and fails when the heap allocations of its `Run` grow faster than the case's limit. The packages are generated in a temporary `GOPATH`, so no large fixture is committed.
+
+| Limit | Sizes | Ratio allowed | For |
+| --- | --- | --- | --- |
+| `growthLinear` | n, 2n | 2.5 | Many small functions, or one function whose work is linear |
+| `growthNearLinear` | n, 2n | 3.0 | Shapes that grow a little faster than n (about 2.3x, 2.5x with the race detector), such as one large function |
+| `growthQuadratic` | n, 2n | 4.5 | Shapes that are quadratic today |
+| `growthExponential` | n, n+4 | 2.0 | Shapes that used to double their work per statement (about 16x) |
+
+How it measures:
+
+- It counts `runtime.MemStats.Mallocs` around `Analyzer.Run` only, so loading and building SSA are not counted. The packages run one at a time (`checker.Options.Sequential`) and the test is not parallel, because the count is process-wide.
+- It analyzes every package three times and keeps the smallest count. The analyzer does a few percent more or less work from run to run with map order, and the race detector makes `sync.Pool` drop items at random.
+
+**Rejected: a wall-clock limit (#260's time limit).** Under CI's flags (`-race -covermode=atomic -coverpkg=./...`) the analyzer ran about 25 times slower, so a limit was either flaky or too loose to catch anything. Allocation counts repeat, and the race detector and coverage change most ratios little.
+
+Limitations:
+
+- Work that allocates nothing, such as a linear search repeated in a loop, is not counted. The race detector's `sync.Pool` drops make some of it visible (`switchuse` grows about 2.3x without the race detector and about 3x with it, so it has the quadratic limit).
+- A case whose issue is still open has `after: "#NNN"` and is skipped. Its fix removes the field, and every later performance fix adds its shape with a limit it meets.
 
 ### Testdata Organization
 

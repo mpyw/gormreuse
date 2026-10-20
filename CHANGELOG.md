@@ -110,4 +110,4 @@ The analysis does much more, but takes about as long as 0.22.0. These are wall t
 | gorm's `tests` module | 1.2 s | 1.1 s |
 | 400 conditional reassignments in one function, and a chain of 400 `pure` functions | 1.0 s | 1.2 s |
 
-With facts, the drivers also run gormreuse on every dependency. gormreuse builds SSA only for the packages that reach `gorm.io/gorm`, so this adds little. `TestPerformance` keeps the generated worst cases above under 2 s of analysis (#260).
+With facts, the drivers also run gormreuse on every dependency. gormreuse builds SSA only for the packages that reach `gorm.io/gorm`, so this adds little. A test fails when the analyzer's allocations on a generated shape, such as the worst cases above, grow faster than the shape allows (#260, #302).
