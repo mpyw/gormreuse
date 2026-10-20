@@ -221,6 +221,16 @@ helper := func(q *gorm.DB) { //gormreuse:pure
 a, b := func(q *gorm.DB) { _ = q }, func(q *gorm.DB) { _ = q }
 ```
 
+**Lookup cost (#301).** Every call site asks the directive sets about its callee, so a lookup must not scan the file:
+
+| Lookup | How |
+| --- | --- |
+| Which function a directive is on | `placement.addFile` reads the comments of a file once and keeps the groups that hold the directive. Only a file with such a group is walked, once, to place every closure's directive. A closure is matched only against the groups on its brace line or on the line above it or its statement, in file order, so the first match is the same as a scan of all comments |
+| `DirectiveFuncSet.Contains` | Remembered per declared function, misses included. `Add` and `Import` clear it. An inferred function is checked first, so `Infer` needs no clearing |
+| Innermost statement of a report, for a line ignore | The file's statements and closures are kept in source order with the index of the innermost one that holds each. A lookup is a binary search and a walk up the holders. Function-level ignore spans are searched the same way |
+
+Before, a lookup scanned every comment of the file and placed a closure's directive by walking its statement and the whole file again, and an ignore lookup walked the file from its root. n closures with a directive in one function took 108 s at n = 800. The cases `ignores`, `ignorefn`, `directives`, `unuseddir`, `helpersign`, `closurepure`, `closurepuresame` and `closurepurepkg` in the [allocation-growth gate](#allocation-growth-gate-302) cover these.
+
 > **Important**: Passing `q` to a user-defined function without `//gormreuse:pure` is a branch of `q`, like a gorm method call. When the function returns a `*gorm.DB`, its call is also handled like a gorm method call in a merge: `if c { q = helper(q) }` is an assignment (`handleArgs` calls `isAssignment`, see [Which merges are reassignments](#which-merges-are-reassignments-175)). Its result is a new mutable root, unless the helper is [inferred](#inferred-immutable-return-261) `immutable-return`. Use `//gormreuse:pure` for functions that don't pollute their arguments, and `//gormreuse:immutable-return` for functions whose result can be reused (like DB connection helpers).
 
 > **Note**: Unused directives are reported as warnings:
@@ -767,7 +777,7 @@ A variable is resolved only when:
 
 A read before the store holds nil, and calling it panics, so every call that runs, runs the stored value. A store in a loop stores a new closure of the same function on each iteration.
 
-`FuncVars` remembers the result for each `Alloc`, so a variable called at n sites is scanned once. The zero `FuncVars` (`SiteOfWithoutFuncVars`) resolves neither package-level nor local variables. Directive placement for a function literal is also memoized (`placement.funcLitDirectiveCache`), since a closure called at n sites asked it n times, each walking the enclosing statement.
+`FuncVars` remembers the result for each `Alloc`, so a variable called at n sites is scanned once. The zero `FuncVars` (`SiteOfWithoutFuncVars`) resolves neither package-level nor local variables. A closure called at n sites asks for its directive n times. Each answer walked the enclosing statement until #301, which [places every directive of a file once](#directives).
 
 Limitations:
 

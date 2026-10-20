@@ -28,3 +28,19 @@ func TestDirectiveFuncSet_Import(t *testing.T) {
 		t.Error("nil set Contains = true, want false")
 	}
 }
+
+// TestDirectiveFuncSet_ContainsAfterAdd checks that Contains does not keep a
+// miss it remembered once Add puts the function in the set (#301).
+func TestDirectiveFuncSet_ContainsAfterAdd(t *testing.T) {
+	t.Parallel()
+
+	fn := &ssa.Function{}
+	set := NewPureFuncSet(nil, nil)
+	if set.Contains(fn) {
+		t.Error("Contains = true before Add, want false")
+	}
+	set.Add(funcKeyOf(fn))
+	if !set.Contains(fn) {
+		t.Error("Contains = false after Add, want true")
+	}
+}
