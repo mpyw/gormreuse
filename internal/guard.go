@@ -19,14 +19,31 @@ import (
 // (#186). The report goes through pass.Reportf directly, so no ignore directive
 // suppresses it.
 //
+// The work of a caller that sees the panic must not be trusted: run and
+// runPackage report whether the work finished, and the caller treats a
+// function whose work did not as breaking its contract (#315).
+//
 // Set GORMREUSE_DEBUG_PANIC to a non-empty value to re-panic instead, surfacing
 // the stack trace for debugging.
 type panicGuard struct {
 	pass     *analysis.Pass
 	reported map[*ssa.Function]bool
+	// packageFailed is set once runPackage recovered a panic.
+	//
+	//declscope:private
+	packageFailed bool
 }
 
-func (g *panicGuard) run(fn *ssa.Function, work func()) {
+// guardPanicInjection, when set, runs at the start of the work of every stage
+// (with fn nil for runPackage), so that a test can make that work panic. It
+// is nil outside tests.
+//
+//declscope:private
+var guardPanicInjection func(stage string, fn *ssa.Function)
+
+// run runs the work of stage for fn and reports whether it finished without
+// a panic.
+func (g *panicGuard) run(stage string, fn *ssa.Function, work func()) (finished bool) {
 	defer func() {
 		r := recover()
 		if r == nil {
@@ -41,5 +58,37 @@ func (g *panicGuard) run(fn *ssa.Function, work func()) {
 		g.reported[fn] = true
 		g.pass.Reportf(fn.Pos(), "gormreuse: internal error analyzing %s: %v; please report this at https://github.com/mpyw/gormreuse/issues", fn.RelString(fn.Pkg.Pkg), r)
 	}()
+	if guardPanicInjection != nil {
+		guardPanicInjection(stage, fn)
+	}
 	work()
+	return true
+}
+
+// runPackage runs the work of stage, which reads the whole package, such as
+// collecting the callbacks, and reports whether it finished without a panic.
+// The report names stage, at the package clause of the first file.
+func (g *panicGuard) runPackage(stage string, work func()) (finished bool) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			return
+		}
+		if os.Getenv("GORMREUSE_DEBUG_PANIC") != "" {
+			panic(fmt.Sprintf("gormreuse: panic in %s: %v", stage, r))
+		}
+		g.packageFailed = true
+		g.pass.Reportf(g.pass.Files[0].Package, "gormreuse: internal error in %s of package %s: %v; please report this at https://github.com/mpyw/gormreuse/issues", stage, g.pass.Pkg.Path(), r)
+	}()
+	if guardPanicInjection != nil {
+		guardPanicInjection(stage, nil)
+	}
+	work()
+	return true
+}
+
+// panicked reports whether any work recovered a panic, so that diagnostics
+// may have been lost.
+func (g *panicGuard) panicked() bool {
+	return g.packageFailed || len(g.reported) > 0
 }

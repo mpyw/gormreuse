@@ -37,12 +37,16 @@ func reportImmutableReturnViolations(
 		if skip(fn) {
 			continue
 		}
-		guard.run(fn, func() {
+		// A check that panicked proves nothing, so the function is not
+		// trusted (#315).
+		if !guard.run("immutable-return", fn, func() {
 			for _, v := range validator.Validate(fn) {
 				failed[fn] = true
 				report(v.Pos, v.Message)
 			}
-		})
+		}) {
+			failed[fn] = true
+		}
 	}
 	return failed
 }
@@ -138,7 +142,9 @@ func computeNeedsImmutableParam(
 		if pureFuncs != nil && pureFuncs.Contains(fn) {
 			continue
 		}
-		guard.run(fn, func() {
+		// A function whose analysis panicked keeps its directive: reporting
+		// it redundant would delete a directive it may need (#315).
+		if !guard.run("immutable-param", fn, func() {
 			// Counterfactual: analyze fn with its parameters treated as mutable.
 			cf := ssautil.NewAnalyzer(fn, counterfactual, nil, cfgs)
 			if slices.ContainsFunc(cf.Analyze(), func(v pollution.Violation) bool {
@@ -147,7 +153,9 @@ func computeNeedsImmutableParam(
 			}) {
 				needs[fn] = true
 			}
-		})
+		}) {
+			needs[fn] = true
+		}
 	}
 	return needs
 }

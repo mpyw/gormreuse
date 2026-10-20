@@ -9,9 +9,9 @@ import (
 
 func TestIsPureFunction(t *testing.T) {
 	t.Parallel()
-	fixtures, all := loadFixtureProgram(t)
 	// Syntax-backed pure set resolves //gormreuse:pure via each function's AST.
-	tr := NewRootTracer(directive.NewPureFuncSet(nil, nil), nil, nil, nil, nil, nil, callsite.FuncVars{})
+	fixtures, all, sets := loadFixtureProgramSets(t, directive.NewPureFuncSet)
+	tr := NewRootTracer(sets[0], nil, nil, nil, nil, nil, callsite.FuncVars{})
 
 	if session := fixtureGormMethod(all, "Session"); session != nil && !tr.IsPureFunction(session) {
 		t.Error("Session (immutable builtin) should count as pure")

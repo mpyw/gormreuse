@@ -1,15 +1,19 @@
 package tracer
 
 import (
+	"go/token"
+	"go/types"
 	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
 
+	"golang.org/x/tools/go/ast/inspector"
 	"golang.org/x/tools/go/packages"
 	"golang.org/x/tools/go/ssa"
 	"golang.org/x/tools/go/ssa/ssautil"
 
+	"github.com/mpyw/gormreuse/internal/directive"
 	"github.com/mpyw/gormreuse/internal/typeutil"
 )
 
@@ -21,6 +25,17 @@ import (
 //
 //declscope:shared // the tests of every file of the package load the fixtures with it
 func loadFixtureProgram(t *testing.T) (fixtureFuncs map[string]*ssa.Function, allFuncs map[*ssa.Function]bool) {
+	t.Helper()
+	fixtureFuncs, allFuncs, _ = loadFixtureProgramSets(t)
+	return fixtureFuncs, allFuncs
+}
+
+// loadFixtureProgramSets is loadFixtureProgram that also returns a set made
+// by each of newSets, with the fixture's files added, so that it finds the
+// directives written in them (#315).
+//
+//declscope:shared // pure_test.go reads the fixtures' directives with it
+func loadFixtureProgramSets(t *testing.T, newSets ...func(*token.FileSet, *types.Info) *directive.DirectiveFuncSet) (fixtureFuncs map[string]*ssa.Function, allFuncs map[*ssa.Function]bool, sets []*directive.DirectiveFuncSet) {
 	t.Helper()
 	_, file, _, ok := runtime.Caller(0)
 	if !ok {
@@ -59,7 +74,14 @@ func loadFixtureProgram(t *testing.T) (fixtureFuncs map[string]*ssa.Function, al
 	if len(fixtureFuncs) == 0 || len(allFuncs) == 0 {
 		t.Fatal("no SSA functions loaded")
 	}
-	return fixtureFuncs, allFuncs
+	for _, newSet := range newSets {
+		set := newSet(pkgs[0].Fset, pkgs[0].TypesInfo)
+		for cur := range inspector.New(pkgs[0].Syntax).Root().Children() {
+			set.AddFile(cur)
+		}
+		sets = append(sets, set)
+	}
+	return fixtureFuncs, allFuncs, sets
 }
 
 // loadFixtureSource builds SSA for a package made of src, which may import

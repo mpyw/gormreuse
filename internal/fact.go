@@ -54,7 +54,7 @@ func exportFacts(pass *analysis.Pass, ssaInfo *buildssa.SSA, src factSources, sk
 		if skip(fn) {
 			continue
 		}
-		guard.run(fn, func() {
+		guard.run("facts", fn, func() {
 			var f facts.Func
 			if src.pureFuncs.Contains(fn) {
 				f.Pure = true
@@ -62,9 +62,9 @@ func exportFacts(pass *analysis.Pass, ssaInfo *buildssa.SSA, src factSources, sk
 				f.Returned = src.pureVerdicts.Returned[fn]
 				f.ReturnsOnlyParams = len(f.Returned) > 0 && src.tracer.PureReturnsOnlyParams(fn)
 			}
-			f.ImmutableReturn = src.immutableReturnFuncs.Contains(fn) && !src.distrusted.returns[fn]
+			f.ImmutableReturn = src.immutableReturnFuncs.Contains(fn) && !src.distrusted.distrustsReturn(fn)
 			f.BranchesImmutableParam = src.needsImmutableParam[fn]
-			if !src.distrusted.inputs[fn] {
+			if !src.distrusted.distrustsInput(fn) {
 				f.ImmutableInput = src.immutableInputSet.Callbacks(fn)
 			}
 			facts.Export(pass, fn, f)

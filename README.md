@@ -165,9 +165,9 @@ gormreuse has no flags of its own. These come from the analysis driver:
 
 The command exits with status 3 when it reports a diagnostic, and with 0 when it reports none. With `-json` it exits with 0 either way.
 
-Generated files (containing `// Code generated ... DO NOT EDIT.`) are always excluded and cannot be opted in. Their directives are not checked, so another package does not trust them. At a call from another package, a `pure` or `immutable-return` function in a generated file counts as unmarked. Files that import `"C"` are analyzed: the header that cgo adds to its output does not count. `-fix` does not edit them, because the driver treats cgo's output as generated.
+Generated files (containing `// Code generated ... DO NOT EDIT.`) are always excluded and cannot be opted in. Their directives are not checked, so nothing trusts them: at any call, in the same package or another, a function in a generated file counts as unmarked, whatever directive it carries. Files that import `"C"` are analyzed: the header that cgo adds to its output does not count. `-fix` does not edit them, because the driver treats cgo's output as generated.
 
-If gormreuse fails inside a function, it reports `gormreuse: internal error analyzing <func>: ...` at that function. Please [open an issue](https://github.com/mpyw/gormreuse/issues) with the code. Set `GORMREUSE_DEBUG_PANIC=1` to get the stack trace instead.
+If gormreuse fails inside a function, it reports `gormreuse: internal error analyzing <func>: ...` at that function, and does not trust the directives that function's failed check was proving. A failure in work that reads the whole package is reported as `gormreuse: internal error in <stage> of package <path>: ...` at the package clause. Please [open an issue](https://github.com/mpyw/gormreuse/issues) with the code. Set `GORMREUSE_DEBUG_PANIC=1` to get the stack trace instead.
 
 ### Examples
 
@@ -854,6 +854,8 @@ helper2 := func(q *gorm.DB) { //gormreuse:pure
     _ = q
 }
 ```
+
+A same-line directive belongs to the innermost function whose `{` comes before it on the line. In `func outer(db *gorm.DB) { run(func(q *gorm.DB) { //gormreuse:pure`, only the closure is pure.
 
 > [!TIP]
 > Without a directive, a call to your own function is treated like this:

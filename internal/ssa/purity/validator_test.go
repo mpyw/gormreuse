@@ -15,10 +15,10 @@ import (
 
 func TestValidatorValidate(t *testing.T) {
 	t.Parallel()
-	funcs := loadFixtureFuncs(t)
 	// A syntax-backed pure set: Contains resolves //gormreuse:pure via each
 	// function's AST, which is enough for the fixtures.
-	pureFuncs := directive.NewPureFuncSet(nil, nil)
+	funcs, sets := loadFixtureSets(t, directive.NewPureFuncSet)
+	pureFuncs := sets[0]
 
 	tests := []struct {
 		fn      string
@@ -98,8 +98,8 @@ func TestValidatorValidate(t *testing.T) {
 // (issue #187).
 func TestValidatorValidateTransitive(t *testing.T) {
 	t.Parallel()
-	funcs := loadFixtureFuncs(t)
-	pureFuncs := directive.NewPureFuncSet(nil, nil)
+	funcs, sets := loadFixtureSets(t, directive.NewPureFuncSet)
+	pureFuncs := sets[0]
 	wrapper := funcs["pcWrapper"]
 
 	if v := purity.NewValidator(wrapper, pureFuncs, nil, nil, callsite.FuncVars{}).Validate(); len(v) != 0 {
@@ -117,8 +117,8 @@ func TestValidatorValidateTransitive(t *testing.T) {
 // result may be (issue #188).
 func TestValidatorReturnedParams(t *testing.T) {
 	t.Parallel()
-	funcs := loadFixtureFuncs(t)
-	pureFuncs := directive.NewPureFuncSet(nil, nil)
+	funcs, sets := loadFixtureSets(t, directive.NewPureFuncSet)
+	pureFuncs := sets[0]
 
 	tests := []struct {
 		fn       string

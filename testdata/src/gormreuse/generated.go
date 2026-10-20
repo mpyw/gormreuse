@@ -13,3 +13,35 @@ func generatedReuse(db *gorm.DB) {
 	q.Find(&[]User{})
 	q.Count(new(int64)) // This would normally be a violation, but generated files are excluded
 }
+
+// The directives below are never validated, since this file is not analyzed,
+// so none is trusted by the rest of the package either (#315), whatever its
+// kind and placement. Their callers are in directive_consistency.go.
+
+//gormreuse:pure
+func genDocPure(db *gorm.DB) {
+	db.Where("polluted")
+}
+
+func genSameLinePure(db *gorm.DB) { //gormreuse:pure
+	db.Where("polluted")
+}
+
+//gormreuse:immutable-return
+func genDocImmutableReturn(db *gorm.DB) *gorm.DB {
+	return db.Where("mutable")
+}
+
+func genSameLineImmutableReturn(db *gorm.DB) *gorm.DB { //gormreuse:immutable-return
+	return db.Where("mutable")
+}
+
+//gormreuse:immutable-input(cb)
+func genDocImmutableInput(db *gorm.DB, cb func(*gorm.DB)) {
+	cb(db.Where("mutable"))
+}
+
+//gormreuse:pure
+var genVarPure = func(db *gorm.DB) {
+	db.Where("polluted")
+}

@@ -50,6 +50,9 @@ type placementIndex struct {
 	byStartLine, byEndLine map[int][]int
 	// lits is the directive comment of each closure that has one.
 	lits map[*ast.FuncLit]token.Pos
+	// litBraces are the closures whose opening brace is on each line, for a
+	// file with a directive (see placementWalk).
+	litBraces map[int][]placementLitBrace
 }
 
 // placementGroup is a comment group that holds the directive.
@@ -116,6 +119,14 @@ func (p *placement) directivesIn(file *ast.File) []*ast.Comment {
 	return out
 }
 
+// fileAdded reports whether node is in a file added with addFile, the only
+// files whose directives are looked for.
+//
+//declscope:shared // funcset.go trusts no directive in another file (#315)
+func (p *placement) fileAdded(node ast.Node) bool {
+	return p.fset != nil && p.indexFor(node) != nil
+}
+
 // indexFor returns the index of the file added with addFile that contains
 // node, or nil. A node without a position has no file name, and addFile
 // records no file under an empty one.
@@ -160,6 +171,7 @@ func (p *placement) buildIndex(file *ast.File) *placementIndex {
 		return idx
 	}
 	w := p.walkFile(file)
+	idx.litBraces = w.litBraces
 	for _, lit := range w.lits {
 		if pos := p.placeFuncLit(idx, w, lit); pos.IsValid() {
 			idx.lits[lit.lit] = pos
@@ -261,14 +273,17 @@ func (p *placement) walkFile(file *ast.File) *placementWalk {
 // brace of a FuncDecl, on the same line (same-line pattern), and returns its
 // position, or token.NoPos.
 //
-// This is simpler than FuncLit handling because FuncDecl cannot be nested
-// within another FuncDecl on the same line, so we don't need innermost detection.
-//
 // Example:
 //
 //	func foo(db *gorm.DB) { //gormreuse:pure
 //	    ...
 //	}
+//
+// A closure in the body whose opening brace is between the declaration's and
+// the directive takes the directive instead, by the innermost rule of
+// matchesSameLineDirective (#315):
+//
+//	func outer(db *gorm.DB) { run(func(q *gorm.DB) { //gormreuse:pure  ← the closure's, not outer's
 //
 // An external function body (funcDecl.Body == nil) has none.
 //
@@ -282,12 +297,22 @@ func (p *placement) findDirectiveAfterFuncDeclBrace(funcDecl *ast.FuncDecl) toke
 		return token.NoPos
 	}
 	brace := p.fset.PositionFor(funcDecl.Body.Lbrace, false)
-	for _, i := range idx.byStartLine[brace.Line] {
-		if g := idx.groups[i]; g.startColumn > brace.Column {
-			return g.directives[0].Pos()
-		}
+	groups := idx.byStartLine[brace.Line]
+	if len(groups) == 0 {
+		return token.NoPos
 	}
-	return token.NoPos
+	// The directive is a line comment, which runs to the end of the line, so
+	// a group that holds it and starts on the brace's line starts after the
+	// brace, and it is the only one.
+	g := idx.groups[groups[0]]
+	body := funcDecl.Body
+	if slices.ContainsFunc(idx.litBraces[brace.Line], func(lit placementLitBrace) bool {
+		return lit.column > brace.Column && lit.column < g.startColumn &&
+			body.Pos() <= lit.lit.Pos() && lit.lit.End() <= body.End()
+	}) {
+		return token.NoPos
+	}
+	return g.directives[0].Pos()
 }
 
 // findDirectiveForFuncLit finds the directive comment of a FuncLit and

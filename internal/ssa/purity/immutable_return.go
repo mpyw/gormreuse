@@ -7,7 +7,6 @@ import (
 	"golang.org/x/tools/go/ssa"
 
 	"github.com/mpyw/gormreuse/internal/directive"
-	"github.com/mpyw/gormreuse/internal/ssa/callsite"
 	"github.com/mpyw/gormreuse/internal/ssa/origin"
 	"github.com/mpyw/gormreuse/internal/ssa/tracer"
 	"github.com/mpyw/gormreuse/internal/typeutil"
@@ -24,8 +23,8 @@ import (
 // re-forks a fresh clone==0 Statement (see the e2e TestSessionInMiddle). So is
 // Session(&gorm.Session{Initialized: true}), which returns tx.getInstance()
 // (#174). The check sees through the places whose code it can read (#194):
-//   - a call to a closure (an IIFE or a local closure): its returns are checked
-//     the same way
+//   - a call to a closure (an IIFE, a local closure, or one a package-level
+//     variable always holds, #315): its returns are checked the same way
 //   - a value that a deferred closure writes to a named result
 //   - an unexported package-level variable whose address does not escape and
 //     whose every assignment in the package is provably mutable
@@ -183,13 +182,14 @@ func (v *ImmutableReturnValidator) rootMutable(root ssa.Value, seen map[ssa.Valu
 	if !ok {
 		return false
 	}
+	site := v.rt.Site(call)
 	if v.distrusted != nil {
-		if callee := origin.Declared(v.rt.Site(call).Declared); callee != nil && v.distrusted(callee) {
+		if callee := origin.Declared(site.Declared); callee != nil && v.distrusted(callee) {
 			return true
 		}
 	}
 	// A method value call is the call of its method.
-	if site := v.rt.Site(call); site.Recv != nil {
+	if site.Recv != nil {
 		if !site.IsGormMethod() {
 			return false
 		}
@@ -198,8 +198,11 @@ func (v *ImmutableReturnValidator) rootMutable(root ssa.Value, seen map[ssa.Valu
 		}
 		return site.Method() == "Session" && site.SessionSetsInitialized()
 	}
-	// A closure marked immutable-return is checked on its own.
-	if closure := immutableReturnClosure(call.Call.Value, v.rt.FuncVars()); closure != nil && !v.set.Contains(closure) {
+	// A call to a closure, in place or through a variable that always holds
+	// it, local or package-level (#315), runs the closure's body, which is
+	// checked here. A named function's body is not part of the caller. A
+	// closure marked immutable-return is checked on its own.
+	if closure := site.Callee; closure != nil && closure.Parent() != nil && !v.set.Contains(closure) {
 		return v.returnsMutable(closure, seen)
 	}
 	return false
@@ -286,22 +289,6 @@ func immutableReturnPackageFuncs(funcs []*ssa.Function, pkg *ssa.Package) []*ssa
 		all = append(all, fn.AnonFuncs...)
 	}
 	return out
-}
-
-// immutableReturnClosure returns the closure that a call through v runs: v is
-// the closure, a MakeClosure of it, or a load of a local assigned only once
-// that holds either (callsite.FuncVars.LocalValue). A named function is not
-// returned, since its body is not part of the caller.
-func immutableReturnClosure(v ssa.Value, vars callsite.FuncVars) *ssa.Function {
-	switch x := vars.LocalValue(v).(type) {
-	case *ssa.Function:
-		if x.Parent() != nil {
-			return x
-		}
-	case *ssa.MakeClosure:
-		return immutableReturnClosure(x.Fn, vars)
-	}
-	return nil
 }
 
 // immutableReturnDeferredWrite is what deferred closures do to one named

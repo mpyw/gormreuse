@@ -68,7 +68,7 @@ func validatePureFuncs(
 			continue
 		}
 		changed := false
-		guard.run(fn, func() {
+		finished := guard.run("pure", fn, func() {
 			validator := purity.NewValidator(fn, pureFuncs, immutableReturnFuncs, verdicts, funcVars)
 			// Only a definitive violation revokes pure-trust at call sites;
 			// conservative func-arg violations do not (avoids FP cascades).
@@ -83,6 +83,13 @@ func validatePureFuncs(
 				changed = true
 			}
 		})
+		// A validation that panicked proves nothing, so the function is not
+		// trusted (#315).
+		if !finished {
+			verdicts.Failed[fn] = true
+			delete(verdicts.Returned, fn)
+			changed = true
+		}
 		if !changed {
 			continue
 		}
@@ -98,7 +105,7 @@ func validatePureFuncs(
 	// a pure function that creates it, so the same violation can come twice.
 	reported := make(map[purity.Violation]bool)
 	for _, fn := range targets {
-		guard.run(fn, func() {
+		guard.run("pure", fn, func() {
 			for _, v := range purity.NewValidator(fn, pureFuncs, immutableReturnFuncs, verdicts, funcVars).Validate() {
 				if reported[v] {
 					continue

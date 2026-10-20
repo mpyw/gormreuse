@@ -1,23 +1,30 @@
 package purity_test
 
 import (
+	"go/token"
+	"go/types"
 	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
 
+	"golang.org/x/tools/go/ast/inspector"
 	"golang.org/x/tools/go/packages"
 	"golang.org/x/tools/go/ssa"
 	"golang.org/x/tools/go/ssa/ssautil"
+
+	"github.com/mpyw/gormreuse/internal/directive"
 )
 
-// loadFixtureFuncs builds SSA for the testdata/gormreuse fixture package (which
-// imports the gorm stub) and returns its functions keyed by name. purity needs
-// real *gorm.DB types, so — unlike cfg — it cannot use a plain-Go inline
-// harness and loads the GOPATH fixture package instead.
+// loadFixtureSets builds SSA for the testdata/gormreuse fixture package (which
+// imports the gorm stub) and returns its functions keyed by name, and a set
+// made by each of newSets with the fixture's files added, so that it finds the
+// directives written in them (#315). purity needs real *gorm.DB types, so —
+// unlike cfg — it cannot use a plain-Go inline harness and loads the GOPATH
+// fixture package instead.
 //
 //declscope:shared // validator_test.go and immutable_return_test.go load the fixtures with it
-func loadFixtureFuncs(t *testing.T) map[string]*ssa.Function {
+func loadFixtureSets(t *testing.T, newSets ...func(*token.FileSet, *types.Info) *directive.DirectiveFuncSet) (map[string]*ssa.Function, []*directive.DirectiveFuncSet) {
 	t.Helper()
 	_, file, _, ok := runtime.Caller(0)
 	if !ok {
@@ -56,5 +63,13 @@ func loadFixtureFuncs(t *testing.T) map[string]*ssa.Function {
 	if len(funcs) == 0 {
 		t.Fatal("no SSA functions loaded from fixture package")
 	}
-	return funcs
+	var sets []*directive.DirectiveFuncSet
+	for _, newSet := range newSets {
+		set := newSet(pkgs[0].Fset, pkgs[0].TypesInfo)
+		for cur := range inspector.New(pkgs[0].Syntax).Root().Children() {
+			set.AddFile(cur)
+		}
+		sets = append(sets, set)
+	}
+	return funcs, sets
 }
