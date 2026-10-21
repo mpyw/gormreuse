@@ -2,6 +2,15 @@
 
 These notes say what changes for users in each release, and what to do about it. The full commit list of each release is on [GitHub Releases](https://github.com/mpyw/gormreuse/releases). Releases up to 0.22.0 have their notes there only.
 
+## 0.24.1 (2026-10-21)
+
+Documentation only. The analyzer behaves exactly as in 0.24.0.
+
+| Change | Effect |
+| --- | --- |
+| The README shows each rule as code (#393) | Each rule is a short sentence and a table of code examples: what is reported, a bug and its fix, or the code before and after `-fix`. The inference conditions have one code example per row |
+| A corrected claim (#393) | Converting a `*gorm.DB` to an interface is not a branch by itself. A gorm call on a value taken back out by a type assertion is. The README listed the conversion as a branch |
+
 ## 0.24.0 (2026-10-21)
 
 gormreuse now follows a `*gorm.DB` read from a map, a slice, an array or a channel. It also follows a method value handed to other code. Inferred `immutable-param` and `immutable-input` now need a proof that the value is immutable. Loops with exclusive branches, exclusive `defer` statements, `Commit` and `Rollback` give no false reports. `-fix` no longer offers a fix that swallows an error or drops a condition.
