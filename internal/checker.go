@@ -67,8 +67,8 @@ func (c *checker) analyze(fn *ssa.Function) []pollution.Violation {
 		if v.Root != nil && !v.FromPureReceiver && c.ignores.Covers(v.Pos) {
 			c.ignoredRoots[v.Root] = true
 		}
-		c.pureReports.add(v, c.ignores.Covers(v.Pos))
 	}
+	c.pureReports.add(violations, c.ignores.Covers)
 	return violations
 }
 
@@ -101,7 +101,7 @@ func (c *checker) report(violations []pollution.Violation) {
 			// receiver branch explains is dropped, after Generate decided
 			// it as before #404, so the advice of its diagnostics is too.
 			f = c.fixGen.Generate(v)
-			if c.pureReports.roots()[v.Root] {
+			if c.pureReports.marked[v.Root] {
 				f = nil
 			}
 			fixes[v.Root] = f
@@ -213,15 +213,18 @@ func checkerBoolInt(b bool) int {
 }
 
 // checkerPureReports collects, over every function of the package, the
-// reports that hold only because of a pure method's receiver branch (#404).
-// A root gets no fix when one of them is shown. A reuse report is shown
-// when no other reuse report is at its position: the checker reports one
-// diagnostic per position, and puts first a report that holds without the
-// branch. A Session/Debug copy report is shown on its own.
+// reports that hold only because of a pure method's receiver branch (#404),
+// and marks the root of each one that is shown. Such a root gets no fix. The
+// checker shows one reuse diagnostic per position: the first report at it,
+// in the first function that has one, after putting first the reports that
+// hold without the branch (see report). A Session/Debug copy report is shown
+// on its own. A root whose report is not shown keeps its fix.
 type checkerPureReports struct {
-	other  map[token.Pos]bool
-	pure   []pollution.Violation
+	// marked holds the roots of the shown reports.
 	marked map[ssa.Value]bool
+	// seen holds the positions, and the copy reports, already shown or
+	// suppressed by an earlier function.
+	seen map[reportKey]bool
 	// firstOther is the first report of each root that holds without a
 	// pure method's receiver branch.
 	firstOther map[ssa.Value]pollution.Violation
@@ -247,39 +250,41 @@ func (r *checkerPureReports) decideAdvice(v pollution.Violation, generate func(p
 	generate(v)
 }
 
-// add records v, a violation of a function. ignored says that an ignore
-// directive suppresses its position, so it is not shown.
-func (r *checkerPureReports) add(v pollution.Violation, ignored bool) {
-	switch {
-	case v.Root != nil && !v.FromPureReceiver:
-		if r.other == nil {
-			r.other = make(map[token.Pos]bool)
-			r.firstOther = make(map[ssa.Value]pollution.Violation)
-		}
-		r.other[v.Pos] = true
-		if _, ok := r.firstOther[v.Root]; !ok {
-			r.firstOther[v.Root] = v
-		}
-	case ignored:
-	case v.Root != nil, v.PureReceiverRoot != nil:
-		r.pure = append(r.pure, v)
+// add records the violations of a function, in the order analyze returned
+// them. ignored says that an ignore directive suppresses a position, so
+// nothing is shown at it.
+func (r *checkerPureReports) add(violations []pollution.Violation, ignored func(token.Pos) bool) {
+	if r.marked == nil {
+		r.marked = make(map[ssa.Value]bool)
+		r.seen = make(map[reportKey]bool)
+		r.firstOther = make(map[ssa.Value]pollution.Violation)
 	}
-}
-
-// roots returns the roots with a shown report. Every function is analyzed
-// before the first is reported, so the answer is computed once, then.
-func (r *checkerPureReports) roots() map[ssa.Value]bool {
-	if r.marked != nil {
-		return r.marked
-	}
-	r.marked = make(map[ssa.Value]bool)
-	for _, v := range r.pure {
-		switch {
-		case v.PureReceiverRoot != nil:
-			r.marked[v.PureReceiverRoot] = true
-		case !r.other[v.Pos]:
-			r.marked[v.Root] = true
+	for _, group := range reportGroupByPos(violations) {
+		var shown *pollution.Violation
+		for i, v := range group {
+			if v.Root == nil {
+				if v.PureReceiverRoot != nil && !r.seen[reportKeyOf(v)] && !ignored(v.Pos) {
+					r.marked[v.PureReceiverRoot] = true
+				}
+				r.seen[reportKeyOf(v)] = true
+				continue
+			}
+			if !v.FromPureReceiver {
+				if _, ok := r.firstOther[v.Root]; !ok {
+					r.firstOther[v.Root] = v
+				}
+			}
+			if shown == nil || shown.FromPureReceiver && !v.FromPureReceiver {
+				shown = &group[i]
+			}
 		}
+		if shown == nil {
+			continue
+		}
+		key := reportKeyOf(*shown)
+		if !r.seen[key] && !ignored(shown.Pos) && shown.FromPureReceiver {
+			r.marked[shown.Root] = true
+		}
+		r.seen[key] = true
 	}
-	return r.marked
 }

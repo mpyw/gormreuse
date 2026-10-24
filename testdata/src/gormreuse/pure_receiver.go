@@ -497,6 +497,50 @@ func prExclusiveFirstBranchNoFix(db *gorm.DB, c bool) {
 	go r.list(nil) // want `\*gorm\.DB reused: second branch from mutable root \(root at pure_receiver\.go:488, first branch at pure_receiver\.go:496\)`
 }
 
+// [LIMITATION] prTwoPureShownQ2: x.Find is a new report of q1 and of q2, each explained only by its
+// pure call. The one shown names q2, which gets no fix. q1 is
+// not shown, so it keeps the Session it got before #404, which drops what
+// its pure call changes (Unsafe fix).
+func prTwoPureShownQ2(db *gorm.DB, c bool) {
+	q1 := db.Where("a")
+	q2 := db.Where("b") // want `\*gorm\.DB reused: second branch from mutable root`
+	r1 := prRepo{db: q1}
+	r2 := prRepo{db: q2}
+	r1.list(nil)
+	r2.list(nil)
+	x := q1
+	if c {
+		x = q2
+	}
+	x.Find(nil)   // want `\*gorm\.DB reused: second branch from mutable root \(root at pure_receiver\.go:506,`
+	q1.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	q1.Find(nil)  // want `\*gorm\.DB reused: second branch from mutable root`
+	q2.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	q2.Find(nil)  // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// [LIMITATION] prTwoPureShownQ1: x.Find is a new report of q1 and of q2, each explained only by its
+// pure call. The one shown names q1, which gets no fix. q2 is
+// not shown, so it keeps the Session it got before #404, which drops what
+// its pure call changes (Unsafe fix).
+func prTwoPureShownQ1(db *gorm.DB, c bool) {
+	q1 := db.Where("a")
+	q2 := db.Where("b") // want `\*gorm\.DB reused: second branch from mutable root`
+	r1 := prRepo{db: q1}
+	r2 := prRepo{db: q2}
+	r1.list(nil)
+	r2.list(nil)
+	x := q2
+	if c {
+		x = q1
+	}
+	x.Find(nil)   // want `\*gorm\.DB reused: second branch from mutable root \(root at pure_receiver\.go:527,`
+	q1.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	q1.Find(nil)  // want `\*gorm\.DB reused: second branch from mutable root`
+	q2.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	q2.Find(nil)  // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
 // =============================================================================
 // UNSAFE FIX: A PURE CALL AFTER A STORE INTO OTHER MEMORY
 //
