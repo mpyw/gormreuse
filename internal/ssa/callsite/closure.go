@@ -10,9 +10,11 @@ import (
 // ClosureRuns).
 type ClosureRun struct {
 	Instr ssa.Instruction
-	// Called is set when Instr is a plain call of the closure value that does
-	// not also pass it on.
-	Called bool
+	// Invoked is set when Instr runs the closure value itself: a call, or a
+	// go or defer statement, of it that does not also pass it on. A plain call
+	// is such an Instr that is an *ssa.Call. Any other run hands the value on,
+	// and it may run later any number of times.
+	Invoked bool
 }
 
 // ClosureRuns returns the instructions where v, a closure value (a
@@ -97,7 +99,13 @@ func ClosureRuns(v ssa.Value) []ClosureRun {
 				}
 			case *ssa.Call:
 				if ref.Call.Value == v && !slices.Contains(ref.Call.Args, v) {
-					runs = append(runs, ClosureRun{Instr: ref, Called: true})
+					runs = append(runs, ClosureRun{Instr: ref, Invoked: true})
+					continue
+				}
+			case *ssa.Go, *ssa.Defer:
+				call := ref.(ssa.CallInstruction).Common()
+				if call.Value == v && !slices.Contains(call.Args, v) {
+					runs = append(runs, ClosureRun{Instr: ref, Invoked: true})
 					continue
 				}
 			}
@@ -115,10 +123,11 @@ func ClosureRuns(v ssa.Value) []ClosureRun {
 func ClosureCalls(mc *ssa.MakeClosure) []*ssa.Call {
 	var calls []*ssa.Call
 	for _, run := range ClosureRuns(mc) {
-		if !run.Called || run.Instr.Parent() != mc.Parent() {
+		call, plain := run.Instr.(*ssa.Call)
+		if !run.Invoked || !plain || run.Instr.Parent() != mc.Parent() {
 			return nil
 		}
-		calls = append(calls, run.Instr.(*ssa.Call))
+		calls = append(calls, call)
 	}
 	return calls
 }

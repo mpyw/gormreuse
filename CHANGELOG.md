@@ -10,6 +10,13 @@ These notes say what changes for users in each release, and what to do about it.
 | --- | --- | --- |
 | A function literal handed on that returns a captured `*gorm.DB` (#397). The code that gets it may call it and chain on the result, as `Scopes` and `Preload` do | `run(func() *gorm.DB { return q }); q.Find(&us)`, `db.Scopes(func(d *gorm.DB) *gorm.DB { return q }).Find(&a); q.Find(&b)` | Return the callback's own parameter, or make `q` immutable with `Session`. `-fix` offers the Session where it does for a method value handed on |
 
+### Fewer false reports
+
+| No longer reported | Example |
+| --- | --- |
+| A use followed by `break` or `return` in a range-over-func body (#399). go/ssa turns these exits into `return false`, and the iterator stops. A use that can reach the end of the body or a `continue` is still reported, and so is a `break` inside a `switch` or a `select` | `for v := range seq { if v > 0 { q.Find(&u); break } }` |
+| The same in a nested range-over-func loop, with `break outer` or `return` (#399). The code after the inner loop is followed with the exit the inner body took. A `break` that leaves only the inner loop, or `continue outer`, is still reported | `outer: for range rows { for range cols { q.Find(&u); break outer } }` |
+
 ## 0.24.1 (2026-10-21)
 
 Documentation only. The analyzer behaves exactly as in 0.24.0.
