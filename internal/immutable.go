@@ -155,9 +155,12 @@ func computeNeedsImmutableParam(
 		if !guard.run("immutable-param", fn, func() {
 			// Counterfactual: analyze fn with its parameters treated as mutable.
 			cf := ssautil.NewAnalyzer(fn, counterfactual, nil, cfgs)
+			// A report that only a pure method's receiver branch explains
+			// (#404) does not make the directive needed: it was not one when
+			// the directive was written.
 			if slices.ContainsFunc(cf.Analyze(), func(v pollution.Violation) bool {
 				p, ok := v.Root.(*ssa.Parameter)
-				return ok && p.Parent() == fn
+				return ok && p.Parent() == fn && !v.FromPureReceiver
 			}) {
 				needs[fn] = true
 			}

@@ -293,6 +293,28 @@ var growthCases = []growthCase{
 		b.WriteString("}\n")
 		return []string{b.String()}
 	}},
+	// n go statements on one root, each in its own block. Each is checked
+	// against the branches before it, and the check stops at the first that
+	// reaches it (#404 kept that).
+	{name: "gobranches", limit: growthNearLinear, shape: func(n int) []string {
+		var b strings.Builder
+		b.WriteString("func f(db *gorm.DB, c []bool) {\n\tq := db.Where(\"x\")\n")
+		for i := range n {
+			fmt.Fprintf(&b, "\tif c[%d] {\n\t\tgo q.Find(nil)\n\t}\n", i)
+		}
+		b.WriteString("}\n")
+		return []string{b.String()}
+	}},
+	// The same with defer statements.
+	{name: "deferbranches", limit: growthNearLinear, shape: func(n int) []string {
+		var b strings.Builder
+		b.WriteString("func f(db *gorm.DB, c []bool) {\n\tq := db.Where(\"x\")\n")
+		for i := range n {
+			fmt.Fprintf(&b, "\tif c[%d] {\n\t\tdefer q.Find(nil)\n\t}\n", i)
+		}
+		b.WriteString("}\n")
+		return []string{b.String()}
+	}},
 	// n uses of one root in separate blocks.
 	{name: "usesbr", limit: growthQuadratic, shape: func(n int) []string {
 		var b strings.Builder

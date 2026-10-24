@@ -258,6 +258,7 @@ func (t *Tracker) RecordInvocationSite(fn *ssa.Function, site *ssa.BasicBlock) {
 // Caller must ensure root is not nil.
 func (t *Tracker) ProcessBranch(root ssa.Value, use UsageInfo) {
 	t.pollutingUses[root] = append(t.pollutingUses[root], use)
+	delete(t.byPos, root)
 }
 
 // RecordPureUse records a PURE usage (Session, Debug, etc).
@@ -281,6 +282,7 @@ func (t *Tracker) RecordAssignment(root ssa.Value, use UsageInfo) {
 // not nil.
 func (t *Tracker) RecordBranchUse(root ssa.Value, use UsageInfo) {
 	t.branchUses[root] = append(t.branchUses[root], use)
+	delete(t.byPos, root)
 }
 
 // RecordAliasUse records a use of a Session/Debug copy that shares root's
@@ -337,29 +339,24 @@ func (t *Tracker) AddViolationWithRoot(target UsageInfo, root ssa.Value, fromPur
 // and, with may set, those through a merge that may hold root.
 func (t *Tracker) PollutedBefore(root ssa.Value, target UsageInfo, around, may bool) (polluted, byOther bool) {
 	check := func(use UsageInfo) bool {
+		effort.Step()
 		if around {
 			return t.runsWith(root, use, target)
 		}
 		return t.reaches(root, use, target)
 	}
-	visit := func(use UsageInfo) {
-		if check(use) {
-			polluted = true
-			byOther = byOther || !use.PureReceiver
-		}
+	// The branches that were uses before #404 are searched first, and the
+	// search stops at the first that reaches target, as it did. Only when
+	// none does are a pure method's receiver branches searched.
+	other := func(use UsageInfo) bool { return !use.PureReceiver && check(use) }
+	pure := func(use UsageInfo) bool { return use.PureReceiver && check(use) }
+	mayOther := func(use mayUse) bool { return other(use.UsageInfo) }
+	mayPure := func(use mayUse) bool { return pure(use.UsageInfo) }
+	if slices.ContainsFunc(t.pollutingUses[root], other) || slices.ContainsFunc(t.branchUses[root], other) || may && slices.ContainsFunc(t.mayUses[root], mayOther) {
+		return true, true
 	}
-	for _, use := range t.pollutingUses[root] {
-		visit(use)
-	}
-	for _, use := range t.branchUses[root] {
-		visit(use)
-	}
-	if may {
-		for _, use := range t.mayUses[root] {
-			visit(use.UsageInfo)
-		}
-	}
-	return polluted, byOther
+	polluted = slices.ContainsFunc(t.pollutingUses[root], pure) || slices.ContainsFunc(t.branchUses[root], pure) || may && slices.ContainsFunc(t.mayUses[root], mayPure)
+	return polluted, false
 }
 
 // DetectViolations performs violation detection after all uses are recorded.
@@ -856,8 +853,8 @@ func (t *Tracker) firstBranchPos(root ssa.Value, target UsageInfo, fromPure bool
 }
 
 // branchesByPos returns the polluting and branch uses of root with a valid
-// position, in position order (see firstBranchPos). It is computed once per
-// root, after the uses are recorded.
+// position, in position order (see firstBranchPos). It is kept until another
+// branch of root is recorded.
 func (t *Tracker) branchesByPos(root ssa.Value) []UsageInfo {
 	if uses, ok := t.byPos[root]; ok {
 		return uses

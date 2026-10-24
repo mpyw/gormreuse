@@ -4399,7 +4399,7 @@ For directive diagnostics. It isolates an argument, or deletes an unused directi
 </table>
 
 > [!IMPORTANT]
-> A fix never drops a condition that gormreuse can see. When it cannot keep every change the code makes, the diagnostic has **no fix**. See [When there is no fix](#when-there-is-no-fix). One known case slips through: a `//gormreuse:pure` call after a store into memory other code reaches (see [Known Limitations](#known-limitations), Unsafe fix).
+> A fix never drops a condition that gormreuse can see. When it cannot keep every change the code makes, the diagnostic has **no fix**. See [When there is no fix](#when-there-is-no-fix). Known cases slip through, all with a `//gormreuse:pure` call that changes the root in place: one after a store into memory other code reaches, and one through its receiver that makes no report shown on its own, because it is the first use on its path or its report is hidden behind another root's report at the same position (see [Known Limitations](#known-limitations), Unsafe fix).
 
 ### Strategy 1: Reassignment (Creating New Roots)
 
@@ -5861,7 +5861,7 @@ q.Find(nil)
 q.Find(nil) // reported
 ```
 
-A pure method that holds the root in its receiver, but is the first use on its path, makes no report, so the fix does not see it either: `if c { q.Find(nil) } else { r.list(nil) }; q.Count(nil)` gets a Session. Check such a fix by hand. When the pure method does make a report, the root gets no fix.
+A pure method that holds the root in its receiver, but makes no report that is shown, is not seen by the fix either. That is when it is the first use on its path, as in `if c { q.Find(nil) } else { r.list(nil) }; q.Count(nil)`, or when its report is at a position that reports another root first, as with `x.Find(nil)` where `x` may be `q1` or `q2`. The root gets a Session. Check such a fix by hand. When the pure method's report is shown, the root gets no fix.
 
 </details>
 

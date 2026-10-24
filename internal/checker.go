@@ -147,14 +147,19 @@ func (c *checker) report(violations []pollution.Violation) {
 			slices.SortStableFunc(reuse, func(a, b pollution.Violation) int {
 				return cmp.Compare(checkerBoolInt(a.FromPureReceiver), checkerBoolInt(b.FromPureReceiver))
 			})
-			// The advice of the diagnostic depends on its root's fix (see
-			// reportViolation), so the fix is decided even when this
-			// diagnostic does not carry it.
-			fixOf(reuse[0])
 			c.reportViolation(reuse[0], func() []analysis.SuggestedFix {
 				var fixes []analysis.SuggestedFix
 				for _, fv := range fixFor {
 					fixes = append(fixes, fixOf(fv)...)
+				}
+				// The advice of the diagnostic depends on its root's fix (see
+				// reportViolation). A report that only a pure method's receiver
+				// branch explains (#404) carries no fix, so its root's fix is
+				// decided from a report that holds without the branch, as main
+				// decides it. Only a root with no such report is decided from
+				// this one. Neither is kept as the root's fix.
+				if head := reuse[0]; head.FromPureReceiver && !c.ignoredRoots[head.Root] {
+					c.pureReports.decideAdvice(head, c.fixGen.Generate)
 				}
 				return fixes
 			})
@@ -217,6 +222,29 @@ type checkerPureReports struct {
 	other  map[token.Pos]bool
 	pure   []pollution.Violation
 	marked map[ssa.Value]bool
+	// firstOther is the first report of each root that holds without a
+	// pure method's receiver branch.
+	firstOther map[ssa.Value]pollution.Violation
+	// decided holds the roots whose advice decideAdvice decided.
+	decided map[ssa.Value]bool
+}
+
+// decideAdvice decides the advice of v's root, once per root, for a shown
+// report that only a pure method's receiver branch explains: generate runs
+// on the root's first report that holds without the branch, as main runs it,
+// or on v when the root has none. The fix it returns is not kept.
+func (r *checkerPureReports) decideAdvice(v pollution.Violation, generate func(pollution.Violation) []analysis.SuggestedFix) {
+	if r.decided[v.Root] {
+		return
+	}
+	if r.decided == nil {
+		r.decided = make(map[ssa.Value]bool)
+	}
+	r.decided[v.Root] = true
+	if other, ok := r.firstOther[v.Root]; ok {
+		v = other
+	}
+	generate(v)
 }
 
 // add records v, a violation of a function. ignored says that an ignore
@@ -226,8 +254,12 @@ func (r *checkerPureReports) add(v pollution.Violation, ignored bool) {
 	case v.Root != nil && !v.FromPureReceiver:
 		if r.other == nil {
 			r.other = make(map[token.Pos]bool)
+			r.firstOther = make(map[ssa.Value]pollution.Violation)
 		}
 		r.other[v.Pos] = true
+		if _, ok := r.firstOther[v.Root]; !ok {
+			r.firstOther[v.Root] = v
+		}
 	case ignored:
 	case v.Root != nil, v.PureReceiverRoot != nil:
 		r.pure = append(r.pure, v)

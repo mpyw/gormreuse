@@ -321,9 +321,10 @@ func prParamRootCaller(db *gorm.DB) {
 	prParamRootNoFix(db.Session(&gorm.Session{}))
 }
 
-// prHiddenAtSharedFix: x.Find is a report of q1, which main gave, and of q2,
-// which only the pure call explains. The diagnostic is main's, about q1, so
-// q2 shows no new report and keeps its fix, as both roots do.
+// [LIMITATION] prHiddenAtSharedFix: x.Find is a report of q1, which main
+// gave, and of q2, which only the pure call explains. The diagnostic is
+// main's, about q1, so q2 shows no new report and keeps its fix, as both
+// roots do. That Session drops what r.list changes on q2 (Unsafe fix).
 func prHiddenAtSharedFix(db *gorm.DB, c bool) {
 	q1 := db.Where("a")
 	q2 := db.Where("b") // want `\*gorm\.DB reused: second branch from mutable root`
@@ -395,7 +396,7 @@ func prHiddenRootFixedAsBefore(db1, db2 *gorm.DB, n int) {
 	default:
 		q.Find(nil)
 		prRepo{db: p}.list(nil)
-		prHandBoth(q, p) // want `\*gorm\.DB reused: second branch from mutable root \(root at pure_receiver\.go:388, first branch at pure_receiver\.go:396\)`
+		prHandBoth(q, p) // want `\*gorm\.DB reused: second branch from mutable root \(root at pure_receiver\.go:389, first branch at pure_receiver\.go:397\)`
 	}
 }
 
@@ -411,7 +412,7 @@ func prArgumentReadKept(db, db2 *gorm.DB, c bool) {
 		return
 	}
 	sub.Where("a").Find(nil)
-	x.First(nil) // want `\*gorm\.DB reused: mutable root passed as a query argument is read when the query runs \(root at pure_receiver\.go:406, changed at pure_receiver\.go:413\)`
+	x.First(nil) // want `\*gorm\.DB reused: mutable root passed as a query argument is read when the query runs \(root at pure_receiver\.go:407, changed at pure_receiver\.go:414\)`
 }
 
 type prPair struct{ A, B *gorm.DB }
@@ -430,7 +431,7 @@ func prRootOrderKept(db *gorm.DB, c bool) {
 	}
 	p.A.Find(nil)
 	p.B.Find(nil)
-	prHandBoth(p.A, p.B) // want `\*gorm\.DB reused: second branch from mutable root \(root at pure_receiver\.go:426, first branch at pure_receiver\.go:431\)`
+	prHandBoth(p.A, p.B) // want `\*gorm\.DB reused: second branch from mutable root \(root at pure_receiver\.go:427, first branch at pure_receiver\.go:432\)`
 }
 
 // prIgnoredPureReportFix: the ignore suppresses the report that only the pure
@@ -441,6 +442,59 @@ func prIgnoredPureReportFix(db *gorm.DB) {
 	q.First(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 	r := prRepo{db: q}
 	r.list(nil) //gormreuse:ignore
+}
+
+//gormreuse:immutable-param
+func prRedundantImmutableParam(db *gorm.DB) { // want `redundant gormreuse:immutable-param directive: no \*gorm\.DB parameter is reused`
+	r := prRepo{db: db}
+	r.list(nil)
+	db.Find(nil)
+}
+
+// prRedundantImmutableParamCaller: the directive above was redundant before
+// #404, and a report that only the pure call explains does not make it
+// needed, so passing a mutable q to it is no contract violation.
+func prRedundantImmutableParamCaller(db *gorm.DB) {
+	q := db.Where("a")
+	prRedundantImmutableParam(q)
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+func prTuple(db *gorm.DB) (*gorm.DB, error) { return db.Where("m"), nil }
+
+// prIgnoredLoopPureFix: the ignore suppresses the report of x that only the
+// pure call explains. x keeps the fix it had before #404, which is decided
+// from x's own report, not from the ignored one.
+func prIgnoredLoopPureFix(db *gorm.DB, c bool) {
+	q, _ := prTuple(db)
+	x := db.Where("b") // want `\*gorm\.DB reused: second branch from mutable root`
+	r := prRepo{db: x}
+	for i := 0; i < 2; i++ {
+		r.list(nil) //gormreuse:ignore
+	}
+	for i := 0; i < 3; i++ {
+		y := q
+		if c {
+			y = x
+		}
+		y.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	}
+}
+
+// prExclusiveFirstBranchNoFix: the second spawned call names the first one as
+// its first branch, not the call in the loop on the other path, though that
+// one was recorded first.
+func prExclusiveFirstBranchNoFix(db *gorm.DB, c bool) {
+	q := db.Where("x")
+	r := prRepo{db: q}
+	if c {
+		for i := 0; i < 2; i++ {
+			r.list(nil) // want `\*gorm\.DB reused: second branch from mutable root \(root at pure_receiver\.go:488, first branch at pure_receiver\.go:492\)`
+		}
+		return
+	}
+	go r.list(nil)
+	go r.list(nil) // want `\*gorm\.DB reused: second branch from mutable root \(root at pure_receiver\.go:488, first branch at pure_receiver\.go:496\)`
 }
 
 // =============================================================================
