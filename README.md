@@ -598,7 +598,7 @@ q.Find(&users)
 
 </td><td>
 
-It may be called elsewhere. A struct field such as `job{find: q.Find}` counts too, and so does one boxed in an interface.
+It may be called elsewhere. A struct field such as `job{find: q.Find}` counts too.
 
 </td></tr>
 <tr><td>A function literal handed on that returns <code>q</code></td><td>
@@ -612,7 +612,7 @@ q.Find(&users)
 
 </td><td>
 
-It may be called elsewhere, and the caller may chain on `q`. A `Scopes` or `Preload` callback that returns `q`, and a struct field that holds such a literal, count too. A literal that returns its own parameter, its own chain, a `Session` copy or an immutable value does not.
+It may be called elsewhere, and the caller may chain on `q`. A `Scopes` or `Preload` callback that returns `q` counts too, and so does a slice, a struct or a map holding such a literal that is passed on. A literal that returns its own parameter, its own chain, a `Session` copy or an immutable value does not. Neither does one kept in a local slice, struct or map that never leaves the function, or one passed to `fmt` or `log`.
 
 </td></tr>
 <tr><td>Type assertion out of an interface</td><td>
@@ -5479,7 +5479,7 @@ gormreuse reports a reuse only when it can follow the value. These cases are kno
 
 | Kind | Cases | Meaning |
 | --- | --- | --- |
-| Missed reuse (false negatives) | 17 | Reuse that is not reported |
+| Missed reuse (false negatives) | 22 | Reuse that is not reported |
 | Extra reports (false positives) | 5 | Safe code that is reported |
 | Wrong position | — | A report on the wrong line |
 | No fix | — | A report without a suggested fix |
@@ -5714,6 +5714,71 @@ load("b") // not reported
 ```
 
 </td><td>A call through the returned func value has no known callee</td></tr>
+<tr><td><!-- fixtures: crcBoxedMethodValue -->
+
+A method value boxed in an interface and handed on:
+
+```go
+var v any = q.Find
+take(v)
+q.Count(nil) // not reported
+```
+
+</td><td>A method value in an interface is not followed</td></tr>
+<tr><td><!-- fixtures: crcBranchesAndReturns -->
+
+A function literal handed on that chains on the captured value on one path and returns it unchanged on another:
+
+```go
+run(func() *gorm.DB {
+    if c {
+        q = q.Where("z")
+    }
+    return q
+})
+q.Find(nil) // not reported
+```
+
+</td><td>The chain in the body counts as the literal's one use of <code>q</code></td></tr>
+<tr><td><!-- fixtures: crcAssignedByOtherClosure, crcAssignedByOtherClosureNested -->
+
+A function literal handed on whose captured variable another closure may assign:
+
+```go
+run(func() *gorm.DB {
+    do(func() {
+        if c {
+            q = other
+        }
+    })
+    return q
+})
+q.Find(nil) // not reported
+```
+
+</td><td>When that closure runs is not known</td></tr>
+<tr><td><!-- fixtures: crcReturnsPointer, crcReturnsStruct, crcFactoryLiteral -->
+
+A function literal handed on that returns the captured value as a <code>**gorm.DB</code> or in a struct, or one that a call makes:
+
+```go
+runP(func() **gorm.DB { return &q })
+q.Find(nil) // not reported
+```
+
+</td><td>Only a literal that returns a <code>*gorm.DB</code> is followed, where it is made</td></tr>
+<tr><td><!-- fixtures: crcPureHandsOnLiteral -->
+
+A `//gormreuse:pure` function that hands on a literal returning its argument:
+
+```go
+//gormreuse:pure
+func f(d *gorm.DB) {
+    run(func() *gorm.DB { return d }) // not reported
+}
+```
+
+</td><td>The pure check does not take such a literal as a branch of the argument</td></tr>
 </table>
 
 </details>

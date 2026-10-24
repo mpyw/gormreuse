@@ -9,7 +9,6 @@ These notes say what changes for users in each release, and what to do about it.
 | Now reported | Example | What to do |
 | --- | --- | --- |
 | A function literal handed on that returns a captured `*gorm.DB` (#397). The code that gets it may call it and chain on the result, as `Scopes` and `Preload` do | `run(func() *gorm.DB { return q }); q.Find(&us)`, `db.Scopes(func(d *gorm.DB) *gorm.DB { return q }).Find(&a); q.Find(&b)` | Return the callback's own parameter, or make `q` immutable with `Session`. No fix is offered |
-| A method value boxed in an interface and handed on (#397) | `var v any = q.Find; take(v); q.Count(&n)` | The same as for `take(q.Find)` |
 
 ## 0.24.1 (2026-10-21)
 

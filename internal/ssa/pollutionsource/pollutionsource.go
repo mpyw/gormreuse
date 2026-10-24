@@ -170,17 +170,21 @@ func isReadOnlyVariadicArg(idx *ssa.IndexAddr, val ssa.Value, vars callsite.Func
 			// A go or defer statement formats its arguments when the call
 			// runs, as a plain call does (#309).
 			call, ok := sr.(ssa.CallInstruction)
-			if !ok {
-				continue
-			}
-			sig := call.Common().Signature()
-			args := call.Common().Args
-			if sig != nil && sig.Variadic() && len(args) > 0 && args[len(args)-1] == slice && isReadOnlyStdlibCallee(call, vars) {
+			if ok && IsReadOnlyVariadicCall(call, slice, vars) {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// IsReadOnlyVariadicCall reports whether call passes v as the varargs slice
+// of a variadic call to a known read-only stdlib function (see
+// readOnlyVariadicPkgs), which only formats what it is passed.
+func IsReadOnlyVariadicCall(call ssa.CallInstruction, v ssa.Value, vars callsite.FuncVars) bool {
+	sig := call.Common().Signature()
+	args := call.Common().Args
+	return sig != nil && sig.Variadic() && len(args) > 0 && args[len(args)-1] == v && isReadOnlyStdlibCallee(call, vars)
 }
 
 // isReadOnlyStdlibCallee reports whether call targets a function in an
