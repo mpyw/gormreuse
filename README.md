@@ -612,7 +612,7 @@ q.Find(&users)
 
 </td><td>
 
-It may be called elsewhere, and the caller may chain on `q`. A `Scopes` or `Preload` callback that returns `q` counts too, and so does a slice, a struct or a map holding such a literal that is passed on. A literal that returns its own parameter, its own chain, a `Session` copy or an immutable value does not. Neither does one kept in a local slice, struct or map that never leaves the function, or one passed to `fmt` or `log`.
+It may be called elsewhere, and the caller may chain on `q`. A `Scopes` or `Preload` callback that returns `q` counts too, and so does a slice, a struct or a map holding such a literal that is passed on. A literal that returns its own parameter, its own chain, a `Session` copy or an immutable value does not. Neither does one kept in a local slice, struct or map whose literals are only called with the result dropped (`for _, f := range fs { f() }`), or read with `len` or `range`. Nor does one passed to `fmt` or `log`.
 
 </td></tr>
 <tr><td>Type assertion out of an interface</td><td>

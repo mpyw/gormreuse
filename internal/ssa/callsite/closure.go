@@ -122,3 +122,13 @@ func ClosureCalls(mc *ssa.MakeClosure) []*ssa.Call {
 	}
 	return calls
 }
+
+// ClosureOnlyCalled reports whether every use of v, a closure value, calls
+// it: a call, a go or a defer statement whose callee is v and that does not
+// also pass v on, as an IIFE is called.
+func ClosureOnlyCalled(v ssa.Value) bool {
+	return !slices.ContainsFunc(*v.Referrers(), func(r ssa.Instruction) bool {
+		call, ok := r.(ssa.CallInstruction)
+		return !ok || call.Common().Value != v || slices.Contains(call.Common().Args, v)
+	})
+}

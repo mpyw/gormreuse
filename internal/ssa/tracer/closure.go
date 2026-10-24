@@ -1,7 +1,6 @@
 package tracer
 
 import (
-	"go/token"
 	"go/types"
 	"maps"
 	"slices"
@@ -80,22 +79,14 @@ func closureHoldsGormFunc(binding ssa.Value, handsOn bool, seen map[*ssa.MakeClo
 // value of the captured variable other than by calling it: it passes it,
 // stores it, captures it in a nested closure, or anything else.
 func closureFreeVarHandedOn(fv *ssa.FreeVar) bool {
-	for _, ref := range *fv.Referrers() {
-		load, ok := ref.(*ssa.UnOp)
-		if !ok || load.Op != token.MUL {
-			if _, store := ref.(*ssa.Store); !store {
-				return true
-			}
-			continue
+	return slices.ContainsFunc(*fv.Referrers(), func(ref ssa.Instruction) bool {
+		// A load is the only unary operation on an address.
+		if load, ok := ref.(*ssa.UnOp); ok {
+			return !callsite.ClosureOnlyCalled(load)
 		}
-		for _, use := range *load.Referrers() {
-			call, ok := use.(ssa.CallInstruction)
-			if !ok || call.Common().Value != load || slices.Contains(call.Common().Args, ssa.Value(load)) {
-				return true
-			}
-		}
-	}
-	return false
+		_, store := ref.(*ssa.Store)
+		return !store
+	})
 }
 
 // isClosureResultStored checks if a closure call's result is stored (assigned to

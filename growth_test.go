@@ -1292,6 +1292,29 @@ var growthCases = []growthCase{
 		b.WriteString("}\n")
 		return []string{b.String()}
 	}},
+	// One []any literal of n values next to a mutable root: a store of a
+	// value that is no function literal never walks the container (#397).
+	{name: "anyliteral", limit: growthNearLinear, shape: func(n int) []string {
+		var b strings.Builder
+		b.WriteString("func use([]any) {}\n\nfunc f(db *gorm.DB) {\n\tq := db.Where(\"x\")\n\txs := []any{\n")
+		for i := range n {
+			fmt.Fprintf(&b, "\t\t%d,\n", i)
+		}
+		b.WriteString("\t}\n\tuse(xs)\n\tq.Find(nil)\n}\n")
+		return []string{b.String()}
+	}},
+	// One local slice of n function literals that return a captured root,
+	// each called in a loop: the container is walked once for all its stores
+	// (#397).
+	{name: "literalslice", limit: growthNearLinear, shape: func(n int) []string {
+		var b strings.Builder
+		b.WriteString("func f(db *gorm.DB) {\n\tq := db.Where(\"x\")\n\tfs := []func() *gorm.DB{\n")
+		for range n {
+			b.WriteString("\t\tfunc() *gorm.DB { return q },\n")
+		}
+		b.WriteString("\t}\n\tfor _, f := range fs {\n\t\tf()\n\t}\n\tq.Find(nil)\n}\n")
+		return []string{b.String()}
+	}},
 	// n loops that each append a query of their own to a slice, then a loop
 	// that reads it: each append runs again, and the values the slice may
 	// hold are found once (#374). Its steps are quadratic, but no more than

@@ -1,6 +1,6 @@
 --- closure_returns_capture.go	1970-01-01 00:00:00
 +++ closure_returns_capture.go.golden	1970-01-01 00:00:00
-@@ -1,713 +1,713 @@
+@@ -1,930 +1,930 @@
  package internal
  
  import (
@@ -117,6 +117,7 @@
  func crcReturnsParameter(db *gorm.DB) {
  	q := db.Session(&gorm.Session{}).Where("x")
  	db.Session(&gorm.Session{}).Scopes(func(d *gorm.DB) *gorm.DB { return d.Where("a") }).Find(nil)
+ 	db.Session(&gorm.Session{}).Scopes(func(d *gorm.DB) *gorm.DB { crcUse(q == nil); return d }).Find(nil)
  	q.Find(nil)
  }
  
@@ -397,6 +398,131 @@
  	crcRun(g)
  }
  
+ // crcVarargsInLoopIgnored: the report of a hand-off in a loop is on the
+ // call's line, so a directive there suppresses it.
+ func crcVarargsInLoopIgnored(db *gorm.DB, items []string) {
+ 	q := db.Session(&gorm.Session{}).Where("x")
+ 	for range items {
+ 		crcRunV(func() *gorm.DB { return q }) //gormreuse:ignore
+ 	}
+ }
+ 
+ // crcLocalSliceRanged: a range over a local slice that only calls its
+ // literals is no hand-off. Only the two queries are a reuse.
+ func crcLocalSliceRanged(db *gorm.DB) {
+-	q := db.Session(&gorm.Session{}).Where("x")
++	q := db.Session(&gorm.Session{}).Where("x").Session(&gorm.Session{})
+ 	fs := []func() *gorm.DB{func() *gorm.DB { return q }}
+ 	for _, f := range fs {
+ 		f()
+ 	}
+ 	q.Find(nil)
+ 	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // crcLocalSliceLen: len only reads the local slice.
+ func crcLocalSliceLen(db *gorm.DB) {
+-	q := db.Session(&gorm.Session{}).Where("x")
++	q := db.Session(&gorm.Session{}).Where("x").Session(&gorm.Session{})
+ 	fs := []func() *gorm.DB{func() *gorm.DB { return q }}
+ 	crcUse(len(fs) > cap(fs))
+ 	q.Find(nil)
+ 	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // crcLocalMapRanged: a range over a local map that only calls its literals,
+ // and a delete from it, are no hand-off.
+ func crcLocalMapRanged(db *gorm.DB) {
+-	q := db.Session(&gorm.Session{}).Where("x")
++	q := db.Session(&gorm.Session{}).Where("x").Session(&gorm.Session{})
+ 	m := map[string]func() *gorm.DB{"q": func() *gorm.DB { return q }}
+ 	for _, f := range m {
+ 		f()
+ 	}
+ 	delete(m, "q")
+ 	q.Find(nil)
+ 	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // crcAppendedCalled: a literal appended to a local slice whose elements are
+ // only called is no hand-off.
+ func crcAppendedCalled(db *gorm.DB) {
+-	q := db.Session(&gorm.Session{}).Where("x")
++	q := db.Session(&gorm.Session{}).Where("x").Session(&gorm.Session{})
+ 	var fs []func() *gorm.DB
+ 	fs = append(fs, func() *gorm.DB { return q })
+ 	fs[0]()
+ 	q.Find(nil)
+ 	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // crcLocalSliceCopied: a copy of the local slice into another local
+ // variable, read and called, is no hand-off.
+ func crcLocalSliceCopied(db *gorm.DB) {
+ 	q := db.Session(&gorm.Session{}).Where("x")
+ 	fs := []func() *gorm.DB{func() *gorm.DB { return q }}
+ 	var gs [][]func() *gorm.DB
+ 	gs = append(gs, fs)
+ 	for _, g := range gs {
+ 		g[0]()
+ 	}
+ 	fmt.Println(fs)
+ 	q.Find(nil)
+ }
+ 
+ // crcLocalSliceElemMerged: a variable that holds one of two elements, compared
+ // with nil and called, is no hand-off.
+ func crcLocalSliceElemMerged(db *gorm.DB, c bool) {
+ 	q := db.Session(&gorm.Session{}).Where("x")
+ 	fs := []func() *gorm.DB{func() *gorm.DB { return q }, func() *gorm.DB { return q }}
+ 	f := fs[0]
+ 	if c {
+ 		f = fs[1]
+ 	}
+ 	if f != nil {
+ 		f()
+ 	}
+ 	q.Find(nil)
+ }
+ 
+ // crcGlobalDB holds a connection.
+ var crcGlobalDB *gorm.DB
+ 
+ // crcReturnsGlobal: a literal that returns a package-level variable hands on
+ // no captured value.
+ func crcReturnsGlobal() {
+ 	crcRun(func() *gorm.DB { return crcGlobalDB })
+ 	crcRun(func() *gorm.DB { return crcGlobalDB })
+ }
+ 
+ // crcReturnsParamField: a field read through a captured pointer parameter
+ // is not a root, as in the function itself.
+ func crcReturnsParamField(p *crcHolder) {
+ 	crcRun(func() *gorm.DB { return p.db })
+ 	crcRun(func() *gorm.DB { return p.db })
+ }
+ 
+ // crcCapturedFieldWritten: the literal writes the captured struct, through a
+ // closure it calls in place, so the struct is left out.
+ func crcCapturedFieldWritten(db *gorm.DB) {
+ 	h := crcHolder{db: db.Session(&gorm.Session{}).Where("x")}
+ 	crcRun(func() *gorm.DB {
+ 		func() { h.db = db.Session(&gorm.Session{}) }()
+ 		return h.db
+ 	})
+ }
+ 
+ // crcCapturedFieldLater: the literal returns a field of a captured struct,
+ // read where it is handed on. A value stored into the field later is not
+ // what was handed on.
+ func crcCapturedFieldLater(db *gorm.DB) {
+ 	h := crcHolder{db: db.Session(&gorm.Session{}).Where("x")}
+ 	crcRun(func() *gorm.DB { return h.db })
+ 	q2 := db.Session(&gorm.Session{}).Where("y")
+ 	h.db = q2
+ 	q2.Find(nil)
+ }
+ 
  // ===== SHOULD REPORT (stores and containers) =====
  
  // crcConditionalStore: the literal may assign another value to the captured
@@ -596,6 +722,102 @@
  	q := db.Session(&gorm.Session{}).Where("x")
  	fs := []func() *gorm.DB{func() *gorm.DB { return q }}
  	ch <- fs[0]
+ 	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // crcRunV calls every builder it is passed and chains on the results.
+ func crcRunV(fs ...func() *gorm.DB) {
+ 	crcRunAll(fs)
+ }
+ 
+ // crcVarargs: a literal handed on as a vararg is reported at the call.
+ func crcVarargs(db *gorm.DB) {
+-	q := db.Session(&gorm.Session{}).Where("x")
++	q := db.Session(&gorm.Session{}).Where("x").Session(&gorm.Session{})
+ 	q.Count(nil)
+ 	crcRunV(func() *gorm.DB { return q }) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // crcVarargsInLoop: the hand-off runs again on each iteration, reported at
+ // the call.
+ func crcVarargsInLoop(db *gorm.DB, items []string) {
+ 	q := db.Session(&gorm.Session{}).Where("x")
+ 	for range items {
+ 		crcRunV(func() *gorm.DB { return q }) // want `\*gorm\.DB reused: second branch from mutable root`
+ 	}
+ }
+ 
+ // crcAppended: a literal appended to a slice that is passed on is reported
+ // at the append.
+ func crcAppended(db *gorm.DB) {
+ 	q := db.Session(&gorm.Session{}).Where("x")
+ 	q.Count(nil)
+ 	var fs []func() *gorm.DB
+ 	fs = append(fs, func() *gorm.DB { return q }) // want `\*gorm\.DB reused: second branch from mutable root`
+ 	crcRunAll(fs)
+ }
+ 
+ // crcReassignedBeforeCall: q is reassigned after the closure that hands the
+ // literal on is made, and before it is called. The variable is read at that
+ // call.
+ func crcReassignedBeforeCall(db *gorm.DB) {
+ 	q := db.Session(&gorm.Session{}).Where("x")
+ 	f := func() *gorm.DB { return q }
+ 	g := func() { crcRun(f) }
+ 	q = db.Session(&gorm.Session{}).Where("y")
+ 	g()
+ 	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // crcTakeAll takes values.
+ func crcTakeAll([]any) {}
+ 
+ // crcBoxedInSlice: a literal boxed in a []any that is passed on.
+ func crcBoxedInSlice(db *gorm.DB) {
+ 	q := db.Session(&gorm.Session{}).Where("x")
+ 	vs := []any{func() *gorm.DB { return q }}
+ 	crcTakeAll(vs)
+ 	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // crcBuilder is a named func type.
+ type crcBuilder func() *gorm.DB
+ 
+ // crcRunBuilders calls every builder.
+ func crcRunBuilders(bs []crcBuilder) {
+ 	for _, b := range bs {
+ 		b().Find(nil)
+ 	}
+ }
+ 
+ // crcNamedFuncInSlice: a literal converted to a named func type in a slice
+ // that is passed on.
+ func crcNamedFuncInSlice(db *gorm.DB) {
+ 	q := db.Session(&gorm.Session{}).Where("x")
+ 	bs := []crcBuilder{func() *gorm.DB { return q }}
+ 	crcRunBuilders(bs)
+ 	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // crcRunArray calls every builder of an array.
+ func crcRunArray(fs [1]func() *gorm.DB) {
+ 	fs[0]().Find(nil)
+ }
+ 
+ // crcLocalArrayHandedOn: a local array is passed on by value.
+ func crcLocalArrayHandedOn(db *gorm.DB) {
+ 	q := db.Session(&gorm.Session{}).Where("x")
+ 	fs := [1]func() *gorm.DB{func() *gorm.DB { return q }}
+ 	crcRunArray(fs)
+ 	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // crcLocalSliceInParamMap: the local slice is stored in a map the caller
+ // passed.
+ func crcLocalSliceInParamMap(db *gorm.DB, m map[string][]func() *gorm.DB) {
+ 	q := db.Session(&gorm.Session{}).Where("x")
+ 	fs := []func() *gorm.DB{func() *gorm.DB { return q }}
+ 	m["q"] = fs
  	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  }
  
