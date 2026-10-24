@@ -1083,7 +1083,7 @@ for v := range slices.Values(ids) {
 
 A loop body runs more than once. So one use inside it is reuse.
 
-Range-over-func loops (Go 1.23+) count as loops too. A chain that a range-over-func body assigns is seen after the loop, as for a plain loop.
+Range-over-func loops (Go 1.23+) count as loops too. As in a plain loop, a use followed by `break` or `return` runs once, and a chain that the body assigns is seen after the loop.
 
 </td></tr>
 <tr><td>
@@ -5466,7 +5466,7 @@ gormreuse reports a reuse only when it can follow the value. These cases are kno
 | Kind | Cases | Meaning |
 | --- | --- | --- |
 | Missed reuse (false negatives) | 17 | Reuse that is not reported |
-| Extra reports (false positives) | 5 | Safe code that is reported |
+| Extra reports (false positives) | 6 | Safe code that is reported |
 | Wrong position | — | A report on the wrong line |
 | No fix | — | A report without a suggested fix |
 
@@ -5786,6 +5786,21 @@ if c {
 ```
 
 </td><td>Calls in two functions are taken to both run</td></tr>
+<tr><td><!-- fixtures: rangeFuncExitLabeledBreak, rangeFuncExitNestedReturn -->
+
+A use in a nested range-over-func loop, followed by a break out of both loops or a return:
+
+```go
+outer:
+for range rows {
+    for range cols {
+        q.Find(nil) // reported
+        break outer
+    }
+}
+```
+
+</td><td>The inner loop body runs again when the outer one does. Which way the outer body leaves after the inner loop is not followed</td></tr>
 </table>
 
 </details>

@@ -711,12 +711,20 @@ The results do not change. The goldens, and `-json` and `-fix -diff` over `e2e/i
 | Range-over-func bodies (#177) | See below |
 | A root defined in the loop body (#375) | Two uses of it on exclusive branches are not a reuse. See below |
 
-**Range-over-func loops (#177).** SSA compiles the body of `for v := range seq` (Go 1.23+) into a synthetic closure. The iterator calls it once per element. go/ssa marks it with `Synthetic == "range-over-func yield"`. The closure has no back-edge, so `DetectLoops` treats every block of it as in a loop.
+**Range-over-func loops (#177).** SSA compiles the body of `for v := range seq` (Go 1.23+) into a synthetic closure. The iterator calls it once per element. go/ssa marks it with `Synthetic == "range-over-func yield"`. The closure has no back-edge. So `DetectLoops` puts in a loop the blocks of it that can reach a `return true` (`rangeFuncLoopBlocks`, #399).
+
+| Exit | go/ssa returns | The body runs again |
+| --- | --- | --- |
+| The end of the body, `continue` | `true` | Yes |
+| `break`, `return`, `goto` or a labelled `break`/`continue` out of the loop | `false` | No. The iterator must stop, and go/ssa panics when it calls the body again |
+
+A result that is not a constant counts as `true`. So `if c { q.Find(nil); break }` runs once, as in a plain loop. A use that reaches both exits repeats.
 
 - A root defined outside the body and used inside it is reported, as in a plain `for range`.
 - A root defined inside the body is in a loop block, so it is fresh on each iteration.
 - The body reaches outer variables through `FreeVar`s, so `q = q.Where(v)` inside it is a `Store` to a `FreeVar`, not to an `Alloc`. `isAssignment` treats a `FreeVar` as a merge point like an `Alloc` ([Which merges are reassignments](#which-merges-are-reassignments)). Its values are those of the captured variable, so the store is an assignment only when that variable can hold `root`. That is the in-place update of a plain loop. A store into another variable, such as `last = q.Where(v)`, still counts as a use of `q`.
-- A closure nested inside the body (an IIFE, a `defer`) runs once per run of the body, so it repeats as the body does.
+- A closure nested inside the body (an IIFE, a `defer`) runs once per run of the body, so it repeats as the body does. A closure made in a block that only reaches a `return false` runs once.
+- In a nested loop, the inner body is such a closure. A `break outer` or a `return` in it makes the inner body return `false` and sets a state variable. The outer body then reads the variable and returns `false` too. That variable is not read, so the inner body still repeats with the outer one (`rangeFuncExitLabeledBreak`, `rangeFuncExitNestedReturn`).
 - A store in the body is a store at the loop (#341). The iterator calls the body only while the loop statement runs. So a read after the loop sees the body's stores. It also sees the value before the loop, since the body may run no time. That is what the loop-header Phi of a plain loop gives ([Captured variables](#captured-variables)).
 - For the same reason, a read in the body sees only the stores that reach the loop, not those after it.
 
@@ -3283,6 +3291,7 @@ Each fixture function marked `[LIMITATION]` under `testdata/src` pins one of the
 | A captured pointer variable reassigned to a second returned struct: `p := mk(s); go func() { p.db.Find(nil) }(); p = mk(s); p.db.Count(nil)` | `cosReturnedReassigned` | A load of a reassigned pointer variable is resolved to every pointer stored in it. So the last read is matched to the first struct too ([Struct roots](#struct-roots)) |
 | A recursive helper that returns only immutable values, branched twice | `notInferredRecursive` | Inference is a least fixed point, so a function that returns its own result is never inferred ([Inferred immutable-return](#inferred-immutable-return)) |
 | A closure called on exclusive branches, once directly and once inside another closure | `rcsExclusiveAcrossClosures` | Sites in two functions are taken to both run ([Uses that run more than once](#uses-that-run-more-than-once)) |
+| A use in a nested range-over-func loop, followed by `break outer` or `return` | `rangeFuncExitLabeledBreak`, `rangeFuncExitNestedReturn` | The inner body is a closure made in the outer body, which may run again. The outer body leaves through a state variable that go/ssa sets in the inner body, and that variable is not read ([Loops](#loops)) |
 
 **Wrong position.** Uses in a deferred closure are ordered by their source position, not by when they run. `defer func() { q.Count(nil) }(); q.Find(nil)` is reported at `q.Find`, which runs first. A deferred call such as `defer q.Count(nil)` is ordered after the function's other uses and reported at the `defer`. Fixtures: `ifInsideDefer`, `ifElseInsideDefer`, `nestedIfInsideDefer`, `tripleNestingIfForDefer`, `tripleNestingForIfDefer`, `deferCapturingLoopVar`, `nestedDeferClosures`, `tripleNestedDeferClosures`, `nestedDeferWithFor`, `ultimateIfForDeferChaos`.
 
