@@ -1,6 +1,7 @@
 package tracer
 
 import (
+	"go/token"
 	"go/types"
 	"maps"
 	"slices"
@@ -20,18 +21,41 @@ import (
 // Looks through pointer chains (*gorm.DB, **gorm.DB, ...) and struct fields, so
 // a closure capturing a struct that holds a *gorm.DB is analyzed too (#181).
 // A captured variable that holds a method value of such a receiver counts too
-// (#341): `find := q.Find; func() { find(nil) }()` calls q.Find.
+// (#341): `find := q.Find; func() { find(nil) }()` calls q.Find. So does one
+// that holds a function literal returning a *gorm.DB that it captures, when
+// the closure hands the variable on (#397): `f := func() *gorm.DB { return q };
+// func() { run(f) }()` hands q on. A closure that only calls such a variable,
+// as a chain of getters does, is traced through the call instead.
 func ClosureCapturesGormDB(mc *ssa.MakeClosure) bool {
-	return slices.ContainsFunc(mc.Bindings, func(binding ssa.Value) bool {
-		return closureHoldsGormDB(binding.Type(), make(map[types.Type]bool)) || closureHoldsGormMethodValue(binding)
-	})
+	return closureCapturesGormDB(mc, make(map[*ssa.MakeClosure]bool))
 }
 
-// closureHoldsGormMethodValue reports whether binding, a variable that a closure
+// closureCapturesGormDB is ClosureCapturesGormDB, with the closures already
+// asked about in seen, so a closure that captures itself ends.
+func closureCapturesGormDB(mc *ssa.MakeClosure, seen map[*ssa.MakeClosure]bool) bool {
+	if seen[mc] {
+		return false
+	}
+	seen[mc] = true
+	fn, _ := mc.Fn.(*ssa.Function)
+	for i, binding := range mc.Bindings {
+		if closureHoldsGormDB(binding.Type(), make(map[types.Type]bool)) {
+			return true
+		}
+		handsOn := fn != nil && i < len(fn.FreeVars) && closureFreeVarHandedOn(fn.FreeVars[i])
+		if closureHoldsGormFunc(binding, handsOn, seen) {
+			return true
+		}
+	}
+	return false
+}
+
+// closureHoldsGormFunc reports whether binding, a variable that a closure
 // captures, may hold a method value whose receiver holds a *gorm.DB (see
-// closureHoldsGormDB). Any value stored into the variable counts, and a
+// closureHoldsGormDB), or, when handsOn, a function literal that returns a
+// *gorm.DB and captures one. Any value stored into the variable counts, and a
 // FreeVar is followed to the variable that its closure captures.
-func closureHoldsGormMethodValue(binding ssa.Value) bool {
+func closureHoldsGormFunc(binding ssa.Value, handsOn bool, seen map[*ssa.MakeClosure]bool) bool {
 	alloc, ok := binding.(*ssa.Alloc)
 	if fv, nested := binding.(*ssa.FreeVar); nested {
 		alloc, ok = freeVarAlloc(fv)
@@ -44,9 +68,34 @@ func closureHoldsGormMethodValue(binding ssa.Value) bool {
 		if !ok {
 			return false
 		}
-		site, bound := callsite.BoundSite(mc)
-		return bound && closureHoldsGormDB(site.Recv.Type(), make(map[types.Type]bool))
+		if site, bound := callsite.BoundSite(mc); bound {
+			return closureHoldsGormDB(site.Recv.Type(), make(map[types.Type]bool))
+		}
+		fn := mc.Fn.(*ssa.Function)
+		return handsOn && typeutil.HasGormDBResult(fn.Signature.Results()) && closureCapturesGormDB(mc, seen)
 	})
+}
+
+// closureFreeVarHandedOn reports whether the closure that fv belongs to uses the
+// value of the captured variable other than by calling it: it passes it,
+// stores it, captures it in a nested closure, or anything else.
+func closureFreeVarHandedOn(fv *ssa.FreeVar) bool {
+	for _, ref := range *fv.Referrers() {
+		load, ok := ref.(*ssa.UnOp)
+		if !ok || load.Op != token.MUL {
+			if _, store := ref.(*ssa.Store); !store {
+				return true
+			}
+			continue
+		}
+		for _, use := range *load.Referrers() {
+			call, ok := use.(ssa.CallInstruction)
+			if !ok || call.Common().Value != load || slices.Contains(call.Common().Args, ssa.Value(load)) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // isClosureResultStored checks if a closure call's result is stored (assigned to

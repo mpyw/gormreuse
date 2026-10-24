@@ -471,7 +471,15 @@ The tracer resolves a call `w(x)` through a method value `w := r.m` as the call 
 
 **A method value handed on (#374).** A method value passed to a function, or stored anywhere but in a local variable, may be called there. The call through it is no call site of `q`: it is a dynamic call, or a call in another function. So the hand-off is the branch, as `helper(q)` is (`boundGormReceiver`, `handOn`). It is reported when it runs again, as in a loop. Before #374 `firstPage(q.Find); q.Count(&n)` and `j := job{find: q.Find}; j.find(&a); q.Count(&n)` were missed, while the same code with a closure was reported. `-fix` offers no fix for such a root, as for any hand-off.
 
-**A function literal handed on that returns a captured value (#397).** `run(func() *gorm.DB { return q })` hands `q` on, as `run(q.Find)` does. The code that gets the literal may call it and chain on what it returns. Scopes and Preload do that with their callbacks. The literal's body makes no call on `q`, so nothing else records a use. `returnedCaptureRoots` in `handler/call.go` finds the captured values among the literal's returns, through Phi edges. A value captured by value gives the roots of its binding. A variable captured by reference is read where the literal is handed on, as an address handed on is (`PointeeRoots`). The hand-offs are the same as for a method value: an argument, a send, a map update, and a store anywhere but in a local variable, such as the field of `job{build: f}` or the varargs array of `Scopes`. The literal may also be boxed in an interface, as a `Preload` argument is, or held by a local variable first.
+**A function literal handed on that returns a captured value (#397).** `run(func() *gorm.DB { return q })` hands `q` on, as `run(q.Find)` does. The code that gets the literal may call it and chain on what it returns. Scopes and Preload do that with their callbacks. The literal's body makes no call on `q`, so nothing else records a use. `returnedCaptureRoots` in `handler/call.go` finds the captured values among the literal's returns (`literalReturns`). The hand-offs are the same as for a method value: an argument, a send, a map update, and a store anywhere but in a local variable, such as the field of `job{build: f}` or the varargs array of `Scopes`. `funcValueRoots` answers for both kinds of function value, so every hand-off handler asks one function.
+
+| Shape | How it is read |
+| --- | --- |
+| The literal boxed in an interface, as a `Preload` argument is, or held by a local variable first | `unwrapFuncValue`, shared with `boundGormReceiver`. So a method value boxed in an interface (`var v any = q.Find; take(v)`) is a hand-off too |
+| A local variable that may hold one of several literals, also reassigned in a loop | Each literal of the merge (`handedOnLiterals`) |
+| A captured variable | go/ssa captures every variable by reference, so a return is a load of a `FreeVar`. It is read where the literal is handed on, as an address handed on is (`PointeeRoots`). When another closure hands the literal on, it is read where the literal is made. A variable of an enclosing closure is read where that closure is made (`addPointee`) |
+| A merge in the literal's body, a nested literal called in place, or a field of a captured struct | The merge's edges, and the nested literal's returns. Any other value is traced, and only roots outside the handed-on literal count (`addOutside`) |
+| A closure that only captures a variable holding the literal, as in `f := func() *gorm.DB { return q }; g := func() { run(f) }` | `ClosureCapturesGormDB` accepts such a variable when `g` hands it on (`closureHoldsGormFunc`), so `g` is analyzed with its parent and its hand-off is a branch there |
 
 These are not hand-offs of `q`:
 
@@ -479,8 +487,13 @@ These are not hand-offs of `q`:
 | --- | --- |
 | `func(d *gorm.DB) *gorm.DB { return d.Where("a") }` | It returns a root of its own, from its parameter |
 | `func() *gorm.DB { return q.Where("y") }` | The `Where` in the body is the one branch of `q`. It returns a new root |
+| `func() *gorm.DB { q = q.Where("z"); return q }` | The literal assigns the captured variable, so it returns its own chain. Its `Where` is the one branch. Such a variable is left out on every path, also one that does not assign it |
 | `func() *gorm.DB { return q.Session(&gorm.Session{}) }` | A Session copy has no root |
 | A literal called in place | The call is traced into its returns ([Closure results](#closure-results)) |
+
+A literal stored into a local slice or a struct literal counts as handed on, even when the slice or the struct never leaves the function, as `fs := []func() *gorm.DB{func() *gorm.DB { return q }}`. A method value does the same (#374): a store anywhere but in a local variable is a hand-off. Following the slice to an actual escape would have to be done for method values too.
+
+Not followed: a literal that the function returns. `return func() *gorm.DB { return q }` after `q.Find(&a)` is no hand-off, and neither is `return q.Find`. The caller is another function.
 
 `-fix` offers no fix, as for a method value handed on. Before #397, `run(func() *gorm.DB { return q }); q.Find(&b)` was missed, while `run(q.Find)` was reported. `e2e/internal/closure_returns_capture_test.go` shows the leak against real GORM.
 
@@ -490,7 +503,7 @@ An interface method value has no declared method, so `origin.Declared` keeps the
 
 A method value's wrapper is never analyzed as a closure of its caller (`processFunction`, `isMethodValue`). That holds even when its receiver holds a `*gorm.DB`, so that the `MakeClosure` captures one. Analyzing it read the wrapper's parameter as a mutable parameter, and reported its forwarding call to an `immutable-param` method at no position (#255).
 
-A function literal that captures only a method value is analyzed (#341). In `find := q.Find; func() { find(&a) }()` the literal captures the variable `find`, whose type is a func, not a `*gorm.DB`. `ClosureCapturesGormDB` also accepts a captured variable that may hold a method value of a receiver that holds a `*gorm.DB` (`closureHoldsGormMethodValue`). Before #341 the closure was skipped, so its call of `q.Find` was no branch.
+A function literal that captures only a method value is analyzed (#341). In `find := q.Find; func() { find(&a) }()` the literal captures the variable `find`, whose type is a func, not a `*gorm.DB`. `ClosureCapturesGormDB` also accepts a captured variable that may hold a method value of a receiver that holds a `*gorm.DB`, or a function literal that returns a `*gorm.DB` and captures one, when the closure hands that variable on rather than only calling it (`closureHoldsGormFunc`, `closureFreeVarHandedOn`, #397). A chain of getters, `g1 := func() *gorm.DB { return g0() }`, only calls, so it is traced through the calls as before, and the check stays linear (`closuregetters` in the growth gate). Before #341 the closure was skipped, so its call of `q.Find` was no branch.
 
 As a last guard, `Analyzer.Analyze` moves a violation without a position to its call, then to the analyzed function (`positionedViolation`). A diagnostic at no position cannot be suppressed, and golangci-lint drops it.
 

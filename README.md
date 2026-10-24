@@ -598,7 +598,7 @@ q.Find(&users)
 
 </td><td>
 
-It may be called elsewhere. A struct field such as `job{find: q.Find}` counts too.
+It may be called elsewhere. A struct field such as `job{find: q.Find}` counts too, and so does one boxed in an interface.
 
 </td></tr>
 <tr><td>A function literal handed on that returns <code>q</code></td><td>
@@ -612,7 +612,7 @@ q.Find(&users)
 
 </td><td>
 
-It may be called elsewhere, and the caller may chain on `q`. A `Scopes` or `Preload` callback that returns `q`, and a struct field that holds such a literal, count too. A literal that returns its own parameter, a `Session` copy or an immutable value does not.
+It may be called elsewhere, and the caller may chain on `q`. A `Scopes` or `Preload` callback that returns `q`, and a struct field that holds such a literal, count too. A literal that returns its own parameter, its own chain, a `Session` copy or an immutable value does not.
 
 </td></tr>
 <tr><td>Type assertion out of an interface</td><td>

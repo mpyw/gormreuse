@@ -139,3 +139,167 @@ func crcChainInBody(db *gorm.DB) {
 	q := db.Session(&gorm.Session{}).Where("x")
 	crcRun(func() *gorm.DB { return q.Where("y") })
 }
+
+// ===== SHOULD REPORT (more shapes) =====
+
+// crcMergedLiterals: the local variable holds one of two literals, and one
+// returns the captured value.
+func crcMergedLiterals(db *gorm.DB, c bool) {
+	q := db.Session(&gorm.Session{}).Where("x")
+	f := func() *gorm.DB { return db.Session(&gorm.Session{}) }
+	if c {
+		f = func() *gorm.DB { return q }
+	}
+	crcRun(f)
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// crcNestedCalledInPlace: the literal returns what a nested literal, called
+// in place, returns.
+func crcNestedCalledInPlace(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x")
+	crcRun(func() *gorm.DB { return func() *gorm.DB { return q }() })
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// crcHolder holds a query.
+type crcHolder struct{ db *gorm.DB }
+
+// crcCapturedField: the literal returns a field of a captured struct.
+func crcCapturedField(db *gorm.DB) {
+	h := crcHolder{db: db.Session(&gorm.Session{}).Where("x")}
+	crcRun(func() *gorm.DB { return h.db })
+	h.db.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// crcHandedOnInClosure: another closure hands the literal on, through a
+// variable it captures.
+func crcHandedOnInClosure(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x")
+	f := func() *gorm.DB { return q }
+	g := func() { crcRun(f) }
+	g()
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// crcMadeInClosure: the literal is made and handed on in another closure,
+// and captures q through it.
+func crcMadeInClosure(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x")
+	g := func() { crcRun(func() *gorm.DB { return q }) }
+	g()
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	q = db.Session(&gorm.Session{})
+}
+
+// crcReassignedLater: q is reassigned after the hand-off, so the literal
+// captures the variable. It reads the value where it is handed on.
+func crcReassignedLater(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x")
+	crcRun(func() *gorm.DB { return q })
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	q = db.Session(&gorm.Session{}).Where("y")
+	q.Find(nil)
+}
+
+// crcMergedLiteralsInLoop: the variable is reassigned in a loop, so the
+// merge of literals is a cycle.
+func crcMergedLiteralsInLoop(db *gorm.DB, items []string) {
+	q := db.Session(&gorm.Session{}).Where("x")
+	f := func() *gorm.DB { return db.Session(&gorm.Session{}) }
+	for _, item := range items {
+		if item == "q" {
+			f = func() *gorm.DB { return q }
+		}
+	}
+	crcRun(f)
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// crcLoopInLiteral: the literal's return merges values in a loop.
+func crcLoopInLiteral(db *gorm.DB, items []string) {
+	q := db.Session(&gorm.Session{}).Where("x")
+	crcRun(func() *gorm.DB {
+		r := q
+		for _, item := range items {
+			if item == "s" {
+				r = db.Session(&gorm.Session{})
+			}
+		}
+		return r
+	})
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// crcNestedLocal: a nested literal called in place returns a variable of the
+// outer literal, which holds the captured value.
+func crcNestedLocal(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x")
+	crcRun(func() *gorm.DB {
+		r := q
+		return func() *gorm.DB { return r }()
+	})
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// crcSent: the literal is sent on a channel.
+func crcSent(db *gorm.DB, ch chan func() *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x")
+	ch <- func() *gorm.DB { return q }
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// crcMapValue: the literal is stored in a map.
+func crcMapValue(db *gorm.DB, m map[string]func() *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x")
+	m["q"] = func() *gorm.DB { return q }
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// crcBoxedMethodValue: a method value boxed in an interface is handed on.
+func crcBoxedMethodValue(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x")
+	var v any = q.Find
+	crcTake(v)
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// crcTake takes any value.
+func crcTake(any) {}
+
+// ===== SHOULD NOT REPORT (more shapes) =====
+
+// crcReassignsCapture: the literal assigns the captured variable its own
+// chain and returns that. The Where in the body is the one branch of q.
+func crcReassignsCapture(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x")
+	crcRun(func() *gorm.DB {
+		q = q.Where("z")
+		return q
+	})
+}
+
+// crcNestedOwnChain: a nested literal returns the outer literal's own chain,
+// which the outer body's Where already branches once.
+func crcNestedOwnChain(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x")
+	crcRun(func() *gorm.DB {
+		r := q.Where("y")
+		return func() *gorm.DB { return r }()
+	})
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// crcRecursiveLiteral: a literal that captures itself ends the search.
+func crcRecursiveLiteral(db *gorm.DB) {
+	s := db.Session(&gorm.Session{})
+	var f func() *gorm.DB
+	f = func() *gorm.DB {
+		if s == nil {
+			return f()
+		}
+		return s
+	}
+	crcRun(f)
+	crcRun(f)
+}

@@ -568,22 +568,14 @@ func (u siteUse) handleArgs() {
 		// The address of a variable holding a *gorm.DB hands its value on:
 		// applyP(&q) may change it in place, as applyTenant(q) may (#345).
 		if roots := ctx.RootTracer.PointeeRoots(arg, site.Instr, ctx.LoopInfo); roots != nil {
-			u.branch(roots, pollution.UsageInfo{Block: u.block, Pos: u.pos, Escapes: true}, func(ssa.Value) bool { return false })
+			u.escape(roots)
 			continue
 		}
 		// A method value such as q.Find hands its receiver on, as a closure
-		// that calls q.Find does (#374).
-		if recv := boundGormReceiver(arg, ctx); recv != nil {
-			if roots := u.roots(recv); roots != nil {
-				u.branch(roots, pollution.UsageInfo{Block: u.block, Pos: u.pos, Escapes: true}, func(ssa.Value) bool { return false })
-			}
-			continue
-		}
-		// A function literal that returns a captured *gorm.DB hands it on, as
-		// a method value does: the callee may call it and chain on the result
-		// (#397).
-		if roots := returnedCaptureRoots(arg, site.Instr, ctx); roots != nil {
-			u.branch(roots, pollution.UsageInfo{Block: u.block, Pos: u.pos, Escapes: true}, func(ssa.Value) bool { return false })
+		// that calls q.Find does (#374). So does a function literal that
+		// returns a captured *gorm.DB (#397).
+		if roots := funcValueRoots(arg, site.Instr, ctx); roots != nil {
+			u.escape(roots)
 			continue
 		}
 		// Check if arg is *gorm.DB (directly or wrapped in MakeInterface).
@@ -750,18 +742,10 @@ func immutableParamContractMessage(name string, dropsState bool) string {
 }
 
 // boundGormReceiver returns the receiver of v when v is a method value of a
-// *gorm.DB method, as q.Find is, also converted to a named func type or held
-// by a local variable (callsite.FuncVars.LocalValue). It is nil otherwise.
+// *gorm.DB method, as q.Find is, behind any wrapper unwrapFuncValue removes.
+// It is nil otherwise.
 func boundGormReceiver(v ssa.Value, ctx *Context) ssa.Value {
-	for {
-		v = ctx.RootTracer.FuncVars().LocalValue(v)
-		ct, ok := v.(*ssa.ChangeType)
-		if !ok {
-			break
-		}
-		v = ct.X
-	}
-	mc, ok := v.(*ssa.MakeClosure)
+	mc, ok := unwrapFuncValue(v, ctx).(*ssa.MakeClosure)
 	if !ok {
 		return nil
 	}
@@ -769,6 +753,35 @@ func boundGormReceiver(v ssa.Value, ctx *Context) ssa.Value {
 		return site.Recv
 	}
 	return nil
+}
+
+// unwrapFuncValue returns the function value that v holds: v itself, or what
+// a local variable holds (callsite.FuncVars.LocalValue, also through a
+// closure that captures it), or what a conversion to a named func type or a
+// box in an interface wraps.
+func unwrapFuncValue(v ssa.Value, ctx *Context) ssa.Value {
+	for {
+		v = ctx.RootTracer.FuncVars().LocalValue(v)
+		switch w := v.(type) {
+		case *ssa.ChangeType:
+			v = w.X
+		case *ssa.MakeInterface:
+			v = w.X
+		default:
+			return v
+		}
+	}
+}
+
+// funcValueRoots returns the mutable roots that the function value v hands
+// on to code that may call it: the receiver of a *gorm.DB method value
+// (#374), or the captured values a function literal returns (#397). at is
+// the instruction that hands v on. It is nil for any other value.
+func funcValueRoots(v ssa.Value, at ssa.Instruction, ctx *Context) []ssa.Value {
+	if recv := boundGormReceiver(v, ctx); recv != nil {
+		return ctx.RootTracer.MutableRoots(recv, ctx.LoopInfo)
+	}
+	return returnedCaptureRoots(v, at, ctx)
 }
 
 // handOn records v, handed on by instr, as a branch of every root it may
@@ -786,94 +799,221 @@ func handOnRoots(instr ssa.Instruction, roots []ssa.Value, ctx *Context) {
 	if roots == nil {
 		return
 	}
-	u := siteUse{ctx: ctx, block: instr.Block(), pos: ctx.pos(instr.Pos())}
+	siteUse{ctx: ctx, block: instr.Block(), pos: ctx.pos(instr.Pos())}.escape(roots)
+}
+
+// escape records roots as branched by code that the site hands them to.
+// Other code may change them in place, so none of them is an assignment.
+func (u siteUse) escape(roots []ssa.Value) {
 	u.branch(roots, pollution.UsageInfo{Block: u.block, Pos: u.pos, Escapes: true}, func(ssa.Value) bool { return false })
 }
 
 // returnedCaptureRoots returns the mutable roots of the captured *gorm.DB
-// values that v may return, when v is a function literal handed on: also
-// converted to a named func type, boxed in an interface, or held by a local
-// variable. The code that gets it may call it and chain on what it returns,
-// as Scopes and Preload do, so handing it on hands those values on (#397):
+// values that v may return, when v is a function literal handed on by at:
+// behind any wrapper unwrapFuncValue removes, or one of several a local
+// variable may hold. The code that gets it may call it and chain on what it
+// returns, as Scopes and Preload do, so handing it on hands those values on
+// (#397):
 //
 //	q := db.Where("name = ?", "x")
 //	run(func() *gorm.DB { return q }) // a branch of q's root
 //	q.Find(&users)                    // the second branch
 //
-// Only a captured value is followed. A chain the literal builds is a use in
-// its body already, and its own parameter or an immutable value has no root
-// here. A variable captured by reference is read where v is handed on, as an
-// address handed on is (PointeeRoots). It is nil for any other value.
+// Only a value the literal returns as it captured it counts (see
+// literalReturns). A chain the literal builds is a use in its body already,
+// and its own parameter or an immutable value has no root here.
 func returnedCaptureRoots(v ssa.Value, at ssa.Instruction, ctx *Context) []ssa.Value {
-	for {
-		v = ctx.RootTracer.FuncVars().LocalValue(v)
-		switch w := v.(type) {
-		case *ssa.ChangeType:
-			v = w.X
-			continue
-		case *ssa.MakeInterface:
-			v = w.X
+	s := &literalReturns{ctx: ctx, seen: map[ssa.Value]bool{}}
+	for _, mc := range handedOnLiterals(v, ctx, map[ssa.Value]bool{}) {
+		fn, ok := mc.Fn.(*ssa.Function)
+		if !ok || !typeutil.HasGormDBResult(fn.Signature.Results()) {
 			continue
 		}
-		break
+		// A captured variable is read where the literal is handed on, or
+		// where it is made when another closure hands it on.
+		s.mc, s.at = mc, at
+		if at.Parent() != mc.Parent() {
+			s.at = mc
+		}
+		s.returns(&literalFrame{fn: fn, mc: mc})
 	}
-	mc, ok := v.(*ssa.MakeClosure)
-	if !ok {
+	return s.roots
+}
+
+// handedOnLiterals returns the closures of function literals that v may be:
+// v unwrapped (unwrapFuncValue), or each edge of a merge of such values. A
+// bound method value is not one.
+func handedOnLiterals(v ssa.Value, ctx *Context, seen map[ssa.Value]bool) []*ssa.MakeClosure {
+	v = unwrapFuncValue(v, ctx)
+	if seen[v] {
 		return nil
 	}
-	fn, ok := mc.Fn.(*ssa.Function)
-	if !ok || !typeutil.HasGormDBResult(fn.Signature.Results()) {
-		return nil
-	}
-	if _, bound := callsite.BoundSite(mc); bound {
-		return nil
-	}
-	var roots []ssa.Value
-	add := func(rs []ssa.Value) {
-		for _, r := range rs {
-			if !slices.Contains(roots, r) {
-				roots = append(roots, r)
-			}
+	seen[v] = true
+	switch w := v.(type) {
+	case *ssa.MakeClosure:
+		if _, bound := callsite.BoundSite(w); !bound {
+			return []*ssa.MakeClosure{w}
 		}
-	}
-	seen := map[ssa.Value]bool{}
-	var visit func(r ssa.Value)
-	visit = func(r ssa.Value) {
-		if seen[r] {
-			return
+	case *ssa.Phi:
+		var mcs []*ssa.MakeClosure
+		for _, e := range w.Edges {
+			mcs = append(mcs, handedOnLiterals(e, ctx, seen)...)
 		}
-		seen[r] = true
-		switch r := r.(type) {
-		case *ssa.Phi:
-			for _, e := range r.Edges {
-				visit(e)
-			}
-		case *ssa.ChangeType:
-			visit(r.X)
-		case *ssa.FreeVar:
-			if i := slices.Index(fn.FreeVars, r); i >= 0 {
-				add(ctx.RootTracer.MutableRoots(mc.Bindings[i], ctx.LoopInfo))
-			}
-		case *ssa.UnOp:
-			if fv, ok := r.X.(*ssa.FreeVar); ok && r.Op == token.MUL {
-				if i := slices.Index(fn.FreeVars, fv); i >= 0 {
-					add(ctx.RootTracer.PointeeRoots(mc.Bindings[i], at, ctx.LoopInfo))
-				}
-			}
-		}
+		return mcs
 	}
-	for _, b := range fn.Blocks {
+	return nil
+}
+
+// literalFrame is a function literal whose returns literalReturns follows:
+// the literal handed on, or one called in place inside it (outer).
+type literalFrame struct {
+	fn    *ssa.Function
+	mc    *ssa.MakeClosure
+	outer *literalFrame
+}
+
+// literalReturns collects the roots of the captured values that a function
+// literal returns as it captured them. It follows merges, a nested literal
+// called in place, and a load such as a captured struct's field. go/ssa
+// captures every variable by reference, so a captured value is a load of a
+// FreeVar. A captured variable that the literal assigns returns the literal's
+// own chain, which is a use in its body, so it is left out, also on paths
+// that do not assign it.
+type literalReturns struct {
+	ctx *Context
+	// mc is the closure of the literal handed on, and at the instruction
+	// where its captured variables are read.
+	mc    *ssa.MakeClosure
+	at    ssa.Instruction
+	seen  map[ssa.Value]bool
+	roots []ssa.Value
+}
+
+// returns visits the *gorm.DB results of every return of f.
+func (s *literalReturns) returns(f *literalFrame) {
+	for _, b := range f.fn.Blocks {
 		ret, ok := b.Instrs[len(b.Instrs)-1].(*ssa.Return)
 		if !ok {
 			continue
 		}
 		for _, r := range ret.Results {
 			if typeutil.IsGormDB(r.Type()) {
-				visit(r)
+				s.visit(r, f)
 			}
 		}
 	}
-	return roots
+}
+
+// visit adds the roots of r, a value of f.fn, that r holds as captured.
+func (s *literalReturns) visit(r ssa.Value, f *literalFrame) {
+	if s.seen[r] {
+		return
+	}
+	s.seen[r] = true
+	switch r := r.(type) {
+	case *ssa.Phi:
+		for _, e := range r.Edges {
+			s.visit(e, f)
+		}
+	case *ssa.Call:
+		// A nested literal called in place returns what it returns.
+		if mc, ok := r.Call.Value.(*ssa.MakeClosure); ok {
+			if fn, ok := mc.Fn.(*ssa.Function); ok {
+				s.returns(&literalFrame{fn: fn, mc: mc, outer: f})
+			}
+		}
+	case *ssa.UnOp:
+		if fv, ok := r.X.(*ssa.FreeVar); ok && r.Op == token.MUL {
+			s.visitCapturedVariable(fv, f)
+			return
+		}
+		s.addOutside(s.ctx.RootTracer.MutableRoots(r, nil))
+	default:
+		s.addOutside(s.ctx.RootTracer.MutableRoots(r, nil))
+	}
+}
+
+// visitCapturedVariable adds the roots of a variable that f captures by
+// reference, read where the literal is handed on. A variable that a literal
+// on the way assigns is left out (see literalReturns).
+func (s *literalReturns) visitCapturedVariable(fv *ssa.FreeVar, f *literalFrame) {
+	for {
+		for _, ref := range *fv.Referrers() {
+			if st, ok := ref.(*ssa.Store); ok && st.Addr == fv {
+				return
+			}
+		}
+		b := f.mc.Bindings[slices.Index(f.fn.FreeVars, fv)]
+		if f.outer == nil {
+			s.addPointee(b)
+			return
+		}
+		next, ok := b.(*ssa.FreeVar)
+		if !ok {
+			// A variable of the literal's own body, read where the nested
+			// literal is made.
+			s.addOutside(s.ctx.RootTracer.PointeeRoots(b, f.mc, nil))
+			return
+		}
+		fv, f = next, f.outer
+	}
+}
+
+// addPointee adds the roots of the variable that ptr, the address that the
+// literal handed on captures, points to where the literal is handed on. A
+// variable of a function that encloses the literal's function is read where
+// that function's closure is made.
+func (s *literalReturns) addPointee(ptr ssa.Value) {
+	at := s.at
+	for {
+		fv, ok := ptr.(*ssa.FreeVar)
+		if !ok {
+			break
+		}
+		// A closure that SSA removed as unreachable has no binding. ptr is
+		// then nil, which points to nothing.
+		at, ptr = callsite.FreeVarMakeClosure(fv.Parent()), callsite.FreeVarBinding(fv)
+	}
+	s.add(s.ctx.RootTracer.PointeeRoots(ptr, at, s.loopInfo()))
+}
+
+// addOutside adds the roots that are not defined in the literal handed on or
+// in a function nested in it. A root inside it is the literal's own chain or
+// parameter, which its body uses.
+func (s *literalReturns) addOutside(roots []ssa.Value) {
+	for _, root := range roots {
+		if b := tracer.RootBlock(root); b == nil || !nestedIn(b.Parent(), s.mc.Fn.(*ssa.Function)) {
+			s.add([]ssa.Value{root})
+		}
+	}
+}
+
+// loopInfo returns the analysis's loopInfo when the literal handed on is
+// made in the function being analyzed, and nil otherwise.
+func (s *literalReturns) loopInfo() *cfg.LoopInfo {
+	if s.mc.Parent() == s.ctx.CurrentFn {
+		return s.ctx.LoopInfo
+	}
+	return nil
+}
+
+// add adds roots that are not added yet.
+func (s *literalReturns) add(roots []ssa.Value) {
+	for _, r := range roots {
+		if !slices.Contains(s.roots, r) {
+			s.roots = append(s.roots, r)
+		}
+	}
+}
+
+// nestedIn reports whether g is fn or a function nested in it.
+func nestedIn(g, fn *ssa.Function) bool {
+	for ; g != nil; g = g.Parent() {
+		if g == fn {
+			return true
+		}
+	}
+	return false
 }
 
 // handsOnMethodValue reports whether a store into addr hands a method value
@@ -894,10 +1034,8 @@ type sendHandler struct{}
 func (h *sendHandler) handle(send *ssa.Send, ctx *Context) {
 	if gormVal, kind := pollutionsource.Leak(send, ctx.RootTracer.FuncVars()); kind != pollutionsource.KindNone {
 		handOn(send, gormVal, ctx)
-	} else if recv := boundGormReceiver(send.X, ctx); recv != nil {
-		handOn(send, recv, ctx)
 	} else {
-		handOnRoots(send, returnedCaptureRoots(send.X, send, ctx), ctx)
+		handOnRoots(send, funcValueRoots(send.X, send, ctx), ctx)
 	}
 }
 
@@ -913,10 +1051,8 @@ type storeHandler struct{}
 func (h *storeHandler) handle(store *ssa.Store, ctx *Context) {
 	if gormVal, kind := pollutionsource.Leak(store, ctx.RootTracer.FuncVars()); kind != pollutionsource.KindNone {
 		handOn(store, gormVal, ctx)
-	} else if recv := boundGormReceiver(store.Val, ctx); recv != nil && handsOnMethodValue(store.Addr) {
-		handOn(store, recv, ctx)
-	} else if recv == nil && handsOnMethodValue(store.Addr) {
-		handOnRoots(store, returnedCaptureRoots(store.Val, store, ctx), ctx)
+	} else if handsOnMethodValue(store.Addr) {
+		handOnRoots(store, funcValueRoots(store.Val, store, ctx), ctx)
 	}
 }
 
@@ -928,10 +1064,8 @@ type mapUpdateHandler struct{}
 func (h *mapUpdateHandler) handle(mapUpdate *ssa.MapUpdate, ctx *Context) {
 	if gormVal, kind := pollutionsource.Leak(mapUpdate, ctx.RootTracer.FuncVars()); kind != pollutionsource.KindNone {
 		handOn(mapUpdate, gormVal, ctx)
-	} else if recv := boundGormReceiver(mapUpdate.Value, ctx); recv != nil {
-		handOn(mapUpdate, recv, ctx)
 	} else {
-		handOnRoots(mapUpdate, returnedCaptureRoots(mapUpdate.Value, mapUpdate, ctx), ctx)
+		handOnRoots(mapUpdate, funcValueRoots(mapUpdate.Value, mapUpdate, ctx), ctx)
 	}
 }
 
