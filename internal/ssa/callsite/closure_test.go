@@ -132,7 +132,7 @@ func TestClosureRuns(t *testing.T) {
 		runs := ClosureRuns(mc)
 		called := 0
 		for _, run := range runs {
-			if run.Called {
+			if _, plain := run.Instr.(*ssa.Call); plain && run.Invoked {
 				called++
 			}
 		}

@@ -1083,7 +1083,7 @@ for v := range slices.Values(ids) {
 
 A loop body runs more than once. So one use inside it is reuse.
 
-Range-over-func loops (Go 1.23+) count as loops too. A chain that a range-over-func body assigns is seen after the loop, as for a plain loop.
+Range-over-func loops (Go 1.23+) count as loops too. As in a plain loop, a use followed by `break` or `return` runs once, also from a nested loop with `break outer`. A chain that the body assigns is seen after the loop.
 
 </td></tr>
 <tr><td>
