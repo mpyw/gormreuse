@@ -5479,7 +5479,7 @@ gormreuse reports a reuse only when it can follow the value. These cases are kno
 
 | Kind | Cases | Meaning |
 | --- | --- | --- |
-| Missed reuse (false negatives) | 22 | Reuse that is not reported |
+| Missed reuse (false negatives) | 23 | Reuse that is not reported |
 | Extra reports (false positives) | 5 | Safe code that is reported |
 | Wrong position | — | A report on the wrong line |
 | No fix | — | A report without a suggested fix |
@@ -5779,6 +5779,19 @@ func f(d *gorm.DB) {
 ```
 
 </td><td>The pure check does not take such a literal as a branch of the argument</td></tr>
+<tr><td><!-- fixtures: crcGetterCalledInClosure -->
+
+A closure that only calls a captured getter literal and chains on the result:
+
+```go
+f := func() *gorm.DB { return q }
+func() {
+    f().Find(nil)
+}()
+q.Find(nil) // not reported
+```
+
+</td><td>The closure captures no <code>*gorm.DB</code>, so it is not analyzed</td></tr>
 </table>
 
 </details>

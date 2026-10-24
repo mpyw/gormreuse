@@ -911,7 +911,11 @@ func containerEscapes(container ssa.Value, ctx *Context) bool {
 	if ctx.containers == nil {
 		ctx.containers = map[ssa.Value]bool{}
 	}
-	escapes := (&containerWalk{vars: ctx.RootTracer.FuncVars(), seen: map[ssa.Value]bool{}}).escapes(base)
+	var pkg *types.Package
+	if ctx.CurrentFn.Pkg != nil {
+		pkg = ctx.CurrentFn.Pkg.Pkg
+	}
+	escapes := (&containerWalk{vars: ctx.RootTracer.FuncVars(), pkg: pkg, seen: map[ssa.Value]bool{}}).escapes(base)
 	ctx.containers[base] = escapes
 	return escapes
 }
@@ -931,11 +935,56 @@ func containerBase(addr ssa.Value) ssa.Value {
 }
 
 // containerWalk follows the values that hold a container (see
-// containerEscapes).
+// containerEscapes). pkg is the package of the function being analyzed.
 type containerWalk struct {
 	vars callsite.FuncVars
+	pkg  *types.Package
 	seen map[ssa.Value]bool
 	work []ssa.Value
+}
+
+// containerTypeHoldsFunc reports whether a value of type t may hold a
+// function value that the function stored: a func or an interface, or a
+// struct, an array, a slice, a map, a pointer or a tuple that holds one. A
+// *gorm.DB holds none, and neither does a struct type of another package
+// than pkg, whose fields the function does not build. seen stops a type that
+// holds itself.
+func containerTypeHoldsFunc(t types.Type, pkg *types.Package, seen map[types.Type]bool) bool {
+	if typeutil.IsGormDB(t) || seen[t] {
+		return false
+	}
+	seen[t] = true
+	if named, ok := types.Unalias(t).(*types.Named); ok && named.Obj().Pkg() != pkg {
+		if _, ok := named.Underlying().(*types.Struct); ok {
+			return false
+		}
+	}
+	holds := func(t types.Type) bool { return containerTypeHoldsFunc(t, pkg, seen) }
+	switch u := t.Underlying().(type) {
+	case *types.Signature, *types.Interface:
+		return true
+	case *types.Struct:
+		for f := range u.Fields() {
+			if holds(f.Type()) {
+				return true
+			}
+		}
+	case *types.Tuple:
+		for v := range u.Variables() {
+			if holds(v.Type()) {
+				return true
+			}
+		}
+	case *types.Array:
+		return holds(u.Elem())
+	case *types.Slice:
+		return holds(u.Elem())
+	case *types.Map:
+		return holds(u.Key()) || holds(u.Elem())
+	case *types.Pointer:
+		return holds(u.Elem())
+	}
+	return false
 }
 
 // escapes reports whether code outside the function may get base, or a
@@ -1021,27 +1070,40 @@ func (w *containerWalk) callEscapes(c ssa.Value, call ssa.CallInstruction) bool 
 }
 
 // elemEscapes reports whether e, a value read out of the container, may be
-// handed on. A container value, such as a struct, an array, a slice, a map or
-// a tuple, is followed as the container. A function value may only be
-// called, with its result dropped, or compared with nil. A value of any other
-// type holds no function literal.
+// handed on. A value that may hold a function value
+// (containerTypeHoldsFunc), such as a struct, an array, a slice, a map, a
+// tuple or a pointer to one, is followed as the container. A function value
+// may only be called, with its result dropped, compared with nil, or boxed
+// for a read-only stdlib function such as fmt.Println
+// (pollutionsource.IsReadOnlyVariadicArg). A value of any other type holds
+// no function literal.
 func (w *containerWalk) elemEscapes(e ssa.Value) bool {
 	switch e.Type().Underlying().(type) {
 	case *types.Signature, *types.Interface:
-	case *types.Basic, *types.Pointer, *types.Chan:
-		return false
 	default:
-		w.push(e)
+		if containerTypeHoldsFunc(e.Type(), w.pkg, map[types.Type]bool{}) {
+			w.push(e)
+		}
 		return false
 	}
 	return slices.ContainsFunc(*e.Referrers(), func(r ssa.Instruction) bool {
-		if phi, ok := r.(*ssa.Phi); ok {
+		switch r := r.(type) {
+		case *ssa.Phi:
 			// A variable that holds one of several elements.
-			if w.seen[phi] {
+			if w.seen[r] {
 				return false
 			}
-			w.seen[phi] = true
-			return w.elemEscapes(phi)
+			w.seen[r] = true
+			return w.elemEscapes(r)
+		case *ssa.MakeInterface:
+			return slices.ContainsFunc(*r.Referrers(), func(use ssa.Instruction) bool {
+				store, ok := use.(*ssa.Store)
+				if !ok {
+					return true
+				}
+				idx, ok := store.Addr.(*ssa.IndexAddr)
+				return !ok || !pollutionsource.IsReadOnlyVariadicArg(idx, r, w.vars)
+			})
 		}
 		call, ok := r.(ssa.CallInstruction)
 		if !ok {

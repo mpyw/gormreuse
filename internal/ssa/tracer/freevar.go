@@ -48,7 +48,7 @@ func (t *RootTracer) traceFreeVarLoad(fv *ssa.FreeVar, load ssa.Instruction, vis
 // lost its own position and saw every store of the variable, also the stores
 // of the range-over-func body that holds it.
 //
-//declscope:shared // closure.go's closureHoldsGormFunc finds a captured function value's variable with it
+//declscope:shared // closure.go's closureFuncValues finds a captured function value's variable with it
 func freeVarAlloc(fv *ssa.FreeVar) (*ssa.Alloc, bool) {
 	binding := callsite.FreeVarBinding(fv)
 	for {

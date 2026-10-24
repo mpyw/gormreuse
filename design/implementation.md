@@ -480,7 +480,7 @@ The tracer resolves a call `w(x)` through a method value `w := r.m` as the call 
 | A captured variable | go/ssa captures every variable by reference, so a return is a load of a `FreeVar`. It counts when some path reaches the load without assigning the variable (`unassignedAt`). A store assigns it, and so does a literal called in place that assigns it on every path. It is read where the literal is handed on, as an address handed on is (`PointeeRoots`). When another closure hands the literal on, it is read where that closure runs in the literal's function: its one plain call when it has one and runs nowhere else (`callsite.ClosureCalls`), or where it is made (`readPoint`). A variable of an enclosing closure is read where that closure is made (`addPointee`) |
 | A field of a captured struct, as in `return h.db` | Read the same way, where the literal is handed on (`ParamReadSelected`). A struct variable that the literal or a closure it makes writes to is left out (`writesCaptured`) |
 | A merge in the literal's body, or a nested literal called in place or through a variable (a getter chain) | The merge's edges, and the nested literal's returns. Any other value is traced, and only roots outside the literals followed count (`addOutside`) |
-| A closure that only captures a variable holding the literal, as in `f := func() *gorm.DB { return q }; g := func() { run(f) }` | `ClosureCapturesGormDB` accepts such a variable when `g` hands it on (`closureHoldsGormFunc`), so `g` is analyzed with its parent and its hand-off is a branch there |
+| A closure that only captures a variable holding the literal, as in `f := func() *gorm.DB { return q }; g := func() { run(f) }` | `ClosureCapturesGormDB` accepts such a variable when `g` hands it on (`closureFuncValues`), so `g` is analyzed with its parent and its hand-off is a branch there |
 
 These are not hand-offs of `q`:
 
@@ -494,12 +494,12 @@ These are not hand-offs of `q`:
 | `func() *gorm.DB { return q.Session(&gorm.Session{}) }` | A Session copy has no root |
 | A literal called in place | The call is traced into its returns ([Closure results](#closure-results)) |
 
-**Local containers.** A literal stored into a local array, slice, struct or map is handed on only when code outside the function may get the container, or a function value read out of it (`containerEscapes`). The walk follows every value that holds the container as it is: a slice of it, a copy into a local variable or into another local container, a load of that variable, the result of `append`, a merge, a conversion, a box in an interface. Values read out of it are followed too: a struct, a slice, a map or a tuple as a container, and a function value through its merges, as in a range loop.
+**Local containers.** A literal stored into a local array, slice, struct or map is handed on only when code outside the function may get the container, or a function value read out of it (`containerEscapes`). The walk follows every value that holds the container as it is: a slice of it, a copy into a local variable or into another local container, a load of that variable, the result of `append`, a merge, a conversion, a box in an interface. Values read out of it are followed too: a struct, an array, a slice, a map, a tuple or a pointer to one as a container, as in `ps := []*S{{F: f}}; run(ps[0].F)`, and a function value through its merges, as in a range loop. Only a type that may hold a function value is followed (`containerTypeHoldsFunc`). A `*gorm.DB`, and a struct type of another package, whose fields the function does not build, are not.
 
 | Use | Hands the literal on |
 | --- | --- |
 | Building it, `len`, `cap`, `delete`, `clear`, `range`, `append` (whose result is followed) | No |
-| Passing it to a read-only stdlib function, as `fmt.Println(fs)` or the varargs of `log.Printf` (`pollutionsource.IsReadOnlyVariadicCall`) | No |
+| Passing it, or a function value read out of it, to a read-only stdlib function, as `fmt.Println(fs)`, `fmt.Println(fs[0])` or the varargs of `log.Printf` (`pollutionsource.IsReadOnlyVariadicCall`, `IsReadOnlyVariadicArg`) | No |
 | Calling a function value read out of it, with the result dropped: `for _, f := range fs { f() }`, `go fs[0]()` | No |
 | Passing it, or a function value read out of it, to any other call: `runAll(fs)`, `run(fs[0])` | Yes |
 | Chaining on the result of a call through it: `fs[0]().Find(nil)` | Yes |
@@ -519,7 +519,7 @@ An interface method value has no declared method, so `origin.Declared` keeps the
 
 A method value's wrapper is never analyzed as a closure of its caller (`processFunction`, `isMethodValue`). That holds even when its receiver holds a `*gorm.DB`, so that the `MakeClosure` captures one. Analyzing it read the wrapper's parameter as a mutable parameter, and reported its forwarding call to an `immutable-param` method at no position (#255).
 
-A function literal that captures only a method value is analyzed (#341). In `find := q.Find; func() { find(&a) }()` the literal captures the variable `find`, whose type is a func, not a `*gorm.DB`. `ClosureCapturesGormDB` also accepts a captured variable that may hold a method value of a receiver that holds a `*gorm.DB`, or a function literal that returns a `*gorm.DB` and captures one, when the closure hands that variable on rather than only calling it (`closureHoldsGormFunc`, `closureFreeVarHandedOn`, #397). A chain of getters, `g1 := func() *gorm.DB { return g0() }`, only calls, so it is traced through the calls as before, and the check stays linear (`closuregetters` in the growth gate). Before #341 the closure was skipped, so its call of `q.Find` was no branch.
+A function literal that captures only a method value is analyzed (#341). In `find := q.Find; func() { find(&a) }()` the literal captures the variable `find`, whose type is a func, not a `*gorm.DB`. `ClosureCapturesGormDB` also accepts a captured variable that may hold a method value of a receiver that holds a `*gorm.DB`, or a function literal that returns a captured `*gorm.DB` (`closureReturnsCapturedGormDB`, also through a chain of such literals), when the closure hands that variable on rather than only calling it (`closureFreeVarHandedOn`, #397). The answer for a literal is kept on the `RootTracer`, so a chain of literals that each hand on the one before is linear (`literalchain` in the growth gate). A closure that only calls such a variable, as in `func() { f().Find(nil) }()`, is not analyzed, so the query on what the call returns is missed ([Known Limitations](#known-limitations)). A chain of getters, `g1 := func() *gorm.DB { return g0() }`, only calls too, and the check stays linear (`closuregetters`). Before #341 the closure was skipped, so its call of `q.Find` was no branch.
 
 As a last guard, `Analyzer.Analyze` moves a violation without a position to its call, then to the analyzed function (`positionedViolation`). A diagnostic at no position cannot be suppressed, and golangci-lint drops it.
 
@@ -1624,7 +1624,7 @@ The mode (`Site.Mode`) decides only two things:
 
 `go` and `defer` statements are handled after the other instructions of their function, so every plain use is recorded by then. A root with no plain branch, as in `go q.Count(nil); go q.Find(nil)`, names as its first branch the earliest branch use recorded before the reported one (#309).
 
-`pollutionsource.isReadOnlyUse` accepts a `go`/`defer` statement, so the varargs of `defer db.Find(&rows, "id IN (?)", sub)` are not a leak. Since #309 so does `isReadOnlyVariadicArg`, so `defer log.Printf("%v", q)` is not a leak either, for the handler and the pure validator alike.
+`pollutionsource.isReadOnlyUse` accepts a `go`/`defer` statement, so the varargs of `defer db.Find(&rows, "id IN (?)", sub)` are not a leak. Since #309 so does `IsReadOnlyVariadicArg`, so `defer log.Printf("%v", q)` is not a leak either, for the handler and the pure validator alike.
 
 </details>
 
@@ -3321,6 +3321,7 @@ Each fixture function marked `[LIMITATION]` under `testdata/src` pins one of the
 | A function literal handed on whose captured variable another closure may assign: `run(func() *gorm.DB { do(func() { if c { q = r } }); return q })` | `crcAssignedByOtherClosure`, `crcAssignedByOtherClosureNested` | When that closure runs is not known, so the variable is left out (`assignedByOtherClosure`) |
 | A function literal handed on that returns the captured value as a `**gorm.DB` or in a struct, or one that a call makes: `run(func() **gorm.DB { return &q })`, `run(mk())` | `crcReturnsPointer`, `crcReturnsStruct`, `crcFactoryLiteral` | Only a literal whose results include a `*gorm.DB` is followed, and only where it is made ([Method values](#method-values)) |
 | A `//gormreuse:pure` function that hands on a literal returning its argument: `run(func() *gorm.DB { return d })` | `crcPureHandsOnLiteral` | The pure check reports taking a method value of the argument, but not a literal that returns it ([Pure contract](#pure-contract)) |
+| A closure that only calls a captured variable holding a literal that returns a captured value, and chains on the result: `f := func() *gorm.DB { return q }; func() { f().Find(nil) }(); q.Find(nil)` | `crcGetterCalledInClosure` | The closure captures no `*gorm.DB` and hands nothing on, so it is not analyzed (`ClosureCapturesGormDB`). Calling `f()` in the function itself is traced ([Method values](#method-values)) |
 
 **Extra reports (false positives).**
 

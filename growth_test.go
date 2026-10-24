@@ -1315,6 +1315,18 @@ var growthCases = []growthCase{
 		b.WriteString("\t}\n\tfor _, f := range fs {\n\t\tf()\n\t}\n\tq.Find(nil)\n}\n")
 		return []string{b.String()}
 	}},
+	// A chain of n literals, each handing the one before it on: whether a
+	// literal returns a captured *gorm.DB is decided once per literal
+	// (closureReturnsCapturedGormDB, #397).
+	{name: "literalchain", n: 400, limit: growthLinear, shape: func(n int) []string {
+		var b strings.Builder
+		b.WriteString("func run(func() *gorm.DB) {}\n\nfunc f(db *gorm.DB) {\n\tq := db.Where(\"x\")\n\tf0 := func() *gorm.DB { return q }\n")
+		for i := 1; i <= n; i++ {
+			fmt.Fprintf(&b, "\tf%d := func() *gorm.DB { run(f%d); return nil }\n", i, i-1)
+		}
+		fmt.Fprintf(&b, "\trun(f%d)\n}\n", n)
+		return []string{b.String()}
+	}},
 	// n loops that each append a query of their own to a slice, then a loop
 	// that reads it: each append runs again, and the values the slice may
 	// hold are found once (#374). Its steps are quadratic, but no more than
