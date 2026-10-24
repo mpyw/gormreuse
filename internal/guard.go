@@ -2,8 +2,8 @@
 package internal
 
 import (
-	"fmt"
 	"os"
+	"runtime/debug"
 
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/ssa"
@@ -23,8 +23,8 @@ import (
 // runPackage report whether the work finished, and the caller treats a
 // function whose work did not as breaking its contract (#315).
 //
-// Set GORMREUSE_DEBUG_PANIC to a non-empty value to re-panic instead, surfacing
-// the stack trace for debugging.
+// Set GORMREUSE_DEBUG_PANIC to a non-empty value to add the stack trace to the
+// report, for debugging.
 type panicGuard struct {
 	pass     *analysis.Pass
 	reported map[*ssa.Function]bool
@@ -49,14 +49,11 @@ func (g *panicGuard) run(stage string, fn *ssa.Function, work func()) (finished 
 		if r == nil {
 			return
 		}
-		if os.Getenv("GORMREUSE_DEBUG_PANIC") != "" {
-			panic(fmt.Sprintf("gormreuse: panic analyzing %s: %v", fn, r))
-		}
 		if g.reported[fn] {
 			return
 		}
 		g.reported[fn] = true
-		g.pass.Reportf(fn.Pos(), "gormreuse: internal error analyzing %s: %v; please report this at https://github.com/mpyw/gormreuse/issues", fn.RelString(fn.Pkg.Pkg), r)
+		g.pass.Reportf(fn.Pos(), "gormreuse: internal error analyzing %s: %v; please report this at https://github.com/mpyw/gormreuse/issues%s", fn.RelString(fn.Pkg.Pkg), r, guardStack())
 	}()
 	if guardPanicInjection != nil {
 		guardPanicInjection(stage, fn)
@@ -74,11 +71,8 @@ func (g *panicGuard) runPackage(stage string, work func()) (finished bool) {
 		if r == nil {
 			return
 		}
-		if os.Getenv("GORMREUSE_DEBUG_PANIC") != "" {
-			panic(fmt.Sprintf("gormreuse: panic in %s: %v", stage, r))
-		}
 		g.packageFailed = true
-		g.pass.Reportf(g.pass.Files[0].Package, "gormreuse: internal error in %s of package %s: %v; please report this at https://github.com/mpyw/gormreuse/issues", stage, g.pass.Pkg.Path(), r)
+		g.pass.Reportf(g.pass.Files[0].Package, "gormreuse: internal error in %s of package %s: %v; please report this at https://github.com/mpyw/gormreuse/issues%s", stage, g.pass.Pkg.Path(), r, guardStack())
 	}()
 	if guardPanicInjection != nil {
 		guardPanicInjection(stage, nil)
@@ -91,4 +85,16 @@ func (g *panicGuard) runPackage(stage string, work func()) (finished bool) {
 // may have been lost.
 func (g *panicGuard) panicked() bool {
 	return g.packageFailed || len(g.reported) > 0
+}
+
+// guardStack is the stack trace to add to a report, starting with a newline,
+// when GORMREUSE_DEBUG_PANIC is set, and empty otherwise. Called while a
+// recovered panic unwinds, it holds the frames that panicked.
+//
+//declscope:private
+func guardStack() string {
+	if os.Getenv("GORMREUSE_DEBUG_PANIC") == "" {
+		return ""
+	}
+	return "\n" + string(debug.Stack())
 }

@@ -5,6 +5,7 @@ import (
 	"go/parser"
 	"go/token"
 	"go/types"
+	"strings"
 	"testing"
 
 	"golang.org/x/tools/go/analysis"
@@ -31,7 +32,8 @@ func InjectGuardPanic(panics map[string]string) (restore func()) {
 
 // TestPanicGuardRunPackage checks that a panic in the work that reads the
 // whole package is reported once at the package clause, that the guard then
-// reports it panicked, and that GORMREUSE_DEBUG_PANIC re-surfaces it (#315).
+// reports it panicked, and that GORMREUSE_DEBUG_PANIC adds the stack trace
+// to it (#315).
 func TestPanicGuardRunPackage(t *testing.T) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "p.go", "package p\n", 0)
@@ -61,12 +63,10 @@ func TestPanicGuardRunPackage(t *testing.T) {
 	}
 
 	t.Setenv("GORMREUSE_DEBUG_PANIC", "1")
-	func() {
-		defer func() {
-			if r := recover(); r == nil {
-				t.Error("expected re-panic under GORMREUSE_DEBUG_PANIC, got none")
-			}
-		}()
-		guard.runPackage("collect", func() { panic("boom") })
-	}()
+	got = nil
+	guard = &panicGuard{pass: pass, reported: make(map[*ssa.Function]bool)}
+	guard.runPackage("collect", func() { panic("boom") })
+	if len(got) != 1 || !strings.Contains(got[0].Message, want+"\n") || !strings.Contains(got[0].Message, "panic(") {
+		t.Errorf("got %+v, want the report followed by the stack trace", got)
+	}
 }

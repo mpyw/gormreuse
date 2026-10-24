@@ -7,6 +7,7 @@ import (
 	"go/types"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"golang.org/x/tools/go/analysis"
@@ -23,7 +24,7 @@ import (
 // TestPanicGuard verifies that a panic in per-function analysis is contained
 // (issue #77 item 3) so one pathological function cannot abort the whole vet
 // run, that it is reported once at the function instead of dropped silently
-// (issue #186), and that GORMREUSE_DEBUG_PANIC re-surfaces it.
+// (issue #186), and that GORMREUSE_DEBUG_PANIC adds the stack trace to it.
 func TestPanicGuard(t *testing.T) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "p.go", "package p\n\nfunc F() {}\n", 0)
@@ -53,16 +54,14 @@ func TestPanicGuard(t *testing.T) {
 		t.Fatalf("got %+v, want one diagnostic at %v: %q", got, fn.Pos(), want)
 	}
 
-	// With GORMREUSE_DEBUG_PANIC set, the panic is re-surfaced.
+	// With GORMREUSE_DEBUG_PANIC set, the report carries the stack trace.
 	t.Setenv("GORMREUSE_DEBUG_PANIC", "1")
-	func() {
-		defer func() {
-			if r := recover(); r == nil {
-				t.Error("expected re-panic under GORMREUSE_DEBUG_PANIC, got none")
-			}
-		}()
-		guard.run("test", fn, func() { panic("boom") })
-	}()
+	got = nil
+	guard = &panicGuard{pass: pass, reported: make(map[*ssa.Function]bool)}
+	guard.run("test", fn, func() { panic("boom") })
+	if len(got) != 1 || !strings.Contains(got[0].Message, want+"\n") || !strings.Contains(got[0].Message, "panic(") {
+		t.Errorf("got %+v, want the report followed by the stack trace", got)
+	}
 }
 
 // TestReportUnusedIgnoresFix verifies that an unused ignore gets a fix that
