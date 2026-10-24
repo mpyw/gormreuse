@@ -169,10 +169,11 @@ func inferImmutableParams(
 	set *directive.DirectiveFuncSet,
 	newTracer func() *tracer.RootTracer,
 	finisherOnly func(*ssa.Function) []int,
+	directWrites stmtwrite.Cache,
 	globals tracer.ProvenGlobals,
 	skip func(*ssa.Function) bool,
 ) map[*ssa.Function]bool {
-	changes := inferChangesInPlace(funcs, finisherOnly)
+	changes := inferChangesInPlace(funcs, finisherOnly, directWrites)
 	candidates := make(map[*ssa.Function]bool)
 	var order []*ssa.Function
 	for _, fn := range funcs {
@@ -349,7 +350,7 @@ func inferCallersPassImmutable(fn *ssa.Function, calls []ssa.CallInstruction, rt
 // through the variable, and a closure called with it gets it as its own.
 // finisherOnly returns the finisher-only parameters of a function of another
 // package, from its fact.
-func inferChangesInPlace(funcs []*ssa.Function, finisherOnly func(*ssa.Function) []int) map[*ssa.Function]bool {
+func inferChangesInPlace(funcs []*ssa.Function, finisherOnly func(*ssa.Function) []int, directWrites stmtwrite.Cache) map[*ssa.Function]bool {
 	declared := make(map[*ssa.Function]bool)
 	for _, fn := range funcs {
 		if _, ok := fn.Syntax().(*ast.FuncDecl); ok {
@@ -363,7 +364,7 @@ func inferChangesInPlace(funcs []*ssa.Function, finisherOnly func(*ssa.Function)
 		if !declared[fn] {
 			continue
 		}
-		own, callees := inferParamUses(fn, declared, finisherOnly)
+		own, callees := inferParamUses(fn, declared, finisherOnly, directWrites)
 		if own {
 			changes[fn] = true
 			queue = append(queue, fn)
@@ -389,7 +390,7 @@ func inferChangesInPlace(funcs []*ssa.Function, finisherOnly func(*ssa.Function)
 // (see inferChangesInPlace). own reports a use that may change one in place.
 // callees are the functions of declared that get one as an argument: fn
 // changes it when one of them does.
-func inferParamUses(fn *ssa.Function, declared map[*ssa.Function]bool, finisherOnly func(*ssa.Function) []int) (own bool, callees []*ssa.Function) {
+func inferParamUses(fn *ssa.Function, declared map[*ssa.Function]bool, finisherOnly func(*ssa.Function) []int, directWrites stmtwrite.Cache) (own bool, callees []*ssa.Function) {
 	tree := make(map[*ssa.Function]bool)
 	var instrs []ssa.Instruction
 	callsite.WalkInstrs([]*ssa.Function{fn}, func(instr ssa.Instruction) {
@@ -399,7 +400,7 @@ func inferParamUses(fn *ssa.Function, declared map[*ssa.Function]bool, finisherO
 	held, vars := inferHeldParams(fn, instrs, tree)
 	// A write into the parameter's query through a direct path, as
 	// tx.Statement.Clauses["X"] = c, is a change in place (#405).
-	own = len(stmtwrite.Writes(stmtwrite.Seeds(fn))) > 0
+	own = len(directWrites.Of(fn)) > 0
 
 	for v := range vars {
 		for _, ref := range *v.Referrers() {

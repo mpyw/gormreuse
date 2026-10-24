@@ -13,16 +13,17 @@
 //     `clear(db.Statement.S)`.
 //
 // The parameter may be read in a closure, a go or a defer statement in the
-// body, through the captured variable that holds it, when nothing assigns
-// that variable again. A local variable that go/ssa keeps in a register, as
-// in `st := db.Statement; st.Distinct = true`, is the same value, so it is a
-// direct path too.
+// body, through the captured variable that holds it: go/ssa's spill of the
+// parameter, or a copy `db := db` in an inner block before any branch,
+// when nothing assigns that variable again. A local variable that go/ssa keeps in
+// a register, as in `st := db.Statement; st.Distinct = true`, is the same
+// value, so it is a direct path too.
 //
 // A handle read from the memory is not followed: `db.Statement.DB` is the
 // parent of a Session or Debug copy that shares the Statement, not the
 // argument. Any other path is not followed either, and is a known
 // limitation: a *gorm.Statement parameter, which may be a fresh Statement
-// that no argument holds, a variable
+// that no argument holds, any other variable
 // that is assigned again, captured or has its address taken, a copy such as
 // `c := *db.Statement`, a Session or Debug result, a parameter that holds a
 // *gorm.DB (a **gorm.DB, a slice, a map or a struct), an append result, a
@@ -39,6 +40,7 @@ import (
 
 	"golang.org/x/tools/go/ssa"
 
+	"github.com/mpyw/gormreuse/internal/ssa/pollutionsource"
 	"github.com/mpyw/gormreuse/internal/typeutil"
 )
 
@@ -56,33 +58,53 @@ const (
 	sliceRef
 )
 
+// step is a value the walk reached, with what it is and the parameter whose
+// memory it is.
 type step struct {
 	v ssa.Value
 	k kind
+	p *ssa.Parameter
 }
 
 // walker walks values forward and records the writes it finds.
 type walker struct {
-	writes map[ssa.Instruction]bool
+	seeds  map[ssa.Value]*ssa.Parameter
+	writes map[ssa.Instruction]Write
 	seen   map[step]bool
 	work   []step
 }
 
-// Writes returns the instructions that write, through a direct path, the
-// query memory of seeds (see Seeds).
-func Writes(seeds map[ssa.Value]*ssa.Parameter) map[ssa.Instruction]bool {
-	w := &walker{writes: map[ssa.Instruction]bool{}, seen: map[step]bool{}}
-	for h := range seeds {
-		w.push(step{v: h, k: handle})
+// Write is a direct write into the query of a *gorm.DB parameter.
+type Write struct {
+	// OwnStore reports whether it is a Store of the parameter it writes, as
+	// in db.Statement.DB = db.
+	OwnStore bool
+}
+
+// Cache keeps the direct writes of each function for one pass, for the pure
+// contract and the inferred immutable-param.
+type Cache map[*ssa.Function]map[ssa.Instruction]Write
+
+// Of returns the direct writes of fn, each instruction mapped to what it
+// writes.
+func (c Cache) Of(fn *ssa.Function) map[ssa.Instruction]Write {
+	if writes, done := c[fn]; done {
+		return writes
+	}
+	seeds := seedsOf(fn)
+	w := &walker{seeds: seeds, writes: map[ssa.Instruction]Write{}, seen: map[step]bool{}}
+	for h, p := range seeds {
+		w.push(step{v: h, k: handle, p: p})
 	}
 	w.run()
+	c[fn] = w.writes
 	return w.writes
 }
 
-// Seeds returns the values that are surely a *gorm.DB parameter of fn, each
-// mapped to that parameter: the parameter and the values directHandles gives
-// for it. A method's receiver is not an argument.
-func Seeds(fn *ssa.Function) map[ssa.Value]*ssa.Parameter {
+// seedsOf returns the values that are surely a *gorm.DB parameter of fn,
+// each mapped to that parameter: the parameter and the values directHandles
+// gives for it. A method's receiver is not an argument.
+func seedsOf(fn *ssa.Function) map[ssa.Value]*ssa.Parameter {
 	seeds := make(map[ssa.Value]*ssa.Parameter)
 	for i, p := range fn.Params {
 		if i == 0 && fn.Signature.Recv() != nil {
@@ -97,30 +119,25 @@ func Seeds(fn *ssa.Function) map[ssa.Value]*ssa.Parameter {
 	return seeds
 }
 
-// WrittenParam returns the parameter whose memory addr, the address of a
-// write that Writes found, is part of: the seed the address is reached from
-// through fields, elements and loads, the steps of a direct path.
-func WrittenParam(addr ssa.Value, seeds map[ssa.Value]*ssa.Parameter) *ssa.Parameter {
-	for seeds[addr] == nil {
-		switch a := addr.(type) {
-		case *ssa.FieldAddr:
-			addr = a.X
-		case *ssa.IndexAddr:
-			addr = a.X
-		default:
-			addr = a.(*ssa.UnOp).X // a load of a field
-		}
+// record records instr as a write into the query of p.
+func (w *walker) record(instr ssa.Instruction, p *ssa.Parameter) {
+	own := false
+	if st, ok := instr.(*ssa.Store); ok {
+		db, _ := pollutionsource.UnwrapGormDB(st.Val)
+		own = w.seeds[db] == p
 	}
-	return seeds[addr]
+	w.writes[instr] = Write{OwnStore: own}
 }
 
 // directHandles returns param and the values that are surely param: the
 // loads of the variable that holds it when a closure captures it. go/ssa
 // keeps such a parameter in a variable of its name, stored in the entry
-// block, that the function and its closures load. The variable counts only
-// when the parameter is the one value stored into it, and its address goes
-// to nothing but loads and closures. A variable of the body that is assigned
-// the parameter, as in `var x *gorm.DB; …; x = db`, is not one.
+// block, that the function and its closures load. A copy `db := db` in an
+// inner block before any branch makes the same kind of variable, and it is
+// surely param too. The variable counts only when the parameter is the
+// one value stored into it, and its address goes to nothing but loads and
+// closures. Any other variable of the body that is assigned the parameter,
+// as in `var x *gorm.DB; …; x = db`, is not one.
 func directHandles(param *ssa.Parameter) []ssa.Value {
 	handles := []ssa.Value{param}
 	for _, r := range *param.Referrers() {
@@ -175,16 +192,16 @@ func (w *walker) push(s step) {
 // Statement, a map or a slice. A *gorm.DB read from the memory, as
 // db.Statement.DB, may be another handle than the argument. Any other value
 // is a copy.
-func (w *walker) pushLoaded(v ssa.Value) {
+func (w *walker) pushLoaded(v ssa.Value, p *ssa.Parameter) {
 	t := v.Type()
 	switch types.Unalias(t).Underlying().(type) {
 	case *types.Map:
-		w.push(step{v: v, k: mapRef})
+		w.push(step{v: v, k: mapRef, p: p})
 	case *types.Slice:
-		w.push(step{v: v, k: sliceRef})
+		w.push(step{v: v, k: sliceRef, p: p})
 	case *types.Pointer:
 		if typeutil.IsGormStatement(t) { // a pointer field, so not **gorm.Statement
-			w.push(step{v: v, k: handle})
+			w.push(step{v: v, k: handle, p: p})
 		}
 	}
 }
@@ -205,26 +222,26 @@ func (w *walker) visit(s step, r ssa.Instruction) {
 	switch r := r.(type) {
 	case *ssa.Store:
 		if r.Addr == v { // a handle or an address
-			w.writes[r] = true
+			w.record(r, s.p)
 		}
 	case *ssa.FieldAddr:
 		if s.k == handle && isGormDBStateField(r.X.Type(), r.Field) {
 			return
 		}
 		if s.k == handle || s.k == addr {
-			w.push(step{v: r, k: addr})
+			w.push(step{v: r, k: addr, p: s.p})
 		}
 	case *ssa.UnOp:
 		if s.k == addr { // a load of a field or an element
-			w.pushLoaded(r)
+			w.pushLoaded(r, s.p)
 		}
 	case *ssa.MapUpdate:
 		if r.Map == v {
-			w.writes[r] = true
+			w.record(r, s.p)
 		}
 	case *ssa.IndexAddr:
 		if s.k == sliceRef {
-			w.push(step{v: r, k: addr})
+			w.push(step{v: r, k: addr, p: s.p})
 		}
 	case ssa.CallInstruction:
 		w.visitBuiltin(s, r)
@@ -242,7 +259,7 @@ func (w *walker) visitBuiltin(s step, call ssa.CallInstruction) {
 	}
 	switch b.Name() {
 	case "delete", "clear", "copy":
-		w.writes[call] = true
+		w.record(call, s.p)
 	}
 }
 

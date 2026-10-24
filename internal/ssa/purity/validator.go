@@ -99,7 +99,7 @@ func NewValidator(fn *ssa.Function, pureFuncs, immutableReturnFuncs *directive.D
 // Note: Pure functions MAY return mutable *gorm.DB values. The "pure" contract only
 // guarantees that the function doesn't pollute its arguments - callers must treat
 // the return value as potentially mutable.
-func (v *Validator) Validate(writes map[ssa.Instruction]bool) []Violation {
+func (v *Validator) Validate(writes map[ssa.Instruction]stmtwrite.Write) []Violation {
 	fn := v.fn
 	if fn == nil || fn.Blocks == nil {
 		return nil
@@ -581,23 +581,22 @@ func (v *Validator) checkStoreEscape(store *ssa.Store) []Violation {
 // `db.Statement.Distinct = true` or `delete(db.Statement.Clauses, "X")`:
 // they change its query in place, as db.Where does. stmtwrite decides them,
 // as it does for the inferred immutable-param. found holds the violations
-// found already. A Store of the argument itself that already has a
-// definitive one, as the escape of db.Statement.DB = db, is not reported
-// again. Another value stored over the argument's memory, as in
+// found already. A Store of the argument itself into its own memory that
+// already has a definitive one, as the escape of db.Statement.DB = db, is not
+// reported again. Another value stored over the argument's memory, as in
 // db.Statement.DB = other.Where("x"), gives both reports.
-func (v *Validator) checkDirectWrites(found []Violation, writes map[ssa.Instruction]bool) []Violation {
-	seeds := stmtwrite.Seeds(v.fn)
+func (v *Validator) checkDirectWrites(found []Violation, writes map[ssa.Instruction]stmtwrite.Write) []Violation {
+	if len(writes) == 0 {
+		return nil
+	}
 	reported := make(map[token.Pos]bool, len(found))
 	for _, viol := range found {
 		reported[viol.Pos] = reported[viol.Pos] || viol.Definitive
 	}
 	var violations []Violation
-	for instr := range writes {
-		if st, ok := instr.(*ssa.Store); ok && reported[st.Pos()] {
-			db, _ := pollutionsource.UnwrapGormDB(st.Val)
-			if p := seeds[db]; p != nil && p == stmtwrite.WrittenParam(st.Addr, seeds) {
-				continue
-			}
+	for instr, write := range writes {
+		if write.OwnStore && reported[instr.Pos()] {
+			continue
 		}
 		violations = append(violations, Violation{
 			Pos:        instr.Pos(),

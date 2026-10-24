@@ -36,6 +36,7 @@ func validatePureFuncs(
 	pureFuncs, immutableReturnFuncs *directive.DirectiveFuncSet,
 	funcVars callsite.FuncVars,
 	table *facts.Table,
+	directWrites stmtwrite.Cache,
 	skip func(*ssa.Function) bool,
 	report func(token.Pos, string),
 	guard *panicGuard,
@@ -56,15 +57,6 @@ func validatePureFuncs(
 	// add violations and returned parameters, so this reaches a fixed point,
 	// whatever order the functions are validated in.
 	callers := pureCallers(targets, funcVars)
-	// The direct writes of a function depend only on its body, not on the
-	// verdicts, so each is computed once (#405).
-	writes := make(map[*ssa.Function]map[ssa.Instruction]bool, len(targets))
-	directWrites := func(fn *ssa.Function) map[ssa.Instruction]bool {
-		if _, done := writes[fn]; !done {
-			writes[fn] = stmtwrite.Writes(stmtwrite.Seeds(fn))
-		}
-		return writes[fn]
-	}
 	queue := slices.Clone(targets)
 	queued := make(map[*ssa.Function]bool, len(targets))
 	for _, fn := range targets {
@@ -82,7 +74,7 @@ func validatePureFuncs(
 			validator := purity.NewValidator(fn, pureFuncs, immutableReturnFuncs, verdicts, funcVars)
 			// Only a definitive violation revokes pure-trust at call sites;
 			// conservative func-arg violations do not (avoids FP cascades).
-			if slices.ContainsFunc(validator.Validate(directWrites(fn)), func(v purity.Violation) bool { return v.Definitive }) {
+			if slices.ContainsFunc(validator.Validate(directWrites.Of(fn)), func(v purity.Violation) bool { return v.Definitive }) {
 				verdicts.Failed[fn] = true
 				delete(verdicts.Returned, fn)
 				changed = true
@@ -116,7 +108,7 @@ func validatePureFuncs(
 	reported := make(map[purity.Violation]bool)
 	for _, fn := range targets {
 		guard.run("pure", fn, func() {
-			for _, v := range purity.NewValidator(fn, pureFuncs, immutableReturnFuncs, verdicts, funcVars).Validate(directWrites(fn)) {
+			for _, v := range purity.NewValidator(fn, pureFuncs, immutableReturnFuncs, verdicts, funcVars).Validate(directWrites.Of(fn)) {
 				if reported[v] {
 					continue
 				}

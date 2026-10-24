@@ -59,7 +59,7 @@ func TestValidatorValidate(t *testing.T) {
 			if !ok {
 				t.Fatalf("fixture function %q not found", tc.fn)
 			}
-			violations := purity.NewValidator(fn, pureFuncs, nil, nil, callsite.FuncVars{}).Validate(stmtwrite.Writes(stmtwrite.Seeds(fn)))
+			violations := purity.NewValidator(fn, pureFuncs, nil, nil, callsite.FuncVars{}).Validate(stmtwrite.Cache{}.Of(fn))
 
 			if tc.clean {
 				if len(violations) != 0 {

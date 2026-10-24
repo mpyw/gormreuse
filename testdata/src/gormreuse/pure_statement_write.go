@@ -80,6 +80,18 @@ func pswCaptured(db *gorm.DB) {
 	defer delete(db.Statement.Clauses, "Y")           // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
 }
 
+// pswShadowCopy copies the parameter with db := db in an inner block before
+// any branch, and writes through the copy in a closure. Nothing assigns it
+// again, so it is the parameter.
+//
+//gormreuse:pure
+func pswShadowCopy(db *gorm.DB) {
+	{
+		db := db
+		func() { db.Statement.Distinct = true }() // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
+	}
+}
+
 // pswSelfStore stores the argument into its own memory: one report, the
 // escape. pswOverwriteFrom and pswStoreOther store another value over the
 // argument's memory: the escape of that value, and the write of the
