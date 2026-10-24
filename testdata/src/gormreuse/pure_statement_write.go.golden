@@ -69,11 +69,6 @@ func pswStatementParam(db *gorm.DB, st *gorm.Statement) {
 	st.Distinct = true // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
 }
 
-//gormreuse:pure
-func pswStatementDB(db *gorm.DB) {
-	db.Statement.DB.Statement.Distinct = true // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
-}
-
 // pswCaptured writes through the captured parameter in a closure, a nested
 // closure, a go and a defer statement, and a deferred builtin.
 //
@@ -254,7 +249,10 @@ func pswNotDirect(db *gorm.DB, other *gorm.DB, c bool, b []byte) {
 	if c {
 		m = db.Statement
 	}
-	m.Distinct = true // a merge
+	m.Distinct = true                         // a merge
+	db.Statement.DB.Statement.Distinct = true // Statement.DB may be a parent
+	db.Statement.DB.Statement = nil
+	*db.Statement.DB = gorm.DB{}
 }
 
 type pswStatement gorm.Statement
@@ -273,14 +271,19 @@ func pswHolderParams(h pswHolder, pq **gorm.DB, arr [1]*gorm.DB, m map[string]*g
 	st.Clauses["X"] = 1
 }
 
-// pswReassignedParam writes through a parameter that the body assigns again,
-// in a closure.
+// pswReassignedParam writes, in closures, through a parameter that the body
+// assigns again, and through a variable of the body that holds the
+// parameter.
 // [LIMITATION]
 //
 //gormreuse:pure
-func pswReassignedParam(db *gorm.DB) {
+func pswReassignedParam(db, other *gorm.DB) {
 	func() { db.Statement.Distinct = true }()
 	db = nil
+	var x *gorm.DB
+	f := func() { x.Statement.Distinct = true }
+	x = other
+	f()
 }
 
 // pswConfig writes the argument's Config. It holds no clause, so it is
@@ -333,12 +336,6 @@ func pswInferCaptured(db *gorm.DB) {
 	db.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
-func pswInferStatementDB(db *gorm.DB) {
-	db.Statement.DB.Statement.Clauses["X"] = 1
-	db.Find(nil)
-	db.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
-}
-
 // The helpers below only read the Statement, or write memory it does not
 // hold. They are inferred, as on main, and their reuse is not reported.
 func pswInferReads(db *gorm.DB) {
@@ -379,6 +376,7 @@ func pswInferNotDirect(db *gorm.DB) {
 	sort.Strings(db.Statement.Selects)
 	db.Session(&gorm.Session{}).Statement.Distinct = true
 	_ = append(db.Statement.Selects[:0], "x")
+	db.Statement.DB.Statement.Clauses["X"] = 1
 	db.Find(nil)
 	db.Count(nil)
 }
@@ -388,7 +386,6 @@ func pswInferCallers(db *gorm.DB) {
 	pswInferSelectsElem(db.Session(&gorm.Session{}))
 	pswInferBuiltins(db.Session(&gorm.Session{}))
 	pswInferCaptured(db.Session(&gorm.Session{}))
-	pswInferStatementDB(db.Session(&gorm.Session{}))
 	pswInferReads(db.Session(&gorm.Session{}))
 	pswInferStores(db.Session(&gorm.Session{}), nil, nil)
 	pswInferCopies(db.Session(&gorm.Session{}))

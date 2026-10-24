@@ -10,8 +10,7 @@
 //   - `db.Statement.M[k] = v`, `delete(db.Statement.M, k)` and
 //     `clear(db.Statement.M)`;
 //   - `db.Statement.S[i] = v`, `copy(db.Statement.S, …)` and
-//     `clear(db.Statement.S)`;
-//   - the same through `db.Statement.DB`, which is a handle too.
+//     `clear(db.Statement.S)`.
 //
 // The parameter may be read in a closure, a go or a defer statement in the
 // body, through the captured variable that holds it, when nothing assigns
@@ -19,7 +18,10 @@
 // in `st := db.Statement; st.Distinct = true`, is the same value, so it is a
 // direct path too.
 //
-// Any other path is not followed, and is a known limitation: a variable
+// A handle read from the memory is not followed: `db.Statement.DB` is the
+// parent of a Session or Debug copy that shares the Statement, not the
+// argument. Any other path is not followed either, and is a known
+// limitation: a variable
 // that is assigned again, captured or has its address taken, a copy such as
 // `c := *db.Statement`, a Session or Debug result, a parameter that holds a
 // *gorm.DB (a **gorm.DB, a slice, a map or a struct), an append result, a
@@ -43,8 +45,7 @@ import (
 type kind int
 
 const (
-	// handle is the parameter, or a *gorm.DB or *gorm.Statement read from
-	// its memory through a direct path.
+	// handle is the parameter, or its Statement.
 	handle kind = iota
 	// addr is the address of a field or an element of that memory.
 	addr
@@ -89,17 +90,19 @@ func WritesThrough(v ssa.Value) bool {
 
 // DirectHandles returns param and the values that are surely param: the
 // loads of the variable that holds it when a closure captures it. go/ssa
-// keeps such a parameter in a variable that the function and its closures
-// load. The variable counts only when the parameter is the one value stored
-// into it, and its address goes to nothing but loads and closures.
+// keeps such a parameter in a variable of its name, stored in the entry
+// block, that the function and its closures load. The variable counts only
+// when the parameter is the one value stored into it, and its address goes
+// to nothing but loads and closures. A variable of the body that is assigned
+// the parameter, as in `var x *gorm.DB; …; x = db`, is not one.
 func DirectHandles(param *ssa.Parameter) []ssa.Value {
 	handles := []ssa.Value{param}
 	for _, r := range *param.Referrers() {
 		st, ok := r.(*ssa.Store)
-		if !ok || st.Val != ssa.Value(param) {
+		if !ok || st.Val != ssa.Value(param) || st.Block() != param.Parent().Blocks[0] {
 			continue
 		}
-		if spill, ok := st.Addr.(*ssa.Alloc); ok {
+		if spill, ok := st.Addr.(*ssa.Alloc); ok && spill.Comment == param.Name() {
 			handles = append(handles, spillLoads(spill, st)...)
 		}
 	}
@@ -142,8 +145,10 @@ func (w *walker) push(s step) {
 	}
 }
 
-// pushLoaded follows v, a value loaded from the memory, by its type: a
-// handle, a map or a slice. Any other value is a copy.
+// pushLoaded follows v, a value loaded from the memory, by its type: the
+// Statement, a map or a slice. A *gorm.DB read from the memory, as
+// db.Statement.DB, may be another handle than the argument. Any other value
+// is a copy.
 func (w *walker) pushLoaded(v ssa.Value) {
 	t := v.Type()
 	switch types.Unalias(t).Underlying().(type) {
@@ -152,10 +157,17 @@ func (w *walker) pushLoaded(v ssa.Value) {
 	case *types.Slice:
 		w.push(step{v: v, k: sliceRef})
 	case *types.Pointer:
-		if typeutil.IsGormDB(t) || typeutil.IsGormStatement(t) { // both reject **T
+		if IsHandle(t) && typeutil.IsGormStatement(t) {
 			w.push(step{v: v, k: handle})
 		}
 	}
+}
+
+// IsHandle reports whether t is *gorm.DB or *gorm.Statement: a parameter
+// whose query a direct path writes.
+func IsHandle(t types.Type) bool {
+	_, ptr := types.Unalias(t).(*types.Pointer)
+	return ptr && (typeutil.IsGormDB(t) || typeutil.IsGormStatement(t)) // both reject **T
 }
 
 func (w *walker) run() {

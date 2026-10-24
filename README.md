@@ -2658,9 +2658,9 @@ A write into its `Statement`, or over the `*gorm.DB` itself, changes its query i
 - `*db = v` and `db.Statement = v`;
 - a field of the `Statement`, as in `db.Statement.Distinct = true`;
 - a map or a slice the `Statement` holds: `db.Statement.Clauses[k] = v`, `db.Statement.Selects[i] = v`, and `delete`, `clear` or `copy` into one;
-- the same through `db.Statement.DB`, and through the parameter in a closure, a `go` or a `defer` statement in the body.
+- the same through the parameter in a closure, a `go` or a `defer` statement in the body.
 
-A write through anything else is not followed, since it may write memory the argument does not hold: a local variable that is assigned again, captured or has its address taken, a copy such as `c := *db.Statement`, a `Session` or `Debug` result, a parameter that holds a `*gorm.DB`, an `append` result, a lookup, a conversion, a merge, or a call such as `sort.Strings(db.Statement.Selects)` (see [Known Limitations](#known-limitations)).
+A write through anything else is not followed, since it may write memory the argument does not hold: `db.Statement.DB`, which is the parent of a `Session` copy that shares the `Statement`, a local variable that is assigned again, captured or has its address taken, a copy such as `c := *db.Statement`, a `Session` or `Debug` result, a parameter that holds a `*gorm.DB`, an `append` result, a lookup, a conversion, a merge, or a call such as `sort.Strings(db.Statement.Selects)` (see [Known Limitations](#known-limitations)).
 
 These may be written:
 
@@ -5746,11 +5746,11 @@ A pure function, or a helper inferred `immutable-param`, that writes the argumen
 
 ```go
 //gormreuse:pure
-func mark(db *gorm.DB) {
-    c := *db.Statement
-    c.Clauses["X"] = c                                    // not reported
-    db.Session(&gorm.Session{}).Statement.Distinct = true // not reported
-    sort.Strings(db.Statement.Selects)                    // not reported
+func mark(db *gorm.DB, w clause.Clause) {
+    st := db.Statement
+    func() { st.Clauses["X"] = w }()                      // not reported: a captured variable
+    db.Session(&gorm.Session{}).Statement.Distinct = true // not reported: a Session result
+    sort.Strings(db.Statement.Selects)                    // not reported: a call
 }
 ```
 
