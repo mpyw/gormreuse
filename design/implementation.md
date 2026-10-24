@@ -471,6 +471,19 @@ The tracer resolves a call `w(x)` through a method value `w := r.m` as the call 
 
 **A method value handed on (#374).** A method value passed to a function, or stored anywhere but in a local variable, may be called there. The call through it is no call site of `q`: it is a dynamic call, or a call in another function. So the hand-off is the branch, as `helper(q)` is (`boundGormReceiver`, `handOn`). It is reported when it runs again, as in a loop. Before #374 `firstPage(q.Find); q.Count(&n)` and `j := job{find: q.Find}; j.find(&a); q.Count(&n)` were missed, while the same code with a closure was reported. `-fix` offers no fix for such a root, as for any hand-off.
 
+**A function literal handed on that returns a captured value (#397).** `run(func() *gorm.DB { return q })` hands `q` on, as `run(q.Find)` does. The code that gets the literal may call it and chain on what it returns. Scopes and Preload do that with their callbacks. The literal's body makes no call on `q`, so nothing else records a use. `returnedCaptureRoots` in `handler/call.go` finds the captured values among the literal's returns, through Phi edges. A value captured by value gives the roots of its binding. A variable captured by reference is read where the literal is handed on, as an address handed on is (`PointeeRoots`). The hand-offs are the same as for a method value: an argument, a send, a map update, and a store anywhere but in a local variable, such as the field of `job{build: f}` or the varargs array of `Scopes`. The literal may also be boxed in an interface, as a `Preload` argument is, or held by a local variable first.
+
+These are not hand-offs of `q`:
+
+| Literal | Why |
+| --- | --- |
+| `func(d *gorm.DB) *gorm.DB { return d.Where("a") }` | It returns a root of its own, from its parameter |
+| `func() *gorm.DB { return q.Where("y") }` | The `Where` in the body is the one branch of `q`. It returns a new root |
+| `func() *gorm.DB { return q.Session(&gorm.Session{}) }` | A Session copy has no root |
+| A literal called in place | The call is traced into its returns ([Closure results](#closure-results)) |
+
+`-fix` offers no fix, as for a method value handed on. Before #397, `run(func() *gorm.DB { return q }); q.Find(&b)` was missed, while `run(q.Find)` was reported. `e2e/internal/closure_returns_capture_test.go` shows the leak against real GORM.
+
 <details><summary>Interface method values, wrappers and the position guard</summary>
 
 An interface method value has no declared method, so `origin.Declared` keeps the wrapper. Its signature has no receiver. A call through it is handled like any other call whose result holds a `*gorm.DB`: a mutable root, as for an interface call `r.Query()` (#176).
@@ -1521,6 +1534,7 @@ On the safe side, the linter marks a `*gorm.DB` as polluted in these cases:
 | Slice or array storage, `append` | `[]*gorm.DB{db}`, `qs = append(qs, db)` | The same |
 | Map storage | `map[string]*gorm.DB{"k": db}` | The same |
 | A method value handed on (#374) | `firstPage(q.Find)`, `job{find: q.Find}` | A branch of the receiver ([Method values](#method-values)) |
+| A function literal handed on that returns a captured value (#397) | `run(func() *gorm.DB { return q })`, `Scopes(func(d *gorm.DB) *gorm.DB { return q })` | A branch of the captured value ([Method values](#method-values)) |
 | Interface conversion | `interface{}(db)` | A type assertion may extract it. A read-only argument of a query method is the exception (#185) |
 | Function argument | `helper(db)` | A branch when the callee is not trusted as pure. A `*gorm.DB` result assigned back in a merge is an assignment, as for a gorm method |
 | A struct that holds it, handed to a call (#341) | `useDeps(deps{DB: q})`, `r := &repo{db: q}; r.active()` | A branch of each root that the struct's `*gorm.DB` fields hold, as for `helper(q)`. See below |
