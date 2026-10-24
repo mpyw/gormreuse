@@ -75,13 +75,13 @@ type Violation struct {
 	Param int
 
 	// FromPureReceiver is set on a reuse violation that holds only because
-	// of a pure method's branch through its receiver (UsageInfo.PureReceiver,
-	// #404): the reported use is such a branch, or no other use explains it.
-	// PureReceiverReport is set on every violation of a root that has one,
-	// once CollectViolations ran. The fix generator offers such a root no
-	// Session, and leaves every other root as it was before #404.
-	FromPureReceiver   bool
-	PureReceiverReport bool
+	// of a pure method's receiver branch (UsageInfo.PureReceiver, #404): the
+	// reported use is such a branch, or no other use explains it.
+	// PureReceiverRoot is the root of a Session/Debug copy violation that
+	// only such a branch explains; the violation itself has no Root. The
+	// checker offers no fix for a root whose such report it shows.
+	FromPureReceiver bool
+	PureReceiverRoot ssa.Value
 }
 
 // UsageInfo tracks a single usage of a root (exported for fix generation).
@@ -425,15 +425,17 @@ func (t *Tracker) DetectViolations() {
 		argumentReads := make(map[token.Pos]Violation)
 		for _, use := range t.aliasUses[root] {
 			change, ok := t.earlierReaching(otherChanges, use.UsageInfo, use.copyPos)
+			var pureRoot ssa.Value
 			if !ok {
 				change, ok = t.earlierReaching(changes, use.UsageInfo, use.copyPos)
+				pureRoot = root
 			}
 			switch {
 			case !ok:
 			case !use.argument:
-				t.violations = append(t.violations, Violation{Pos: use.Pos, Message: t.aliasMessage(root, change.Pos)})
+				t.violations = append(t.violations, Violation{Pos: use.Pos, Message: t.aliasMessage(root, change.Pos), PureReceiverRoot: pureRoot})
 			case argumentReads[use.copyPos].Pos == token.NoPos || use.Pos < argumentReads[use.copyPos].Pos:
-				argumentReads[use.copyPos] = Violation{Pos: use.Pos, Message: t.argumentMessage(root, change.Pos)}
+				argumentReads[use.copyPos] = Violation{Pos: use.Pos, Message: t.argumentMessage(root, change.Pos), PureReceiverRoot: pureRoot}
 			}
 		}
 		for _, copyPos := range slices.Sorted(maps.Keys(argumentReads)) {
@@ -585,7 +587,6 @@ func funcName(v ssa.Value) string {
 // uses, which nothing changes, so a root reused n times costs one list, not
 // n (#350). They share its hidden uses the same way (#389).
 func (t *Tracker) CollectViolations() []Violation {
-	t.markPureReceiverReports()
 	shared := make(map[ssa.Value][]UsageInfo)
 	hidden := make(map[ssa.Value][]UsageInfo)
 	for i := range t.violations {
@@ -606,41 +607,10 @@ func (t *Tracker) CollectViolations() []Violation {
 
 // withoutPureReceiver returns uses without the branches that pure methods
 // make through their receivers (#404). The fix of a root sees the uses it saw
-// before #404: a root with a report that needs such a branch gets no fix at
-// all (Violation.PureReceiverReport), and the fix of any other root is as it
-// was.
+// before #404, so it and its advice are as they were. The checker drops the
+// fix of a root with a report that needs such a branch.
 func withoutPureReceiver(uses []UsageInfo) []UsageInfo {
 	return slices.DeleteFunc(uses, func(use UsageInfo) bool { return use.PureReceiver })
-}
-
-// markPureReceiverReports drops a violation that holds only because of a
-// pure method's receiver branch (#404) where another check reports the same
-// use of the same root without it, so the report keeps its text from before
-// #404. Then it marks every violation of a root that still has such a report
-// (Violation.PureReceiverReport).
-func (t *Tracker) markPureReceiverReports() {
-	type rootPos struct {
-		root ssa.Value
-		pos  token.Pos
-	}
-	other := make(map[rootPos]bool)
-	for _, v := range t.violations {
-		if v.Root != nil && !v.FromPureReceiver {
-			other[rootPos{v.Root, v.Pos}] = true
-		}
-	}
-	t.violations = slices.DeleteFunc(t.violations, func(v Violation) bool {
-		return v.FromPureReceiver && other[rootPos{v.Root, v.Pos}]
-	})
-	marked := make(map[ssa.Value]bool)
-	for _, v := range t.violations {
-		if v.FromPureReceiver {
-			marked[v.Root] = true
-		}
-	}
-	for i := range t.violations {
-		t.violations[i].PureReceiverReport = marked[t.violations[i].Root]
-	}
 }
 
 // hiddenUses returns the uses of root that AllUses does not list (see

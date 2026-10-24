@@ -321,6 +321,66 @@ func prParamRootCaller(db *gorm.DB) {
 	prParamRootNoFix(db.Session(&gorm.Session{}))
 }
 
+// prHiddenAtSharedFix: x.Find is a report of q1, which main gave, and of q2,
+// which only the pure call explains. The diagnostic is main's, about q1, so
+// q2 shows no new report and keeps its fix, as both roots do.
+func prHiddenAtSharedFix(db *gorm.DB, c bool) {
+	q1 := db.Where("a")
+	q2 := db.Where("b") // want `\*gorm\.DB reused: second branch from mutable root`
+	q1.Find(nil)
+	r := prRepo{db: q2}
+	r.list(nil)
+	x := q1
+	if c {
+		x = q2
+	}
+	x.Find(nil)  // want `\*gorm\.DB reused: second branch from mutable root`
+	q2.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// prClosureReportNoFix: the report that only the pure call explains is in a
+// closure. It still takes the fix away from q in the enclosing function.
+func prClosureReportNoFix(db *gorm.DB) {
+	q := db.Where("x")
+	q.Find(nil)
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	g := func() {
+		r := prRepo{db: q}
+		r.list(nil)
+		q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	}
+	_ = g
+}
+
+// prErrorAdviceNoFix: the queries leave their errors unchecked, so the reports
+// advise checking them, as before #404. The new report on the else path
+// advises the same, and the root gets no fix.
+func prErrorAdviceNoFix(db *gorm.DB, id int, b bool) error {
+	q := db.Model(&User{})
+	if b {
+		r := prRepo{db: q}
+		r.list(nil)
+		return q.Update("x", 1).Error // want `\*gorm\.DB reused: second branch from mutable root .*; a Session would let a later query run past an earlier query's unchecked error, so check that error first`
+	}
+	q.Update("name", "new")
+	return q.Update("id", id).Error // want `\*gorm\.DB reused: second branch from mutable root .*; a Session would let a later query run past an earlier query's unchecked error, so check that error first`
+}
+
+// prAliasReportNoFix: only the pure call changes q before the copy is used,
+// so the copy's report is new, and q gets no fix.
+func prAliasReportNoFix(db *gorm.DB, b bool) {
+	q := db.Where("x")
+	c := q.Session(&gorm.Session{})
+	if b {
+		r := prRepo{db: q}
+		r.list(nil)
+		c.Find(nil) // want `\*gorm\.DB reused: Session/Debug copy shares the Statement of a mutable root`
+		return
+	}
+	q.Find(nil)
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
 // =============================================================================
 // UNSAFE FIX: A PURE CALL AFTER A STORE INTO OTHER MEMORY
 //

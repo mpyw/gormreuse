@@ -2,6 +2,7 @@ package internal
 
 import (
 	"cmp"
+	"go/token"
 	"slices"
 
 	"golang.org/x/tools/go/analysis"
@@ -28,6 +29,7 @@ type checker struct {
 	needsImmutableParam func(*ssa.Function) bool // immutable-param fns that branch a param (2b caller check)
 	reported            map[reportKey]bool       // Deduplication of reports
 	ignoredRoots        map[ssa.Value]bool       // Roots with a diagnostic an ignore suppresses, in any function (#346)
+	pureReports         checkerPureReports       // Reports that only a pure method's receiver branch explains (#404)
 	fixGen              *fix.Generator           // Cached fix generator for all violations
 	cfgs                *cfg.Analyzer            // CFG cache of the pass, shared with fixGen (#299)
 }
@@ -63,6 +65,7 @@ func (c *checker) analyze(fn *ssa.Function) []pollution.Violation {
 		if v.Root != nil && c.ignores.Covers(v.Pos) {
 			c.ignoredRoots[v.Root] = true
 		}
+		c.pureReports.add(v, c.ignores.Covers(v.Pos))
 	}
 	return violations
 }
@@ -92,7 +95,13 @@ func (c *checker) report(violations []pollution.Violation) {
 		}
 		f, ok := fixes[v.Root]
 		if !ok {
+			// The fix of a root with a report that only a pure method's
+			// receiver branch explains is dropped, after Generate decided
+			// it as before #404, so the advice of its diagnostics is too.
 			f = c.fixGen.Generate(v)
+			if c.pureReports.roots()[v.Root] {
+				f = nil
+			}
 			fixes[v.Root] = f
 		}
 		return f
@@ -187,4 +196,49 @@ func checkerBoolInt(b bool) int {
 		return 1
 	}
 	return 0
+}
+
+// checkerPureReports collects, over every function of the package, the
+// reports that hold only because of a pure method's receiver branch (#404).
+// A root gets no fix when one of them is shown. A reuse report is shown
+// when no other reuse report is at its position: the checker reports one
+// diagnostic per position, and puts first a report that holds without the
+// branch. A Session/Debug copy report is shown on its own.
+type checkerPureReports struct {
+	other  map[token.Pos]bool
+	pure   []pollution.Violation
+	marked map[ssa.Value]bool
+}
+
+// add records v, a violation of a function. ignored says that an ignore
+// directive suppresses its position, so it is not shown.
+func (r *checkerPureReports) add(v pollution.Violation, ignored bool) {
+	switch {
+	case v.Root != nil && !v.FromPureReceiver:
+		if r.other == nil {
+			r.other = make(map[token.Pos]bool)
+		}
+		r.other[v.Pos] = true
+	case ignored:
+	case v.Root != nil, v.PureReceiverRoot != nil:
+		r.pure = append(r.pure, v)
+	}
+}
+
+// roots returns the roots with a shown report. Every function is analyzed
+// before the first is reported, so the answer is computed once, then.
+func (r *checkerPureReports) roots() map[ssa.Value]bool {
+	if r.marked != nil {
+		return r.marked
+	}
+	r.marked = make(map[ssa.Value]bool)
+	for _, v := range r.pure {
+		switch {
+		case v.PureReceiverRoot != nil:
+			r.marked[v.PureReceiverRoot] = true
+		case !r.other[v.Pos]:
+			r.marked[v.Root] = true
+		}
+	}
+	return r.marked
 }

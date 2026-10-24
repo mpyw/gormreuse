@@ -39,20 +39,12 @@ import (
 //     would lose its condition (#309);
 //   - the root is stored into a struct field or an element that other code
 //     can reach, as in `s := &Svc{db: q}; s.apply()` (see
-//     holderChangesRoot, #310);
-//   - the root has a report that holds only because a //gormreuse:pure
-//     method branches it through its receiver, as in
-//     `r := repo{db: q}; r.list(); q.Find(nil)` (#404). The pure check does
-//     not cover the receiver. Every other root is fixed as before #404
-//     (pollution.Violation.PureReceiverReport).
+//     holderChangesRoot, #310).
 //
 // A Session at the root makes each of them see a copy (#243).
 //
 //declscope:shared // generator.go's Generate withholds the fix with it
 func (g *Generator) changedElsewhere(v pollution.Violation, noDiscarded bool) bool {
-	if v.PureReceiverReport {
-		return true
-	}
 	ordered := usesOrdered(v)
 	for _, use := range v.AllUses {
 		if use.Escapes && changeSeenAfterEscape(g.cfg, tracer.RootBlock(v.Root), use, v.AllUses, ordered, g.tracer.FuncVars()) && !g.handoffKeepsChanges(v, use, noDiscarded) {
