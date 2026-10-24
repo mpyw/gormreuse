@@ -548,7 +548,7 @@ func (u siteUse) handleArgs() {
 	call := u.call()
 	if site.Declared != nil && ctx.RootTracer.IsPureFunction(site.Declared) {
 		if site.Recv != nil {
-			u.handleHolders([]ssa.Value{site.Recv}, pollution.UsageInfo{Block: u.block, Pos: u.pos, Escapes: true, PureReceiver: true})
+			u.handleHolders([]ssa.Value{site.Recv}, pollution.UsageInfo{Block: u.block, Pos: u.pos, Escapes: true, PureReceiver: pureReceiverKind(site.Instr)})
 		}
 		return
 	}
@@ -616,6 +616,18 @@ func (u siteUse) handleArgs() {
 		operands = append([]ssa.Value{site.Recv}, operands...)
 	}
 	u.handleHolders(operands, pollution.UsageInfo{Block: u.block, Pos: u.pos, Escapes: true})
+}
+
+// pureReceiverKind returns how instr, a call of a pure method, runs (see
+// pollution.PureReceiverKind).
+func pureReceiverKind(instr ssa.CallInstruction) pollution.PureReceiverKind {
+	switch instr.(type) {
+	case *ssa.Go:
+		return pollution.PureReceiverGo
+	case *ssa.Defer:
+		return pollution.PureReceiverDefer
+	}
+	return pollution.PureReceiverCall
 }
 
 // handleHolders handles the structs that the site hands on, as an argument or

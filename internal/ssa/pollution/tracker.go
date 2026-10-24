@@ -105,11 +105,27 @@ type UsageInfo struct {
 	Direct bool
 
 	// PureReceiver is set on the branch that a //gormreuse:pure method makes
-	// of what its receiver holds (#404). The pure check does not cover the
-	// receiver, so the method may change the root in place where the fix
-	// cannot see it, and the fix generator offers no Session for the root.
-	PureReceiver bool
+	// of what its receiver holds (#404), and says how the call runs. The
+	// pure check does not cover the receiver, so the method may change the
+	// root in place. The fix generator reads it (see the fix package).
+	PureReceiver PureReceiverKind
 }
+
+// PureReceiverKind says whether a use is the branch a //gormreuse:pure method
+// makes through its receiver (#404), and how the call runs.
+type PureReceiverKind uint8
+
+const (
+	// NotPureReceiver is any other use.
+	NotPureReceiver PureReceiverKind = iota
+	// PureReceiverCall is a plain call, also through a method value.
+	PureReceiverCall
+	// PureReceiverGo is a go statement, which runs alongside the uses after
+	// it.
+	PureReceiverGo
+	// PureReceiverDefer is a defer statement, which runs after every use.
+	PureReceiverDefer
+)
 
 // aliasUse is a use of a Session/Debug copy, with the position of the call
 // that took the copy. When argument is set, it is a use of a chain that holds
@@ -337,7 +353,7 @@ func (t *Tracker) AddContractViolation(pos token.Pos, message string, call ssa.C
 
 // AddViolationWithRoot adds a violation with root information for fix generation.
 func (t *Tracker) AddViolationWithRoot(pos token.Pos, root ssa.Value) {
-	t.addViolationWithContext(UsageInfo{Pos: pos}, root)
+	t.addViolationWithContext(pos, root)
 }
 
 // DetectViolations performs violation detection after all uses are recorded.
@@ -427,7 +443,7 @@ func (t *Tracker) DetectViolations() {
 		// the call again: reaches would never hold.
 		for _, target := range t.loopCarriedUses[root] {
 			if slices.ContainsFunc(t.pollutingUses[root], func(src UsageInfo) bool { return t.isReachable(src.Block, target.Block) }) {
-				t.addViolationWithContext(target, root)
+				t.addViolationWithContext(target.Pos, root)
 			}
 		}
 	}
@@ -682,10 +698,10 @@ func (t *Tracker) invocationChain(block *ssa.BasicBlock) []*ssa.BasicBlock {
 
 // addViolationWithContext adds a violation with root information for fix
 // generation. CollectViolations adds the root's uses.
-func (t *Tracker) addViolationWithContext(target UsageInfo, root ssa.Value) {
+func (t *Tracker) addViolationWithContext(pos token.Pos, root ssa.Value) {
 	t.violations = append(t.violations, Violation{
-		Pos:     target.Pos,
-		Message: t.reuseMessage(root, target),
+		Pos:     pos,
+		Message: t.reuseMessage(root),
 		Root:    root,
 	})
 }
@@ -693,16 +709,15 @@ func (t *Tracker) addViolationWithContext(target UsageInfo, root ssa.Value) {
 // reuseMessage builds the reuse diagnostic. It names the mutable root and its
 // first branch (when their positions are known) so the report points the user
 // at all three sites — root, first branch, and the offending second branch (the
-// diagnostic's own position) — not just the last one (#76). target is the
-// reported use.
-func (t *Tracker) reuseMessage(root ssa.Value, target UsageInfo) string {
+// diagnostic's own position) — not just the last one (#76).
+func (t *Tracker) reuseMessage(root ssa.Value) string {
 	msg := "*gorm.DB reused: second branch from mutable root"
 
 	var locs []string
 	if root != nil && rootPos(root).IsValid() {
 		locs = append(locs, "root at "+t.loc(rootPos(root)))
 	}
-	if fb := t.firstBranchPos(root, target); fb.IsValid() {
+	if fb := t.firstBranchPos(root); fb.IsValid() {
 		locs = append(locs, "first branch at "+t.loc(fb))
 	}
 	if len(locs) > 0 {
@@ -777,14 +792,23 @@ func rootPos(root ssa.Value) token.Pos {
 // branch among those, recorded before the one reported (#309). They are not
 // ordered by position, so they count only then.
 //
-// The branch a pure method makes through its receiver (#404) counts only when
-// it comes before target, the reported use, and reaches it, as for a report
-// (checkViolationsBetween). So a pure call on another path is not named as
-// the first branch of a report that it has no part in.
-func (t *Tracker) firstBranchPos(root ssa.Value, target UsageInfo) token.Pos {
+// The branch a pure method makes through its receiver (#404) is left out, so
+// a report that main gave names the same first branch. It is named only when
+// no other use is a candidate, by the same rules, as in `r.list(nil); go
+// q.Find(nil)`.
+func (t *Tracker) firstBranchPos(root ssa.Value) token.Pos {
+	if best := t.firstBranchAmong(root, false); best.IsValid() {
+		return best
+	}
+	return t.firstBranchAmong(root, true)
+}
+
+// firstBranchAmong is firstBranchPos over the uses of root, with the branches
+// of pure methods through their receivers when pure is set.
+func (t *Tracker) firstBranchAmong(root ssa.Value, pure bool) token.Pos {
 	best := token.NoPos
 	earliest := func(u UsageInfo) {
-		if u.PureReceiver && (target.Block == nil || u.Pos >= target.Pos || !t.reaches(root, u, target)) {
+		if u.PureReceiver != NotPureReceiver && !pure {
 			return
 		}
 		if u.Pos.IsValid() && (!best.IsValid() || u.Pos < best) {
@@ -835,7 +859,7 @@ func (t *Tracker) checkViolationsBetween(targets, sources []UsageInfo, root ssa.
 			// Check CFG reachability (across closures, at their invocation
 			// sites), on a path that keeps the root of src (#375)
 			if t.reaches(root, src, target) {
-				t.addViolationWithContext(target, root)
+				t.addViolationWithContext(target.Pos, root)
 				break
 			}
 		}

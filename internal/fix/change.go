@@ -41,15 +41,15 @@ import (
 //     can reach, as in `s := &Svc{db: q}; s.apply()` (see
 //     holderChangesRoot, #310);
 //   - a //gormreuse:pure method branches it through its receiver, as in
-//     `r := repo{db: q}; r.list()`, on a path that another use of the root
-//     shares (changePureReceiverSharesPath). The pure check does not cover
-//     the receiver (#404).
+//     `r := repo{db: q}; r.list()`, and another use of the root may see what
+//     it changes (changePureReceiverSeen). The pure check does not cover the
+//     receiver (#404).
 //
 // A Session at the root makes each of them see a copy (#243).
 //
 //declscope:shared // generator.go's Generate withholds the fix with it
 func (g *Generator) changedElsewhere(v pollution.Violation, noDiscarded bool) bool {
-	if slices.ContainsFunc(slices.Concat(v.AllUses, v.Hidden), func(use pollution.UsageInfo) bool { return g.changePureReceiverSharesPath(v, use) }) {
+	if uses := slices.Concat(v.AllUses, v.Hidden); slices.ContainsFunc(uses, func(use pollution.UsageInfo) bool { return g.changePureReceiverSeen(v.Root, use, uses) }) {
 		return true
 	}
 	ordered := usesOrdered(v)
@@ -85,30 +85,40 @@ func (g *Generator) changedElsewhere(v pollution.Violation, noDiscarded bool) bo
 	return deferChanges > 0 && (deferUses > 1 || deferRepeats)
 }
 
-// changePureReceiverSharesPath reports whether use is the branch a
-// //gormreuse:pure method makes of what its receiver holds (#404), on a path
-// that another use of v's root shares. The method may change the root in
-// place, at a point the fix cannot order. Such a use shares a path when it
-// may run again for one run of the root's definition, or when another use
-// can reach it or be reached from it: in the same block, in another function
-// such as a closure, or along the CFG. A pure call on its own exclusive path,
-// as in `if c { r.list(); return }; q.Find(nil); q.Find(nil)`, changes
-// nothing that the reported uses see, so the fix stays as it was before #404.
-func (g *Generator) changePureReceiverSharesPath(v pollution.Violation, use pollution.UsageInfo) bool {
-	if !use.PureReceiver {
+// changePureReceiverSeen reports whether use is the branch a
+// //gormreuse:pure method makes of what its receiver holds (#404), and
+// another of uses, the uses of root, may see what the method changes in
+// place. A Session at the root would make the method change a copy, which is
+// only unsafe when a later use sees the change:
+//   - A go statement runs alongside the uses after it, so it may be seen.
+//   - A defer statement runs after every use, so it is not.
+//   - Any other call may be seen when it may run again for one run of the
+//     root's definition, when another use comes after it in its block, or
+//     when its block reaches another use's block. A use in another function,
+//     such as a closure, is not ordered, and counts too.
+//
+// So a pure call on an exclusive path (`if c { r.list(nil); return }`), or
+// after every other use, keeps the fix it had before #404.
+func (g *Generator) changePureReceiverSeen(root ssa.Value, use pollution.UsageInfo, uses []pollution.UsageInfo) bool {
+	switch use.PureReceiver {
+	case pollution.NotPureReceiver, pollution.PureReceiverDefer:
 		return false
-	}
-	if use.Block == nil || useRepeatsAfter(g.cfg, use.Block, tracer.RootBlock(v.Root)) {
+	case pollution.PureReceiverGo:
 		return true
 	}
-	return slices.ContainsFunc(slices.Concat(v.AllUses, v.Hidden), func(other pollution.UsageInfo) bool {
+	if use.Block == nil || useRepeatsAfter(g.cfg, use.Block, tracer.RootBlock(root)) {
+		return true
+	}
+	return slices.ContainsFunc(uses, func(other pollution.UsageInfo) bool {
 		switch {
 		case other.Pos == use.Pos && other.Block == use.Block:
 			return false
-		case other.Block == nil || other.Block == use.Block || other.Block.Parent() != use.Block.Parent():
+		case other.Block == nil || other.Block.Parent() != use.Block.Parent():
 			return true
+		case other.Block == use.Block:
+			return other.Pos > use.Pos
 		}
-		return g.cfg.CanReach(use.Block, other.Block) || g.cfg.CanReach(other.Block, use.Block)
+		return g.cfg.CanReach(use.Block, other.Block)
 	})
 }
 
