@@ -189,7 +189,7 @@ Some reports have no fix on purpose. See [Automatic Fixes](#automatic-fixes).
 > Building gormreuse from source requires Go 1.27 or later.
 
 > [!CAUTION]
-> To prevent supply chain attacks, pin to a specific version tag instead of `@latest` in CI/CD pipelines (e.g., `@v0.25.0`).
+> To prevent supply chain attacks, pin to a specific version tag instead of `@latest` in CI/CD pipelines (e.g., `@v0.25.1`).
 
 <a id="mise"></a>
 <details>
@@ -198,7 +198,7 @@ Some reports have no fix on purpose. See [Automatic Fixes](#automatic-fixes).
 mise's `github` backend installs gormreuse directly from GitHub Releases. It needs no extra registry. It needs no Go toolchain either, because the binaries are prebuilt. Run it in the project root:
 
 ```bash
-mise use "github:mpyw/gormreuse@0.25.0"
+mise use "github:mpyw/gormreuse@0.25.1"
 gormreuse ./...
 ```
 
@@ -206,7 +206,7 @@ It pins the version in the project's `mise.toml`. So every checkout and CI run t
 
 ```toml
 [tools]
-"github:mpyw/gormreuse" = "0.25.0"
+"github:mpyw/gormreuse" = "0.25.1"
 ```
 
 Add `-g` to install it for every project on your machine instead.
@@ -271,7 +271,7 @@ go run github.com/mpyw/gormreuse/cmd/gormreuse@latest ./...
 No package manager? Grab the archive for your platform from [GitHub Releases](https://github.com/mpyw/gormreuse/releases):
 
 ```bash
-export VERSION=0.25.0
+export VERSION=0.25.1
 export OS=linux    # or darwin
 export ARCH=amd64  # or arm64
 export BASE_URL="https://github.com/mpyw/gormreuse/releases/download/v${VERSION}"
@@ -312,7 +312,7 @@ version: v2.15.0  # the golangci-lint release to build
 plugins:
   - module: github.com/mpyw/gormreuse
     import: github.com/mpyw/gormreuse/plugin
-    version: v0.25.0
+    version: v0.25.1
 ```
 
 2\. Turn it on in `.golangci.yml`. gormreuse has no settings, and any key under `settings` is an error:
