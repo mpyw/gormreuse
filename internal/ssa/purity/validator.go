@@ -93,7 +93,7 @@ func NewValidator(fn *ssa.Function, pureFuncs, immutableReturnFuncs *directive.D
 //   - Does not pollute *gorm.DB arguments (no non-pure method calls on them)
 //   - Does not let them escape
 //   - Does not write them directly: writes are the function's direct writes,
-//     stmtwrite.Writes of stmtwrite.Seeds, which its caller computes once
+//     which its caller takes from the per-pass stmtwrite.Cache (Cache.Of)
 //     (#405)
 //
 // Note: Pure functions MAY return mutable *gorm.DB values. The "pure" contract only
