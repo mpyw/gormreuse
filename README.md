@@ -2653,9 +2653,17 @@ func wrap3(db *gorm.DB) func() *gorm.DB {
 
 **Must NOT** write to an argument directly.
 
-A write into its `Statement`, or over the `*gorm.DB` itself, changes its query in place, as `Where` does. This includes a write through a local variable that holds the `Statement`, and a write into a map or a slice that the `Statement` holds.
+A write into its `Statement`, or over the `*gorm.DB` itself, changes its query in place, as `Where` does. This includes:
 
-The argument's `Error` and `RowsAffected` may be written. They hold the outcome of a query, as `AddError` does. So may a local copy of the `Statement`.
+- a write through a variable that holds the `Statement`, also one a closure captures;
+- a write into a map or a slice that the `Statement` holds, also with `delete`, `clear` or `copy`;
+- a write into a `*gorm.Statement` parameter.
+
+These may be written:
+
+- The argument's `Error` and `RowsAffected`. They hold the outcome of a query, as `AddError` does.
+- Its `Config`. Every handle of the connection shares it, and it holds no clause.
+- The fields of a local copy of the `*gorm.DB` or of the `Statement`. But the maps and slices of such a copy are still the argument's, so a write into them is reported.
 
 Message: `pure function pollutes *gorm.DB argument by writing to it directly`
 
@@ -2669,9 +2677,11 @@ func mark(db *gorm.DB) {
     st := db.Statement
     st.Selects = []string{"id"}      // reported
     *db = gorm.DB{}                  // reported
+    delete(db.Statement.Clauses, "WHERE") // reported
     db.Error = nil                   // OK
     copied := *db.Statement
     copied.Distinct = true           // OK: a local copy
+    copied.Clauses["X"] = c          // reported: the map is shared
 }
 ```
 
@@ -3879,7 +3889,7 @@ func caller(db *gorm.DB) {
 
 The same holds in a closure, as in `func() { tx.Where("a") }()`. It also holds in a helper the function passes the parameter to, as in `applyTenant(tx)`.
 
-A write into the parameter's `Statement` changes it in place too. That includes a write into a map or a slice the `Statement` holds, as in `tx.Statement.Clauses["X"] = c`.
+A write into the parameter's `Statement` changes it in place too. That includes a write into a map or a slice the `Statement` holds, as in `tx.Statement.Clauses["X"] = c` or `delete(tx.Statement.Clauses, "WHERE")`. It also includes handing such a map or slice to a function, a channel or another map.
 
 </td></tr>
 <tr><td>
