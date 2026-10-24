@@ -55,6 +55,7 @@ func validatePureFuncs(
 	// add violations and returned parameters, so this reaches a fixed point,
 	// whatever order the functions are validated in.
 	callers := pureCallers(targets, funcVars)
+	writes := purity.ValidatorDirectWrites{}
 	queue := slices.Clone(targets)
 	queued := make(map[*ssa.Function]bool, len(targets))
 	for _, fn := range targets {
@@ -69,7 +70,7 @@ func validatePureFuncs(
 		}
 		changed := false
 		finished := guard.run("pure", fn, func() {
-			validator := purity.NewValidator(fn, pureFuncs, immutableReturnFuncs, verdicts, funcVars)
+			validator := purity.NewValidator(fn, pureFuncs, immutableReturnFuncs, verdicts, funcVars).UseDirectWrites(writes)
 			// Only a definitive violation revokes pure-trust at call sites;
 			// conservative func-arg violations do not (avoids FP cascades).
 			if slices.ContainsFunc(validator.Validate(), func(v purity.Violation) bool { return v.Definitive }) {
@@ -106,7 +107,7 @@ func validatePureFuncs(
 	reported := make(map[purity.Violation]bool)
 	for _, fn := range targets {
 		guard.run("pure", fn, func() {
-			for _, v := range purity.NewValidator(fn, pureFuncs, immutableReturnFuncs, verdicts, funcVars).Validate() {
+			for _, v := range purity.NewValidator(fn, pureFuncs, immutableReturnFuncs, verdicts, funcVars).UseDirectWrites(writes).Validate() {
 				if reported[v] {
 					continue
 				}

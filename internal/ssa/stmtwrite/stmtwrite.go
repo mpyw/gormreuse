@@ -2,8 +2,8 @@
 // inferred immutable-param (#405): does a function's body write the query of
 // its *gorm.DB parameter through a direct path?
 //
-// A direct path starts at the parameter itself and goes only through its
-// fields and the maps and slices its Statement holds. These are writes:
+// A direct path starts at a *gorm.DB parameter itself and goes only through
+// its fields and the maps and slices its Statement holds. These are writes:
 //
 //   - `*db = v` and `db.Statement = v`;
 //   - `db.Statement.F = v`, also into a field of a field;
@@ -21,7 +21,8 @@
 // A handle read from the memory is not followed: `db.Statement.DB` is the
 // parent of a Session or Debug copy that shares the Statement, not the
 // argument. Any other path is not followed either, and is a known
-// limitation: a variable
+// limitation: a *gorm.Statement parameter, which may be a fresh Statement
+// that no argument holds, a variable
 // that is assigned again, captured or has its address taken, a copy such as
 // `c := *db.Statement`, a Session or Debug result, a parameter that holds a
 // *gorm.DB (a **gorm.DB, a slice, a map or a struct), an append result, a
@@ -68,7 +69,7 @@ type walker struct {
 }
 
 // Writes returns the instructions that write, through a direct path, the
-// query memory of handles: the parameters and the values DirectHandles
+// query memory of handles: the parameters and the values directHandles
 // gives.
 func Writes(handles []ssa.Value) map[ssa.Instruction]bool {
 	w := &walker{writes: map[ssa.Instruction]bool{}, seen: map[step]bool{}}
@@ -88,14 +89,30 @@ func WritesThrough(v ssa.Value) bool {
 	return len(w.writes) > 0
 }
 
-// DirectHandles returns param and the values that are surely param: the
+// Seeds returns the values that are surely a *gorm.DB parameter of fn: each
+// such parameter and the values directHandles gives for it. A method's
+// receiver is not an argument.
+func Seeds(fn *ssa.Function) []ssa.Value {
+	var seeds []ssa.Value
+	for i, p := range fn.Params {
+		if i == 0 && fn.Signature.Recv() != nil {
+			continue
+		}
+		if _, ptr := types.Unalias(p.Type()).(*types.Pointer); ptr && typeutil.IsGormDB(p.Type()) { // rejects **gorm.DB
+			seeds = append(seeds, directHandles(p)...)
+		}
+	}
+	return seeds
+}
+
+// directHandles returns param and the values that are surely param: the
 // loads of the variable that holds it when a closure captures it. go/ssa
 // keeps such a parameter in a variable of its name, stored in the entry
 // block, that the function and its closures load. The variable counts only
 // when the parameter is the one value stored into it, and its address goes
 // to nothing but loads and closures. A variable of the body that is assigned
 // the parameter, as in `var x *gorm.DB; …; x = db`, is not one.
-func DirectHandles(param *ssa.Parameter) []ssa.Value {
+func directHandles(param *ssa.Parameter) []ssa.Value {
 	handles := []ssa.Value{param}
 	for _, r := range *param.Referrers() {
 		st, ok := r.(*ssa.Store)
@@ -157,17 +174,10 @@ func (w *walker) pushLoaded(v ssa.Value) {
 	case *types.Slice:
 		w.push(step{v: v, k: sliceRef})
 	case *types.Pointer:
-		if IsHandle(t) && typeutil.IsGormStatement(t) {
+		if typeutil.IsGormStatement(t) { // a pointer field, so not **gorm.Statement
 			w.push(step{v: v, k: handle})
 		}
 	}
-}
-
-// IsHandle reports whether t is *gorm.DB or *gorm.Statement: a parameter
-// whose query a direct path writes.
-func IsHandle(t types.Type) bool {
-	_, ptr := types.Unalias(t).(*types.Pointer)
-	return ptr && (typeutil.IsGormDB(t) || typeutil.IsGormStatement(t)) // both reject **T
 }
 
 func (w *walker) run() {

@@ -2653,14 +2653,14 @@ func wrap3(db *gorm.DB) func() *gorm.DB {
 
 **Must NOT** write to an argument directly.
 
-A write into its `Statement`, or over the `*gorm.DB` itself, changes its query in place, as `Where` does. Only a direct path from a `*gorm.DB` or `*gorm.Statement` parameter counts:
+A write into its `Statement`, or over the `*gorm.DB` itself, changes its query in place, as `Where` does. Only a direct path from a `*gorm.DB` parameter counts:
 
 - `*db = v` and `db.Statement = v`;
 - a field of the `Statement`, as in `db.Statement.Distinct = true`;
 - a map or a slice the `Statement` holds: `db.Statement.Clauses[k] = v`, `db.Statement.Selects[i] = v`, and `delete`, `clear` or `copy` into one;
 - the same through the parameter in a closure, a `go` or a `defer` statement in the body.
 
-A write through anything else is not followed, since it may write memory the argument does not hold: `db.Statement.DB`, which is the parent of a `Session` copy that shares the `Statement`, a local variable that is assigned again, captured or has its address taken, a copy such as `c := *db.Statement`, a `Session` or `Debug` result, a parameter that holds a `*gorm.DB`, an `append` result, a lookup, a conversion, a merge, or a call such as `sort.Strings(db.Statement.Selects)` (see [Known Limitations](#known-limitations)).
+A write through anything else is not followed, since it may write memory the argument does not hold: `db.Statement.DB`, which is the parent of a `Session` copy that shares the `Statement`, a `*gorm.Statement` parameter, which may be a fresh `Statement`, a local variable that is assigned again, captured or has its address taken, a copy such as `c := *db.Statement`, a `Session` or `Debug` result, a parameter that holds a `*gorm.DB`, an `append` result, a lookup, a conversion, a merge, or a call such as `sort.Strings(db.Statement.Selects)` (see [Known Limitations](#known-limitations)).
 
 These may be written:
 
@@ -5742,7 +5742,7 @@ load("b") // not reported
 </td><td>A call through the returned func value has no known callee</td></tr>
 <tr><td><!-- fixtures: pswNotDirect, pswHolderParams, pswReassignedParam, pswInferNotDirect -->
 
-A pure function, or a helper inferred `immutable-param`, that writes the argument's query through anything but a direct path: a local variable, a copy, a `Session` or `Debug` result, a holder parameter, an `append` result, or a call:
+A pure function, or a helper inferred `immutable-param`, that writes the argument's query through anything but a direct path: a `*gorm.Statement` parameter, a local variable, a copy, a `Session` or `Debug` result, a holder parameter, an `append` result, or a call:
 
 ```go
 //gormreuse:pure

@@ -398,10 +398,8 @@ func inferParamUses(fn *ssa.Function, declared map[*ssa.Function]bool, finisherO
 	})
 	held, vars := inferHeldParams(fn, instrs, tree)
 	direct := make(map[ssa.Value]bool)
-	for _, p := range fn.Params {
-		for _, h := range stmtwrite.DirectHandles(p) {
-			direct[h] = true
-		}
+	for _, h := range stmtwrite.Seeds(fn) {
+		direct[h] = true
 	}
 
 	for v := range vars {

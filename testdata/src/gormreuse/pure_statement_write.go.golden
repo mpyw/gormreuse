@@ -64,11 +64,6 @@ func pswBuiltins(db *gorm.DB) {
 	copy(db.Statement.Selects, []string{"id"}) // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
 }
 
-//gormreuse:pure
-func pswStatementParam(db *gorm.DB, st *gorm.Statement) {
-	st.Distinct = true // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
-}
-
 // pswCaptured writes through the captured parameter in a closure, a nested
 // closure, a go and a defer statement, and a deferred builtin.
 //
@@ -229,7 +224,7 @@ func pswCallerTrusted(db *gorm.DB) {
 // [LIMITATION]
 //
 //gormreuse:pure
-func pswNotDirect(db *gorm.DB, other *gorm.DB, c bool, b []byte) {
+func pswNotDirect(db *gorm.DB, other *gorm.DB, c bool, b []byte, sp *gorm.Statement) {
 	st := db.Statement
 	func() { st.Distinct = true }() // a captured variable
 	cp := *db.Statement
@@ -253,6 +248,7 @@ func pswNotDirect(db *gorm.DB, other *gorm.DB, c bool, b []byte) {
 	db.Statement.DB.Statement.Distinct = true // Statement.DB may be a parent
 	db.Statement.DB.Statement = nil
 	*db.Statement.DB = gorm.DB{}
+	sp.Distinct = true // a *gorm.Statement parameter may be a fresh Statement
 }
 
 type pswStatement gorm.Statement
@@ -299,7 +295,7 @@ func pswConfig(db *gorm.DB) {
 
 func pswCallerNotDirect(db *gorm.DB) {
 	q := db.Where("x")
-	pswNotDirect(q, nil, false, nil) // missed: pswNotDirect is still trusted
+	pswNotDirect(q, nil, false, nil, &gorm.Statement{}) // pswNotDirect is still trusted
 	q.Find(nil)
 }
 
