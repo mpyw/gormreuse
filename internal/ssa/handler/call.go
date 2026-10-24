@@ -909,9 +909,8 @@ func (u siteUse) escape(roots []ssa.Value) {
 // composite literal all ask about it.
 func containerEscapes(container ssa.Value, ctx *Context) bool {
 	base := containerBase(container)
-	switch base.(type) {
-	case *ssa.Alloc, *ssa.MakeMap, *ssa.MakeSlice:
-	default:
+	origins, local := containerOrigins(container)
+	if !local {
 		return true
 	}
 	built := map[types.Type]bool{}
@@ -926,6 +925,9 @@ func containerEscapes(container ssa.Value, ctx *Context) bool {
 		built[addressedType(a.Type())] = true
 		key.WriteString(types.TypeString(a.Type(), nil))
 	}
+	for _, o := range origins {
+		fmt.Fprintf(&key, "|%p", o)
+	}
 	k := containerKey{base, key.String()}
 	if escapes, done := ctx.containers[k]; done {
 		return escapes
@@ -937,7 +939,7 @@ func containerEscapes(container ssa.Value, ctx *Context) bool {
 	if ctx.CurrentFn.Pkg != nil {
 		pkg = ctx.CurrentFn.Pkg.Pkg
 	}
-	escapes := (&containerWalk{vars: ctx.RootTracer.FuncVars(), pkg: pkg, built: built, seen: map[ssa.Value]bool{}}).escapes(base)
+	escapes := (&containerWalk{vars: ctx.RootTracer.FuncVars(), pkg: pkg, built: built, seen: map[ssa.Value]bool{}}).escapes(origins)
 	ctx.containers[k] = escapes
 	return escapes
 }
@@ -950,6 +952,71 @@ func addressedType(t types.Type) types.Type {
 		return ptr.Elem()
 	}
 	return t
+}
+
+// containerOrigins returns the local containers that the container addr
+// writes into may be: what it is an element, a field, a slice, a conversion
+// or a merge of, the result of append (its operands), and what was stored
+// into a local variable it is loaded from. They are allocations of the
+// function: an Alloc, a MakeSlice or a MakeMap. local is false when addr may
+// also be a container that code outside the function made or may hold, such
+// as a parameter, a global, a captured variable or what a call returned. A
+// nil, as in `var fs []T`, holds nothing.
+func containerOrigins(addr ssa.Value) (origins []ssa.Value, local bool) {
+	seen := map[ssa.Value]bool{}
+	local = true
+	var visit func(v ssa.Value)
+	visit = func(v ssa.Value) {
+		if !local || seen[v] {
+			return
+		}
+		seen[v] = true
+		switch v := v.(type) {
+		case *ssa.IndexAddr:
+			visit(v.X)
+		case *ssa.FieldAddr:
+			visit(v.X)
+		case *ssa.Slice:
+			visit(v.X)
+		case *ssa.ChangeType:
+			visit(v.X)
+		case *ssa.Phi:
+			for _, e := range v.Edges {
+				visit(e)
+			}
+		case *ssa.UnOp:
+			// A load of a local variable is what was stored into it. Any
+			// other load, as through a parameter, comes from outside.
+			alloc, ok := v.X.(*ssa.Alloc)
+			if !ok || v.Op != token.MUL {
+				local = false
+				return
+			}
+			for _, r := range *alloc.Referrers() {
+				if store, ok := r.(*ssa.Store); ok && store.Addr == alloc {
+					visit(store.Val)
+				}
+			}
+		case *ssa.Call:
+			// append returns its first operand, or a new array that holds
+			// its elements and those of the varargs.
+			b, ok := v.Call.Value.(*ssa.Builtin)
+			if !ok || b.Name() != "append" {
+				local = false
+				return
+			}
+			for _, arg := range v.Call.Args {
+				visit(arg)
+			}
+		case *ssa.Const:
+		case *ssa.Alloc, *ssa.MakeSlice, *ssa.MakeMap:
+			origins = append(origins, v)
+		default:
+			local = false
+		}
+	}
+	visit(addr)
+	return origins, local
 }
 
 // containerKey is a container and the types a literal is stored into it
@@ -1028,10 +1095,12 @@ func containerTypeHoldsFunc(t types.Type, pkg *types.Package, built, seen map[ty
 	return false
 }
 
-// escapes reports whether code outside the function may get base, or a
-// function value read out of it.
-func (w *containerWalk) escapes(base ssa.Value) bool {
-	w.push(base)
+// escapes reports whether code outside the function may get one of
+// origins, or a function value read out of it.
+func (w *containerWalk) escapes(origins []ssa.Value) bool {
+	for _, o := range origins {
+		w.push(o)
+	}
 	for len(w.work) > 0 {
 		c := w.work[len(w.work)-1]
 		w.work = w.work[:len(w.work)-1]
@@ -1064,19 +1133,22 @@ func (w *containerWalk) useEscapes(c ssa.Value, r ssa.Instruction) bool {
 		}
 		// A copy into a local variable, or into a local container, is the
 		// container too.
-		into := containerBase(r.Addr)
-		switch into.(type) {
-		case *ssa.Alloc, *ssa.MakeMap, *ssa.MakeSlice:
-			w.push(into)
-		default:
+		into, local := containerOrigins(r.Addr)
+		if !local {
 			return true
+		}
+		for _, o := range into {
+			w.push(o)
 		}
 	case *ssa.MapUpdate:
 		if r.Map != c {
-			if _, local := r.Map.(*ssa.MakeMap); !local {
+			into, local := containerOrigins(r.Map)
+			if !local {
 				return true
 			}
-			w.push(r.Map)
+			for _, o := range into {
+				w.push(o)
+			}
 		}
 	case *ssa.UnOp:
 		// A load through the address of an element is the element. A load
