@@ -12,16 +12,14 @@ import (
 )
 
 // =============================================================================
-// PURE FUNCTIONS THAT WRITE TO THE ARGUMENT DIRECTLY (#405)
+// PURE FUNCTIONS THAT WRITE THE PARAMETER'S QUERY THROUGH A DIRECT PATH (#405)
 //
-// A write into the argument's Statement, or over the *gorm.DB itself, changes
-// its query in place, as db.Where does. So it breaks the pure contract, and
-// callers stop trusting the function. The query's outcome (Error,
-// RowsAffected) and the scalar fields of a local copy of the Statement may be
-// written. The maps and slices of such a copy are still the argument's.
+// A write into the parameter's Statement, or over the *gorm.DB itself,
+// changes its query in place, as db.Where does. So it breaks the pure
+// contract, and callers stop trusting the function. Only a direct path from
+// the parameter counts: its fields, and the maps and slices its Statement
+// holds, also in a closure, a go or a defer statement in the body.
 // =============================================================================
-
-type pswHolder struct{ db *gorm.DB }
 
 //gormreuse:pure
 func pswDistinct(db *gorm.DB) {
@@ -34,14 +32,18 @@ func pswClauses(db *gorm.DB) {
 }
 
 //gormreuse:pure
-func pswViaLocal(db *gorm.DB) {
-	st := db.Statement
-	st.Distinct = true // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
+func pswSelects(db *gorm.DB) {
+	db.Statement.Selects = []string{"id"} // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
+	db.Statement.Selects[0] = "id"        // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
 }
 
+// pswRegister names the Statement in a local that go/ssa keeps in a
+// register: it is the same value, so the path is direct.
+//
 //gormreuse:pure
-func pswSelects(db *gorm.DB) {
-	db.Statement.Selects = append(db.Statement.Selects, "id") // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
+func pswRegister(db *gorm.DB) {
+	st := db.Statement
+	st.Distinct = true // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
 }
 
 //gormreuse:pure
@@ -50,61 +52,16 @@ func pswOverwrite(db *gorm.DB) {
 }
 
 //gormreuse:pure
-func pswViaHolder(h pswHolder) {
-	h.db.Statement.Distinct = true // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
+func pswReplaceStatement(db *gorm.DB) {
+	db.Statement = nil // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
 }
 
 //gormreuse:pure
-func pswViaPointer(pq **gorm.DB) {
-	(*pq).Statement.Table = "t" // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
-}
-
-//gormreuse:pure
-func pswInClosure(db *gorm.DB) {
-	func() {
-		db.Statement.Distinct = true // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
-	}()
-}
-
-//gormreuse:pure
-func pswCopiedHandle(db *gorm.DB) {
-	c := *db
-	c.Statement.Distinct = true // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
-}
-
-//gormreuse:pure
-func pswCapturedStatement(db *gorm.DB) {
-	st := db.Statement
-	func() {
-		st.Distinct = true // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
-	}()
-}
-
-// The write may not reach the argument on every path, so it is not counted.
-// [LIMITATION]
-//
-//gormreuse:pure
-func pswCapturedStatementVar(db *gorm.DB) {
-	st := db.Statement
-	func() {
-		st.Distinct = true
-	}()
-	st = nil
-	_ = st
-}
-
-//gormreuse:pure
-func pswLocalCopyMap(db *gorm.DB) {
-	c := *db.Statement
-	c.Distinct = true
-	c.Clauses["X"] = 1 // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
-}
-
-//gormreuse:pure
-func pswLocalCopySlice(db *gorm.DB) {
-	c := *db.Statement
-	c.Distinct = true
-	c.Selects[0] = "id" // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
+func pswBuiltins(db *gorm.DB) {
+	delete(db.Statement.Clauses, "WHERE")      // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
+	clear(db.Statement.Clauses)                // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
+	clear(db.Statement.Selects)                // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
+	copy(db.Statement.Selects, []string{"id"}) // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
 }
 
 //gormreuse:pure
@@ -113,79 +70,28 @@ func pswStatementParam(db *gorm.DB, st *gorm.Statement) {
 }
 
 //gormreuse:pure
-func pswDelete(db *gorm.DB) {
-	delete(db.Statement.Clauses, "WHERE") // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
+func pswStatementDB(db *gorm.DB) {
+	db.Statement.DB.Statement.Distinct = true // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
 }
 
-//gormreuse:pure
-func pswClear(db *gorm.DB) {
-	clear(db.Statement.Clauses) // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
-}
-
-//gormreuse:pure
-func pswCopyInto(db *gorm.DB) {
-	copy(db.Statement.Selects, []string{"id"}) // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
-}
-
-//gormreuse:pure
-func pswMerged(db *gorm.DB, other *gorm.DB, c bool) {
-	st := other.Statement
-	if c {
-		st = db.Statement
-	}
-	st.Distinct = true // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
-}
-
-//gormreuse:pure
-func pswLocalCopyValue(db *gorm.DB) {
-	c := *db.Statement
-	c.Clauses["X"] = 1 // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
-}
-
-//gormreuse:pure
-func pswArrayParam(arr [1]*gorm.DB) {
-	arr[0].Statement.Distinct = true // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
-}
-
-//gormreuse:pure
-func pswMapParam(m map[string]*gorm.DB) {
-	m["a"].Statement.Distinct = true // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
-}
-
-type pswStatement gorm.Statement
-
-//gormreuse:pure
-func pswConverted(db *gorm.DB) {
-	st := (*pswStatement)(db.Statement)
-	st.Distinct = true // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
-}
-
-//gormreuse:pure
-func pswLoopSlice(db *gorm.DB, n int) {
-	s := db.Statement.Selects
-	for i := 0; i < n; i++ {
-		s = []string(pswStrs(s)[1:])
-	}
-	s[0] = "id" // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
-}
-
-// The write may not reach the argument on every path, so it is not counted.
-// [LIMITATION]
+// pswCaptured writes through the captured parameter in a closure, a nested
+// closure, a go and a defer statement, and a deferred builtin.
 //
 //gormreuse:pure
-func pswLoopMerged(db *gorm.DB, n int) {
-	s := []string{"a", "b"}
-	for i := 0; i < n; i++ {
-		if i == 1 {
-			s = db.Statement.Selects
-		}
-		s = s[1:]
-	}
-	s[0] = "id"
+func pswCaptured(db *gorm.DB) {
+	func() {
+		db.Statement.Distinct = true // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
+	}()
+	func() {
+		func() { db.Statement.Selects = nil }() // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
+	}()
+	go func() { delete(db.Statement.Clauses, "X") }() // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
+	defer func() { db.Statement.Table = "" }()        // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
+	defer delete(db.Statement.Clauses, "Y")           // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
 }
 
-// pswSelfStore: storing the argument into its own memory is reported once, as
-// the escape.
+// pswSelfStore and pswOverwriteFrom store the argument into memory it
+// reaches. Each is reported once, as the escape.
 //
 //gormreuse:pure
 func pswSelfStore(db *gorm.DB) {
@@ -197,345 +103,8 @@ func pswOverwriteFrom(a, b *gorm.DB) {
 	*a = *b // want `pure function leaks \*gorm\.DB argument via store through a pointer`
 }
 
-// pswSessionShared writes the Statement of a Session or Debug copy, which
-// shares the argument's Statement (#405 review).
-//
-//gormreuse:pure
-func pswSessionShared(db *gorm.DB) {
-	x := db.Session(&gorm.Session{})
-	x.Statement.Distinct = true                                  // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
-	db.Session(&gorm.Session{}).Statement.Clauses["X"] = 1       // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
-	db.Debug().Statement.Selects = nil                           // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
-	db.Session(&gorm.Session{DryRun: true}).Statement.Table = "" // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
-}
-
-// pswAppendResliced appends to a slice of the Statement's Selects, which
-// overwrites its elements in place.
-//
-//gormreuse:pure
-func pswAppendResliced(db *gorm.DB) {
-	_ = append(db.Statement.Selects[:0], "x") // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
-}
-
-// pswAppendShorter appends to a reslice of Selects cut at another slice's
-// length, which may be below its own.
-//
-//gormreuse:pure
-func pswAppendShorter(db *gorm.DB, other []string) {
-	_ = append(db.Statement.Selects[:len(other)], "x") // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
-}
-
-// pswConvertedSlice writes through a slice converted to an array pointer, and
-// through a map boxed in an interface and asserted back.
-//
-//gormreuse:pure
-func pswConvertedSlice(db *gorm.DB) {
-	(*[1]string)(db.Statement.Selects)[0] = "x" // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
-	var m any = db.Statement.Clauses
-	m.(map[string]interface{})["X"] = 1 // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
-}
-
-// pswHandsOnMemory hands the Statement's map and slice to functions that
-// change them. A hand-off to a call is not followed, as it was not before
-// #405: the callee's body would decide it.
-// [LIMITATION]
-//
-//gormreuse:pure
-func pswHandsOnMemory(db *gorm.DB) {
-	pswFill(db.Statement.Clauses)
-	sort.Strings(db.Statement.Selects)
-}
-
-// pswCapturedLocalCopy writes the shared map of a local copy in a closure.
-//
-//gormreuse:pure
-func pswCapturedLocalCopy(db *gorm.DB) {
-	c := *db.Statement
-	func() {
-		c.Clauses["X"] = 1 // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
-	}()
-}
-
-// pswReplacedLater replaces the copy's map only after the write, so the write
-// reaches the argument.
-//
-// The write may not reach the argument on every path, so it is not counted.
-// [LIMITATION]
-//
-//gormreuse:pure
-func pswReplacedLater(db *gorm.DB, cond bool) {
-	c := *db.Statement
-	if cond {
-		c.Clauses = map[string]interface{}{}
-	}
-	c.Clauses["X"] = 1
-}
-
-// pswSessionNewDB writes the Statement of a NewDB Session, which gorm does
-// not clone either. The Session config reader takes NewDB as isolating,
-// which holds for a chain on the copy, not for a write to its Statement.
-// [LIMITATION]
-//
-//gormreuse:pure
-func pswSessionNewDB(db *gorm.DB) {
-	db.Session(&gorm.Session{NewDB: true}).Statement.Distinct = true
-}
-
-// pswBoxedHandedOn hands the Statement's map, boxed in an interface, to a
-// function that asserts it back and writes it. A boxed value is followed only
-// into a type assertion in the function.
-// [LIMITATION]
-//
-//gormreuse:pure
-func pswBoxedHandedOn(db *gorm.DB) {
-	pswFillAny(db.Statement.Clauses)
-}
-
-func pswFillAny(v any) { v.(map[string]interface{})["X"] = 1 }
-
-// pswPreloads writes the slices that the Statement's Preloads map holds:
-// through a lookup, a comma-ok lookup and a range over the map.
-//
-//gormreuse:pure
-func pswPreloads(db *gorm.DB) {
-	db.Statement.Preloads["A"][0] = 1 // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
-	if v, ok := db.Statement.Preloads["B"]; ok {
-		v[0] = 1 // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
-	}
-	for _, v := range db.Statement.Preloads {
-		v[0] = 1 // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
-	}
-}
-
-// pswBoxedMerged asserts back a map boxed in an interface that a merge may
-// hold.
-//
-// The write may not reach the argument on every path, so it is not counted.
-// [LIMITATION]
-//
-//gormreuse:pure
-func pswBoxedMerged(db *gorm.DB, other any, c bool) {
-	var m any = db.Statement.Clauses
-	if c {
-		m = other
-	}
-	m.(map[string]interface{})["X"] = 1
-}
-
-// pswStoredInClosure stores the map into a variable inside a closure, and
-// writes it after.
-//
-//gormreuse:pure
-func pswStoredInClosure(db *gorm.DB) {
-	var c map[string]interface{}
-	func() { c = db.Statement.Clauses }()
-	c["X"] = 1 // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
-}
-
-// pswReplacedInClosure replaces the copy's map in a closure, which may not
-// run before the write, and pswReplacedAfter only after the write.
-//
-// The write may not reach the argument on every path, so it is not counted.
-// [LIMITATION]
-//
-//gormreuse:pure
-func pswReplacedInClosure(db *gorm.DB) {
-	c := *db.Statement
-	func() { c.Clauses = map[string]interface{}{} }()
-	c.Clauses["X"] = 1
-}
-
-//gormreuse:pure
-func pswReplacedAfter(db *gorm.DB) {
-	c := *db.Statement
-	c.Clauses["X"] = 1 // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
-	c.Clauses = nil
-}
-
-// pswLocalArray stores the map into an element of a local array at an index
-// that is not a constant, so a read of any element may be it.
-//
-//gormreuse:pure
-func pswLocalArrayAnyIndex(db *gorm.DB, i int) {
-	var arr [2]map[string]interface{}
-	arr[i] = db.Statement.Clauses
-	arr[0]["X"] = 1 // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
-}
-
-// pswStatementValue writes the map of a gorm.Statement passed by value: the
-// map is still the caller's.
-//
-//gormreuse:pure
-func pswStatementValue(db *gorm.DB, st gorm.Statement) {
-	st.Clauses["X"] = 1 // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
-}
-
-// pswLiteralCall hands the map to a function literal, which changes it.
-// [LIMITATION]
-//
-//gormreuse:pure
-func pswLiteralCall(db *gorm.DB) {
-	func(m map[string]interface{}) { m["X"] = 1 }(db.Statement.Clauses)
-}
-
-// pswCopyByAddress hands the address of a local copy to a function, which
-// reaches the maps the copy shares.
-//
-//gormreuse:pure
-func pswCopyByAddress(db *gorm.DB) {
-	c := *db.Statement
-	pswTakeStatement(&c) // want `pure function passes \*gorm\.DB argument to non-pure function pswTakeStatement`
-}
-
-func pswTakeStatement(st *gorm.Statement) { st.Clauses["X"] = 1 }
-
-// pswAddressHandedOn hands the address of a Statement field to functions
-// that write through it, and calls methods of the Statement's SQL builder.
-// [LIMITATION]
-//
-//gormreuse:pure
-func pswAddressHandedOn(db *gorm.DB, b []byte) {
-	_ = json.Unmarshal(b, &db.Statement.Selects)
-	_, _ = fmt.Sscan("t", &db.Statement.Table)
-	db.Statement.SQL.WriteString("DROP")
-	db.Statement.SQL.Reset()
-}
-
-// pswKeyedByHandle uses the argument as a map key. The map is the package's,
-// not the argument's memory.
-//
-//gormreuse:pure
-func pswKeyedByHandle(db *gorm.DB) {
-	pswPerDB[db]["n"]++
-	if m, ok := pswPerDB[db]; ok {
-		m["n"] = 0
-	}
-}
-
-var pswPerDB = map[*gorm.DB]map[string]int{}
-
-var pswMk func(*gorm.DB) *gorm.DB
-
-// pswDynHandle writes the Statement of a handle that a function value
-// returned. It may not be the argument, so it stays the warning for passing
-// the argument to a function that is not pure.
-//
-//gormreuse:pure
-func pswDynHandle(db *gorm.DB) {
-	q := pswMk(db) // want `pure function passes \*gorm\.DB argument to non-pure function \(closure\)`
-	q.Statement.Distinct = true
-}
-
-// pswCopyReplaced writes through local copies whose handle was replaced
-// first, and pswCapturedReplaced through a captured variable reassigned
-// before the closure is made. None reaches the argument.
-//
-//gormreuse:pure
-func pswCopyReplaced(db *gorm.DB) {
-	c := *db
-	c.Statement = &gorm.Statement{}
-	c.Statement.Distinct = true
-	s := *db.Statement
-	s.DB = &gorm.DB{}
-	s.DB.Statement = nil
-}
-
-//gormreuse:pure
-func pswCapturedReplaced(db *gorm.DB) {
-	x := db.Statement
-	x = &gorm.Statement{}
-	func() { x.Distinct = true }()
-}
-
-// pswClone appends to a reslice with no room, which always makes a new
-// array, then writes the new one.
-//
-//gormreuse:pure
-func pswClone(db *gorm.DB) []string {
-	s := append(db.Statement.Selects[:0:0], db.Statement.Selects...)
-	s[0] = "x"
-	t := append(db.Statement.Selects[1:1:1], "x")
-	t[0] = "y"
-	return s
-}
-
-// pswHolderMerged writes through a merge of two holder parameters, and
-// pswNodeParam through a parameter of a type that refers to itself.
-//
-//gormreuse:pure
-func pswHolderMerged(a, b **gorm.DB, c bool) {
-	p := a
-	if c {
-		p = b
-	}
-	(*p).Statement.Distinct = true // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
-}
-
-type pswNode struct {
-	next *pswNode
-	db   *gorm.DB
-}
-
-//gormreuse:pure
-func pswNodeParam(n *pswNode) {
-	n.db.Statement.Distinct = true // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
-}
-
-type pswClauseMap map[string]interface{}
-
-func (pswClauseMap) String() string { return "" }
-
-// pswBoxedTwice boxes the map in one interface, converts it to another, and
-// asserts it back.
-//
-//gormreuse:pure
-func pswBoxedTwice(db *gorm.DB) {
-	var st fmt.Stringer = pswClauseMap(db.Statement.Clauses)
-	var a any = st
-	a.(pswClauseMap)["X"] = 1 // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
-}
-
-// pswUnrelatedLoopMerged merges Selects with a slice that a loop steps, which
-// is not the argument's.
-// [LIMITATION]
-//
-//gormreuse:pure
-func pswUnrelatedLoopMerged(db *gorm.DB, n int, c bool) {
-	t := []string{"a"}
-	for i := 0; i < n; i++ {
-		t = t[1:]
-	}
-	s := db.Statement.Selects
-	if c {
-		s = t
-	}
-	s[0] = "x"
-}
-
-// pswReplacedDeep replaces the copy's map in a nested branch.
-// [LIMITATION]
-//
-//gormreuse:pure
-func pswReplacedDeep(db *gorm.DB, a, b bool) {
-	c := *db.Statement
-	if a {
-		c.Clauses = map[string]interface{}{}
-		if b {
-			c.Distinct = true
-		}
-		pswProbeLog("replaced")
-	}
-	c.Clauses["X"] = 1
-}
-
-func pswCallerHandsOn(db *gorm.DB) {
-	q := db.Where("x")
-	pswHandsOnMemory(q) // missed: pswHandsOnMemory is still trusted
-	q.Find(nil)
-}
-
-// pswCallerSubquery: mark(sub) changes the subquery that outer reads, as
-// it does without the directive.
+// pswCallerSubquery: pswDistinct(sub) changes the subquery that outer reads,
+// as it would without the directive.
 func pswCallerSubquery(db *gorm.DB) {
 	sub := db.Session(&gorm.Session{}).Model(nil).Select("id")
 	outer := db.Session(&gorm.Session{}).Where("id IN (?)", sub)
@@ -543,8 +112,8 @@ func pswCallerSubquery(db *gorm.DB) {
 	outer.Find(nil) // want `\*gorm\.DB reused: mutable root passed as a query argument`
 }
 
-// pswCallerSecondBranch: the call is a branch again, so the later query is the
-// second one.
+// pswCallerSecondBranch: pswOverwrite is no longer trusted, so passing q to
+// it is a branch.
 func pswCallerSecondBranch(db *gorm.DB) {
 	q := db.Where("x")
 	pswOverwrite(q)
@@ -562,97 +131,21 @@ func pswOutcome(db *gorm.DB) {
 }
 
 //gormreuse:pure
-func pswLocalCopy(db *gorm.DB) bool {
-	c := *db.Statement
-	c.Distinct = true
-	return c.Distinct
+func pswRead(db *gorm.DB) bool {
+	return db.Statement.Distinct && len(db.Statement.Selects) > 0
 }
 
-//gormreuse:pure
-func pswCopiedHandleOutcome(db *gorm.DB) error {
-	c := *db
-	c.Error = nil
-	return c.Error
-}
-
-type pswHolderPtr struct {
-	db *gorm.DB
-	n  int
-}
-
-//gormreuse:pure
-func pswHolderScalar(h *pswHolderPtr) {
-	h.n = 1
-}
-
-//gormreuse:pure
-func pswCopyFrom(db *gorm.DB) []string {
-	dst := make([]string, 1)
-	copy(dst, db.Statement.Selects)
-	return dst
-}
-
-//gormreuse:pure
-func pswLocalArray(db *gorm.DB) {
-	var arr [1]*gorm.DB
-	arr[0] = nil
-	s := arr[:]
-	s[0] = nil
-	_ = db
-}
-
-//gormreuse:pure
-func pswCapturedReassigned(db *gorm.DB) {
-	st := db.Statement
-	func() {
-		st = nil
-	}()
-	_ = st
-}
-
-// pswRebindPointer changes the caller's variable, not the *gorm.DB it holds.
-//
-//gormreuse:pure
-func pswRebindPointer(pq **gorm.DB) {
-	*pq = nil
-}
-
-// pswSessionCloned writes the Statement of a Session that clones it: one
-// with Context, SkipHooks or Initialized, or WithContext.
-//
-//gormreuse:pure
-func pswSessionCloned(db *gorm.DB, ctx context.Context) {
-	db.Session(&gorm.Session{Context: ctx}).Statement.Distinct = true
-	db.Session(&gorm.Session{SkipHooks: true}).Statement.Distinct = true
-	db.Session(&gorm.Session{Initialized: true}).Statement.Distinct = true
-	db.WithContext(ctx).Statement.Distinct = true
-}
-
-// pswFreshStatement writes a map that the function made, held by a new
-// Statement or by a local copy whose field it replaced first (#405 review).
-//
-//gormreuse:pure
-func pswFreshStatement(db *gorm.DB) {
-	st := &gorm.Statement{DB: db, Clauses: map[string]interface{}{}}
-	st.Clauses["X"] = 1
-	c := *db.Statement
-	c.Clauses = map[string]interface{}{}
-	c.Clauses["X"] = 1
-}
-
-// pswReaders hands the Statement's slice and map to functions that only read
-// them, and boxes them for fmt.
+// pswReaders reads the Statement's maps and slices, also through functions,
+// and appends to a copy.
 //
 //gormreuse:pure
 func pswReaders(db *gorm.DB) string {
 	_ = slices.Contains(db.Statement.Selects, "id")
-	_ = append([]string{}, db.Statement.Selects...)
-	s := db.Statement.Selects
-	_ = append(s[:len(s):len(s)], "x")
-	_ = append(db.Statement.Selects[:0:0], "x")
-	_ = append(db.Statement.Selects[1:], "x")
-	_ = append(db.Statement.Selects[:len(db.Statement.Selects)], "x")
 	fmt.Println(db.Statement.Clauses, db.Statement.Table)
+	_ = append([]string{}, db.Statement.Selects...)
+	dst := make([]string, 1)
+	copy(dst, db.Statement.Selects)
+	_ = db.Statement.Clauses["WHERE"]
 	return strings.Join(db.Statement.Selects, ",")
 }
 
@@ -670,14 +163,129 @@ func pswScalars(db *gorm.DB, out *pswOut, m map[string]string, ch chan context.C
 
 func pswProbeLog(string) {}
 
-type pswStrs []string
-
 type pswOut struct{ Table string }
+
+// pswKeyedByHandle uses the argument as a map key. The map is the package's.
+//
+//gormreuse:pure
+func pswKeyedByHandle(db *gorm.DB) {
+	pswPerDB[db]["n"]++
+}
+
+var pswPerDB = map[*gorm.DB]map[string]int{}
+
+// pswLocalCopy writes the fields of local copies, and a new Statement.
+//
+//gormreuse:pure
+func pswLocalCopy(db *gorm.DB) bool {
+	c := *db.Statement
+	c.Distinct = true
+	d := *db
+	d.Statement = &gorm.Statement{}
+	d.Statement.Distinct = true
+	st := &gorm.Statement{DB: db, Clauses: map[string]interface{}{}}
+	st.Clauses["X"] = 1
+	return c.Distinct
+}
+
+// pswHolderWrites writes holder parameters themselves, not a query.
+//
+//gormreuse:pure
+func pswHolderWrites(pq **gorm.DB, h *pswHolder, m map[string]*gorm.DB) {
+	*pq = nil
+	h.db = nil
+	m["a"] = nil
+}
+
+type pswHolder struct{ db *gorm.DB }
+
+var pswMk func(*gorm.DB) *gorm.DB
+
+// pswDynHandle writes the Statement of a handle that a function value
+// returned. It may not be the argument, so only the warning for passing the
+// argument to a function that is not pure stays.
+//
+//gormreuse:pure
+func pswDynHandle(db *gorm.DB) {
+	q := pswMk(db) // want `pure function passes \*gorm\.DB argument to non-pure function \(closure\)`
+	q.Statement.Distinct = true
+}
+
+func pswCallerTrusted(db *gorm.DB) {
+	q := db.Where("x")
+	pswRead(q)
+	pswOutcome(q)
+	pswReaders(q)
+	pswLocalCopy(q)
+	q.Find(nil)
+}
+
+// =============================================================================
+// [LIMITATION] WRITES THROUGH ANYTHING BUT A DIRECT PATH
+//
+// A write through a local variable that is assigned again, captured or has
+// its address taken, a copy, a Session or Debug result, a holder parameter,
+// an append result, a lookup, a conversion, a merge, or a call is not
+// followed. Each may write memory that the argument does not hold.
+// =============================================================================
+
+// pswNotDirect writes the argument's query through paths that are not
+// direct.
+// [LIMITATION]
+//
+//gormreuse:pure
+func pswNotDirect(db *gorm.DB, other *gorm.DB, c bool, b []byte) {
+	st := db.Statement
+	func() { st.Distinct = true }() // a captured variable
+	cp := *db.Statement
+	cp.Clauses["X"] = 1 // a copy holds the same map
+	h := *db
+	h.Statement.Distinct = true                           // a copy holds the same Statement
+	db.Session(&gorm.Session{}).Statement.Distinct = true // a Session that shares it
+	db.Debug().Statement.Selects = nil                    // so does Debug
+	_ = append(db.Statement.Selects[:0], "x")             // an append overwrites it
+	db.Statement.Preloads["A"][0] = 1                     // a lookup
+	(*pswStatement)(db.Statement).Distinct = true         // a conversion
+	pswFill(db.Statement.Clauses)                         // a call
+	sort.Strings(db.Statement.Selects)                    // a call
+	_ = json.Unmarshal(b, &db.Statement.Selects)          // a call gets the address
+	db.Statement.SQL.WriteString("x")                     // a method of a field
+	m := other.Statement
+	if c {
+		m = db.Statement
+	}
+	m.Distinct = true // a merge
+}
+
+type pswStatement gorm.Statement
+
+func pswFill(m map[string]interface{}) { m["X"] = 1 }
+
+// pswHolderParams writes the query of a handle that a holder parameter holds.
+// [LIMITATION]
+//
+//gormreuse:pure
+func pswHolderParams(h pswHolder, pq **gorm.DB, arr [1]*gorm.DB, m map[string]*gorm.DB, st gorm.Statement) {
+	h.db.Statement.Distinct = true
+	(*pq).Statement.Distinct = true
+	arr[0].Statement.Distinct = true
+	m["a"].Statement.Distinct = true
+	st.Clauses["X"] = 1
+}
+
+// pswReassignedParam writes through a parameter that the body assigns again,
+// in a closure.
+// [LIMITATION]
+//
+//gormreuse:pure
+func pswReassignedParam(db *gorm.DB) {
+	func() { db.Statement.Distinct = true }()
+	db = nil
+}
 
 // pswConfig writes the argument's Config. It holds no clause, so it is
 // allowed, but a write such as DryRun or Logger changes how the caller's
-// later queries run. gorm's Session copies the Config, so the caller's handle
-// may hold the same one.
+// later queries run.
 // [LIMITATION]
 //
 //gormreuse:pure
@@ -686,30 +294,22 @@ func pswConfig(db *gorm.DB) {
 	db.SkipDefaultTransaction = false
 }
 
-//gormreuse:pure
-func pswRead(db *gorm.DB) bool {
-	return db.Statement.Distinct && len(db.Statement.Selects) > 0
-}
-
-// pswCallerTrusted: a pure function that only reads stays trusted.
-func pswCallerTrusted(db *gorm.DB) {
+func pswCallerNotDirect(db *gorm.DB) {
 	q := db.Where("x")
-	pswRead(q)
-	pswOutcome(q)
+	pswNotDirect(q, nil, false, nil) // missed: pswNotDirect is still trusted
 	q.Find(nil)
 }
 
 // =============================================================================
 // INFERRED IMMUTABLE-PARAM (#405)
 //
-// A helper that writes to its parameter's Statement relies on changing the
-// caller's value in place, so it is not inferred immutable-param. Its reuse
-// stays reported, also when the write goes through a map or a slice that the
-// Statement holds.
+// A helper that writes its parameter's query through a direct path relies on
+// changing the caller's value in place, so it is not inferred, and its reuse
+// is reported. A helper that only reads the Statement is inferred.
 // =============================================================================
 
 func pswInferClauses(db *gorm.DB) {
-	db.Statement.Clauses["X"] = db.Statement.Clauses["WHERE"]
+	db.Statement.Clauses["X"] = 1
 	db.Find(nil)
 	db.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
@@ -720,234 +320,65 @@ func pswInferSelectsElem(db *gorm.DB) {
 	db.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
-func pswInferDistinct(db *gorm.DB) {
-	db.Statement.Distinct = true
-	db.Find(nil)
-	db.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
-}
-
-func pswInferDelete(db *gorm.DB) {
+func pswInferBuiltins(db *gorm.DB) {
 	delete(db.Statement.Clauses, "WHERE")
-	db.Find(nil)
-	db.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
-}
-
-func pswInferCopy(db *gorm.DB) {
 	copy(db.Statement.Selects, []string{"id"})
 	db.Find(nil)
 	db.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
-func pswInferSlice(db *gorm.DB) {
-	s := db.Statement.Selects[1:]
-	s[0] = "id"
-	db.Find(nil)
-	db.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
-}
-
 func pswInferCaptured(db *gorm.DB) {
-	c := db.Statement.Clauses
-	func() { c["X"] = 1 }()
+	func() { clear(db.Statement.Clauses) }()
 	db.Find(nil)
 	db.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
-// The write may not reach the argument on every path, so it is not counted.
-// [LIMITATION]
-func pswInferCapturedVar(db *gorm.DB) {
-	c := db.Statement.Clauses
-	func() { c["X"] = 1 }()
-	c = nil
-	_ = c
-	db.Find(nil)
-	db.Count(nil)
-}
-
-func pswInferAppendShared(db *gorm.DB) {
-	s := append(db.Statement.Selects[:0], "id")
-	s[0] = "name"
+func pswInferStatementDB(db *gorm.DB) {
+	db.Statement.DB.Statement.Clauses["X"] = 1
 	db.Find(nil)
 	db.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
-// pswInferHandedOn hands the Statement memory on, which is not followed, as before
-// #405.
-// [LIMITATION]
-func pswInferHandedOn(db *gorm.DB) {
-	pswFill(db.Statement.Clauses)
-	db.Find(nil)
-	db.Count(nil)
-}
-
-func pswFill(m map[string]interface{}) { m["X"] = 1 }
-
-// pswInferSent hands the Statement memory on, which is not followed, as before
-// #405.
-// [LIMITATION]
-func pswInferSent(db *gorm.DB, ch chan map[string]interface{}) {
-	ch <- db.Statement.Clauses
-	db.Find(nil)
-	db.Count(nil)
-}
-
-// pswInferStoredInMap hands the Statement memory on, which is not followed, as before
-// #405.
-// [LIMITATION]
-func pswInferStoredInMap(db *gorm.DB, m map[string]map[string]interface{}) {
-	m["c"] = db.Statement.Clauses
-	db.Find(nil)
-	db.Count(nil)
-}
-
-// pswInferReadsInClosure and pswInferReadsInLoop only read the Statement, in a
-// closure and through a slice merged in a loop. They are inferred.
-func pswInferReadsInClosure(db *gorm.DB) {
-	c := db.Statement.Clauses
-	func() { _ = c["X"] }()
-	db.Find(nil)
-	db.Count(nil)
-}
-
-func pswInferReadsInLoop(db *gorm.DB) {
-	for s := db.Statement.Selects; len(s) > 0; s = s[1:] {
-		_ = s[0]
-	}
-	db.Find(nil)
-	db.Count(nil)
-}
-
-// pswInferReadsCopy reads the Statement only: copy reads its source, and
-// append's result is not written through. It is inferred.
-func pswInferReadsCopy(db *gorm.DB) {
-	dst := make([]string, 1)
-	copy(dst, db.Statement.Selects)
-	_ = append(db.Statement.Selects, "id")
-	_ = len(db.Statement.Clauses)
-	db.Find(nil)
-	db.Count(nil)
-}
-
-// pswInferReads only reads the Statement, so it is inferred, and its reuse is
-// not reported.
+// The helpers below only read the Statement, or write memory it does not
+// hold. They are inferred, as on main, and their reuse is not reported.
 func pswInferReads(db *gorm.DB) {
 	_ = db.Statement.Clauses["WHERE"]
 	_ = db.Statement.Selects[0]
-	db.Find(nil)
-	db.Count(nil)
-}
-
-// pswInferSorted hands the Statement memory on, which is not followed, as before
-// #405.
-// [LIMITATION]
-func pswInferSorted(db *gorm.DB) {
-	sort.Strings(db.Statement.Selects)
-	db.Find(nil)
-	db.Count(nil)
-}
-
-func pswInferAppendResliced(db *gorm.DB) {
-	_ = append(db.Statement.Selects[:0], "x")
-	db.Find(nil)
-	db.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
-}
-
-func pswInferConverted(db *gorm.DB) {
-	(*[1]string)(db.Statement.Selects)[0] = "x"
-	db.Find(nil)
-	db.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
-}
-
-func pswInferBoxed(db *gorm.DB) {
-	var m any = db.Statement.Clauses
-	m.(map[string]interface{})["X"] = 1
-	db.Find(nil)
-	db.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
-}
-
-// The helpers below only read scalar and interface fields of the Statement,
-// or hand its slice to a reader. Their writes change copies, so they are
-// inferred as on main, and their reuse is not reported (#405 review).
-func pswInferLogsTable(db *gorm.DB) {
 	pswProbeLog(db.Statement.Table)
+	fmt.Println("t", db.Statement.Table, db.Statement.Selects)
+	_ = db.Statement.Context.Value("k")
+	_ = strings.Join(db.Statement.Selects, ",")
 	db.Find(nil)
 	db.Count(nil)
 }
 
-func pswInferPrintsTable(db *gorm.DB) {
-	fmt.Println("t", db.Statement.Table)
-	db.Find(nil)
-	db.Count(nil)
-}
-
-func pswInferStoresTable(db *gorm.DB, out *pswOut) {
+func pswInferStores(db *gorm.DB, out *pswOut, m map[string]string) {
 	out.Table = db.Statement.Table
-	db.Find(nil)
-	db.Count(nil)
-}
-
-func pswInferMapsTable(db *gorm.DB, m map[string]string) {
 	m["t"] = db.Statement.Table
 	db.Find(nil)
 	db.Count(nil)
 }
 
-func pswInferContext(db *gorm.DB) {
-	ctx := db.Statement.Context
-	_ = ctx.Value("k")
-	db.Find(nil)
-	db.Count(nil)
-}
-
-func pswInferJoins(db *gorm.DB) {
-	_ = strings.Join(db.Statement.Selects, ",")
-	_ = slices.Index(db.Statement.Selects, "id")
-	db.Find(nil)
-	db.Count(nil)
-}
-
-// pswInferSessionShared writes the Statement of a Session copy of its
-// parameter, which is the parameter's. The inference reads the fields of the
-// parameter itself only.
-// [LIMITATION]
-func pswInferSessionShared(db *gorm.DB) {
-	db.Session(&gorm.Session{}).Statement.Distinct = true
-	db.Find(nil)
-	db.Count(nil)
-}
-
-// The helpers below write only memory that no longer holds the parameter's:
-// a variable reassigned before the write, a local copy whose field was
-// replaced, and a slice that an append to a reslice with no room made. They
-// are inferred, as on main.
-func pswInferCapturedReplaced(db *gorm.DB) {
-	s := db.Statement.Selects
-	s = []string{"a"}
-	func() { s[0] = "b" }()
-	db.Find(nil)
-	db.Count(nil)
-}
-
-func pswInferAddrReplaced(db *gorm.DB) {
-	s := db.Statement.Selects
-	p := &s
-	s = []string{"a"}
-	(*p)[0] = "b"
-	db.Find(nil)
-	db.Count(nil)
-}
-
-func pswInferCopyReplaced(db *gorm.DB) {
-	c := *db.Statement.DB
-	c.Statement = &gorm.Statement{}
-	c.Statement.Distinct = true
-	db.Find(nil)
-	db.Count(nil)
-}
-
-func pswInferClone(db *gorm.DB) {
+func pswInferCopies(db *gorm.DB) {
 	s := db.Statement.Selects
 	s = append(s[:0:0], s...)
 	s[0] = "x"
+	dst := make([]string, 1)
+	copy(dst, db.Statement.Selects)
+	db.Find(nil)
+	db.Count(nil)
+}
+
+// pswInferNotDirect writes the parameter's query through paths that are not
+// direct, so it is still inferred.
+// [LIMITATION]
+func pswInferNotDirect(db *gorm.DB) {
+	c := db.Statement.Clauses
+	func() { c["X"] = 1 }()
+	pswFill(db.Statement.Clauses)
+	sort.Strings(db.Statement.Selects)
+	db.Session(&gorm.Session{}).Statement.Distinct = true
+	_ = append(db.Statement.Selects[:0], "x")
 	db.Find(nil)
 	db.Count(nil)
 }
@@ -955,33 +386,11 @@ func pswInferClone(db *gorm.DB) {
 func pswInferCallers(db *gorm.DB) {
 	pswInferClauses(db.Session(&gorm.Session{}))
 	pswInferSelectsElem(db.Session(&gorm.Session{}))
-	pswInferDistinct(db.Session(&gorm.Session{}))
-	pswInferReads(db.Session(&gorm.Session{}))
-	pswInferDelete(db.Session(&gorm.Session{}))
-	pswInferCopy(db.Session(&gorm.Session{}))
-	pswInferSlice(db.Session(&gorm.Session{}))
+	pswInferBuiltins(db.Session(&gorm.Session{}))
 	pswInferCaptured(db.Session(&gorm.Session{}))
-	pswInferCapturedVar(db.Session(&gorm.Session{}))
-	pswInferAppendShared(db.Session(&gorm.Session{}))
-	pswInferHandedOn(db.Session(&gorm.Session{}))
-	pswInferSent(db.Session(&gorm.Session{}), nil)
-	pswInferStoredInMap(db.Session(&gorm.Session{}), nil)
-	pswInferReadsCopy(db.Session(&gorm.Session{}))
-	pswInferReadsInClosure(db.Session(&gorm.Session{}))
-	pswInferReadsInLoop(db.Session(&gorm.Session{}))
-	pswInferSorted(db.Session(&gorm.Session{}))
-	pswInferAppendResliced(db.Session(&gorm.Session{}))
-	pswInferConverted(db.Session(&gorm.Session{}))
-	pswInferBoxed(db.Session(&gorm.Session{}))
-	pswInferLogsTable(db.Session(&gorm.Session{}))
-	pswInferPrintsTable(db.Session(&gorm.Session{}))
-	pswInferStoresTable(db.Session(&gorm.Session{}), nil)
-	pswInferMapsTable(db.Session(&gorm.Session{}), nil)
-	pswInferContext(db.Session(&gorm.Session{}))
-	pswInferJoins(db.Session(&gorm.Session{}))
-	pswInferSessionShared(db.Session(&gorm.Session{}))
-	pswInferCapturedReplaced(db.Session(&gorm.Session{}))
-	pswInferAddrReplaced(db.Session(&gorm.Session{}))
-	pswInferCopyReplaced(db.Session(&gorm.Session{}))
-	pswInferClone(db.Session(&gorm.Session{}))
+	pswInferStatementDB(db.Session(&gorm.Session{}))
+	pswInferReads(db.Session(&gorm.Session{}))
+	pswInferStores(db.Session(&gorm.Session{}), nil, nil)
+	pswInferCopies(db.Session(&gorm.Session{}))
+	pswInferNotDirect(db.Session(&gorm.Session{}))
 }

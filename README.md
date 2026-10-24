@@ -2653,41 +2653,36 @@ func wrap3(db *gorm.DB) func() *gorm.DB {
 
 **Must NOT** write to an argument directly.
 
-A write into its `Statement`, or over the `*gorm.DB` itself, changes its query in place, as `Where` does. This includes:
+A write into its `Statement`, or over the `*gorm.DB` itself, changes its query in place, as `Where` does. Only a direct path from a `*gorm.DB` or `*gorm.Statement` parameter counts:
 
-- a write through a variable that holds the `Statement`, also one a closure captures;
-- a write into a map or a slice that the `Statement` holds, also with `delete`, `clear` or `copy`, or an `append` to a reslice such as `Selects[:0]` that overwrites its elements;
-- a write into a `*gorm.Statement` parameter;
-- a write through the `Statement` of a `Session` or `Debug` copy that shares it. A `Session` with `Context`, `PrepareStmt`, `SkipHooks` or `Initialized`, and `WithContext`, clone it.
+- `*db = v` and `db.Statement = v`;
+- a field of the `Statement`, as in `db.Statement.Distinct = true`;
+- a map or a slice the `Statement` holds: `db.Statement.Clauses[k] = v`, `db.Statement.Selects[i] = v`, and `delete`, `clear` or `copy` into one;
+- the same through `db.Statement.DB`, and through the parameter in a closure, a `go` or a `defer` statement in the body.
+
+A write through anything else is not followed, since it may write memory the argument does not hold: a local variable that is assigned again, captured or has its address taken, a copy such as `c := *db.Statement`, a `Session` or `Debug` result, a parameter that holds a `*gorm.DB`, an `append` result, a lookup, a conversion, a merge, or a call such as `sort.Strings(db.Statement.Selects)` (see [Known Limitations](#known-limitations)).
 
 These may be written:
 
 - The argument's `Error` and `RowsAffected`. They hold the outcome of a query, as `AddError` does.
 - Its `Config`. It holds no clause. A write to it, such as `db.DryRun = true`, still changes how the caller's later queries run, and is not reported (see [Known Limitations](#known-limitations)).
-- The fields of a local copy of the `*gorm.DB` or of the `Statement`. But the maps and slices of such a copy are still the argument's, so a write into them is reported while the copy surely holds them.
-- A scalar, a string or an interface read from the `Statement`, such as `Table` or `Context`. It is a copy.
 
 Message: `pure function pollutes *gorm.DB argument by writing to it directly`
-
-Only the writes that the function's own body makes count, and only when they surely reach the argument: through the parameter itself, a `Session` or `Debug` copy that shares its `Statement`, or a variable that surely still holds one of these. A handle that another function returned, a merge with another value, and a variable that is assigned again before the write are not followed (see [Known Limitations](#known-limitations)). Handing a map, a slice or an address of the `Statement` to another function, as in `sort.Strings(db.Statement.Selects)` or `json.Unmarshal(b, &db.Statement.Selects)`, is not followed (see [Known Limitations](#known-limitations)).
 
 </td><td>
 
 ```go
 //gormreuse:pure
 func mark(db *gorm.DB) {
-    db.Statement.Distinct = true     // reported
-    db.Statement.Clauses["X"] = c    // reported
-    st := db.Statement
-    st.Selects = []string{"id"}      // reported
-    *db = gorm.DB{}                  // reported
+    db.Statement.Distinct = true          // reported
+    db.Statement.Clauses["X"] = c         // reported
     delete(db.Statement.Clauses, "WHERE") // reported
-    db.Error = nil                   // OK
+    *db = gorm.DB{}                       // reported
+    db.Error = nil                        // OK
     copied := *db.Statement
-    copied.Distinct = true           // OK: a local copy
-    copied.Clauses["X"] = c          // reported: the map is shared
-    db.Session(&gorm.Session{}).Statement.Distinct = true // reported: shared
-    sort.Strings(db.Statement.Selects) // not reported: a hand-off
+    copied.Distinct = true                // OK: a local copy
+    copied.Clauses["X"] = c               // not reported: through a copy
+    sort.Strings(db.Statement.Selects)    // not reported: a call
 }
 ```
 
@@ -3895,7 +3890,7 @@ func caller(db *gorm.DB) {
 
 The same holds in a closure, as in `func() { tx.Where("a") }()`. It also holds in a helper the function passes the parameter to, as in `applyTenant(tx)`.
 
-A write into the parameter's `Statement` changes it in place too. That includes a write into a map or a slice the `Statement` holds, as in `tx.Statement.Clauses["X"] = c` or `delete(tx.Statement.Clauses, "WHERE")`. Only the helper's own writes count, decided by the same rules as the [`pure`](#gormreusepure) contract. Handing the map or slice to another function, a channel or another map is still a read, as before. So are scalar and interface fields, as in `log(tx.Statement.Table)` or `tx.Statement.Context.Value(k)`.
+A write into the parameter's `Statement` changes it in place too. That includes a write into a map or a slice the `Statement` holds, as in `tx.Statement.Clauses["X"] = c` or `delete(tx.Statement.Clauses, "WHERE")`, through a direct path from the parameter, as for the [`pure`](#gormreusepure) contract. A write through anything else, such as a local copy, a `Session` result or a call, is not followed, as before. Reads of scalar and interface fields, as in `log(tx.Statement.Table)` or `tx.Statement.Context.Value(k)`, stay reads.
 
 </td></tr>
 <tr><td>
@@ -5510,7 +5505,7 @@ gormreuse reports a reuse only when it can follow the value. These cases are kno
 
 | Kind | Cases | Meaning |
 | --- | --- | --- |
-| Missed reuse (false negatives) | 22 | Reuse that is not reported |
+| Missed reuse (false negatives) | 19 | Reuse that is not reported |
 | Extra reports (false positives) | 5 | Safe code that is reported |
 | Wrong position | — | A report on the wrong line |
 | No fix | — | A report without a suggested fix |
@@ -5745,63 +5740,21 @@ load("b") // not reported
 ```
 
 </td><td>A call through the returned func value has no known callee</td></tr>
-<tr><td><!-- fixtures: pswSessionNewDB, pswInferSessionShared -->
+<tr><td><!-- fixtures: pswNotDirect, pswHolderParams, pswReassignedParam, pswInferNotDirect -->
 
-A write through the `Statement` of a `Session` copy, with `NewDB` in a pure function, or in a helper inferred `immutable-param`:
+A pure function, or a helper inferred `immutable-param`, that writes the argument's query through anything but a direct path: a local variable, a copy, a `Session` or `Debug` result, a holder parameter, an `append` result, or a call:
 
 ```go
 //gormreuse:pure
 func mark(db *gorm.DB) {
-    // not reported
-    db.Session(&gorm.Session{NewDB: true}).Statement.Distinct = true
-}
-```
-
-</td><td>gorm keeps the <code>Statement</code> for <code>NewDB</code>, but gormreuse takes it as isolated. The inference reads only the parameter's own fields</td></tr>
-<tr><td><!-- fixtures: pswHandsOnMemory, pswLiteralCall, pswBoxedHandedOn, pswInferHandedOn, pswInferSent, pswInferStoredInMap, pswInferSorted -->
-
-A pure function, or a helper inferred `immutable-param`, that hands the `Statement`'s map or slice to code that writes it:
-
-```go
-func fill(m map[string]interface{}) { m["X"] = 1 }
-
-//gormreuse:pure
-func mark(db *gorm.DB) {
-    fill(db.Statement.Clauses)         // not reported
-    sort.Strings(db.Statement.Selects) // not reported
-}
-```
-
-</td><td>Only the writes that the body makes itself count. A call, a send or a store elsewhere hands the memory on, and the callee's body is not read</td></tr>
-<tr><td><!-- fixtures: pswAddressHandedOn -->
-
-A pure function that hands the address of a `Statement` field to code that writes through it:
-
-```go
-//gormreuse:pure
-func load(db *gorm.DB, b []byte) {
-    json.Unmarshal(b, &db.Statement.Selects) // not reported
-    db.Statement.SQL.WriteString("DROP")     // not reported
-}
-```
-
-</td><td>A call that gets the address, also as a method receiver, is a hand-off, as above</td></tr>
-<tr><td><!-- fixtures: pswCapturedStatementVar, pswLoopMerged, pswUnrelatedLoopMerged, pswReplacedLater, pswReplacedDeep, pswBoxedMerged, pswReplacedInClosure, pswInferCapturedVar -->
-
-A write that reaches the argument on some paths only: through a variable assigned again elsewhere, a merge with another value, or a copy whose field is replaced on one path:
-
-```go
-//gormreuse:pure
-func mark(db *gorm.DB, cond bool) {
     c := *db.Statement
-    if cond {
-        c.Clauses = map[string]clause.Clause{}
-    }
-    c.Clauses["X"] = clause.Clause{} // not reported
+    c.Clauses["X"] = c                                    // not reported
+    db.Session(&gorm.Session{}).Statement.Distinct = true // not reported
+    sort.Strings(db.Statement.Selects)                    // not reported
 }
 ```
 
-</td><td>A write counts only when it surely reaches the argument</td></tr>
+</td><td>Only a direct path from the parameter surely reaches the argument. The others may write memory it does not hold</td></tr>
 <tr><td><!-- fixtures: pswConfig -->
 
 A pure function that writes the argument's `Config`:

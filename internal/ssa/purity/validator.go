@@ -573,27 +573,29 @@ func (v *Validator) checkStoreEscape(store *ssa.Store) []Violation {
 	}}
 }
 
-// checkDirectWrites reports the writes into the query memory of the
-// argument (#405), such as `*db = gorm.DB{}`, `db.Statement.Distinct = true`
-// or `delete(db.Statement.Clauses, "X")`: they change its query in place, as
-// db.Where does. stmtwrite decides what is a write, walking from the seeded
-// parameters through the function and its closures, so the inferred
-// immutable-param reads the same answer. Only the parameters are seeds: a
-// handle that a call returned, or that a local copy holds, may not be the
-// argument's, and stmtwrite follows the ones that surely are. found holds the
-// violations found already: a position that has one, such as the escape of
-// db.Statement.DB = db, is not reported again.
+// checkDirectWrites reports the writes into the query of a *gorm.DB or
+// *gorm.Statement parameter through a direct path (#405), such as
+// `*db = gorm.DB{}`, `db.Statement.Distinct = true` or
+// `delete(db.Statement.Clauses, "X")`: they change its query in place, as
+// db.Where does. stmtwrite decides what is a direct path, so the inferred
+// immutable-param reads the same answer. A write through anything else, such
+// as a local copy or a call result, may not reach the argument, and is not
+// reported. found holds the violations found already: a position that has
+// one, such as the escape of db.Statement.DB = db, is not reported again.
 func (v *Validator) checkDirectWrites(found []Violation) []Violation {
-	var params []ssa.Value
+	var handles []ssa.Value
 	for _, i := range v.seededParams() {
-		params = append(params, v.fn.Params[i])
+		p := v.fn.Params[i]
+		if t := p.Type(); validatorIsHandle(t) {
+			handles = append(handles, stmtwrite.DirectHandles(p)...)
+		}
 	}
 	reported := make(map[token.Pos]bool, len(found))
 	for _, viol := range found {
 		reported[viol.Pos] = true
 	}
 	var violations []Violation
-	for instr := range stmtwrite.Writes(params) {
+	for instr := range stmtwrite.Writes(handles) {
 		if reported[instr.Pos()] {
 			continue
 		}
@@ -605,6 +607,12 @@ func (v *Validator) checkDirectWrites(found []Violation) []Violation {
 	}
 	slices.SortFunc(violations, func(a, b Violation) int { return int(a.Pos - b.Pos) })
 	return violations
+}
+
+// validatorIsHandle reports whether t is *gorm.DB or *gorm.Statement.
+func validatorIsHandle(t types.Type) bool {
+	_, ptr := types.Unalias(t).(*types.Pointer)
+	return ptr && (typeutil.IsGormDB(t) || typeutil.IsGormStatement(t))
 }
 
 // checkLeak reports a contract violation when a param-derived *gorm.DB escapes
