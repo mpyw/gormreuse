@@ -1,6 +1,6 @@
 --- closure_returns_capture.go	1970-01-01 00:00:00
 +++ closure_returns_capture.go.golden	1970-01-01 00:00:00
-@@ -1,1130 +1,1130 @@
+@@ -1,1208 +1,1208 @@
  package internal
  
  import (
@@ -556,6 +556,18 @@
  	q.Find(nil)
  }
  
+ // crcMadeSliceKept: a local slice that make built and that is only built
+ // stays local, and the reuse of q is reported as before #397.
+ func crcMadeSliceKept(db *gorm.DB, n int) {
+-	q := db.Session(&gorm.Session{}).Where("x")
++	q := db.Session(&gorm.Session{}).Where("x").Session(&gorm.Session{})
+ 	q.Find(nil)
+ 	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ 	fs := make([]func() *gorm.DB, n)
+ 	fs[0] = func() *gorm.DB { return db }
+ 	_ = fs
+ }
+ 
  // crcCapturedFieldLater: the literal returns a field of a captured struct,
  // read where it is handed on. A value stored into the field later is not
  // what was handed on.
@@ -1007,6 +1019,73 @@
  		return h.db
  	})
  	h.db.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // crcMadeSlice: a literal stored into a slice that make built is passed on.
+ func crcMadeSlice(db *gorm.DB, n int) {
+ 	q := db.Session(&gorm.Session{}).Where("x")
+ 	fs := make([]func() *gorm.DB, n)
+ 	fs[0] = func() *gorm.DB { return q }
+ 	crcRun(fs[0])
+ 	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // crcMadeSliceField: the same, into a field of an element.
+ func crcMadeSliceField(db *gorm.DB, n int) {
+ 	q := db.Session(&gorm.Session{}).Where("x")
+ 	js := make([]crcJob, n)
+ 	js[0].build = func() *gorm.DB { return q }
+ 	crcRun(js[0].build)
+ 	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // crcMadeSliceOfSlices: the same, into an element of a slice element.
+ func crcMadeSliceOfSlices(db *gorm.DB, n int) {
+ 	q := db.Session(&gorm.Session{}).Where("x")
+ 	fss := make([][]func() *gorm.DB, n)
+ 	fss[0] = make([]func() *gorm.DB, n)
+ 	fss[0][0] = func() *gorm.DB { return q }
+ 	crcRun(fss[0][0])
+ 	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // crcMadeMap: a literal stored into a map that make built is passed on.
+ func crcMadeMap(db *gorm.DB) {
+ 	q := db.Session(&gorm.Session{}).Where("x")
+ 	m := make(map[string]func() *gorm.DB)
+ 	m["q"] = func() *gorm.DB { return q }
+ 	crcRun(m["q"])
+ 	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // crcMutualGetters: two getter literals call each other, and the second is
+ // handed on in a closure. Their answer is shared, so the closure hands q on.
+ func crcMutualGetters(db *gorm.DB, c bool) {
+ 	q := db.Session(&gorm.Session{}).Where("x")
+ 	var fa, fb func() *gorm.DB
+ 	fa = func() *gorm.DB {
+ 		if c {
+ 			return fb()
+ 		}
+ 		return q
+ 	}
+ 	fb = func() *gorm.DB { return fa() }
+ 	func() { crcUse(fa != nil) }()
+ 	func() { crcRun(fb) }()
+ 	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // crcLiteralTwoValues: one literal is handed on as itself and through a
+ // variable that may hold it.
+ func crcLiteralTwoValues(db *gorm.DB, c bool) {
+ 	q := db.Session(&gorm.Session{}).Where("x")
+ 	f := func() *gorm.DB { return q }
+ 	g := func() *gorm.DB { return db.Session(&gorm.Session{}) }
+ 	if c {
+ 		g = f
+ 	}
+ 	crcRun(f)
+ 	crcRun(g) // want `\*gorm\.DB reused: second branch from mutable root`
  }
  
  // crcMethodValueInLocalSlice: a method value stored in a local slice is a

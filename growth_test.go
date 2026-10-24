@@ -1405,6 +1405,28 @@ var growthCases = []growthCase{
 		b.WriteString("}\n")
 		return []string{b.String()}
 	}},
+	// n literals that each may call every other one through a variable, and
+	// return a captured root, handed on once. Their summaries are found per
+	// strongly connected component (#397), so each literal is walked once.
+	// The source holds n² calls, so the case is held to the quadratic limit.
+	{name: "literalcycles", n: 12, limit: growthQuadratic, shape: func(n int) []string {
+		var b strings.Builder
+		b.WriteString("func run(func() *gorm.DB) {}\n\nfunc f(db *gorm.DB, k int) {\n\tq := db.Where(\"x\")\n")
+		for i := range n {
+			fmt.Fprintf(&b, "\tvar f%d func() *gorm.DB\n", i)
+		}
+		for i := range n {
+			fmt.Fprintf(&b, "\tf%d = func() *gorm.DB {\n\t\tswitch k {\n", i)
+			for j := range n {
+				if j != i {
+					fmt.Fprintf(&b, "\t\tcase %d:\n\t\t\treturn f%d()\n", j, j)
+				}
+			}
+			b.WriteString("\t\t}\n\t\treturn q\n\t}\n")
+		}
+		b.WriteString("\trun(f0)\n\tq.Find(nil)\n}\n")
+		return []string{b.String()}
+	}},
 	// n loops that each append a query of their own to a slice, then a loop
 	// that reads it: each append runs again, and the values the slice may
 	// hold are found once (#374). Its steps are quadratic, but no more than

@@ -923,7 +923,7 @@ func containerEscapes(container ssa.Value, ctx *Context) bool {
 		case *ssa.FieldAddr:
 			a = addr.X
 		}
-		built[a.Type().Underlying().(*types.Pointer).Elem()] = true
+		built[addressedType(a.Type())] = true
 		key.WriteString(types.TypeString(a.Type(), nil))
 	}
 	k := containerKey{base, key.String()}
@@ -940,6 +940,16 @@ func containerEscapes(container ssa.Value, ctx *Context) bool {
 	escapes := (&containerWalk{vars: ctx.RootTracer.FuncVars(), pkg: pkg, built: built, seen: map[ssa.Value]bool{}}).escapes(base)
 	ctx.containers[k] = escapes
 	return escapes
+}
+
+// addressedType returns the type that a value of type t addresses when it
+// is indexed or selected: what a pointer points to, or t itself, as for a
+// slice or a map.
+func addressedType(t types.Type) types.Type {
+	if ptr, ok := t.Underlying().(*types.Pointer); ok {
+		return ptr.Elem()
+	}
+	return t
 }
 
 // containerKey is a container and the types a literal is stored into it
@@ -1271,19 +1281,15 @@ func handedOnLiterals(v ssa.Value, ctx *Context, seen map[ssa.Value]bool) []*ssa
 type captureCache struct {
 	ctx       *Context
 	summaries map[*ssa.MakeClosure]*literalSummary
-	open      map[*ssa.MakeClosure]bool
-	// cyclic is set when a summary meets one that is still open. Such a
-	// summary misses what the open one returns, so it is not kept.
-	cyclic   bool
-	flows    map[*ssa.FreeVar]*assignFlow
-	index    map[ssa.Instruction]int
-	others   map[*ssa.FreeVar]bool
-	branches map[*ssa.FreeVar]bool
-	writes   map[capturedWriteKey]bool
-	calls    map[*ssa.MakeClosure][]*ssa.Call
-	reads    map[capturedReadKey][]ssa.Value
-	values   map[ssa.Value]*handedLiterals
-	single   map[*ssa.Alloc]*ssa.Store
+	flows     map[*ssa.FreeVar]*assignFlow
+	index     map[ssa.Instruction]int
+	others    map[*ssa.FreeVar]bool
+	branches  map[*ssa.FreeVar]bool
+	writes    map[capturedWriteKey]bool
+	calls     map[*ssa.MakeClosure][]*ssa.Call
+	reads     map[capturedReadKey][]ssa.Value
+	values    map[ssa.Value]*handedLiterals
+	single    map[*ssa.Alloc]*ssa.Store
 }
 
 // captureCache returns the cache of the function being analyzed.
@@ -1292,7 +1298,6 @@ func (c *Context) captureCache() *captureCache {
 		c.captures = &captureCache{
 			ctx:       c,
 			summaries: map[*ssa.MakeClosure]*literalSummary{},
-			open:      map[*ssa.MakeClosure]bool{},
 			flows:     map[*ssa.FreeVar]*assignFlow{},
 			index:     map[ssa.Instruction]int{},
 			others:    map[*ssa.FreeVar]bool{},
@@ -1339,27 +1344,81 @@ type capturedWriteKey struct {
 	fields bool
 }
 
-// summary returns the summary of the literal that mc makes. A literal that is
-// open, because its summary is being found, adds nothing.
+// summary returns the summary of the literal that mc makes. A literal's
+// summary holds what it returns itself (summaryBuilder) and the summaries of
+// the literals it calls through a variable. Literals that call each other,
+// as mutually recursive getters do, share one summary: the summaries are
+// found per strongly connected component of those calls (summarySCC), so
+// each literal is walked once.
 func (c *captureCache) summary(mc *ssa.MakeClosure) *literalSummary {
 	if sum, done := c.summaries[mc]; done {
 		return sum
 	}
-	if c.open[mc] {
-		c.cyclic = true
-		return &literalSummary{}
-	}
-	c.open[mc] = true
-	outerCyclic := c.cyclic
-	c.cyclic = false
-	b := &summaryBuilder{c: c, followed: map[*ssa.MakeClosure]bool{}, seen: map[ssa.Value]bool{}}
+	(&summarySCC{c: c, index: map[*ssa.MakeClosure]int{}, low: map[*ssa.MakeClosure]int{}, onStack: map[*ssa.MakeClosure]bool{}, own: map[*ssa.MakeClosure]*summaryBuilder{}}).visit(mc)
+	return c.summaries[mc]
+}
+
+// summarySCC finds summaries with Tarjan's algorithm over the calls of
+// literals through variables.
+type summarySCC struct {
+	c       *captureCache
+	index   map[*ssa.MakeClosure]int
+	low     map[*ssa.MakeClosure]int
+	onStack map[*ssa.MakeClosure]bool
+	stack   []*ssa.MakeClosure
+	own     map[*ssa.MakeClosure]*summaryBuilder
+}
+
+// visit walks mc and the literals it calls, and keeps the summary of each
+// component once it is complete.
+func (s *summarySCC) visit(mc *ssa.MakeClosure) {
+	s.index[mc], s.low[mc] = len(s.index), len(s.index)
+	s.stack = append(s.stack, mc)
+	s.onStack[mc] = true
+	b := &summaryBuilder{c: s.c, followed: map[*ssa.MakeClosure]bool{}, seen: map[ssa.Value]bool{}}
 	b.follow(mc, nil, nil)
-	delete(c.open, mc)
-	if !c.cyclic {
-		c.summaries[mc] = &b.sum
+	s.own[mc] = b
+	for _, w := range b.calls {
+		if _, done := s.c.summaries[w]; done {
+			continue
+		}
+		if _, seen := s.index[w]; !seen {
+			s.visit(w)
+			s.low[mc] = min(s.low[mc], s.low[w])
+		} else if s.onStack[w] {
+			s.low[mc] = min(s.low[mc], s.index[w])
+		}
 	}
-	c.cyclic = c.cyclic || outerCyclic
-	return &b.sum
+	if s.low[mc] != s.index[mc] {
+		return
+	}
+	// mc is the root of a component: its members are on the stack above it.
+	i := slices.Index(s.stack, mc)
+	members := s.stack[i:]
+	s.stack = s.stack[:i]
+	union := &summaryBuilder{c: s.c}
+	for _, m := range members {
+		s.onStack[m] = false
+		union.inside = append(union.inside, s.own[m].inside...)
+	}
+	for _, m := range members {
+		own := s.own[m]
+		union.addOutside(own.sum.roots)
+		for _, read := range own.sum.reads {
+			union.addRead(read)
+		}
+		for _, w := range own.calls {
+			if sum, done := s.c.summaries[w]; done {
+				union.addOutside(sum.roots)
+				for _, read := range sum.reads {
+					union.addRead(read)
+				}
+			}
+		}
+	}
+	for _, m := range members {
+		s.c.summaries[m] = &union.sum
+	}
 }
 
 // read returns the roots of what read holds where a literal is handed on at
@@ -1478,9 +1537,10 @@ func (c *captureCache) readPoint(at ssa.Instruction, mc *ssa.MakeClosure) ssa.In
 	return at
 }
 
-// summaryBuilder finds the summary of a literal. It follows merges, a nested
-// literal called in place, a literal called through a variable (whose
-// summary it adds), and a captured variable or a field of one. go/ssa
+// summaryBuilder finds what a literal returns itself. It follows merges, a
+// nested literal called in place, and a captured variable or a field of one,
+// and it records the literals called through a variable (calls), whose
+// summaries summarySCC adds. go/ssa
 // captures every variable by reference, so a captured value is a load of a
 // FreeVar, or of a field of one. A variable counts when some path reaches the
 // load without assigning it (unassignedAt): a literal that assigns it first
@@ -1496,6 +1556,9 @@ type summaryBuilder struct {
 	followed map[*ssa.MakeClosure]bool
 	seen     map[ssa.Value]bool
 	sum      literalSummary
+	// calls holds the literals the literal calls through a variable, whose
+	// summaries summarySCC adds.
+	calls []*ssa.MakeClosure
 }
 
 // literalFrame is a function literal whose returns summaryBuilder follows.
@@ -1551,10 +1614,8 @@ func (b *summaryBuilder) visit(r ssa.Value, f *literalFrame) {
 			return
 		}
 		for _, mc := range handedOnLiterals(r.Call.Value, b.c.ctx, map[ssa.Value]bool{}) {
-			sum := b.c.summary(mc)
-			b.addOutside(sum.roots)
-			for _, read := range sum.reads {
-				b.addRead(read)
+			if !slices.Contains(b.calls, mc) {
+				b.calls = append(b.calls, mc)
 			}
 		}
 	case *ssa.UnOp:
