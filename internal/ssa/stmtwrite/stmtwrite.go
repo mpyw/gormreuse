@@ -69,40 +69,49 @@ type walker struct {
 }
 
 // Writes returns the instructions that write, through a direct path, the
-// query memory of handles: the parameters and the values directHandles
-// gives.
-func Writes(handles []ssa.Value) map[ssa.Instruction]bool {
+// query memory of seeds (see Seeds).
+func Writes(seeds map[ssa.Value]*ssa.Parameter) map[ssa.Instruction]bool {
 	w := &walker{writes: map[ssa.Instruction]bool{}, seen: map[step]bool{}}
-	for _, h := range handles {
+	for h := range seeds {
 		w.push(step{v: h, k: handle})
 	}
 	w.run()
 	return w.writes
 }
 
-// WritesThrough reports whether the body writes, through a direct path, the
-// memory of v: a value loaded from a field of a parameter's Statement.
-func WritesThrough(v ssa.Value) bool {
-	w := &walker{writes: map[ssa.Instruction]bool{}, seen: map[step]bool{}}
-	w.pushLoaded(v)
-	w.run()
-	return len(w.writes) > 0
-}
-
-// Seeds returns the values that are surely a *gorm.DB parameter of fn: each
-// such parameter and the values directHandles gives for it. A method's
-// receiver is not an argument.
-func Seeds(fn *ssa.Function) []ssa.Value {
-	var seeds []ssa.Value
+// Seeds returns the values that are surely a *gorm.DB parameter of fn, each
+// mapped to that parameter: the parameter and the values directHandles gives
+// for it. A method's receiver is not an argument.
+func Seeds(fn *ssa.Function) map[ssa.Value]*ssa.Parameter {
+	seeds := make(map[ssa.Value]*ssa.Parameter)
 	for i, p := range fn.Params {
 		if i == 0 && fn.Signature.Recv() != nil {
 			continue
 		}
 		if _, ptr := types.Unalias(p.Type()).(*types.Pointer); ptr && typeutil.IsGormDB(p.Type()) { // rejects **gorm.DB
-			seeds = append(seeds, directHandles(p)...)
+			for _, h := range directHandles(p) {
+				seeds[h] = p
+			}
 		}
 	}
 	return seeds
+}
+
+// WrittenParam returns the parameter whose memory addr, the address of a
+// write that Writes found, is part of: the seed the address is reached from
+// through fields, elements and loads, the steps of a direct path.
+func WrittenParam(addr ssa.Value, seeds map[ssa.Value]*ssa.Parameter) *ssa.Parameter {
+	for seeds[addr] == nil {
+		switch a := addr.(type) {
+		case *ssa.FieldAddr:
+			addr = a.X
+		case *ssa.IndexAddr:
+			addr = a.X
+		default:
+			addr = a.(*ssa.UnOp).X // a load of a field
+		}
+	}
+	return seeds[addr]
 }
 
 // directHandles returns param and the values that are surely param: the

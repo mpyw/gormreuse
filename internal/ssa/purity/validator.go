@@ -74,9 +74,6 @@ type Validator struct {
 	funcVars     callsite.FuncVars
 	paramDerived map[ssa.Value]bool
 	holdsCache   map[types.Type]bool
-	// writes keeps the direct writes of each function (UseDirectWrites). It
-	// may be nil.
-	writes ValidatorDirectWrites
 }
 
 // NewValidator creates a Validator for a function marked as pure.
@@ -93,13 +90,16 @@ func NewValidator(fn *ssa.Function, pureFuncs, immutableReturnFuncs *directive.D
 }
 
 // Validate checks that the function satisfies the pure contract:
-// - Does not pollute *gorm.DB arguments (no non-pure method calls on them)
-// - Does not let them escape
+//   - Does not pollute *gorm.DB arguments (no non-pure method calls on them)
+//   - Does not let them escape
+//   - Does not write them directly: writes are the function's direct writes,
+//     stmtwrite.Writes of stmtwrite.Seeds, which its caller computes once
+//     (#405)
 //
 // Note: Pure functions MAY return mutable *gorm.DB values. The "pure" contract only
 // guarantees that the function doesn't pollute its arguments - callers must treat
 // the return value as potentially mutable.
-func (v *Validator) Validate() []Violation {
+func (v *Validator) Validate(writes map[ssa.Instruction]bool) []Violation {
 	fn := v.fn
 	if fn == nil || fn.Blocks == nil {
 		return nil
@@ -110,7 +110,7 @@ func (v *Validator) Validate() []Violation {
 	}
 
 	violations := v.validateBody(fn)
-	violations = append(violations, v.checkDirectWrites(violations)...)
+	violations = append(violations, v.checkDirectWrites(violations, writes)...)
 
 	// A call that passes several derived arguments reports each one at the
 	// same position, so drop exact duplicates.
@@ -576,32 +576,28 @@ func (v *Validator) checkStoreEscape(store *ssa.Store) []Violation {
 	}}
 }
 
-// checkDirectWrites reports the writes into the query of a *gorm.DB
-// parameter through a direct path (#405), such as `*db = gorm.DB{}`,
+// checkDirectWrites reports writes, the direct writes of the function into
+// the query of a *gorm.DB parameter (#405), such as `*db = gorm.DB{}`,
 // `db.Statement.Distinct = true` or `delete(db.Statement.Clauses, "X")`:
-// they change its query in place, as db.Where does. stmtwrite decides what is
-// a direct path, as it does for the Statement writes of the inferred
-// immutable-param. A write through anything else, such as a local copy, a
-// *gorm.Statement parameter or a call result, may not reach the argument,
-// and is not reported. found holds the violations found already: a position
-// that has a definitive one, such as the escape of db.Statement.DB = db, is
-// not reported again.
-func (v *Validator) checkDirectWrites(found []Violation) []Violation {
-	writes, done := v.writes[v.fn]
-	if !done {
-		writes = stmtwrite.Writes(stmtwrite.Seeds(v.fn))
-		if v.writes != nil {
-			v.writes[v.fn] = writes
-		}
-	}
+// they change its query in place, as db.Where does. stmtwrite decides them,
+// as it does for the inferred immutable-param. found holds the violations
+// found already. A Store of the argument itself that already has a
+// definitive one, as the escape of db.Statement.DB = db, is not reported
+// again. Another value stored over the argument's memory, as in
+// db.Statement.DB = other.Where("x"), gives both reports.
+func (v *Validator) checkDirectWrites(found []Violation, writes map[ssa.Instruction]bool) []Violation {
+	seeds := stmtwrite.Seeds(v.fn)
 	reported := make(map[token.Pos]bool, len(found))
 	for _, viol := range found {
 		reported[viol.Pos] = reported[viol.Pos] || viol.Definitive
 	}
 	var violations []Violation
 	for instr := range writes {
-		if reported[instr.Pos()] {
-			continue
+		if st, ok := instr.(*ssa.Store); ok && reported[st.Pos()] {
+			db, _ := pollutionsource.UnwrapGormDB(st.Val)
+			if p := seeds[db]; p != nil && p == stmtwrite.WrittenParam(st.Addr, seeds) {
+				continue
+			}
 		}
 		violations = append(violations, Violation{
 			Pos:        instr.Pos(),
@@ -611,18 +607,6 @@ func (v *Validator) checkDirectWrites(found []Violation) []Violation {
 	}
 	slices.SortFunc(violations, func(a, b Violation) int { return int(a.Pos - b.Pos) })
 	return violations
-}
-
-// ValidatorDirectWrites keeps the direct writes of each function for the validations
-// of one package. They depend only on the body, while the pure verdicts that
-// make a function be validated again change.
-type ValidatorDirectWrites map[*ssa.Function]map[ssa.Instruction]bool
-
-// UseDirectWrites makes v read and keep the direct writes of its function in
-// writes, and returns v.
-func (v *Validator) UseDirectWrites(writes ValidatorDirectWrites) *Validator {
-	v.writes = writes
-	return v
 }
 
 // checkLeak reports a contract violation when a param-derived *gorm.DB escapes

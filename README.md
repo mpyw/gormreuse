@@ -5742,7 +5742,7 @@ load("b") // not reported
 </td><td>A call through the returned func value has no known callee</td></tr>
 <tr><td><!-- fixtures: pswNotDirect, pswHolderParams, pswReassignedParam, pswInferNotDirect -->
 
-A pure function, or a helper inferred `immutable-param`, that writes the argument's query through anything but a direct path: a `*gorm.Statement` parameter, a local variable, a copy, a `Session` or `Debug` result, a holder parameter, an `append` result, or a call:
+A pure function, or a helper inferred `immutable-param`, that writes the argument's query through anything but a direct path: a `*gorm.Statement` parameter, a local variable that is assigned again, captured or has its address taken, a copy, a `Session` or `Debug` result, a holder parameter, an `append` result, or a call:
 
 ```go
 //gormreuse:pure

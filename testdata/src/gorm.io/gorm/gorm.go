@@ -32,6 +32,7 @@ type Statement struct {
 	Clauses  map[string]interface{}
 	Preloads map[string][]interface{}
 	SQL      strings.Builder
+	Vars     []interface{}
 }
 
 // AddClause adds a clause to the Statement in place.

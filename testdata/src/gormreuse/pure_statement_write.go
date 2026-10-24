@@ -80,17 +80,25 @@ func pswCaptured(db *gorm.DB) {
 	defer delete(db.Statement.Clauses, "Y")           // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
 }
 
-// pswSelfStore and pswOverwriteFrom store the argument into memory it
-// reaches. Each is reported once, as the escape.
+// pswSelfStore stores the argument into its own memory: one report, the
+// escape. pswOverwriteFrom and pswStoreOther store another value over the
+// argument's memory: the escape of that value, and the write of the
+// argument.
 //
 //gormreuse:pure
 func pswSelfStore(db *gorm.DB) {
-	db.Statement.DB = db // want `pure function leaks \*gorm\.DB argument via store through a pointer`
+	db.Statement.DB = db      // want `pure function leaks \*gorm\.DB argument via store through a pointer`
+	db.Statement.Vars[0] = db // want `pure function leaks \*gorm\.DB argument via slice/array store`
 }
 
 //gormreuse:pure
 func pswOverwriteFrom(a, b *gorm.DB) {
-	*a = *b // want `pure function leaks \*gorm\.DB argument via store through a pointer`
+	*a = *b // want `pure function leaks \*gorm\.DB argument via store through a pointer` `pure function pollutes \*gorm\.DB argument by writing to it directly`
+}
+
+//gormreuse:pure
+func pswStoreOther(db, other *gorm.DB) {
+	db.Statement.DB = other // want `pure function leaks \*gorm\.DB argument via store through a pointer` `pure function pollutes \*gorm\.DB argument by writing to it directly`
 }
 
 // pswCallerSubquery: pswDistinct(sub) changes the subquery that outer reads,
