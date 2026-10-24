@@ -576,29 +576,24 @@ func (v *Validator) checkStoreEscape(store *ssa.Store) []Violation {
 // checkDirectWrites reports the writes into the query memory of the
 // argument (#405), such as `*db = gorm.DB{}`, `db.Statement.Distinct = true`
 // or `delete(db.Statement.Clauses, "X")`: they change its query in place, as
-// db.Where does. stmtwrite decides what is a write, from every derived
-// gorm.DB and gorm.Statement of the function and its closures, so the
-// inferred immutable-param reads the same answer. found holds the
+// db.Where does. stmtwrite decides what is a write, walking from the seeded
+// parameters through the function and its closures, so the inferred
+// immutable-param reads the same answer. Only the parameters are seeds: a
+// handle that a call returned, or that a local copy holds, may not be the
+// argument's, and stmtwrite follows the ones that surely are. found holds the
 // violations found already: a position that has one, such as the escape of
 // db.Statement.DB = db, is not reported again.
 func (v *Validator) checkDirectWrites(found []Violation) []Violation {
-	var handles []ssa.Value
-	for val := range v.paramDerived {
-		// A local variable of the type, as in c := *db, is the function's
-		// own copy, not the argument's handle, also where a closure captures
-		// it. A gorm.Statement passed by value still holds the argument's
-		// maps and slices.
-		if validatorIsVariable(val) || !typeutil.IsGormDB(val.Type()) && !typeutil.IsGormStatement(val.Type()) {
-			continue
-		}
-		handles = append(handles, val)
+	var params []ssa.Value
+	for _, i := range v.seededParams() {
+		params = append(params, v.fn.Params[i])
 	}
 	reported := make(map[token.Pos]bool, len(found))
 	for _, viol := range found {
 		reported[viol.Pos] = true
 	}
 	var violations []Violation
-	for instr := range stmtwrite.Writes(handles) {
+	for instr := range stmtwrite.Writes(params) {
 		if reported[instr.Pos()] {
 			continue
 		}
@@ -610,16 +605,6 @@ func (v *Validator) checkDirectWrites(found []Violation) []Violation {
 	}
 	slices.SortFunc(violations, func(a, b Violation) int { return int(a.Pos - b.Pos) })
 	return violations
-}
-
-// validatorIsVariable reports whether val is the address of a local
-// variable: its Alloc, or a closure's FreeVar bound to one.
-func validatorIsVariable(val ssa.Value) bool {
-	switch val.(type) {
-	case *ssa.Alloc, *ssa.FreeVar:
-		return true
-	}
-	return false
 }
 
 // checkLeak reports a contract violation when a param-derived *gorm.DB escapes

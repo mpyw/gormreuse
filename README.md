@@ -2664,12 +2664,12 @@ These may be written:
 
 - The argument's `Error` and `RowsAffected`. They hold the outcome of a query, as `AddError` does.
 - Its `Config`. It holds no clause. A write to it, such as `db.DryRun = true`, still changes how the caller's later queries run, and is not reported (see [Known Limitations](#known-limitations)).
-- The fields of a local copy of the `*gorm.DB` or of the `Statement`. But the maps and slices of such a copy are still the argument's, so a write into them is reported, unless the copy's field was replaced first.
+- The fields of a local copy of the `*gorm.DB` or of the `Statement`. But the maps and slices of such a copy are still the argument's, so a write into them is reported while the copy surely holds them.
 - A scalar, a string or an interface read from the `Statement`, such as `Table` or `Context`. It is a copy.
 
 Message: `pure function pollutes *gorm.DB argument by writing to it directly`
 
-Only the writes that the function's own body makes count. Handing a map, a slice or an address of the `Statement` to another function, as in `sort.Strings(db.Statement.Selects)` or `json.Unmarshal(b, &db.Statement.Selects)`, is not followed (see [Known Limitations](#known-limitations)).
+Only the writes that the function's own body makes count, and only when they surely reach the argument: through the parameter itself, a `Session` or `Debug` copy that shares its `Statement`, or a variable that surely still holds one of these. A handle that another function returned, a merge with another value, and a variable that is assigned again before the write are not followed (see [Known Limitations](#known-limitations)). Handing a map, a slice or an address of the `Statement` to another function, as in `sort.Strings(db.Statement.Selects)` or `json.Unmarshal(b, &db.Statement.Selects)`, is not followed (see [Known Limitations](#known-limitations)).
 
 </td><td>
 
@@ -5510,7 +5510,7 @@ gormreuse reports a reuse only when it can follow the value. These cases are kno
 
 | Kind | Cases | Meaning |
 | --- | --- | --- |
-| Missed reuse (false negatives) | 21 | Reuse that is not reported |
+| Missed reuse (false negatives) | 22 | Reuse that is not reported |
 | Extra reports (false positives) | 5 | Safe code that is reported |
 | Wrong position | — | A report on the wrong line |
 | No fix | — | A report without a suggested fix |
@@ -5786,6 +5786,22 @@ func load(db *gorm.DB, b []byte) {
 ```
 
 </td><td>A call that gets the address, also as a method receiver, is a hand-off, as above</td></tr>
+<tr><td><!-- fixtures: pswCapturedStatementVar, pswLoopMerged, pswUnrelatedLoopMerged, pswReplacedLater, pswReplacedDeep, pswBoxedMerged, pswReplacedInClosure, pswInferCapturedVar -->
+
+A write that reaches the argument on some paths only: through a variable assigned again elsewhere, a merge with another value, or a copy whose field is replaced on one path:
+
+```go
+//gormreuse:pure
+func mark(db *gorm.DB, cond bool) {
+    c := *db.Statement
+    if cond {
+        c.Clauses = map[string]clause.Clause{}
+    }
+    c.Clauses["X"] = clause.Clause{} // not reported
+}
+```
+
+</td><td>A write counts only when it surely reaches the argument</td></tr>
 <tr><td><!-- fixtures: pswConfig -->
 
 A pure function that writes the argument's `Config`:

@@ -14,8 +14,8 @@ type DB struct {
 	Statement    *Statement
 }
 
-// Config is the configuration that every handle of a connection shares. The
-// stub keeps one of its fields and none of its methods.
+// Config is the configuration of a handle. gorm's Session copies it for the
+// new handle. The stub keeps one of its fields and none of its methods.
 type Config struct {
 	SkipDefaultTransaction bool
 }
