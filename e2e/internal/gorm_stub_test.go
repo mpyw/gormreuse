@@ -20,7 +20,8 @@ import (
 // gormStubOmitted are the methods of the real *gorm.DB that the stub in
 // testdata/src/gorm.io/gorm leaves out on purpose, with the reason.
 var gormStubOmitted = map[string]string{
-	// Promoted from the embedded *gorm.Config. The stub's DB embeds nothing.
+	// Promoted from the embedded *gorm.Config. The stub's Config has none of
+	// its methods.
 	"AfterInitialize": "promoted from *gorm.Config",
 	"Apply":           "promoted from *gorm.Config",
 	// Dialector and plugin plumbing that application code does not chain.

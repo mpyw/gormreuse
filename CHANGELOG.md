@@ -2,6 +2,13 @@
 
 These notes say what changes for users in each release, and what to do about it. The full commit list of each release is on [GitHub Releases](https://github.com/mpyw/gormreuse/releases). Releases up to 0.22.0 have their notes there only.
 
+## Unreleased
+
+| Change | Effect |
+| --- | --- |
+| A direct write to the argument breaks the `pure` contract (#405) | `//gormreuse:pure func mark(db *gorm.DB) { db.Statement.Distinct = true }` passed the body check, and callers trusted it. So `mark(sub)` before the outer query of `sub` was missed. A write through a direct path from the parameter is now reported, and callers stop trusting the function: `*db = v`, `db.Statement = v`, a field of the `Statement`, and a map or a slice it holds (also with `delete`, `clear` or `copy`), also in a closure. `Error`, `RowsAffected` and `Config` may still be written. A write through a local copy, a `Session` result, a holder parameter, an `append` result or a call is not followed |
+| A helper that writes into its parameter's `Statement` through a direct path is not inferred `immutable-param` (#405) | `tx.Statement.Clauses["X"] = c`, `delete(tx.Statement.Clauses, "WHERE")` and similar writes change the caller's value in place. Such a helper was inferred, and its reuse went unreported. It is reported again. A helper that only reads the `Statement` is still inferred |
+
 ## 0.24.1 (2026-10-21)
 
 Documentation only. The analyzer behaves exactly as in 0.24.0.

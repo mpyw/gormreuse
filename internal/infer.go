@@ -13,6 +13,7 @@ import (
 	"github.com/mpyw/gormreuse/internal/ssa/callsite"
 	"github.com/mpyw/gormreuse/internal/ssa/origin"
 	"github.com/mpyw/gormreuse/internal/ssa/purity"
+	"github.com/mpyw/gormreuse/internal/ssa/stmtwrite"
 	"github.com/mpyw/gormreuse/internal/ssa/tracer"
 	"github.com/mpyw/gormreuse/internal/typeutil"
 )
@@ -396,6 +397,12 @@ func inferParamUses(fn *ssa.Function, declared map[*ssa.Function]bool, finisherO
 		instrs = append(instrs, instr)
 	})
 	held, vars := inferHeldParams(fn, instrs, tree)
+	direct := make(map[ssa.Value]bool)
+	for _, p := range fn.Params {
+		for _, h := range stmtwrite.DirectHandles(p) {
+			direct[h] = true
+		}
+	}
 
 	for v := range vars {
 		for _, ref := range *v.Referrers() {
@@ -417,7 +424,7 @@ func inferParamUses(fn *ssa.Function, declared map[*ssa.Function]bool, finisherO
 			case *ssa.Store:
 				own = own || !vars[ref.Addr]
 			case *ssa.FieldAddr:
-				own = own || !inferReadsField(ref)
+				own = own || !inferReadsField(ref, direct[v])
 			case ssa.CallInstruction:
 				changes, callee := inferCallChangesParam(ref, v, tree, declared, finisherOnly)
 				own = own || changes
@@ -515,8 +522,12 @@ func inferHoldStep(instr ssa.Instruction, held, vars map[ssa.Value]bool, tree ma
 // inferReadsField reports whether fa, a field of a *gorm.DB, is only read,
 // as in tx.Error or tx.Dialector. The Statement is a pointer that a write
 // through it changes in place, so only the reads of its own fields count, as
-// in tx.Statement.Context.
-func inferReadsField(fa *ssa.FieldAddr) bool {
+// in tx.Statement.Context. A field of the Statement that is a map, a slice or
+// a handle is shared with it, so a write through one (#405), as in
+// tx.Statement.Clauses["X"] = c, is a change too when fa is a direct path
+// from the parameter (direct). stmtwrite decides it, as it does for the pure
+// contract. Through anything else, only the loads count, as before #405.
+func inferReadsField(fa *ssa.FieldAddr, direct bool) bool {
 	ptr, ok := fa.X.Type().Underlying().(*types.Pointer)
 	if !ok {
 		return false
@@ -526,11 +537,15 @@ func inferReadsField(fa *ssa.FieldAddr) bool {
 		return false
 	}
 	statement := st.Field(fa.Field).Name() == "Statement"
+	var readsOnly func(*ssa.UnOp) bool
+	if direct {
+		readsOnly = func(load *ssa.UnOp) bool { return !stmtwrite.WritesThrough(load) }
+	}
 	return inferOnlyLoads(fa, func(load *ssa.UnOp) bool {
 		return !statement || !slices.ContainsFunc(*load.Referrers(), func(ref ssa.Instruction) bool {
 			field, isField := ref.(*ssa.FieldAddr)
 			_, debug := ref.(*ssa.DebugRef)
-			return !debug && (!isField || !inferOnlyLoads(field, nil))
+			return !debug && (!isField || !inferOnlyLoads(field, readsOnly))
 		})
 	})
 }
