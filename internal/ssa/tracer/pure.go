@@ -35,10 +35,10 @@ type PureVerdicts struct {
 	Imported *facts.Table
 }
 
-// changesReceiverOf reports whether fn is a pure method that may change a
+// ChangesReceiverOf reports whether fn is a pure method that may change a
 // *gorm.DB its receiver holds (see ChangesReceiver). The verdicts are keyed by
 // the declared function.
-func (p *PureVerdicts) changesReceiverOf(fn *ssa.Function) bool {
+func (p *PureVerdicts) ChangesReceiverOf(fn *ssa.Function) bool {
 	if p == nil || fn == nil {
 		return false
 	}
@@ -117,7 +117,7 @@ func (t *RootTracer) IsPureFunction(fn *ssa.Function) bool {
 // *gorm.DB its receiver holds (#404). A call of one hands its receiver on, as
 // a call of a method that is not pure does. Its arguments stay exempt.
 func (t *RootTracer) PureChangesReceiver(fn *ssa.Function) bool {
-	return t.pure.changesReceiverOf(fn)
+	return t.pure.ChangesReceiverOf(fn)
 }
 
 // pureReturnedArgs returns the arguments of a call to a trusted

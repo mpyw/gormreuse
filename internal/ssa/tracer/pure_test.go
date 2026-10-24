@@ -12,8 +12,8 @@ import (
 func TestChangesReceiverOfWithoutVerdicts(t *testing.T) {
 	t.Parallel()
 	var p *PureVerdicts
-	if p.changesReceiverOf(nil) {
-		t.Error("changesReceiverOf on nil verdicts = true, want false")
+	if p.ChangesReceiverOf(nil) {
+		t.Error("ChangesReceiverOf on nil verdicts = true, want false")
 	}
 }
 

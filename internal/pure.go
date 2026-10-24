@@ -103,7 +103,7 @@ func validatePureFuncs(
 		}
 	}
 
-	verdicts.ChangesReceiver = pureChangedReceivers(targets, pureFuncs, immutableReturnFuncs, verdicts, funcVars, guard)
+	verdicts.ChangesReceiver = pureChangedReceivers(targets, callers, pureFuncs, immutableReturnFuncs, verdicts, funcVars, guard)
 
 	// A closure body is validated both as its own pure function and as part of
 	// a pure function that creates it, so the same violation can come twice.
@@ -124,10 +124,13 @@ func validatePureFuncs(
 
 // pureChangedReceivers returns the trusted pure methods in targets that may
 // change a *gorm.DB their receiver holds (#404). A method that calls such a
-// method on its receiver changes it too, so the set grows until nothing
-// changes. A check that panicked counts as a change.
+// method on its receiver changes it too. Each method is checked once, and
+// again only when a method it calls or refers to (callers, see pureCallers)
+// turns out to change its receiver, so a chain of n methods takes about 2n
+// checks. A check that panicked counts as a change.
 func pureChangedReceivers(
 	targets []*ssa.Function,
+	callers map[*ssa.Function][]*ssa.Function,
 	pureFuncs, immutableReturnFuncs *directive.DirectiveFuncSet,
 	verdicts *tracer.PureVerdicts,
 	funcVars callsite.FuncVars,
@@ -137,20 +140,31 @@ func pureChangedReceivers(
 	changes := func(fn *ssa.Function) bool {
 		return changed[fn] || verdicts.Imported.Of(fn).PureChangesReceiver
 	}
-	for grew := true; grew; {
-		grew = false
-		for _, fn := range targets {
-			if changed[fn] || verdicts.Failed[fn] || fn.Signature.Recv() == nil {
-				continue
-			}
-			yes := true
-			guard.run("pure", fn, func() {
-				yes = purity.NewValidator(fn, pureFuncs, immutableReturnFuncs, verdicts, funcVars).ChangesReceiver(changes)
-			})
-			if yes {
-				changed[fn] = true
-				grew = true
-			}
+	var queue []*ssa.Function
+	queued := make(map[*ssa.Function]bool)
+	enqueue := func(fn *ssa.Function) {
+		if !queued[fn] && !changed[fn] && !verdicts.Failed[fn] && fn.Signature.Recv() != nil {
+			queued[fn] = true
+			queue = append(queue, fn)
+		}
+	}
+	for _, fn := range targets {
+		enqueue(fn)
+	}
+	for len(queue) > 0 {
+		fn := queue[0]
+		queue = queue[1:]
+		queued[fn] = false
+		yes := true
+		guard.run("pure", fn, func() {
+			yes = purity.NewValidator(fn, pureFuncs, immutableReturnFuncs, verdicts, funcVars).ChangesReceiver(changes)
+		})
+		if !yes {
+			continue
+		}
+		changed[fn] = true
+		for _, caller := range callers[fn] {
+			enqueue(caller)
 		}
 	}
 	return changed

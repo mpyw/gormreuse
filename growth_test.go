@@ -328,6 +328,22 @@ var growthCases = []growthCase{
 		}
 		return []string{b.String()}
 	}},
+	// A chain of pure methods, each calling the next on its receiver, the
+	// last changing it (#404). Declared caller-first, so a sweep over every
+	// method per round would check each one n times.
+	{name: "purereceivers", limit: growthLinear, shape: func(n int) []string {
+		var b strings.Builder
+		b.WriteString("type repo struct{ db *gorm.DB }\n\n")
+		for i := range n {
+			body := fmt.Sprintf("r.m%d(d)", i+1)
+			if i == n-1 {
+				body = "r.db.Where(\"x\").Find(nil)"
+			}
+			fmt.Fprintf(&b, "//gormreuse:pure\nfunc (r repo) m%d(d *gorm.DB) { %s }\n\n", i, body)
+		}
+		b.WriteString("func caller(db *gorm.DB) {\n\tq := db.Where(\"x\")\n\trepo{db: q}.m0(nil)\n\tq.Find(nil)\n}\n")
+		return []string{b.String()}
+	}},
 	// A chain of n unannotated helpers, the last returning a Session copy.
 	{name: "inferchain", limit: growthLinear, shape: func(n int) []string {
 		var b strings.Builder

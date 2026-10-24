@@ -37,6 +37,9 @@ func (r prRepo) viaHelper(dst *gorm.DB) { prApply(r.db) }
 //gormreuse:pure
 func (r prRepo) mark(dst *gorm.DB) { r.db.Statement.Distinct = true }
 
+// viaPureMethod calls list on its receiver, so it changes its receiver too.
+// dst goes to list's argument, which list's contract covers.
+//
 //gormreuse:pure
 func (r prRepo) viaPureMethod(dst *gorm.DB) { r.list(dst) }
 
@@ -62,6 +65,111 @@ func (r prRepo) name(dst *gorm.DB) string { return "repo" }
 
 //gormreuse:pure
 func (r prRepo) inspect(other prRepo) { r.db.Where("x").Find(nil) }
+
+//gormreuse:pure
+func (r prRepo) handle(dst *gorm.DB) *gorm.DB { return r.db }
+
+//gormreuse:pure
+func (r prRepo) clearError(dst *gorm.DB) { r.db.Error = nil }
+
+//gormreuse:pure
+func (r prRepo) copyStatement(dst *gorm.DB) bool {
+	s := *r.db.Statement
+	s.Distinct = true
+	return s.Distinct
+}
+
+//gormreuse:pure
+func (r prRepo) copyDB(dst *gorm.DB) *gorm.DB {
+	c := *r.db
+	c.Statement = &gorm.Statement{}
+	return &c
+}
+
+//gormreuse:pure
+func (r prRepo) self(dst *gorm.DB) prRepo { return r }
+
+func (r prRepo) getDB() *gorm.DB { return r.db }
+
+//gormreuse:pure
+func (r prRepo) viaGetter(dst *gorm.DB) { r.getDB().Session(&gorm.Session{}).Count(nil) }
+
+// prUseRepo calls list on its argument. list changes its receiver, so it is
+// checked here like a function that is not pure.
+//
+//gormreuse:pure
+func prUseRepo(x prRepo) { x.list(nil) } // want `pure function passes \*gorm\.DB argument to non-pure function list`
+
+type prBox[T interface {
+	Where(query interface{}, args ...interface{}) *gorm.DB
+}] struct{ v T }
+
+//gormreuse:pure
+func (b prBox[T]) list(dst *gorm.DB) { b.v.Where("leak") }
+
+//gormreuse:pure
+func (r *prRepo) markP(dst *gorm.DB) { r.db.Statement.Distinct = true }
+
+//gormreuse:pure
+func (r *prRepo) markCopy(dst *gorm.DB) {
+	c := *r
+	c.db.Statement.Distinct = true
+}
+
+//gormreuse:pure
+func (r prRepo) markLater(dst *gorm.DB) {
+	func() { r.db.Statement.Distinct = true }()
+}
+
+//gormreuse:pure
+func (o prOuter) markInner(dst *gorm.DB) { o.inner.db.Statement.Distinct = true }
+
+//gormreuse:pure
+func (r *prRepo) replaceThenMark(dst *gorm.DB) {
+	r.db = r.db.Session(&gorm.Session{})
+	r.db.Statement.Distinct = true
+}
+
+//gormreuse:pure
+func (r prRepo) resetFieldThenMark(dst *gorm.DB) {
+	r.db = r.db.Session(&gorm.Session{})
+	r.db.Statement.Distinct = true
+}
+
+//gormreuse:pure
+func (o *prOuter) replaceInnerThenMark(dst *gorm.DB) {
+	o.inner.db = o.inner.db.Session(&gorm.Session{})
+	o.inner.db.Statement.Distinct = true
+}
+
+//gormreuse:pure
+func (r prRepo) resetThenMark(dst *gorm.DB) {
+	r = prRepo{db: r.db.Session(&gorm.Session{})}
+	r.db.Statement.Distinct = true
+}
+
+type prCounted struct {
+	db *gorm.DB
+	n  int
+}
+
+//gormreuse:pure
+func (c prCounted) count(dst *gorm.DB) int { return c.n }
+
+func (c prCounted) negN() int { return -c.n }
+
+//gormreuse:pure
+func (c prCounted) viaNeg(dst *gorm.DB) int { return c.negN() }
+
+var prSink *gorm.DB
+
+func (r prRepo) leakDB() *gorm.DB {
+	prSink = r.db
+	return r.db
+}
+
+//gormreuse:pure
+func (r prRepo) viaLeak(dst *gorm.DB) { _ = r.leakDB() }
 
 func prApply(db *gorm.DB) { db.Where("leak") }
 
@@ -163,6 +271,68 @@ func prClosure(db *gorm.DB) {
 	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
+// prReturnsHandle: the pure method returns its receiver's DB, which hands it
+// on.
+func prReturnsHandle(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x")
+	prRepo{db: q}.handle(nil).Where("y").Find(nil)
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// prGenericReceiver: the receiver holds q behind a type parameter.
+func prGenericReceiver(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x")
+	prBox[*gorm.DB]{v: q}.list(nil)
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// prPointerWrite: a pure method with a pointer receiver writes the Statement.
+func prPointerWrite(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x")
+	(&prRepo{db: q}).markP(nil)
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// prDerefCopyWrite: markCopy writes through a copy of its receiver, which
+// still holds q. A copy is not a direct path, as for an argument (#405), so
+// the write is not followed.
+// [LIMITATION]
+func prDerefCopyWrite(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x")
+	(&prRepo{db: q}).markCopy(nil)
+	q.Find(nil) // not reported
+}
+
+// prClosureWrite: a closure in the pure method writes the Statement.
+func prClosureWrite(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x")
+	prRepo{db: q}.markLater(nil)
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// prNestedWrite: the pure method writes through a nested field.
+func prNestedWrite(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x")
+	prOuter{inner: prRepo{db: q}}.markInner(nil)
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// prThroughNonGetter: the pure method passes its receiver to a method that
+// does more than select a field, so it may change it.
+func prThroughNonGetter(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x")
+	_ = prCounted{db: q}.viaNeg(nil)
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// prThroughLeakingGetter: the method the pure method calls also stores the
+// handle in a global.
+func prThroughLeakingGetter(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x")
+	prRepo{db: q}.viaLeak(nil)
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
 // prFixWithheld: q is reused, and the pure method changes it in place, so a
 // Session at q would drop that change. No fix is offered, as for a method
 // that is not pure.
@@ -196,6 +366,88 @@ func prReadsReceiver(db *gorm.DB) {
 func prLenOfReceiver(db *gorm.DB) {
 	q := db.Session(&gorm.Session{}).Where("x")
 	_ = prRepo{db: q}.selected(nil)
+	q.Find(nil)
+}
+
+// prWritesError: writing Error only records an outcome.
+func prWritesError(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x")
+	prRepo{db: q}.clearError(nil)
+	q.Find(nil)
+}
+
+// prWritesStatementCopy: the pure method writes a local copy of the
+// Statement.
+func prWritesStatementCopy(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x")
+	_ = prRepo{db: q}.copyStatement(nil)
+	q.Find(nil)
+}
+
+// prReturnsDBCopy: the pure method returns a local copy of the DB with a
+// Statement of its own.
+func prReturnsDBCopy(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x")
+	_ = prRepo{db: q}.copyDB(nil)
+	q.Find(nil)
+}
+
+// prReturnsSelf: the pure method returns a copy of its receiver.
+func prReturnsSelf(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x")
+	_ = prRepo{db: q}.self(nil)
+	q.Find(nil)
+}
+
+// prReadsThroughGetter: the pure method reads its receiver through a getter.
+func prReadsThroughGetter(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x")
+	prRepo{db: q}.viaGetter(nil)
+	q.Find(nil)
+}
+
+// prPureFunctionCalls: prUseRepo only warns, as a pure function that passes
+// its argument to a function that is not pure does, and is still trusted.
+func prPureFunctionCalls(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x")
+	prUseRepo(prRepo{db: q})
+	q.Find(nil)
+}
+
+// prReplacedFieldWrite: the pointer receiver's field is assigned a Session
+// copy before the write, so the write does not reach q.
+func prReplacedFieldWrite(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x")
+	(&prRepo{db: q}).replaceThenMark(nil)
+	q.Find(nil)
+}
+
+// prResetFieldWrite: the same with a value receiver.
+func prResetFieldWrite(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x")
+	prRepo{db: q}.resetFieldThenMark(nil)
+	q.Find(nil)
+}
+
+// prReplacedNestedFieldWrite: the same through a nested field.
+func prReplacedNestedFieldWrite(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x")
+	(&prOuter{inner: prRepo{db: q}}).replaceInnerThenMark(nil)
+	q.Find(nil)
+}
+
+// prResetReceiverWrite: the whole value receiver is assigned before the
+// write.
+func prResetReceiverWrite(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x")
+	prRepo{db: q}.resetThenMark(nil)
+	q.Find(nil)
+}
+
+// prReadsOtherField: the pure method reads only a field that is not a DB.
+func prReadsOtherField(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x")
+	_ = prCounted{db: q}.count(nil)
 	q.Find(nil)
 }
 

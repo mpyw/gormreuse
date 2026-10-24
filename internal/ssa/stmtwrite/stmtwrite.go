@@ -101,6 +101,110 @@ func (c Cache) Of(fn *ssa.Function) map[ssa.Instruction]Write {
 	return w.writes
 }
 
+// WritesReceiver reports whether fn, a method, writes the query of a
+// *gorm.DB its receiver holds through a direct path (#404). The handles are
+// the *gorm.DB values loaded from the addresses of the receiver's fields, at
+// any depth of struct fields: of a pointer receiver, or of the variable
+// go/ssa keeps a value receiver in, also where a closure captures it. A
+// receiver whose fields the body assigns gives no handle, since a later read
+// may see another value. A copy of the receiver is not followed, as a copy of
+// an argument is not. From each handle the walk is the one for a parameter.
+func WritesReceiver(fn *ssa.Function) bool {
+	seeds := ReceiverHandles(fn)
+	w := &walker{seeds: seeds, writes: map[ssa.Instruction]Write{}, seen: map[step]bool{}}
+	for h, p := range seeds {
+		w.push(step{v: h, k: handle, p: p})
+	}
+	w.run()
+	return len(w.writes) > 0
+}
+
+// ReceiverHandles returns the *gorm.DB values that fn, a method, surely reads
+// from its receiver's fields (see WritesReceiver), each mapped to the
+// receiver. It is empty when the body assigns a field of the receiver.
+func ReceiverHandles(fn *ssa.Function) map[ssa.Value]*ssa.Parameter {
+	seeds := make(map[ssa.Value]*ssa.Parameter)
+	recv := fn.Params[0]
+	if !receiverHandles(recv, seeds, recv) {
+		return nil
+	}
+	for _, r := range *recv.Referrers() {
+		st, ok := r.(*ssa.Store)
+		if !ok || st.Val != ssa.Value(recv) || st.Block() != fn.Blocks[0] {
+			continue
+		}
+		if spill, ok := st.Addr.(*ssa.Alloc); ok && spill.Comment == recv.Name() && !receiverSpillHandles(spill, st, seeds, recv) {
+			return nil
+		}
+	}
+	return seeds
+}
+
+// receiverHandles adds to seeds the *gorm.DB values that v, a pointer
+// receiver, holds in its fields. It reports false when the body stores into a
+// field address, since the field may then hold another value. A load of the
+// whole struct is a copy, which is not followed.
+func receiverHandles(v ssa.Value, seeds map[ssa.Value]*ssa.Parameter, recv *ssa.Parameter) bool {
+	for _, r := range *v.Referrers() {
+		if fa, ok := r.(*ssa.FieldAddr); ok && !receiverFieldHandles(fa, seeds, recv) {
+			return false
+		}
+	}
+	return true
+}
+
+// receiverSpillHandles follows spill, the variable go/ssa keeps a value
+// receiver in, in the method and in the closures that capture it: the
+// addresses of its fields. Another store into it gives false.
+func receiverSpillHandles(spill *ssa.Alloc, spilled *ssa.Store, seeds map[ssa.Value]*ssa.Parameter, recv *ssa.Parameter) bool {
+	vars := []ssa.Value{spill}
+	for i := 0; i < len(vars); i++ {
+		for _, r := range *vars[i].Referrers() {
+			switch r := r.(type) {
+			case *ssa.FieldAddr:
+				if !receiverFieldHandles(r, seeds, recv) {
+					return false
+				}
+			case *ssa.MakeClosure:
+				fn := r.Fn.(*ssa.Function)
+				for j, b := range r.Bindings {
+					if b == vars[i] {
+						vars = append(vars, fn.FreeVars[j])
+					}
+				}
+			case *ssa.Store:
+				if r != spilled {
+					return false
+				}
+			}
+		}
+	}
+	return true
+}
+
+// receiverFieldHandles follows fa, the address of a field of the receiver:
+// a load of a *gorm.DB from it is a handle, and the addresses of its own
+// fields are followed. A store into it gives false.
+func receiverFieldHandles(fa *ssa.FieldAddr, seeds map[ssa.Value]*ssa.Parameter, recv *ssa.Parameter) bool {
+	for _, r := range *fa.Referrers() {
+		switch r := r.(type) {
+		case *ssa.Store:
+			if r.Addr == ssa.Value(fa) {
+				return false
+			}
+		case *ssa.UnOp:
+			if _, ptr := types.Unalias(r.Type()).(*types.Pointer); ptr && typeutil.IsGormDB(r.Type()) {
+				seeds[r] = recv
+			}
+		case *ssa.FieldAddr:
+			if !receiverFieldHandles(r, seeds, recv) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // seedsOf returns the values that are surely a *gorm.DB parameter of fn,
 // each mapped to that parameter: the parameter and the values directHandles
 // gives for it. A method's receiver is not an argument.
