@@ -271,6 +271,80 @@ func rangeFuncExitMapClosureReturn(db *gorm.DB, seq iter.Seq[int], m map[int]fun
 	}
 }
 
+// rangeFuncExitIIFEStoreCapturedBreak: a closure stored into a captured
+// variable from an IIFE in the body, before the break.
+func rangeFuncExitIIFEStoreCapturedBreak(db *gorm.DB, seq iter.Seq[int]) {
+	q := db.Where("x").Session(&gorm.Session{})
+	var f func()
+	for range seq {
+		func() { f = func() { q.Find(nil) } }() // want `\*gorm\.DB reused: second branch from mutable root`
+		break
+	}
+	f()
+	f()
+}
+
+// rangeFuncExitIIFEPassClosureBreak: a closure passed to a function from an
+// IIFE in the body, before the break.
+func rangeFuncExitIIFEPassClosureBreak(db *gorm.DB, seq iter.Seq[int], run func(func())) {
+	q := db.Where("x").Session(&gorm.Session{})
+	for range seq {
+		func() { run(func() { q.Find(nil) }) }() // want `\*gorm\.DB reused: second branch from mutable root`
+		break
+	}
+}
+
+// rangeFuncExitIIFEFieldStoreBreak: a closure stored into a field from an
+// IIFE in the body, before the break.
+func rangeFuncExitIIFEFieldStoreBreak(db *gorm.DB, seq iter.Seq[int], h *rangeFuncExitHolder) {
+	q := db.Where("x").Session(&gorm.Session{})
+	for range seq {
+		func() { h.f = func() { q.Find(nil) } }() // want `\*gorm\.DB reused: second branch from mutable root`
+		break
+	}
+	h.f()
+	h.f()
+}
+
+// rangeFuncExitIIFEAppendBreak: a closure appended to a slice from an IIFE in
+// the body, before the break.
+func rangeFuncExitIIFEAppendBreak(db *gorm.DB, seq iter.Seq[int]) []func() {
+	q := db.Where("x").Session(&gorm.Session{})
+	var fs []func()
+	for range seq {
+		func() { fs = append(fs, func() { q.Find(nil) }) }() // want `\*gorm\.DB reused: second branch from mutable root`
+		break
+	}
+	return fs
+}
+
+// rangeFuncExitIIFEPassClosureBreakOuter: the same as a pass, from an IIFE in
+// a nested body that leaves both loops.
+func rangeFuncExitIIFEPassClosureBreakOuter(db *gorm.DB, outer, inner iter.Seq[int], run func(func())) {
+	q := db.Where("x").Session(&gorm.Session{})
+loop:
+	for range outer {
+		for range inner {
+			func() { run(func() { q.Find(nil) }) }() // want `\*gorm\.DB reused: second branch from mutable root`
+			break loop
+		}
+	}
+}
+
+// rangeFuncExitIIFE2StoreCapturedReturn: two closures deep, before a return.
+func rangeFuncExitIIFE2StoreCapturedReturn(db *gorm.DB, seq iter.Seq[int]) func() {
+	q := db.Where("x").Session(&gorm.Session{})
+	var f func()
+	for range seq {
+		func() { func() { f = func() { q.Find(nil) } }() }() // want `\*gorm\.DB reused: second branch from mutable root`
+		return f
+	}
+	return nil
+}
+
+// rangeFuncExitHolder holds a closure in a field.
+type rangeFuncExitHolder struct{ f func() }
+
 // =============================================================================
 // SHOULD NOT REPORT
 // =============================================================================
@@ -465,4 +539,16 @@ func rangeFuncExitBranchesThenLeaves(db *gorm.DB, outer, inner iter.Seq[int]) {
 		}
 		return
 	}
+}
+
+// rangeFuncExitHandOffInClosureNeverRun: the hand-off is in a closure that
+// is only compared with nil, which does not run it. So the closure it would
+// hand on never runs either.
+func rangeFuncExitHandOffInClosureNeverRun(db *gorm.DB, seq iter.Seq[int], run func(func())) bool {
+	q := db.Where("x")
+	for range seq {
+		g := func() { run(func() { q.Find(nil) }) }
+		return g != nil
+	}
+	return false
 }

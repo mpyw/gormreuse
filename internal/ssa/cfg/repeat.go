@@ -333,15 +333,30 @@ func (r *Repeats) sitesRepeatAfter(def *ssa.BasicBlock) bool {
 	return got
 }
 
-// handedOnInRangeFuncBody reports whether site hands the closure on in a
-// range-over-func body that def is outside of. The closure may then run any
-// number of times after the body: a store into a captured variable, as in
+// handedOnInRangeFuncBody reports whether site hands the closure on within a
+// range-over-func body that def is outside of: in the body, or in a closure
+// that runs within it, at any depth. The closure may then run any number of
+// times after the body. A store into a captured variable, as in
 // `for range seq { f = func() { … }; break }; f(); f()`, is followed by calls
-// that the sites do not see. So such a site counts as running again, as every
-// block of the body did before #399, even when the body leaves the loop
-// after it.
+// that the sites do not see. So such a site counts as running again, even
+// when the body leaves the loop after it. That is the answer before #399,
+// when every block of the body was in a loop.
+//
+// The functions from site.holder out to def's are asked in turn. A closure
+// on the way that runs nowhere hands nothing on.
 func (site repeatSite) handedOnInRangeFuncBody(def *ssa.BasicBlock) bool {
-	return site.handedOn && IsRangeFuncLoopBody(site.holder.fn) && (def == nil || def.Parent() != site.holder.fn)
+	if !site.handedOn {
+		return false
+	}
+	for h := site.holder; h != nil && (def == nil || h.fn != def.Parent()); h = h.parent {
+		if IsRangeFuncLoopBody(h.fn) {
+			return true
+		}
+		if h.parent != nil && !h.multi && len(h.sites) == 0 {
+			return false
+		}
+	}
+	return false
 }
 
 // repeatExits are the exits that a range-over-func body may take after a use
@@ -442,7 +457,7 @@ func repeatExitCode(ret *ssa.Return) (*ssa.FreeVar, int64, bool) {
 // repeatConstInt returns the value of v when it is an integer constant.
 func repeatConstInt(v ssa.Value) (int64, bool) {
 	c, ok := v.(*ssa.Const)
-	if !ok || c.Value == nil || c.Value.Kind() != constant.Int {
+	if !ok || c.Value.Kind() != constant.Int {
 		return 0, false
 	}
 	return constant.Int64Val(c.Value)
