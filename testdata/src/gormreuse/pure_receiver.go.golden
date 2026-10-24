@@ -1,6 +1,10 @@
 package internal
 
-import "gorm.io/gorm"
+import (
+	"sort"
+
+	"gorm.io/gorm"
+)
 
 // =============================================================================
 // PURE METHODS AND THEIR RECEIVER (#404)
@@ -154,335 +158,155 @@ func prOnce(db *gorm.DB) {
 	prRepo{db: q}.list(nil)
 }
 
+// prReceiverLastNoFix hands q to a pure method as its receiver after both
+// queries. The fix withholds the Session for any root a pure method branches
+// through its receiver, wherever the call is.
+func prReceiverLastNoFix(db *gorm.DB) {
+	q := db.Where("x")
+	r := prRepo{db: q}
+	q.Find(nil)
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	r.list(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// prParamReceiverNoFix stores q behind a pointer parameter, then calls a pure
+// method on that pointer. The method branches q, and no fix is offered.
+func prParamReceiverNoFix(db *gorm.DB, p *prRepo) {
+	q := db.Where("x")
+	p.db = q
+	p.listP(nil)
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
 // =============================================================================
-// -fix AFTER A STORE INTO OTHER MEMORY (#404)
+// UNSAFE FIX: A PURE CALL AFTER A STORE INTO OTHER MEMORY
 //
-// After q is stored into a package-level variable or into memory behind a
-// pointer parameter, the next call that may change that memory is where other
-// code reaches q. A pure call is skipped only when it cannot change q in
-// place: its receiver holds no chain of q and cannot point into that memory,
-// and, for a package-level variable, its code never reads the variable. The
-// Session fix is withheld where a skipped call would have hidden such a
-// change.
+// //gormreuse:pure covers the parameters only. -fix takes any pure call as
+// one that changes nothing, so it does not see a pure call that changes q in
+// place through a package-level variable, through a struct it reaches some
+// other way, or through code it runs. Each fixture below gets a Session that
+// drops such a change. This predates #404. Each one is a known limitation.
 // =============================================================================
 
-var prGlobal prRepo
+type prWrap struct{ inner *prRepo }
+
+var (
+	prGlobal     prRepo
+	prGlobalPtr  *prRepo
+	prGlobalWrap prWrap
+	prItems      = []int{2, 1}
+)
 
 //gormreuse:pure
-func prPureFunc(q *gorm.DB) int { _ = q; return 0 }
+func prTouchGlobal(q *gorm.DB) int { _ = q; prGlobal.db.Where("leak"); return 0 }
 
 //gormreuse:pure
-func prPureTouchesGlobal(q *gorm.DB) int { _ = q; prGlobal.db.Where("leak"); return 0 }
-
-//gormreuse:pure
-func (r *prRepo) prMutate(q *gorm.DB) int { _ = q; r.db.Where("leak"); return 0 }
-
-type prPtrHolder struct{ p *prRepo }
-
-//gormreuse:pure
-func (h prPtrHolder) prViaPointer(q *gorm.DB) int { _ = q; h.p.db.Where("leak"); return 0 }
+func prNothing(q *gorm.DB) int { _ = q; return 0 }
 
 func prMutateGlobal() { prGlobal.db.Where("leak") }
 
-// prGlobalPureFuncFix: a pure function that never reads prGlobal cannot
-// change q, so the fix stays.
-func prGlobalPureFuncFix(db *gorm.DB) {
+//gormreuse:pure
+func (w prWrap) prApply(q *gorm.DB) int { _ = q; w.inner.db.Where("leak"); return 0 }
+
+func prLessTouchesGlobal(i, j int) bool { prGlobal.db.Where("leak"); return prItems[i] < prItems[j] }
+
+//gormreuse:pure
+func prSortNamed(q *gorm.DB) int { _ = q; sort.Slice(prItems, prLessTouchesGlobal); return 0 }
+
+//gormreuse:pure
+func prSortLiteral(q *gorm.DB) int {
+	_ = q
+	sort.Slice(prItems, func(i, j int) bool { prGlobal.db.Where("leak"); return prItems[i] < prItems[j] })
+	return 0
+}
+
+//gormreuse:pure
+func (r *prRepo) prRegister(q *gorm.DB) int { _ = q; prGlobalPtr = r; return 0 }
+
+func prMutateViaGlobalPtr() { prGlobalPtr.db.Where("leak") }
+
+// [LIMITATION] prUnsafePureTouchesGlobal: the pure function changes q through
+// prGlobal, and the Session drops it.
+func prUnsafePureTouchesGlobal(db *gorm.DB) {
 	q := db.Where("x").Session(&gorm.Session{})
 	prGlobal.db = q
-	prPureFunc(nil)
+	prTouchGlobal(nil)
 	q.Find(nil)
 	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
-// prGlobalPureTouchesNoFix: the pure check does not seed prGlobal, so this
-// pure function may change q in place. No fix.
-func prGlobalPureTouchesNoFix(db *gorm.DB) {
-	q := db.Where("x")
+// [LIMITATION] prUnsafePureHidesNextCall: the pure call ends the search, so
+// the call after it, which changes q, is not seen.
+func prUnsafePureHidesNextCall(db *gorm.DB) {
+	q := db.Where("x").Session(&gorm.Session{})
 	prGlobal.db = q
-	prPureTouchesGlobal(nil)
-	q.Find(nil)
-	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
-}
-
-// prGlobalPureThenChangeNoFix: the call after the pure one changes q in
-// place, so it is the escape. No fix.
-func prGlobalPureThenChangeNoFix(db *gorm.DB) {
-	q := db.Where("x")
-	prGlobal.db = q
-	prPureFunc(nil)
+	prNothing(nil)
 	prMutateGlobal()
 	q.Find(nil)
 	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
-// prGlobalPureMethodFix: the receiver holds an immutable handle, and the
-// method never reads prGlobal. The fix stays.
-func prGlobalPureMethodFix(db *gorm.DB) {
-	r := prRepo{db: db.Session(&gorm.Session{})}
+// [LIMITATION] prUnsafeLocalWrapper: the receiver holds the address of r,
+// which holds q.
+func prUnsafeLocalWrapper(db *gorm.DB) {
+	q := db.Where("x").Session(&gorm.Session{})
+	r := &prRepo{db: q}
+	w := prWrap{inner: r}
+	w.prApply(nil)
+	q.Find(nil)
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// [LIMITATION] prUnsafeWrapperBehindPointer: the same through a wrapper a
+// parameter points to.
+func prUnsafeWrapperBehindPointer(db *gorm.DB, w *prWrap) {
+	q := db.Where("x").Session(&gorm.Session{})
+	r := prRepo{db: q}
+	w.inner = &r
+	w.prApply(nil)
+	q.Find(nil)
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// [LIMITATION] prUnsafeGlobalWrapper: the same through a package-level
+// wrapper.
+func prUnsafeGlobalWrapper(db *gorm.DB) {
+	q := db.Where("x").Session(&gorm.Session{})
+	r := prRepo{db: q}
+	prGlobalWrap.inner = &r
+	prGlobalWrap.prApply(nil)
+	q.Find(nil)
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// [LIMITATION] prUnsafeSortNamed: sort.Slice runs a named function that
+// changes q through prGlobal.
+func prUnsafeSortNamed(db *gorm.DB) {
 	q := db.Where("x").Session(&gorm.Session{})
 	prGlobal.db = q
-	r.find(nil)
+	prSortNamed(nil)
 	q.Find(nil)
 	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
-// prParamPureFuncFix: a pure function is not handed p, so it cannot reach
-// p.db. The fix stays.
-func prParamPureFuncFix(db *gorm.DB, p *prRepo) {
+// [LIMITATION] prUnsafeSortLiteral: the same with a function literal.
+func prUnsafeSortLiteral(db *gorm.DB) {
 	q := db.Where("x").Session(&gorm.Session{})
-	p.db = q
-	prPureFunc(nil)
+	prGlobal.db = q
+	prSortLiteral(nil)
 	q.Find(nil)
 	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
-// prParamPureMethodFix: the value receiver holds only an immutable handle,
-// so it cannot reach p.db. The fix stays.
-func prParamPureMethodFix(db *gorm.DB, p *prRepo) {
-	r := prRepo{db: db.Session(&gorm.Session{})}
+// [LIMITATION] prUnsafeRetainedReceiver: the pure method keeps the address of
+// r, so a later call changes q through it.
+func prUnsafeRetainedReceiver(db *gorm.DB) {
+	var r prRepo
+	r.prRegister(nil)
 	q := db.Where("x").Session(&gorm.Session{})
-	p.db = q
-	r.find(nil)
-	q.Find(nil)
-	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
-}
-
-// prParamLocalPointerMethodFix: the receiver is the address of a local that
-// holds only an immutable handle. The fix stays.
-func prParamLocalPointerMethodFix(db *gorm.DB, p *prRepo) {
-	r := prRepo{db: db.Session(&gorm.Session{})}
-	q := db.Where("x").Session(&gorm.Session{})
-	p.db = q
-	r.prMutate(nil)
-	q.Find(nil)
-	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
-}
-
-// prParamOtherPointerNoFix: o may point to the same struct as p, and a pure
-// method may change what its receiver holds. No fix.
-func prParamOtherPointerNoFix(db *gorm.DB, p, o *prRepo) {
-	q := db.Where("x")
-	p.db = q
-	o.prMutate(nil)
-	q.Find(nil)
-	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
-}
-
-// prParamHolderPointerNoFix: the receiver holds p itself. No fix.
-func prParamHolderPointerNoFix(db *gorm.DB, p *prRepo) {
-	h := prPtrHolder{p: p}
-	q := db.Where("x")
-	p.db = q
-	h.prViaPointer(nil)
-	q.Find(nil)
-	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
-}
-
-// prParamReceiverNoFix: the receiver is p, which holds q. The call is a
-// branch of q, and no fix is offered.
-func prParamReceiverNoFix(db *gorm.DB, p *prRepo) {
-	q := db.Where("x")
-	p.db = q
-	p.prMutate(nil)
-	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
-	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
-}
-
-// =============================================================================
-// -fix: WHAT A PURE CALL CAN REACH (#404, review round 3)
-//
-// A pure method is an escape of a local struct only while the struct holds a
-// chain of q. After a store into other memory, the receiver must be able to
-// point into memory of that type. A package-level variable counts when the
-// memory is read from it through pointers and slices, and the search through
-// the callee's calls handles recursion.
-// =============================================================================
-
-type prIDs []int
-
-type prRepos []*prRepo
-
-type prOuterRepo struct {
-	inner prRepo
-	n     int
-}
-
-var (
-	prGlobalPtr   *prRepo
-	prGlobalSlice []prRepo
-)
-
-//gormreuse:pure
-func (r *prRepo) prFindP(q *gorm.DB) int { _ = q; return 0 }
-
-//gormreuse:pure
-func (x prIDs) prCount(q *gorm.DB) int { _ = q; return len(x) }
-
-//gormreuse:pure
-func (x *prIDs) prCountP(q *gorm.DB) int { _ = q; return len(*x) }
-
-//gormreuse:pure
-func (rs prRepos) prFirst(q *gorm.DB) int { _ = q; rs[0].db.Where("leak"); return 0 }
-
-//gormreuse:pure
-func prRecA(q *gorm.DB, n int) int {
-	x := 0
-	if n > 0 {
-		x = prRecB(q, n-1)
-	}
-	prGlobal.db.Where("leak")
-	return x
-}
-
-//gormreuse:pure
-func prRecB(q *gorm.DB, n int) int { return prRecA(q, n) }
-
-//gormreuse:pure
-func prCleanA(q *gorm.DB, n int) int {
-	if n > 0 {
-		return prCleanB(q, n-1)
-	}
-	return 0
-}
-
-//gormreuse:pure
-func prCleanB(q *gorm.DB, n int) int { return prCleanA(q, n) }
-
-//gormreuse:pure
-func prTouchGlobalPtr(q *gorm.DB) int { _ = q; prGlobalPtr.db.Where("leak"); return 0 }
-
-//gormreuse:pure
-func prTouchGlobalSlice(q *gorm.DB) int { _ = q; prGlobalSlice[0].db.Where("leak"); return 0 }
-
-// prOverwrittenFix: r holds conn, not q, when the pure method runs. The fix
-// stays.
-func prOverwrittenFix(db, conn *gorm.DB) {
-	q := db.Where("x").Session(&gorm.Session{})
-	r := prRepo{}
 	r.db = q
-	r.db = conn
-	r.find(nil)
-	q.Find(nil)
-	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
-}
-
-// prSliceReceiverFix: a []int cannot point into a prRepo. The fix stays.
-func prSliceReceiverFix(db *gorm.DB, p *prRepo, x prIDs) {
-	q := db.Where("x").Session(&gorm.Session{})
-	p.db = q
-	x.prCount(nil)
-	q.Find(nil)
-	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
-}
-
-// prLocalSlicePointerFix: the address of a local []int cannot point into a
-// prRepo either. The fix stays.
-func prLocalSlicePointerFix(db *gorm.DB, p *prRepo) {
-	var x prIDs
-	q := db.Where("x").Session(&gorm.Session{})
-	p.db = q
-	x.prCountP(nil)
-	q.Find(nil)
-	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
-}
-
-// prInnerFieldFix: o.inner is a field of a local struct, which holds only a
-// nil handle. The fix stays.
-func prInnerFieldFix(db *gorm.DB, p *prRepo) {
-	var o prOuterRepo
-	q := db.Where("x").Session(&gorm.Session{})
-	p.db = q
-	o.inner.prFindP(nil)
-	q.Find(nil)
-	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
-}
-
-// prReposReceiverNoFix: rs may hold p. No fix.
-func prReposReceiverNoFix(db *gorm.DB, p *prRepo, rs prRepos) {
-	q := db.Where("x")
-	p.db = q
-	rs.prFirst(nil)
-	q.Find(nil)
-	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
-}
-
-// prRecursionANoFix and prRecursionBNoFix: prRecA reads prGlobal, and
-// prRecB calls prRecA. Either entry gets no fix.
-func prRecursionANoFix(db *gorm.DB) {
-	q := db.Where("x")
-	prGlobal.db = q
-	prRecA(nil, 1)
-	q.Find(nil)
-	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
-}
-
-func prRecursionBNoFix(db *gorm.DB) {
-	q := db.Where("x")
-	prGlobal.db = q
-	prRecB(nil, 1)
-	q.Find(nil)
-	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
-}
-
-// prRecursionCleanFix: neither function reads prGlobal. The fix stays.
-func prRecursionCleanFix(db *gorm.DB) {
-	q := db.Where("x").Session(&gorm.Session{})
-	prGlobal.db = q
-	prCleanB(nil, 1)
-	q.Find(nil)
-	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
-}
-
-// prGlobalPointerNoFix: the memory is read from prGlobalPtr, which the pure
-// function reads too. No fix.
-func prGlobalPointerNoFix(db *gorm.DB) {
-	q := db.Where("x")
-	prGlobalPtr.db = q
-	prTouchGlobalPtr(nil)
-	q.Find(nil)
-	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
-}
-
-// prGlobalSliceNoFix: the same through an element of prGlobalSlice.
-func prGlobalSliceNoFix(db *gorm.DB) {
-	q := db.Where("x")
-	prGlobalSlice[0].db = q
-	prTouchGlobalSlice(nil)
-	q.Find(nil)
-	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
-}
-
-// prGlobalPointerFix: the pure function never reads prGlobalPtr. The fix
-// stays.
-func prGlobalPointerFix(db *gorm.DB) {
-	q := db.Where("x").Session(&gorm.Session{})
-	prGlobalPtr.db = q
-	prPureFunc(nil)
-	q.Find(nil)
-	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
-}
-
-// prMergedLocalNoFix: p may be r, so r.prMutate may change q. No fix.
-func prMergedLocalNoFix(db *gorm.DB, p *prRepo, c bool) {
-	r := &prRepo{}
-	if c {
-		p = r
-	}
-	q := db.Where("x")
-	p.db = q
-	r.prMutate(nil)
-	q.Find(nil)
-	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
-}
-
-// prStoredLocalNoFix: r is stored into prGlobalPtr, so the memory is r. No
-// fix.
-func prStoredLocalNoFix(db *gorm.DB) {
-	r := &prRepo{}
-	prGlobalPtr = r
-	q := db.Where("x")
-	prGlobalPtr.db = q
-	r.prMutate(nil)
+	prMutateViaGlobalPtr()
 	q.Find(nil)
 	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }

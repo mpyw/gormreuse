@@ -39,12 +39,18 @@ import (
 //     would lose its condition (#309);
 //   - the root is stored into a struct field or an element that other code
 //     can reach, as in `s := &Svc{db: q}; s.apply()` (see
-//     holderChangesRoot, #310).
+//     holderChangesRoot, #310);
+//   - a //gormreuse:pure method branches it through its receiver, as in
+//     `r := repo{db: q}; r.list()`. The pure check does not cover the
+//     receiver (#404).
 //
 // A Session at the root makes each of them see a copy (#243).
 //
 //declscope:shared // generator.go's Generate withholds the fix with it
 func (g *Generator) changedElsewhere(v pollution.Violation, noDiscarded bool) bool {
+	if slices.ContainsFunc(v.AllUses, changeIsPureReceiverUse) || slices.ContainsFunc(v.Hidden, changeIsPureReceiverUse) {
+		return true
+	}
 	ordered := usesOrdered(v)
 	for _, use := range v.AllUses {
 		if use.Escapes && changeSeenAfterEscape(g.cfg, tracer.RootBlock(v.Root), use, v.AllUses, ordered, g.tracer.FuncVars()) && !g.handoffKeepsChanges(v, use, noDiscarded) {
@@ -76,6 +82,13 @@ func (g *Generator) changedElsewhere(v pollution.Violation, noDiscarded bool) bo
 		}
 	}
 	return deferChanges > 0 && (deferUses > 1 || deferRepeats)
+}
+
+// changeIsPureReceiverUse reports whether use is the branch a //gormreuse:pure
+// method makes of what its receiver holds (#404). The method may change the
+// root in place, through its receiver, at any point the fix cannot order.
+func changeIsPureReceiverUse(use pollution.UsageInfo) bool {
+	return use.PureReceiver
 }
 
 // finisherErrorChanges reports whether a Session at the root would change

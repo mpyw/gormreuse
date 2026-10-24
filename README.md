@@ -4399,7 +4399,7 @@ For directive diagnostics. It isolates an argument, or deletes an unused directi
 </table>
 
 > [!IMPORTANT]
-> A fix never drops a condition. When it cannot keep every change the code makes, the diagnostic has **no fix**. See [When there is no fix](#when-there-is-no-fix).
+> A fix never drops a condition that gormreuse can see. When it cannot keep every change the code makes, the diagnostic has **no fix**. See [When there is no fix](#when-there-is-no-fix). One known case slips through: a `//gormreuse:pure` call after a store into memory other code reaches (see [Known Limitations](#known-limitations), Unsafe fix).
 
 ### Strategy 1: Reassignment (Creating New Roots)
 
@@ -5035,6 +5035,21 @@ A parameter root that the fix cannot isolate
 See [Parameter Roots](#parameter-roots).
 
 </td></tr>
+<tr><td>
+
+```go
+q := db.Where("base")
+r := repo{db: q}
+q.Find(nil)
+r.list() // pure method
+q.Find(nil)
+```
+
+</td><td>
+
+A `//gormreuse:pure` method branches the root through its receiver. `pure` does not check the receiver, so the method may change the root in place, and a Session would drop that change (#404).
+
+</td></tr>
 </table>
 
 <details>
@@ -5045,6 +5060,7 @@ After the store, these calls count:
 - A `*gorm.DB` method counts only when it takes a function, which it may run before it returns: `Connection`, `Transaction`, `FindInBatches`, `ToSQL`, and the scopes of `Scopes`.
 - A call into a package that does not import gorm counts only when an argument can run code of one that does. That is a function, an interface, or a value whose type has methods in such a package. `sort.Sort(byTenant(xs))` counts, and so does `json.Marshal(v)` when the type of `v` has methods. `fmt.Sprint(n)` and `strings.ToUpper(s)` do not.
 - A channel operation, `close`, and a call into `sync` or `sync/atomic` count. They let a goroutine that is already running go on.
+- A call of a `//gormreuse:pure` function or method does not count, and it ends the search: only the first call after the store is checked. This can drop a change the pure call, or the call after it, makes (see [Known Limitations](#known-limitations), Unsafe fix).
 
 </details>
 
@@ -5471,6 +5487,7 @@ gormreuse reports a reuse only when it can follow the value. These cases are kno
 | Extra reports (false positives) | 5 | Safe code that is reported |
 | Wrong position | — | A report on the wrong line |
 | No fix | — | A report without a suggested fix |
+| Unsafe fix | — | A suggested fix that may drop a condition |
 
 <details>
 <summary>Missed reuse (false negatives)</summary>
@@ -5828,6 +5845,23 @@ q.Find(nil) // reported
   q.Where("a").FirstOrCreate(u)
   q.Where("b").FirstOrCreate(u) // reported, no fix
   ```
+
+**Unsafe fix:** after the root is stored where other code can reach it, `-fix` takes a call of a `//gormreuse:pure` function or method as one that changes nothing. But `pure` covers the parameters only. The call can still change the root through a package-level variable, through a struct its receiver reaches by a pointer, through a function it hands to a callee such as `sort.Slice`, or through an address an earlier pure call kept. The call after a pure call is not checked either. The Session then drops that change:
+
+```go
+var G repo
+
+//gormreuse:pure
+func touch(x *gorm.DB) int { G.db.Where("leak"); return 0 }
+
+q := db.Where("x") // -fix adds .Session(&gorm.Session{}), which drops "leak"
+G.db = q
+touch(nil)
+q.Find(nil)
+q.Find(nil) // reported
+```
+
+Check such a fix by hand. A pure method whose receiver holds the root is the exception: it is reported as a branch, and it gets no fix.
 
 </details>
 

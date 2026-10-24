@@ -103,6 +103,12 @@ type UsageInfo struct {
 	// the other with no run of that call in between (#375). Direct is only
 	// meaningful for the first root of the use's value.
 	Direct bool
+
+	// PureReceiver is set on the branch that a //gormreuse:pure method makes
+	// of what its receiver holds (#404). The pure check does not cover the
+	// receiver, so the method may change the root in place where the fix
+	// cannot see it, and the fix generator offers no Session for the root.
+	PureReceiver bool
 }
 
 // aliasUse is a use of a Session/Debug copy, with the position of the call

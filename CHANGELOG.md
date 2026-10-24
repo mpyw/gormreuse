@@ -6,8 +6,7 @@ These notes say what changes for users in each release, and what to do about it.
 
 | Change | Effect |
 | --- | --- |
-| A pure method's receiver is a branch (#404) | `//gormreuse:pure` covers a method's arguments, not its receiver. So a pure method could add a condition to the `*gorm.DB` its receiver holds, and the later query on it was missed: `repo{db: q}.list(); q.Find(&us)`. Such a call now branches what its receiver holds, as a method without the directive does. A receiver that holds a connection, such as a `gorm.Open` result, gives no new report. `-fix` offers no Session for such a root when a use may follow the call. A struct passed as an argument to a pure method is still only read |
-| `-fix` withholds a Session that a pure call could undo (#404) | After `q` is stored into a package-level variable or behind a pointer parameter, a pure call ended the search for code that changes `q` in place. So a later call such as `mutate()`, or a pure function that changes the package-level variable, was missed, and the Session dropped its condition. Now each call after the store is checked, and a pure call is skipped only when it cannot reach `q`: its receiver holds no chain of `q` and cannot point into the memory, and its code never reads the package-level variable the memory is read from |
+| A pure method's receiver is a branch (#404) | `//gormreuse:pure` covers a method's arguments, not its receiver. So a pure method could add a condition to the `*gorm.DB` its receiver holds, and the later query on it was missed: `repo{db: q}.list(); q.Find(&us)`. Such a call now branches what its receiver holds, as a method without the directive does. A receiver that holds a connection, such as a `gorm.Open` result, gives no new report. `-fix` offers no Session for such a root, since the method may change it in place. A struct passed as an argument to a pure method is still only read, and keeps its fix |
 
 ## 0.24.1 (2026-10-21)
 

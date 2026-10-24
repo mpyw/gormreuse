@@ -7,7 +7,6 @@ import (
 
 	"golang.org/x/tools/go/ssa"
 
-	"github.com/mpyw/gormreuse/internal/ssa/callsite"
 	"github.com/mpyw/gormreuse/internal/ssa/cfg"
 	"github.com/mpyw/gormreuse/internal/ssa/pollution"
 	"github.com/mpyw/gormreuse/internal/ssa/pollutionsource"
@@ -33,8 +32,6 @@ type holderCache struct {
 	gorm map[*types.Package]bool
 	//declscope:private
 	runs map[types.Type]bool
-	//declscope:private
-	globals map[holderGlobalUse]bool
 }
 
 // holderChangesRoot reports whether a store of v's root into a struct field,
@@ -69,342 +66,38 @@ func (g *Generator) holderChangesRoot(v pollution.Violation, ordered bool) bool 
 //     at the end of the store's block. A local struct copied into such
 //     memory is reached the same way after the copy.
 //
-// A //gormreuse:pure function changes nothing it is handed as an argument, as
-// in paDeref(&q). Its body check does not cover the receiver, so a pure method
-// may change what its receiver holds (#404). So a pure call is an escape of a
-// local struct only where the struct reaches it as the receiver. After a store
-// into other memory, a pure call is skipped, and the next call is the escape,
-// unless the call may reach the root (see holderPureCallReaches). Code in a
-// closure is not ordered against the uses, so an escape there, or a store there
-// into memory that is not a local struct, is taken as seen.
+// A //gormreuse:pure function changes nothing it is handed, as in
+// paDeref(&q). Code in a closure is not ordered against the uses, so an
+// escape there, or a store there into memory that is not a local struct, is
+// taken as seen.
 func (g *Generator) holderStoreChangesRoot(v pollution.Violation, store *ssa.Store, ordered bool) bool {
 	fn := v.Root.Parent()
 	def := tracer.RootBlock(v.Root)
-	// seen reports whether a use may see a change made at instr.
 	seen := func(instr ssa.Instruction) bool {
+		if call, ok := instr.(ssa.CallInstruction); ok {
+			if site := g.tracer.Site(call); !site.IsGormMethod() && g.tracer.IsPureFunction(site.Declared) {
+				return false
+			}
+		}
 		if instr.Parent() != fn || !instr.Pos().IsValid() {
 			return true
 		}
 		use := pollution.UsageInfo{Block: instr.Block(), Pos: instr.Pos(), Escapes: true}
 		return changeSeenAfterEscape(g.cfg, def, use, v.AllUses, ordered, g.tracer.FuncVars())
 	}
-	// escaped reports whether a use may see a change made where e reaches the
-	// local struct.
-	escaped := func(e holderEscape) bool {
-		if call, ok := e.instr.(ssa.CallInstruction); ok {
-			if site := g.tracer.Site(call); g.holderPureCall(site) && (e.via != site.Recv || !g.holderHoldsRoot(site.Recv, e.instr, v.Root)) {
-				return false
-			}
-		}
-		return seen(e.instr)
-	}
-	// reached reports whether a use may see a change made by the calls that
-	// may run after at, a store into other memory.
 	reached := func(at *ssa.Store) bool {
 		if at.Parent() != fn {
 			return true
 		}
-		calls, later := g.holderCallsAfter(at)
-		i := slices.IndexFunc(calls, func(call ssa.Instruction) bool {
-			return !g.holderPureCallSkipped(call, at, v.Root)
-		})
-		return i >= 0 && seen(calls[i]) || later && holderChangeSeenAfterBlock(g.cfg, def, at.Block(), v.AllUses, ordered)
+		next, later := g.holderNextCall(at)
+		return next != nil && seen(next) || later && holderChangeSeenAfterBlock(g.cfg, def, at.Block(), v.AllUses, ordered)
 	}
 	alloc, ok := holderBase(store.Addr)
 	if !ok {
 		return reached(store)
 	}
 	h := g.holderEscapes(alloc)
-	return slices.ContainsFunc(h.escapes, escaped) || slices.ContainsFunc(h.copies, reached)
-}
-
-// holderPureCall reports whether site calls a //gormreuse:pure function or
-// method, other than a *gorm.DB method.
-func (g *Generator) holderPureCall(site callsite.Site) bool {
-	return !site.IsGormMethod() && g.tracer.IsPureFunction(site.Declared)
-}
-
-// holderHoldsRoot reports whether recv, the receiver of the call at, holds a
-// *gorm.DB that carries root's changes, as a read of its fields at the call
-// would see them. A pure method may change such a value in place (#404).
-func (g *Generator) holderHoldsRoot(recv ssa.Value, at ssa.Instruction, root ssa.Value) bool {
-	loopInfo := g.cfg.DetectLoops(at.Parent())
-	return slices.ContainsFunc(g.tracer.GormDBFieldValues(recv, at), func(held ssa.Value) bool {
-		return slices.Contains(g.changeCarryingRoots(held, loopInfo), root)
-	})
-}
-
-// holderPureCallSkipped reports whether instr, a call after store, a store of
-// root into other memory, is a pure call that cannot change root in place
-// (#404). A pure function changes nothing it is handed as an argument, but its
-// body check seeds neither the receiver nor a package-level variable. So the
-// call may change root when the memory is reached from a package-level
-// variable that its code may read (holderReachesGlobal), when its receiver
-// holds a chain of root, or when its receiver may point into the memory
-// (holderValueMayReach).
-func (g *Generator) holderPureCallSkipped(instr ssa.Instruction, store *ssa.Store, root ssa.Value) bool {
-	call, ok := instr.(ssa.CallInstruction)
-	if !ok {
-		return false
-	}
-	site := g.tracer.Site(call)
-	if !g.holderPureCall(site) {
-		return false
-	}
-	mem := holderMemoryOf(store.Addr)
-	if mem.global != nil && g.holderCallReachesGlobal(call, site.Declared, mem.global) {
-		return false
-	}
-	if site.Recv == nil {
-		return true
-	}
-	return !g.holderHoldsRoot(site.Recv, instr, root) && !g.holderValueMayReach(site.Recv, instr, mem.types)
-}
-
-// holderMemory is what a store into other memory writes: the types of the
-// memory a pointer must point into to reach the stored value, from the slot
-// itself out to the base, and the package-level variable the base is read
-// from, if any.
-type holderMemory struct {
-	types  []types.Type
-	global *ssa.Global
-}
-
-// holderMemoryOf returns the memory that addr, the address of a store into
-// other memory, writes. The walk goes from the slot out through fields,
-// elements and loaded pointers. A base that is a package-level variable, or
-// is loaded from one through pointers and slices, as in gp.db or gs[0].db,
-// counts as that variable.
-func holderMemoryOf(addr ssa.Value) holderMemory {
-	var mem holderMemory
-	for {
-		if ptr, ok := addr.Type().Underlying().(*types.Pointer); ok {
-			mem.types = append(mem.types, ptr.Elem())
-		}
-		switch a := addr.(type) {
-		case *ssa.FieldAddr:
-			addr = a.X
-			continue
-		case *ssa.IndexAddr:
-			addr = a.X
-			continue
-		case *ssa.UnOp:
-			if a.Op == token.MUL {
-				addr = a.X
-				continue
-			}
-		case *ssa.Global:
-			mem.global = a
-		}
-		return mem
-	}
-}
-
-// holderValueMayReach reports whether recv, the receiver of the pure call at,
-// may point into memory of one of the types mem. A pointer into a local
-// variable reaches only what the variable holds, unless the variable's
-// address flows anywhere but its own field accesses, pure arguments and the
-// call (holderAllocAliased). Any other value reaches what its type can point
-// to (holderTypeMayReach).
-func (g *Generator) holderValueMayReach(recv ssa.Value, at ssa.Instruction, mem []types.Type) bool {
-	if alloc, ok := holderBase(recv); ok {
-		if g.holderAllocAliased(alloc, at) {
-			return true
-		}
-		return holderTypeMayReach(recv.Type().Underlying().(*types.Pointer).Elem(), mem, map[types.Type]bool{})
-	}
-	return holderTypeMayReach(recv.Type(), mem, map[types.Type]bool{})
-}
-
-// holderAllocAliased reports whether the address of alloc, a local variable,
-// may be held anywhere other than where the function names it: a merge, a
-// store of the address, a capture, a call other than at, or anything else
-// besides a field or element address, a load, a store into it and an
-// argument of a pure function.
-func (g *Generator) holderAllocAliased(alloc *ssa.Alloc, at ssa.Instruction) bool {
-	var aliased func(v ssa.Value) bool
-	aliased = func(v ssa.Value) bool {
-		return slices.ContainsFunc(*v.Referrers(), func(r ssa.Instruction) bool {
-			switch r := r.(type) {
-			case *ssa.FieldAddr:
-				return aliased(r)
-			case *ssa.IndexAddr:
-				return aliased(r)
-			case *ssa.UnOp:
-				return r.Op != token.MUL
-			case *ssa.Store:
-				return r.Val == v
-			case *ssa.DebugRef:
-				return false
-			case ssa.CallInstruction:
-				if r == at {
-					return false
-				}
-				site := g.tracer.Site(r)
-				return !g.holderPureCall(site) || site.Recv == v
-			}
-			return true
-		})
-	}
-	return aliased(alloc)
-}
-
-// holderTypeMayReach reports whether a value of type t may point into memory
-// of one of the types mem: a pointer to such a type, or to a type that holds
-// one inline, or a slice of either, or a value that holds such a pointer
-// further down. A map or a channel holds copies, so only what its values
-// point to counts. A *gorm.DB is a handle, whose chain the caller checks on
-// its own (holderHoldsRoot). An interface, a function, a type parameter and
-// an unsafe.Pointer may point anywhere. seen holds the types being searched.
-func holderTypeMayReach(t types.Type, mem []types.Type, seen map[types.Type]bool) bool {
-	if typeutil.IsGormDB(t) || seen[t] {
-		return false
-	}
-	seen[t] = true
-	switch u := t.Underlying().(type) {
-	case *types.Basic:
-		return u.Kind() == types.UnsafePointer
-	case *types.Pointer:
-		return holderTypeHolds(u.Elem(), mem) || holderTypeMayReach(u.Elem(), mem, seen)
-	case *types.Slice:
-		return holderTypeHolds(u.Elem(), mem) || holderTypeMayReach(u.Elem(), mem, seen)
-	case *types.Array:
-		return holderTypeMayReach(u.Elem(), mem, seen)
-	case *types.Map:
-		return holderTypeMayReach(u.Key(), mem, seen) || holderTypeMayReach(u.Elem(), mem, seen)
-	case *types.Chan:
-		return holderTypeMayReach(u.Elem(), mem, seen)
-	case *types.Struct:
-		for field := range u.Fields() {
-			if holderTypeMayReach(field.Type(), mem, seen) {
-				return true
-			}
-		}
-		return false
-	}
-	return true
-}
-
-// holderTypeHolds reports whether a value of type t is, or holds inline in
-// its fields or array elements, a value of one of the types mem.
-func holderTypeHolds(t types.Type, mem []types.Type) bool {
-	if slices.ContainsFunc(mem, func(m types.Type) bool { return types.Identical(t, m) }) {
-		return true
-	}
-	switch u := t.Underlying().(type) {
-	case *types.Array:
-		return holderTypeHolds(u.Elem(), mem)
-	case *types.Struct:
-		for field := range u.Fields() {
-			if holderTypeHolds(field.Type(), mem) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// holderCallReachesGlobal reports whether call, to fn, may read or write
-// global, or run code that does. A function with no body here is of another
-// package, which cannot name the variable. It may still run code of this
-// package, such as a callback registered earlier, when its package reaches
-// gorm (holderBodilessRuns).
-func (g *Generator) holderCallReachesGlobal(call ssa.CallInstruction, fn *ssa.Function, global *ssa.Global) bool {
-	if fn.Blocks == nil {
-		return g.holderBodilessRuns(call, fn)
-	}
-	return g.holderReachesGlobal(fn, global)
-}
-
-// holderBodilessRuns reports whether call, to fn, a function with no body
-// here, may run code of this package that changes a *gorm.DB. Its package
-// must reach gorm, as for handleHolders, and holderCallChanges must find that
-// the call may run code: a *gorm.DB method runs only the functions it is
-// handed.
-func (g *Generator) holderBodilessRuns(call ssa.CallInstruction, fn *ssa.Function) bool {
-	if fn.Pkg == nil {
-		return true
-	}
-	return g.holderReachesGorm(fn.Pkg.Pkg) && g.holderCallChanges(call)
-}
-
-// holderReachesGlobal reports whether fn, or code it calls, may read or
-// write global (see holderCallReachesGlobal). A call through a function value
-// or an interface may run any code. The answer is kept per function and
-// variable. A search that ends false proves every function it visited false,
-// so they are all kept. One that ends true proves only fn: a function it
-// visited may have seen fn as false while fn was still being searched.
-func (g *Generator) holderReachesGlobal(fn *ssa.Function, global *ssa.Global) bool {
-	c := &g.holders
-	key := holderGlobalUse{fn, global}
-	if reaches, ok := c.globals[key]; ok {
-		return reaches
-	}
-	if c.globals == nil {
-		c.globals = map[holderGlobalUse]bool{}
-	}
-	visited := map[*ssa.Function]bool{}
-	reaches := g.holderSearchGlobal(fn, global, visited)
-	if reaches {
-		c.globals[key] = true
-		return true
-	}
-	for f := range visited {
-		c.globals[holderGlobalUse{f, global}] = false
-	}
-	return false
-}
-
-// holderGlobalUse keys holderReachesGlobal.
-type holderGlobalUse struct {
-	fn     *ssa.Function
-	global *ssa.Global
-}
-
-// holderSearchGlobal is holderReachesGlobal without the memo of its own
-// answer. visited holds the functions this search has entered, each of which
-// adds nothing when it is reached again.
-func (g *Generator) holderSearchGlobal(fn *ssa.Function, global *ssa.Global, visited map[*ssa.Function]bool) bool {
-	if reaches, ok := g.holders.globals[holderGlobalUse{fn, global}]; ok {
-		return reaches
-	}
-	if visited[fn] {
-		return false
-	}
-	visited[fn] = true
-	for _, block := range fn.Blocks {
-		for _, instr := range block.Instrs {
-			var operands [16]*ssa.Value
-			for _, op := range instr.Operands(operands[:0]) {
-				if *op == global {
-					return true
-				}
-				if mc, ok := (*op).(*ssa.MakeClosure); ok && g.holderSearchGlobal(mc.Fn.(*ssa.Function), global, visited) {
-					return true
-				}
-			}
-			call, ok := instr.(ssa.CallInstruction)
-			if !ok {
-				continue
-			}
-			common := call.Common()
-			if _, builtin := common.Value.(*ssa.Builtin); builtin {
-				continue
-			}
-			callee := common.StaticCallee()
-			switch {
-			case callee == nil:
-				return true
-			case callee.Blocks == nil:
-				if g.holderBodilessRuns(call, callee) {
-					return true
-				}
-			case g.holderSearchGlobal(callee, global, visited):
-				return true
-			}
-		}
-	}
-	return false
+	return slices.ContainsFunc(h.escapes, seen) || slices.ContainsFunc(h.copies, reached)
 }
 
 // holderChangeSeenAfterBlock reports whether a use may see a change made at
@@ -510,15 +203,8 @@ func holderBase(addr ssa.Value) (*ssa.Alloc, bool) {
 // it (#181).
 type holderWalk struct {
 	seen    map[ssa.Value]bool
-	escapes []holderEscape
+	escapes []ssa.Instruction
 	copies  []*ssa.Store
-}
-
-// holderEscape is an instruction that hands on a local struct, and via, the
-// operand through which it reaches the struct.
-type holderEscape struct {
-	instr ssa.Instruction
-	via   ssa.Value
 }
 
 // addr walks the uses of addr, the address of the struct or of a part of it.
@@ -545,7 +231,7 @@ func (h *holderWalk) addr(addr ssa.Value) {
 			h.captured(r, addr, h.addr)
 		case *ssa.DebugRef:
 		default:
-			h.escapes = append(h.escapes, holderEscape{r, addr})
+			h.escapes = append(h.escapes, r)
 		}
 	}
 }
@@ -571,13 +257,13 @@ func (h *holderWalk) pointerVar(store *ssa.Store, v ssa.Value) {
 			h.addr(r)
 		case *ssa.Store:
 			if r.Val == v {
-				h.escapes = append(h.escapes, holderEscape{r, v})
+				h.escapes = append(h.escapes, r)
 			}
 		case *ssa.MakeClosure:
 			h.captured(r, v, func(fv ssa.Value) { h.pointerVar(store, fv) })
 		case *ssa.DebugRef:
 		default:
-			h.escapes = append(h.escapes, holderEscape{r, v})
+			h.escapes = append(h.escapes, r)
 		}
 	}
 }
@@ -616,7 +302,7 @@ func (h *holderWalk) value(v ssa.Value) {
 			}
 		case *ssa.DebugRef:
 		default:
-			h.escapes = append(h.escapes, holderEscape{r, v})
+			h.escapes = append(h.escapes, r)
 		}
 	}
 }
@@ -824,16 +510,18 @@ func (g *Generator) holderReachesGorm(pkg *types.Package) bool {
 	return reaches
 }
 
-// holderCallsAfter returns the calls in store's block, after it, that may
-// change memory other functions reach, in the order they run, and whether a
-// block after that block can still run one.
-func (g *Generator) holderCallsAfter(store *ssa.Store) (after []ssa.Instruction, later bool) {
+// holderNextCall returns the first call in store's block, after it, that
+// may change memory other functions reach, and whether a block after that
+// block can still run one.
+func (g *Generator) holderNextCall(store *ssa.Store) (next ssa.Instruction, later bool) {
 	calls := g.holderFuncCalls(store.Parent())
 	block := store.Block()
 	inBlock := calls.inBlock[block]
 	at := calls.index[store]
-	i, _ := slices.BinarySearchFunc(inBlock, at, func(instr ssa.Instruction, at int) int {
+	if i, _ := slices.BinarySearchFunc(inBlock, at, func(instr ssa.Instruction, at int) int {
 		return calls.index[instr] - at
-	})
-	return inBlock[i:], slices.ContainsFunc(block.Succs, func(succ *ssa.BasicBlock) bool { return calls.from[succ] })
+	}); i < len(inBlock) {
+		next = inBlock[i]
+	}
+	return next, slices.ContainsFunc(block.Succs, func(succ *ssa.BasicBlock) bool { return calls.from[succ] })
 }

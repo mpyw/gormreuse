@@ -548,7 +548,7 @@ func (u siteUse) handleArgs() {
 	call := u.call()
 	if site.Declared != nil && ctx.RootTracer.IsPureFunction(site.Declared) {
 		if site.Recv != nil {
-			u.handleHolders([]ssa.Value{site.Recv})
+			u.handleHolders([]ssa.Value{site.Recv}, pollution.UsageInfo{Block: u.block, Pos: u.pos, Escapes: true, PureReceiver: true})
 		}
 		return
 	}
@@ -615,7 +615,7 @@ func (u siteUse) handleArgs() {
 	if site.Recv != nil {
 		operands = append([]ssa.Value{site.Recv}, operands...)
 	}
-	u.handleHolders(operands)
+	u.handleHolders(operands, pollution.UsageInfo{Block: u.block, Pos: u.pos, Escapes: true})
 }
 
 // handleHolders handles the structs that the site hands on, as an argument or
@@ -644,9 +644,10 @@ func (u siteUse) handleArgs() {
 // call through an interface, whose receiver is boxed before the call.
 //
 // operands are what the site hands on: its receiver and its arguments. A pure
-// function only reads its arguments, so handleArgs passes its receiver alone
-// (#404).
-func (u siteUse) handleHolders(operands []ssa.Value) {
+// function only reads its arguments, so handleArgs passes its receiver alone,
+// and marks the branch it makes (pollution.UsageInfo.PureReceiver, #404). use
+// is the branch each held root gets.
+func (u siteUse) handleHolders(operands []ssa.Value, use pollution.UsageInfo) {
 	site, ctx := u.site, u.ctx
 	if site.IsGormMethod() || isGormStatementMethod(site) {
 		return
@@ -674,7 +675,6 @@ func (u siteUse) handleHolders(operands []ssa.Value) {
 	if len(held) == 0 || !holderCalleeReachesGorm(site) {
 		return
 	}
-	use := pollution.UsageInfo{Block: u.block, Pos: u.pos, Escapes: true}
 	for _, roots := range held {
 		u.branch(roots, use, func(ssa.Value) bool { return false })
 	}
