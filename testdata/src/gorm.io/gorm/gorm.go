@@ -12,9 +12,17 @@ type DB struct {
 
 // Statement holds the clauses of a query.
 type Statement struct {
-	Table string
-	DB    *DB
+	Table    string
+	DB       *DB
+	Distinct bool
+	Selects  []string
+	// Clauses holds clause.Clause values in gorm. gorm.go imports no clause
+	// package, so the stub keeps the map only.
+	Clauses map[string]interface{}
 }
+
+// AddClause adds a clause to the Statement in place.
+func (stmt *Statement) AddClause(v interface{}) {}
 
 // Parse reads the schema of value. It reads only the configuration of
 // stmt.DB.

@@ -515,7 +515,9 @@ func inferHoldStep(instr ssa.Instruction, held, vars map[ssa.Value]bool, tree ma
 // inferReadsField reports whether fa, a field of a *gorm.DB, is only read,
 // as in tx.Error or tx.Dialector. The Statement is a pointer that a write
 // through it changes in place, so only the reads of its own fields count, as
-// in tx.Statement.Context.
+// in tx.Statement.Context. A field of the Statement that is a map, a slice or
+// a pointer is shared with it, so a write through one (#405), as in
+// tx.Statement.Clauses["X"] = c, is a change too.
 func inferReadsField(fa *ssa.FieldAddr) bool {
 	ptr, ok := fa.X.Type().Underlying().(*types.Pointer)
 	if !ok {
@@ -530,8 +532,36 @@ func inferReadsField(fa *ssa.FieldAddr) bool {
 		return !statement || !slices.ContainsFunc(*load.Referrers(), func(ref ssa.Instruction) bool {
 			field, isField := ref.(*ssa.FieldAddr)
 			_, debug := ref.(*ssa.DebugRef)
-			return !debug && (!isField || !inferOnlyLoads(field, nil))
+			return !debug && (!isField || !inferOnlyLoads(field, func(load *ssa.UnOp) bool {
+				return !inferWritesThrough(load, map[ssa.Value]bool{})
+			}))
 		})
+	})
+}
+
+// inferWritesThrough reports whether a value read from the Statement, such as
+// its Clauses map or its Selects slice, is written through: a map update, or
+// a store into an element or a field it points to.
+func inferWritesThrough(v ssa.Value, seen map[ssa.Value]bool) bool {
+	if seen[v] {
+		return false
+	}
+	seen[v] = true
+	return slices.ContainsFunc(*v.Referrers(), func(ref ssa.Instruction) bool {
+		switch ref := ref.(type) {
+		case *ssa.MapUpdate:
+			return ref.Map == v
+		case *ssa.Store:
+			return ref.Addr == v
+		case *ssa.IndexAddr:
+			return inferWritesThrough(ref, seen)
+		case *ssa.FieldAddr:
+			return inferWritesThrough(ref, seen)
+		case *ssa.UnOp:
+			_, isPtr := ref.Type().Underlying().(*types.Pointer)
+			return ref.Op == token.MUL && isPtr && inferWritesThrough(ref, seen)
+		}
+		return false
 	})
 }
 

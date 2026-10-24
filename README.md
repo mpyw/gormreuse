@@ -2651,6 +2651,33 @@ func wrap3(db *gorm.DB) func() *gorm.DB {
 </td></tr>
 <tr><td>
 
+**Must NOT** write to an argument directly.
+
+A write into its `Statement`, or over the `*gorm.DB` itself, changes its query in place, as `Where` does. This includes a write through a local variable that holds the `Statement`, and a write into a map or a slice that the `Statement` holds.
+
+The argument's `Error` and `RowsAffected` may be written. They hold the outcome of a query, as `AddError` does. So may a local copy of the `Statement`.
+
+Message: `pure function pollutes *gorm.DB argument by writing to it directly`
+
+</td><td>
+
+```go
+//gormreuse:pure
+func mark(db *gorm.DB) {
+    db.Statement.Distinct = true     // reported
+    db.Statement.Clauses["X"] = c    // reported
+    st := db.Statement
+    st.Selects = []string{"id"}      // reported
+    *db = gorm.DB{}                  // reported
+    db.Error = nil                   // OK
+    copied := *db.Statement
+    copied.Distinct = true           // OK: a local copy
+}
+```
+
+</td></tr>
+<tr><td>
+
 **Must NOT** pass an argument to a function that is not pure.
 
 This includes a pure function that fails this contract itself. It also includes a method called through an interface that may hold the argument but is not the boxed argument itself.
@@ -3851,6 +3878,8 @@ func caller(db *gorm.DB) {
 **Not inferred.** A discarded chain statement on the parameter. On a mid-chain value it changes the caller's value in place. On an immutable one it does nothing.
 
 The same holds in a closure, as in `func() { tx.Where("a") }()`. It also holds in a helper the function passes the parameter to, as in `applyTenant(tx)`.
+
+A write into the parameter's `Statement` changes it in place too. That includes a write into a map or a slice the `Statement` holds, as in `tx.Statement.Clauses["X"] = c`.
 
 </td></tr>
 <tr><td>

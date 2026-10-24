@@ -173,6 +173,9 @@ func (v *Validator) validateBody(fn *ssa.Function) []Violation {
 				violations = append(violations, v.checkClosure(i)...)
 			case *ssa.Store:
 				violations = append(violations, v.checkStoreEscape(i)...)
+				violations = append(violations, v.checkDirectWrite(i.Addr, i.Pos())...)
+			case *ssa.MapUpdate:
+				violations = append(violations, v.checkDirectWrite(i.Map, i.Pos())...)
 			case *ssa.Return:
 				if fn == v.fn {
 					violations = append(violations, v.checkWrappedReturn(i)...)
@@ -569,6 +572,79 @@ func (v *Validator) checkStoreEscape(store *ssa.Store) []Violation {
 		Message:    "pure function leaks *gorm.DB argument via " + via,
 		Definitive: true,
 	}}
+}
+
+// checkDirectWrite reports a store or a map update into memory that the
+// argument reaches through its *gorm.DB (#405): `*db = gorm.DB{}`,
+// `db.Statement.Distinct = true`, `st := db.Statement; st.Selects = ...` or
+// `db.Statement.Clauses["X"] = c`. Such a write changes the argument's query
+// in place, as db.Where does. at is the address of the store, or the map of
+// the update.
+func (v *Validator) checkDirectWrite(at ssa.Value, pos token.Pos) []Violation {
+	if !v.writesArgument(at, map[ssa.Value]bool{}) {
+		return nil
+	}
+	return []Violation{{
+		Pos:        pos,
+		Message:    "pure function pollutes *gorm.DB argument by writing to it directly",
+		Definitive: true,
+	}}
+}
+
+// writesArgument reports whether at is memory reached from a parameter-derived
+// *gorm.DB, through field and element addresses, loads, slices and map
+// lookups. The Error and RowsAffected fields of the *gorm.DB are left out:
+// they hold the outcome of a query, as AddError does, and touch no clause. So
+// is its Config, which every handle of the connection shares and which holds
+// no clause. A local copy, such as `c := *db.Statement`, is a variable of
+// its own.
+func (v *Validator) writesArgument(at ssa.Value, seen map[ssa.Value]bool) bool {
+	if seen[at] {
+		return false
+	}
+	seen[at] = true
+	if typeutil.IsGormDB(at.Type()) && v.paramDerived[at] {
+		return true
+	}
+	switch x := at.(type) {
+	case *ssa.FieldAddr:
+		return !validatorIsGormDBStateField(x.X.Type(), x.Field) && v.writesArgument(x.X, seen)
+	case *ssa.Field:
+		return !validatorIsGormDBStateField(types.NewPointer(x.X.Type()), x.Field) && v.writesArgument(x.X, seen)
+	case *ssa.IndexAddr:
+		return v.writesArgument(x.X, seen)
+	case *ssa.Index:
+		return v.writesArgument(x.X, seen)
+	case *ssa.Lookup:
+		return v.writesArgument(x.X, seen)
+	case *ssa.Slice:
+		return v.writesArgument(x.X, seen)
+	case *ssa.ChangeType:
+		return v.writesArgument(x.X, seen)
+	case *ssa.UnOp:
+		return x.Op == token.MUL && v.writesArgument(x.X, seen)
+	case *ssa.Phi:
+		return slices.ContainsFunc(x.Edges, func(edge ssa.Value) bool { return v.writesArgument(edge, seen) })
+	}
+	return false
+}
+
+// validatorIsGormDBStateField reports whether field i of the struct ptr points to is
+// a field of gorm.DB that a write may change in a pure function: Error,
+// RowsAffected or Config (see writesArgument).
+func validatorIsGormDBStateField(ptr types.Type, i int) bool {
+	if !typeutil.IsGormDB(ptr) {
+		return false
+	}
+	st, ok := ptr.Underlying().(*types.Pointer).Elem().Underlying().(*types.Struct)
+	if !ok {
+		return false
+	}
+	switch st.Field(i).Name() {
+	case "Error", "RowsAffected", "Config":
+		return true
+	}
+	return false
 }
 
 // checkLeak reports a contract violation when a param-derived *gorm.DB escapes
