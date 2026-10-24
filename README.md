@@ -5041,13 +5041,13 @@ See [Parameter Roots](#parameter-roots).
 q := db.Where("base")
 r := repo{db: q}
 q.Find(nil)
-r.list() // pure method
+r.list(nil) // //gormreuse:pure func (r repo) list(dst *gorm.DB)
 q.Find(nil)
 ```
 
 </td><td>
 
-A `//gormreuse:pure` method branches the root through its receiver, and that makes a report of its own. `pure` does not check the receiver, so the method may change the root in place. gormreuse offers no fix for a root with such a report (#404). A pure call that makes no report, as on an early return such as `if c { r.list(); return }`, leaves the fix as it was.
+A `//gormreuse:pure` method branches the root through its receiver, and that makes a report of its own. `pure` does not check the receiver, so the method may change the root in place. gormreuse offers no fix for a root with such a report (#404). A pure call that makes no report leaves the fix as it was. That is so when it is on a path that returns before the root's first use, as in `if c { r.list(nil); return }; q.Find(nil); q.Find(nil)`.
 
 </td></tr>
 </table>

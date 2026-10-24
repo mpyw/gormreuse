@@ -830,17 +830,15 @@ func rootPos(root ssa.Value) token.Pos {
 // branch among those, recorded before the one reported (#309). They are not
 // ordered by position, so they count only then.
 //
-// A pure method's branch through its receiver (#404) is left out of a report
-// that holds without it, so that report names what it did before #404. A
-// report that holds only because of such a branch (fromPure) names the
-// earliest branch that runs before target, the reported use, such a branch
-// included (runsBefore). It falls back to the earliest branch, as before.
+// A pure method's branch through its receiver (#404) is never named by a
+// report that holds without it, so that report names what it did before
+// #404. A report that holds only because of such a branch (fromPure) names
+// the earliest branch that runs before target, the reported use, such a
+// branch included (runsBefore). It falls back to the earliest branch, as
+// before.
 func (t *Tracker) firstBranchPos(root ssa.Value, target UsageInfo, fromPure bool) token.Pos {
 	if !fromPure {
-		if best := t.firstBranchAmong(root, false); best.IsValid() {
-			return best
-		}
-		return t.firstBranchAmong(root, true)
+		return t.firstBranchAmong(root, false)
 	}
 	// The uses in position order, so the first that runs before target is
 	// the earliest. They are sorted once per root.
@@ -964,6 +962,15 @@ func (t *Tracker) checkViolationsBetween(targets, sources []UsageInfo, root ssa.
 	// report of its own (Violation.FromPureReceiver).
 	// The pure branches are searched nearest first: the one that reaches a
 	// use is most often just before it, as in `r.list(nil); q.Find(nil)`.
+	// With no pure branch among the sources, the search is the one it was.
+	if !slices.ContainsFunc(sources, func(src UsageInfo) bool { return src.PureReceiver }) {
+		for _, target := range targets {
+			if slices.ContainsFunc(sources, func(src UsageInfo) bool { return reaching(src, target) }) {
+				t.addViolationWithContext(target, root, target.PureReceiver)
+			}
+		}
+		return
+	}
 	var other, pure []UsageInfo
 	for _, src := range sources {
 		if src.PureReceiver {

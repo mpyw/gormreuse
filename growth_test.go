@@ -285,10 +285,10 @@ var growthCases = []growthCase{
 	// are ordered by their instructions, which are indexed once per block.
 	{name: "purereceivers", limit: growthNearLinear, shape: func(n int) []string {
 		var b strings.Builder
-		b.WriteString("type repo struct{ db *gorm.DB }\n\n//gormreuse:pure\nfunc (r repo) list(x int) int { return x }\n\n")
+		b.WriteString("type repo struct{ db *gorm.DB }\n\n//gormreuse:pure\nfunc (r repo) list(x *gorm.DB) int { _ = x; return 0 }\n\n")
 		b.WriteString("func f(db *gorm.DB) {\n\tq := db.Where(\"x\")\n\tr := repo{db: q}\n")
 		for i := range n {
-			fmt.Fprintf(&b, "\tr.list(%d)\n\tq.Where(\"c%d\").Find(nil)\n", i, i)
+			fmt.Fprintf(&b, "\tr.list(nil)\n\tq.Where(\"c%d\").Find(nil)\n", i)
 		}
 		b.WriteString("}\n")
 		return []string{b.String()}

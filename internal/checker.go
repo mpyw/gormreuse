@@ -101,7 +101,7 @@ func (c *checker) report(violations []pollution.Violation) {
 			// receiver branch explains is dropped, after Generate decided
 			// it as before #404, so the advice of its diagnostics is too.
 			f = c.fixGen.Generate(v)
-			if c.pureReports.marked[v.Root] {
+			if c.pureReports.roots()[v.Root] {
 				f = nil
 			}
 			fixes[v.Root] = f
@@ -139,6 +139,12 @@ func (c *checker) report(violations []pollution.Violation) {
 			if !v.FromPureReceiver && !slices.ContainsFunc(fixFor, func(f pollution.Violation) bool { return f.Root == v.Root }) {
 				fixFor = append(fixFor, v)
 			}
+		}
+		// A report that holds without a pure method's receiver branch wins
+		// its position from any function (#404), so a group of reports that
+		// need the branch is left to the function that has one.
+		if len(reuse) > 0 && !slices.ContainsFunc(reuse, func(v pollution.Violation) bool { return !v.FromPureReceiver }) && c.pureReports.other[reuse[0].Pos] {
+			reuse = nil
 		}
 		if len(reuse) > 0 {
 			// A report that holds only because of a pure method's receiver
@@ -215,16 +221,23 @@ func checkerBoolInt(b bool) int {
 // checkerPureReports collects, over every function of the package, the
 // reports that hold only because of a pure method's receiver branch (#404),
 // and marks the root of each one that is shown. Such a root gets no fix. The
-// checker shows one reuse diagnostic per position: the first report at it,
-// in the first function that has one, after putting first the reports that
-// hold without the branch (see report). A Session/Debug copy report is shown
-// on its own. A root whose report is not shown keeps its fix.
+// checker shows one reuse diagnostic per position. A report that holds
+// without the branch wins it, from any function (see report). Otherwise the
+// first report at it wins, in the first function that has one. A
+// Session/Debug copy report is shown on its own. A root whose report is not
+// shown keeps its fix.
 type checkerPureReports struct {
-	// marked holds the roots of the shown reports.
-	marked map[ssa.Value]bool
-	// seen holds the positions, and the copy reports, already shown or
-	// suppressed by an earlier function.
+	// other holds the positions with a report that holds without the branch.
+	other map[token.Pos]bool
+	// candidates are the first pure-only report at each position, in order,
+	// and copies holds the roots of the shown copy reports.
+	candidates []pollution.Violation
+	copies     []ssa.Value
+	// seen holds the positions, and the copy reports, already recorded.
 	seen map[reportKey]bool
+	// marked holds the roots of the shown reports, once every function is
+	// analyzed (see roots).
+	marked map[ssa.Value]bool
 	// firstOther is the first report of each root that holds without a
 	// pure method's receiver branch.
 	firstOther map[ssa.Value]pollution.Violation
@@ -254,37 +267,54 @@ func (r *checkerPureReports) decideAdvice(v pollution.Violation, generate func(p
 // them. ignored says that an ignore directive suppresses a position, so
 // nothing is shown at it.
 func (r *checkerPureReports) add(violations []pollution.Violation, ignored func(token.Pos) bool) {
-	if r.marked == nil {
-		r.marked = make(map[ssa.Value]bool)
+	if r.seen == nil {
+		r.other = make(map[token.Pos]bool)
 		r.seen = make(map[reportKey]bool)
 		r.firstOther = make(map[ssa.Value]pollution.Violation)
 	}
 	for _, group := range reportGroupByPos(violations) {
-		var shown *pollution.Violation
+		var first *pollution.Violation
 		for i, v := range group {
-			if v.Root == nil {
+			switch {
+			case v.Root == nil:
 				if v.PureReceiverRoot != nil && !r.seen[reportKeyOf(v)] && !ignored(v.Pos) {
-					r.marked[v.PureReceiverRoot] = true
+					r.copies = append(r.copies, v.PureReceiverRoot)
 				}
 				r.seen[reportKeyOf(v)] = true
-				continue
-			}
-			if !v.FromPureReceiver {
+			case !v.FromPureReceiver:
+				r.other[v.Pos] = true
 				if _, ok := r.firstOther[v.Root]; !ok {
 					r.firstOther[v.Root] = v
 				}
-			}
-			if shown == nil || shown.FromPureReceiver && !v.FromPureReceiver {
-				shown = &group[i]
+			case first == nil:
+				first = &group[i]
 			}
 		}
-		if shown == nil {
+		if first == nil || r.seen[reportKeyOf(*first)] {
 			continue
 		}
-		key := reportKeyOf(*shown)
-		if !r.seen[key] && !ignored(shown.Pos) && shown.FromPureReceiver {
-			r.marked[shown.Root] = true
+		r.seen[reportKeyOf(*first)] = true
+		if !ignored(first.Pos) {
+			r.candidates = append(r.candidates, *first)
 		}
-		r.seen[key] = true
 	}
+}
+
+// roots returns the roots of the shown reports. A pure-only report is shown
+// at its position when no function reports it without the branch. Every
+// function is analyzed before the first is reported, so it is decided once.
+func (r *checkerPureReports) roots() map[ssa.Value]bool {
+	if r.marked != nil {
+		return r.marked
+	}
+	r.marked = make(map[ssa.Value]bool)
+	for _, root := range r.copies {
+		r.marked[root] = true
+	}
+	for _, v := range r.candidates {
+		if !r.other[v.Pos] {
+			r.marked[v.Root] = true
+		}
+	}
+	return r.marked
 }

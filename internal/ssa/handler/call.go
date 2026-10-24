@@ -546,7 +546,10 @@ func (u siteUse) handleArgs() {
 	// A pure method may still branch what its receiver holds (#404).
 	call := u.call()
 	if site.Declared != nil && ctx.RootTracer.IsPureFunction(site.Declared) {
-		if site.Recv != nil {
+		// Only a directive that fits the signature makes the receiver branch:
+		// one on a function with no *gorm.DB parameter is reported unused,
+		// and its calls stay as they were.
+		if site.Recv != nil && typeutil.HasGormDBParameter(site.Declared.Signature) {
 			u.handleHolders([]ssa.Value{site.Recv}, pollution.UsageInfo{Block: u.block, Pos: u.pos, Escapes: true, PureReceiver: true})
 		}
 		return

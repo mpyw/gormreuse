@@ -541,6 +541,21 @@ func prTwoPureShownQ1(db *gorm.DB, c bool) {
 	q2.Find(nil)  // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
+type prNoParamRepo struct{ db *gorm.DB }
+
+//gormreuse:pure // want `unused gormreuse:pure directive`
+func (r prNoParamRepo) count(n int) int { r.db.Where("leak"); return n }
+
+// prUnusedPureDirectiveFix: the directive on count has no *gorm.DB parameter
+// to cover, so it is unused, and its call is not a receiver branch. The
+// report and its fix are as before #404.
+func prUnusedPureDirectiveFix(db *gorm.DB) {
+	q := db.Where("a")
+	q.Find(nil)
+	prNoParamRepo{db: q}.count(1)
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
 // =============================================================================
 // UNSAFE FIX: A PURE CALL AFTER A STORE INTO OTHER MEMORY
 //

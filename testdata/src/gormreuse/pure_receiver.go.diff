@@ -1,6 +1,6 @@
 --- pure_receiver.go	1970-01-01 00:00:00
 +++ pure_receiver.go.golden	1970-01-01 00:00:00
-@@ -1,688 +1,692 @@
+@@ -1,703 +1,707 @@
  package internal
  
  import (
@@ -561,6 +561,23 @@
  	q1.Find(nil)  // want `\*gorm\.DB reused: second branch from mutable root`
  	q2.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  	q2.Find(nil)  // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ type prNoParamRepo struct{ db *gorm.DB }
+ 
+-//gormreuse:pure // want `unused gormreuse:pure directive`
++// want `unused gormreuse:pure directive`
+ func (r prNoParamRepo) count(n int) int { r.db.Where("leak"); return n }
+ 
+ // prUnusedPureDirectiveFix: the directive on count has no *gorm.DB parameter
+ // to cover, so it is unused, and its call is not a receiver branch. The
+ // report and its fix are as before #404.
+ func prUnusedPureDirectiveFix(db *gorm.DB) {
+-	q := db.Where("a")
++	q := db.Where("a").Session(&gorm.Session{})
+ 	q.Find(nil)
+ 	prNoParamRepo{db: q}.count(1)
+ 	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  }
  
  // =============================================================================
