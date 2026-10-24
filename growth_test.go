@@ -1293,7 +1293,7 @@ var growthCases = []growthCase{
 		return []string{b.String()}
 	}},
 	// One []any literal of n values next to a mutable root: a store of a
-	// value that is no function literal never walks the container (#397).
+	// value that is no function literal costs nothing more (#397).
 	{name: "anyliteral", limit: growthNearLinear, shape: func(n int) []string {
 		var b strings.Builder
 		b.WriteString("func use([]any) {}\n\nfunc f(db *gorm.DB) {\n\tq := db.Where(\"x\")\n\txs := []any{\n")
@@ -1304,8 +1304,7 @@ var growthCases = []growthCase{
 		return []string{b.String()}
 	}},
 	// One local slice of n function literals that return a captured root,
-	// each called in a loop: the container is walked once for all its stores
-	// (#397).
+	// each called in a loop: a literal in a container is not followed (#397).
 	{name: "literalslice", limit: growthNearLinear, shape: func(n int) []string {
 		var b strings.Builder
 		b.WriteString("func f(db *gorm.DB) {\n\tq := db.Where(\"x\")\n\tfs := []func() *gorm.DB{\n")
@@ -1315,9 +1314,8 @@ var growthCases = []growthCase{
 		b.WriteString("\t}\n\tfor _, f := range fs {\n\t\tf()\n\t}\n\tq.Find(nil)\n}\n")
 		return []string{b.String()}
 	}},
-	// A chain of n literals, each handing the one before it on: whether a
-	// literal returns a captured *gorm.DB is decided once per literal
-	// (closureReturnsCapturedGormDB, #397).
+	// A chain of n literals, each handing the one before it on in its body
+	// (#397). A hand-off in a nested closure is not followed.
 	{name: "literalchain", n: 400, limit: growthLinear, shape: func(n int) []string {
 		var b strings.Builder
 		b.WriteString("func run(func() *gorm.DB) {}\n\nfunc f(db *gorm.DB) {\n\tq := db.Where(\"x\")\n\tf0 := func() *gorm.DB { return q }\n")
@@ -1328,7 +1326,7 @@ var growthCases = []growthCase{
 		return []string{b.String()}
 	}},
 	// One literal with n returns of a captured root, handed on n times: the
-	// literal's returns are walked once, not at every hand-off (#397).
+	// literal's captured variables are found once (capturedVariables, #397).
 	{name: "literalreturns", limit: growthNearLinear, shape: func(n int) []string {
 		var b strings.Builder
 		b.WriteString("func run(func() *gorm.DB) {}\n\nfunc f(db *gorm.DB, x int) {\n\tq := db.Where(\"x\")\n\tg := func() *gorm.DB {\n")
@@ -1344,9 +1342,8 @@ var growthCases = []growthCase{
 	}},
 	// One literal with n literals called in place that may assign the
 	// captured root, and n returns, handed on n times (#397). cfg.Repeats
-	// compares the runs of the closures in pairs, as it did before #397, so
-	// the case is quadratic. literalstores holds the part #397 adds, where
-	// the root may be unassigned, to linear growth.
+	// compares the runs of the closures in pairs, as it does without #397, so
+	// the case is quadratic.
 	{name: "literaliifes", limit: growthQuadratic, shape: func(n int) []string {
 		var b strings.Builder
 		b.WriteString("func run(func() *gorm.DB) {}\n\nfunc f(db *gorm.DB, x int) {\n\tq := db.Where(\"x\")\n\tg := func() *gorm.DB {\n")
@@ -1361,8 +1358,7 @@ var growthCases = []growthCase{
 		return []string{b.String()}
 	}},
 	// One literal with n stores to the captured root and n returns of it,
-	// handed on twice: where the root may be unassigned is found once for all
-	// the returns (#397).
+	// handed on twice: a reassigned root is not followed (#397).
 	{name: "literalstores", n: 400, limit: growthNearLinear, shape: func(n int) []string {
 		var b strings.Builder
 		b.WriteString("func run(func() *gorm.DB) {}\n\nfunc f(db *gorm.DB, x int) {\n\tq := db.Where(\"x\")\n\tg := func() *gorm.DB {\n")
@@ -1373,7 +1369,7 @@ var growthCases = []growthCase{
 		return []string{b.String()}
 	}},
 	// One literal that returns one of n captured roots, handed on n times:
-	// each root's variable is read once (#397).
+	// the literal's captured variables are found once (#397).
 	{name: "literalphis", limit: growthNearLinear, shape: func(n int) []string {
 		var b strings.Builder
 		b.WriteString("func run(func() *gorm.DB) {}\n\nfunc f(db *gorm.DB, x int) {\n")
@@ -1391,8 +1387,8 @@ var growthCases = []growthCase{
 		b.WriteString("}\n")
 		return []string{b.String()}
 	}},
-	// A variable that holds one of n literals, handed on n times: the
-	// literals of the variable are found and merged once (#397).
+	// A variable that holds one of n literals, handed on n times: such a
+	// merge is not followed (#397).
 	{name: "literalmerges", limit: growthNearLinear, shape: func(n int) []string {
 		var b strings.Builder
 		b.WriteString("func run(func() *gorm.DB) {}\n\nfunc f(db *gorm.DB, x int) {\n\tq := db.Where(\"x\")\n\tg := func() *gorm.DB { return q }\n")
@@ -1406,9 +1402,9 @@ var growthCases = []growthCase{
 		return []string{b.String()}
 	}},
 	// n literals that each may call every other one through a variable, and
-	// return a captured root, handed on once. Their summaries are found per
-	// strongly connected component (#397), so each literal is walked once.
-	// The source holds n² calls, so the case is held to the quadratic limit.
+	// return a captured root, handed on once. capturedVariables follows each
+	// getter once (#397). The source holds n² calls, so the case is held to
+	// the quadratic limit.
 	{name: "literalcycles", n: 12, limit: growthQuadratic, shape: func(n int) []string {
 		var b strings.Builder
 		b.WriteString("func run(func() *gorm.DB) {}\n\nfunc f(db *gorm.DB, k int) {\n\tq := db.Where(\"x\")\n")

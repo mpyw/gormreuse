@@ -612,7 +612,7 @@ q.Find(&users)
 
 </td><td>
 
-It may be called elsewhere, and the caller may chain on `q`. A `Scopes` or `Preload` callback that returns `q` counts too, and so does a store into a parameter's map or a global. A container that holds such a literal counts only when the literal is stored straight into it, and the container itself is then passed to a call, sent, or stored into a parameter or a global. These containers count: a slice, struct or map literal, `make` with a non-constant length, `new(T)`, and a `var j T` local whose field is assigned, as in `run([]func() *gorm.DB{f})`. A `make` with a constant length is not followed: go/ssa builds it as an array and a slice of it, and the store goes into the slice. Neither is a container the function returns, one reached in any other way, such as through an element, an `append` or a variable assigned on a branch (see Known Limitations), or one passed to `fmt`, `log` or `testing`. A literal that returns its own parameter, its own chain, a `Session` copy or an immutable value hands nothing on.
+It may be called elsewhere, and the caller may chain on `q`. It counts only when the literal is handed on directly in the function that declares `q`: as a call argument (also a `Scopes` or `Preload` callback, or one element of the varargs), sent, or stored through a parameter or a global. A local variable holding it counts when it is assigned once and only called or passed. And `q` must be assigned once and never have its address taken. A literal in a container (a struct, slice, map or array, even one passed on), a hand-off in a nested closure, a reassigned `q`, and a returned literal are not followed (see Known Limitations), and neither is one passed to `fmt`, `log` or `testing`. As for a method value, `run(f, f)` with two parameters is one use, and `runV(f, f)` with varargs is two.
 
 </td></tr>
 <tr><td>Type assertion out of an interface</td><td>
@@ -5479,7 +5479,7 @@ gormreuse reports a reuse only when it can follow the value. These cases are kno
 
 | Kind | Cases | Meaning |
 | --- | --- | --- |
-| Missed reuse (false negatives) | 24 | Reuse that is not reported |
+| Missed reuse (false negatives) | 23 | Reuse that is not reported |
 | Extra reports (false positives) | 5 | Safe code that is reported |
 | Wrong position | — | A report on the wrong line |
 | No fix | — | A report without a suggested fix |
@@ -5725,48 +5725,6 @@ q.Count(nil) // not reported
 ```
 
 </td><td>A method value in an interface is not followed</td></tr>
-<tr><td><!-- fixtures: crcBranchesAndReturns -->
-
-A function literal handed on that chains on the captured value on one path and returns it unchanged on another:
-
-```go
-run(func() *gorm.DB {
-    if c {
-        q = q.Where("z")
-    }
-    return q
-})
-q.Find(nil) // not reported
-```
-
-</td><td>The chain in the body counts as the literal's one use of <code>q</code></td></tr>
-<tr><td><!-- fixtures: crcAssignedByOtherClosure, crcAssignedByOtherClosureNested -->
-
-A function literal handed on whose captured variable another closure may assign:
-
-```go
-run(func() *gorm.DB {
-    do(func() {
-        if c {
-            q = other
-        }
-    })
-    return q
-})
-q.Find(nil) // not reported
-```
-
-</td><td>When that closure runs is not known</td></tr>
-<tr><td><!-- fixtures: crcReturnsPointer, crcReturnsStruct, crcFactoryLiteral -->
-
-A function literal handed on that returns the captured value as a <code>**gorm.DB</code> or in a struct, or one that a call makes:
-
-```go
-runP(func() **gorm.DB { return &q })
-q.Find(nil) // not reported
-```
-
-</td><td>Only a literal that returns a <code>*gorm.DB</code> is followed, where it is made</td></tr>
 <tr><td><!-- fixtures: crcPureHandsOnLiteral -->
 
 A `//gormreuse:pure` function that hands on a literal returning its argument:
@@ -5779,31 +5737,52 @@ func f(d *gorm.DB) {
 ```
 
 </td><td>The pure check does not take such a literal as a branch of the argument</td></tr>
-<tr><td><!-- fixtures: crcGetterCalledInClosure -->
+<tr><td><!-- fixtures: crcField, crcLocalSliceHandedOn, crcLocalSliceToGlobal, crcBoxedInSlice, crcNamedFuncInSlice, crcLocalArrayHandedOn, crcLocalSliceInParamMap, crcOtherPackageStruct, crcOtherPackageStructDirect, crcSentSlice, crcNewStructHandedOn, crcVarStructHandedOn, crcMapLiteralHandedOn, crcConstMakeHandedOn, crcConstMakeFieldHandedOn, crcLitSliceIndexedHandedOn, crcPhiSliceHandedOn, crcPhiMapHandedOn, crcAppendThenIndexHandedOn, crcCopyIntoContainerHandedOn, crcCapturedSliceIndexed, crcCallResultSlice, crcAppendParam, crcLocalSliceElemHandedOn, crcLocalSliceResultUsed, crcLocalSliceCaptured, crcLocalSliceInMap, crcLocalStructFieldHandedOn, crcLocalMapCommaOk, crcLocalSliceElemSent, crcAppended, crcAppendedLiteral, crcPointerElem, crcPointerElemRanged, crcPointerMapElem, crcPointerToVariable, crcMapInSlice, crcElemBoxed, crcOtherPackageStructInSlice, crcArrayInSlice, crcMadeSlice, crcMadeSliceField, crcMadeSliceOfSlices, crcMadeMap, crcReceivedSlice -->
 
-A closure that only calls a captured getter literal and chains on the result:
+A function literal in a container, even one passed on:
+
+```go
+run([]func() *gorm.DB{func() *gorm.DB { return q }})
+q.Find(nil) // not reported
+```
+
+</td><td>A literal is followed only as a call argument, a varargs element, a send, or a store outside the function</td></tr>
+<tr><td><!-- fixtures: crcHandedOnInClosure, crcMadeInClosure, crcReassignedBeforeClosure, crcReassignedBeforeCall, crcGetterOfGetterInClosure, crcMutualGetters, crcClosureInLoopHandOff, crcGetterCalledInClosure -->
+
+A function literal handed on in a nested closure:
 
 ```go
 f := func() *gorm.DB { return q }
-func() {
-    f().Find(nil)
-}()
+g := func() { run(f) }
+g()
 q.Find(nil) // not reported
 ```
 
-</td><td>The closure captures no <code>*gorm.DB</code>, so it is not analyzed</td></tr>
-<tr><td><!-- fixtures: crcConstMakeHandedOn, crcConstMakeFieldHandedOn, crcLitSliceIndexedHandedOn, crcPhiSliceHandedOn, crcPhiMapHandedOn, crcAppendThenIndexHandedOn, crcCopyIntoContainerHandedOn, crcCapturedSliceIndexed, crcCallResultSlice, crcAppendParam, crcLocalSliceElemHandedOn, crcLocalSliceResultUsed, crcLocalSliceCaptured, crcLocalSliceInMap, crcLocalStructFieldHandedOn, crcLocalMapCommaOk, crcLocalSliceElemSent, crcAppended, crcPointerElem, crcPointerElemRanged, crcPointerMapElem, crcPointerToVariable, crcMapInSlice, crcElemBoxed, crcOtherPackageStructInSlice, crcArrayInSlice, crcMadeSlice, crcMadeSliceField, crcMadeSliceOfSlices, crcMadeMap, crcReceivedSlice, crcReturnedSlice -->
+</td><td>Only a hand-off in the function that declares <code>q</code> is followed</td></tr>
+<tr><td><!-- fixtures: crcCapturedByReference, crcReassignedLater, crcConditionalStore, crcLoadBeforeStore, crcConditionalStoreInClosure, crcBranchesAndReturns, crcAssignedByOtherClosure, crcAssignedByOtherClosureNested, crcCapturedField, crcCapturedFieldTwice, crcReturnsPointer, crcReturnsStruct, crcFactoryLiteral, crcMergedLiterals, crcMergedLiteralsInLoop, crcLiteralTwoValues, crcNestedCalledInPlace, crcNestedLocal, crcGetterInLiteral -->
 
-A function literal stored into a container that is not handed on directly:
+A function literal that returns something else than a captured variable assigned once:
 
 ```go
-fs := make([]func() *gorm.DB, 1)
-fs[0] = func() *gorm.DB { return q }
-runAll(fs)
+q := db.Where("x")
+if c {
+    q = q.Where("y")
+}
+run(func() *gorm.DB { return q })
 q.Find(nil) // not reported
 ```
 
-</td><td>Only a container literal that holds the function literal and is itself passed on is followed</td></tr>
+</td><td><code>q</code> is assigned twice. Fields, pointers, merged literals and literals called in place are not followed either</td></tr>
+<tr><td><!-- fixtures: crcReturnedSlice, crcReturnedLiteral -->
+
+A function literal that the function returns:
+
+```go
+q.Find(nil)
+return func() *gorm.DB { return q } // not reported
+```
+
+</td><td>The caller is another function</td></tr>
 </table>
 
 </details>

@@ -8,7 +8,7 @@ These notes say what changes for users in each release, and what to do about it.
 
 | Now reported | Example | What to do |
 | --- | --- | --- |
-| A function literal handed on that returns a captured `*gorm.DB` (#397). The code that gets it may call it and chain on the result, as `Scopes` and `Preload` do | `run(func() *gorm.DB { return q }); q.Find(&us)`, `db.Scopes(func(d *gorm.DB) *gorm.DB { return q }).Find(&a); q.Find(&b)` | Return the callback's own parameter, or make `q` immutable with `Session`. `-fix` offers the Session where it does for a method value handed on |
+| A function literal handed on that returns a captured `*gorm.DB` (#397). The code that gets it may call it and chain on the result, as `Scopes` and `Preload` do. Only a direct hand-off counts: a call argument, a send, or a store through a parameter or a global, in the function that declares the variable. A literal in a container is not followed | `run(func() *gorm.DB { return q }); q.Find(&us)`, `db.Scopes(func(d *gorm.DB) *gorm.DB { return q }).Find(&a); q.Find(&b)` | Return the callback's own parameter, or make `q` immutable with `Session`. `-fix` offers the Session where it does for a method value handed on |
 
 ### Fewer false reports
 

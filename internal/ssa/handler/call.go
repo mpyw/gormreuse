@@ -38,7 +38,6 @@
 package handler
 
 import (
-	"fmt"
 	"go/token"
 	"go/types"
 	"slices"
@@ -88,13 +87,10 @@ type Context struct {
 	assignMerges map[*ssa.Call][]ssa.Value
 	mergeFree    map[ssa.Value]bool
 
-	// containers memoizes directContainerHandOffs per container: the
-	// element stores of one composite literal all ask about it (#397).
-	containers map[ssa.Value]*containerHandOffs
-
-	// captures keeps what returnedCaptureRoots finds about the function's
-	// literals (#397).
-	captures *captureCache
+	// literalVars memoizes capturedVariables per literal, and instrIndex
+	// the index of each instruction in its block (#397).
+	literalVars map[*ssa.MakeClosure][]*ssa.Alloc
+	instrIndex  map[ssa.Instruction]int
 }
 
 // pos returns the effective source position to record for a use: the
@@ -577,23 +573,20 @@ func (u siteUse) handleArgs() {
 		// The address of a variable holding a *gorm.DB hands its value on:
 		// applyP(&q) may change it in place, as applyTenant(q) may (#345).
 		if roots := ctx.RootTracer.PointeeRoots(arg, site.Instr, ctx.LoopInfo); roots != nil {
-			u.escape(roots)
+			u.branch(roots, pollution.UsageInfo{Block: u.block, Pos: u.pos, Escapes: true}, func(ssa.Value) bool { return false })
 			continue
 		}
 		// A method value such as q.Find hands its receiver on, as a closure
-		// that calls q.Find does (#374). So does a function literal that
-		// returns a captured *gorm.DB (#397).
-		if roots, literal := funcValueRoots(arg, site.Instr, ctx, nil); roots != nil {
-			if literal {
-				// A literal's hand-off keeps its own position, not that of
-				// the call of the closure it is in (#68), so it never takes
-				// the place of a report there.
-				lu := u
-				lu.pos = site.Instr.Pos()
-				lu.escape(roots)
-			} else {
-				u.escape(roots)
+		// that calls q.Find does (#374).
+		if recv := boundGormReceiver(arg, ctx); recv != nil {
+			if roots := u.roots(recv); roots != nil {
+				u.branch(roots, pollution.UsageInfo{Block: u.block, Pos: u.pos, Escapes: true}, func(ssa.Value) bool { return false })
 			}
+			continue
+		}
+		// So does a function literal that returns a captured *gorm.DB (#397).
+		if roots := literalRoots(arg, site.Instr, ctx); roots != nil {
+			handOnLiteral(site.Instr, site.Instr.Pos(), roots, ctx)
 			continue
 		}
 		// Check if arg is *gorm.DB (directly or wrapped in MakeInterface).
@@ -761,10 +754,17 @@ func immutableParamContractMessage(name string, dropsState bool) string {
 
 // boundGormReceiver returns the receiver of v when v is a method value of a
 // *gorm.DB method, as q.Find is, also converted to a named func type or held
-// by a local variable (unwrapFuncValue). A method value boxed in an interface
-// is not followed. It is nil otherwise.
+// by a local variable (callsite.FuncVars.LocalValue). It is nil otherwise.
 func boundGormReceiver(v ssa.Value, ctx *Context) ssa.Value {
-	mc, ok := unwrapFuncValue(v, ctx, false).(*ssa.MakeClosure)
+	for {
+		v = ctx.RootTracer.FuncVars().LocalValue(v)
+		ct, ok := v.(*ssa.ChangeType)
+		if !ok {
+			break
+		}
+		v = ct.X
+	}
+	mc, ok := v.(*ssa.MakeClosure)
 	if !ok {
 		return nil
 	}
@@ -774,317 +774,44 @@ func boundGormReceiver(v ssa.Value, ctx *Context) ssa.Value {
 	return nil
 }
 
-// unwrapFuncValue returns the function value that v holds: v itself, or what
-// a local variable holds (callsite.FuncVars.LocalValue, also through a
-// closure that captures it), or what a conversion to a named func type wraps.
-// With boxed, it also looks into a box in an interface.
-func unwrapFuncValue(v ssa.Value, ctx *Context, boxed bool) ssa.Value {
-	for {
-		v = ctx.RootTracer.FuncVars().LocalValue(v)
-		switch w := v.(type) {
-		case *ssa.ChangeType:
-			v = w.X
-		case *ssa.MakeInterface:
-			if !boxed {
-				return v
-			}
-			v = w.X
-		default:
-			return v
-		}
-	}
-}
-
-// funcValueRoots returns the mutable roots that the function value v hands on
-// to code that may call it: the receiver of a *gorm.DB method value (#374),
-// or the captured values a function literal returns (#397). at is the
-// instruction that hands v on. handsOn, when not nil, decides whether a
-// function literal is handed on at all; it is asked only once v is known to
-// be one. literal tells which kind the roots come from. The roots are nil for
-// any other value.
-func funcValueRoots(v ssa.Value, at ssa.Instruction, ctx *Context, handsOn func() bool) (roots []ssa.Value, literal bool) {
-	switch v.Type().Underlying().(type) {
-	case *types.Signature, *types.Interface:
-	default:
-		return nil, false
-	}
-	if recv := boundGormReceiver(v, ctx); recv != nil {
-		return ctx.RootTracer.MutableRoots(recv, ctx.LoopInfo), false
-	}
-	lits := ctx.captureCache().literals(v)
-	if len(lits.mcs) == 0 || handsOn != nil && !handsOn() {
-		return nil, true
-	}
-	return returnedCaptureRoots(lits, at, ctx), true
-}
-
-// handOn records v, handed on by instr, as a branch of every root it may
-// hold: a send, or a store into a slice, a map or memory. Other code may use
-// what it was handed, so the hand-off is a branch like a call that takes v
-// (#374). It is reported when it runs again, as in a loop, and the roots of a
-// merge besides the first get a branch through it.
-func handOn(instr ssa.Instruction, v ssa.Value, ctx *Context) {
-	handOnRoots(instr, instr.Pos(), ctx.RootTracer.MutableRoots(v, ctx.LoopInfo), ctx)
-}
-
-// handOnRoots records roots, handed on by instr at pos, as branches (see
-// handOn).
-func handOnRoots(instr ssa.Instruction, pos token.Pos, roots []ssa.Value, ctx *Context) {
-	if roots == nil {
-		return
-	}
-	siteUse{ctx: ctx, block: instr.Block(), pos: ctx.pos(pos)}.escape(roots)
-}
-
-// handOnFuncValue records the roots that the function value v, sent or
-// stored by instr, hands on (funcValueRoots). container is what a store or a
-// map update writes into, or nil for a send. A function literal stored into
-// a container is handed on only as literalStoreHandsOn says. go/ssa gives
-// the store of a function literal into the varargs of a call no position, so
-// the hand-off is placed at that call (handOffPos).
-func handOnFuncValue(instr ssa.Instruction, v, container ssa.Value, ctx *Context) {
-	var handsOn func() bool
-	if container != nil {
-		handsOn = func() bool { return literalStoreHandsOn(instr, container, ctx) }
-	}
-	roots, literal := funcValueRoots(v, instr, ctx, handsOn)
-	if !literal {
-		handOnRoots(instr, instr.Pos(), roots, ctx)
-		return
-	}
-	// A literal's hand-off keeps its own position, as in handleArgs.
-	if roots != nil {
-		siteUse{ctx: ctx, block: instr.Block(), pos: handOffPos(instr)}.escape(roots)
-	}
-}
-
-// handOffPos returns the position of instr, a store or a send that hands a
-// function literal on. go/ssa gives the store of a function literal into the
-// varargs array of a call no position, so it is placed at that call.
-func handOffPos(instr ssa.Instruction) token.Pos {
-	pos := instr.Pos()
-	if store, ok := instr.(*ssa.Store); ok && !pos.IsValid() {
-		if call := varargsCall(store.Addr); call != nil {
-			pos = call.Pos()
-		}
-	}
-	return pos
-}
-
-// varargsCall returns the call that passes the array addr is an element of,
-// sliced, as its varargs, or nil.
-func varargsCall(addr ssa.Value) (call ssa.CallInstruction) {
-	if idx, ok := addr.(*ssa.IndexAddr); ok {
-		for _, r := range *idx.X.Referrers() {
-			if slice, ok := r.(*ssa.Slice); ok {
-				for _, use := range *slice.Referrers() {
-					if c, ok := use.(ssa.CallInstruction); ok {
-						call = c
-					}
-				}
-			}
-		}
-	}
-	return call
-}
-
-// escape records roots as branched by code that the site hands them to.
-// Other code may change them in place, so none of them is an assignment.
-func (u siteUse) escape(roots []ssa.Value) {
-	u.branch(roots, pollution.UsageInfo{Block: u.block, Pos: u.pos, Escapes: true}, func(ssa.Value) bool { return false })
-}
-
-// literalStoreHandsOn reports whether a function literal stored by store
-// into container, the address of an element or a field, or a map, is handed
-// on (#397). It is only when the literal goes into a location outside the
-// function (externalContainer), or straight into a container the function
-// allocates whose own value is handed on after the store
-// (containerHandOffs):
-//
-//	run([]func() *gorm.DB{f})  // handed on
-//	m[k] = f                   // handed on, m a parameter
-//	fs := make([]func() *gorm.DB, 1)
-//	fs[0] = f                  // not followed: a slice of the allocation
-//
-// Any other shape counts as no hand-off: the literal is followed through no
-// load, merge, append, element read, conversion, nesting or capture, which
-// keeps a local table of literals from being reported (Known Limitations).
-// Main reports no literal hand-off, so leaving a shape out is never a
-// regression against it.
-func literalStoreHandsOn(store ssa.Instruction, container ssa.Value, ctx *Context) bool {
-	base := containerBase(container)
-	if externalContainer(base) {
-		return true
-	}
-	switch c := container.(type) {
-	case *ssa.IndexAddr:
-		if c.X != base {
-			return false
-		}
-	case *ssa.FieldAddr:
-		if c.X != base {
-			return false
-		}
-	}
-	switch base.(type) {
-	case *ssa.Alloc, *ssa.MakeSlice, *ssa.MakeMap:
-	default:
-		return false
-	}
-	offs, done := ctx.containers[base]
-	if !done {
-		offs = directContainerHandOffs(base, ctx)
-		if ctx.containers == nil {
-			ctx.containers = map[ssa.Value]*containerHandOffs{}
-		}
-		ctx.containers[base] = offs
-	}
-	c := ctx.captureCache()
-	// A store of the whole variable after the literal's store may replace
-	// it, so then the literal is not followed.
-	if slices.ContainsFunc(offs.wholes, func(w *ssa.Store) bool { return !c.before(w, store) }) {
-		return false
-	}
-	return slices.ContainsFunc(offs.reads, func(read ssa.Instruction) bool { return c.before(store, read) })
-}
-
-// before reports whether a runs before b on every path to b: a's block
-// dominates b's, and a comes first in a shared block.
-func (c *captureCache) before(a, b ssa.Instruction) bool {
-	if a.Block() == b.Block() {
-		return c.indexOf(a) < c.indexOf(b)
-	}
-	return a.Parent() == b.Parent() && a.Block().Dominates(b.Block())
-}
-
-// containerHandOffs is where the own value of a container the function
-// allocates is handed on: the instruction that reads the container for each
-// hand-off, and the stores of the whole variable when the container is one.
-type containerHandOffs struct {
-	reads  []ssa.Instruction
-	wholes []*ssa.Store
-}
-
-// containerBase returns the container whose element or field addr is.
-func containerBase(addr ssa.Value) ssa.Value {
-	for {
-		switch a := addr.(type) {
-		case *ssa.IndexAddr:
-			addr = a.X
-		case *ssa.FieldAddr:
-			addr = a.X
-		default:
-			return addr
-		}
-	}
-}
-
-// externalContainer reports whether v is a location outside the function: a
-// parameter, a global, or what is read through one. A captured variable is a
-// local of the enclosing function, so it is not one.
-func externalContainer(v ssa.Value) bool {
-	for {
-		switch w := v.(type) {
-		case *ssa.Parameter, *ssa.Global:
-			return true
-		case *ssa.UnOp:
-			if w.Op != token.MUL {
-				return false
-			}
-			v = w.X
-		case *ssa.IndexAddr:
-			v = w.X
-		case *ssa.FieldAddr:
-			v = w.X
-		default:
-			return false
-		}
-	}
-}
-
-// directContainerHandOffs returns where the value of base, a container the
-// function allocates, is handed on as it is: base itself, the slice of it
-// that a slice literal or varargs is, or the struct value of a struct
-// literal. It is handed on when it is passed to a call (other than a builtin
-// or a read-only stdlib function such as fmt.Println), sent, or stored or put
-// into a map outside the function. The read of a struct value is its load;
-// the read of any other value is the hand-off itself. A container that the
-// function returns is not followed, as a literal it returns is not.
-func directContainerHandOffs(base ssa.Value, ctx *Context) *containerHandOffs {
-	offs := &containerHandOffs{}
-	values := []ssa.Value{base}
-	for _, r := range *base.Referrers() {
-		switch r := r.(type) {
-		case *ssa.Slice:
-			if r.X == base {
-				values = append(values, r)
-			}
-		case *ssa.UnOp:
-			if r.Op == token.MUL {
-				values = append(values, r)
-			}
-		case *ssa.Store:
-			if r.Addr == base {
-				offs.wholes = append(offs.wholes, r)
-			}
-		}
-	}
-	vars := ctx.RootTracer.FuncVars()
-	for _, v := range values {
-		for _, r := range *v.Referrers() {
-			if !containerHandsOn(v, r, vars) {
-				continue
-			}
-			read := r
-			if load, ok := v.(*ssa.UnOp); ok {
-				read = load
-			}
-			offs.reads = append(offs.reads, read)
-		}
-	}
-	return offs
-}
-
-// containerHandsOn reports whether r hands v, the own value of a container,
-// on (see directContainerHandOffs).
-func containerHandsOn(v ssa.Value, r ssa.Instruction, vars callsite.FuncVars) bool {
-	switch r := r.(type) {
-	case ssa.CallInstruction:
-		if _, builtin := r.Common().Value.(*ssa.Builtin); builtin {
-			return false
-		}
-		return slices.Contains(r.Common().Args, v) && !pollutionsource.IsReadOnlyVariadicCall(r, v, vars)
-	case *ssa.Send:
-		return r.X == v
-	case *ssa.Store:
-		return r.Val == v && externalContainer(containerBase(r.Addr))
-	case *ssa.MapUpdate:
-		return r.Value == v && externalContainer(r.Map)
-	}
-	return false
-}
-
-// returnedCaptureRoots returns the mutable roots of the captured *gorm.DB
-// values that the function literals mcs may return, handed on by at. mcs are
-// the literals a function value may be (handedOnLiterals). The code that gets
-// it may call it and chain on what it returns, as Scopes and Preload do, so
-// handing it on hands those values on (#397):
+// literalRoots returns the mutable roots that v, a function literal, hands
+// on at at (#397). The code that gets the literal may call it and chain on
+// what it returns, as Scopes and Preload do, so handing it on hands on the
+// captured values it returns, as a method value hands on its receiver
+// (#374):
 //
 //	q := db.Where("name = ?", "x")
 //	run(func() *gorm.DB { return q }) // a branch of q's root
 //	q.Find(&users)                    // the second branch
 //
-// Only a value the literal returns as it captured it counts (see
-// literalSummary). A chain the literal builds is a use in its body already,
-// and its own parameter or an immutable value has no root here. What a
-// literal returns, apart from where it is handed on, is kept per literal;
-// only the reads of its captured variables depend on at.
-func returnedCaptureRoots(lits *handedLiterals, at ssa.Instruction, ctx *Context) []ssa.Value {
-	c := ctx.captureCache()
-	sum := c.merged(lits)
-	roots := slices.Clone(sum.roots)
-	for _, read := range sum.reads {
-		for _, r := range c.read(read, at) {
+// It holds only in a direct shape, and the roots are nil otherwise:
+//
+//   - v is the literal, also boxed in an interface or converted to a named
+//     func type, made in the function being analyzed (directLiteral).
+//   - Every use of the literal hands it on as it is: an argument or the
+//     callee of a call, an element of the varargs of a call, a send, or a
+//     store into a location outside the function (literalOnlyHandedOn).
+//   - It returns its captured variables as they are, also through a getter
+//     literal it calls through one (capturedVariables). Each is a variable
+//     of the function being analyzed that is assigned once and never has its
+//     address taken (onlyStore), and its store runs before at.
+//
+// Main reports no literal hand-off, so a shape left out is never a
+// regression against it. A literal in a container, a hand-off in a closure
+// nested in the function that declares the variable, a reassigned variable,
+// and a returned literal are left out (Known Limitations).
+func literalRoots(v ssa.Value, at ssa.Instruction, ctx *Context) []ssa.Value {
+	mc := directLiteral(v)
+	if mc == nil || mc.Parent() != ctx.CurrentFn || !literalOnlyHandedOn(mc, ctx) {
+		return nil
+	}
+	var roots []ssa.Value
+	for _, alloc := range capturedVariables(mc, ctx) {
+		store := onlyStore(alloc)
+		if store == nil || !ctx.runsBefore(store, at) {
+			continue
+		}
+		for _, r := range ctx.RootTracer.MutableRoots(store.Val, ctx.LoopInfo) {
 			if !slices.Contains(roots, r) {
 				roots = append(roots, r)
 			}
@@ -1093,266 +820,208 @@ func returnedCaptureRoots(lits *handedLiterals, at ssa.Instruction, ctx *Context
 	return roots
 }
 
-// handedLiterals is the function literals that a function value may be
-// (handedOnLiterals), and, once asked, the union of their summaries.
-type handedLiterals struct {
-	mcs []*ssa.MakeClosure
-	sum *literalSummary
+// handOnLiteral records roots, handed on by instr at pos, as branches. The
+// position is the hand-off's own, not that of the call of a closure the
+// function is analyzed at (#68), so it never takes the place of a report
+// there.
+func handOnLiteral(instr ssa.Instruction, pos token.Pos, roots []ssa.Value, ctx *Context) {
+	u := siteUse{ctx: ctx, block: instr.Block(), pos: pos}
+	u.branch(roots, pollution.UsageInfo{Block: u.block, Pos: u.pos, Escapes: true}, func(ssa.Value) bool { return false })
 }
 
-// literals returns the handedLiterals of v, kept per value: a variable that
-// holds one of n literals may be handed on n times.
-func (c *captureCache) literals(v ssa.Value) *handedLiterals {
-	v = unwrapFuncValue(v, c.ctx, true)
-	if lits, done := c.values[v]; done {
-		return lits
-	}
-	lits := &handedLiterals{mcs: handedOnLiterals(v, c.ctx, map[ssa.Value]bool{})}
-	c.values[v] = lits
-	return lits
-}
-
-// merged returns the union of the summaries of lits. Reads of one variable
-// by literals made in one function are read at the same point, so one of
-// them stands for all.
-func (c *captureCache) merged(lits *handedLiterals) *literalSummary {
-	if lits.sum != nil {
-		return lits.sum
-	}
-	sum := &literalSummary{}
-	for _, mc := range lits.mcs {
-		part := c.summary(mc)
-		for _, r := range part.roots {
-			if !slices.Contains(sum.roots, r) {
-				sum.roots = append(sum.roots, r)
+// directLiteral returns the closure of the function literal that v is, also
+// boxed in an interface or converted to a named func type, or nil. A bound
+// method value is not one.
+func directLiteral(v ssa.Value) *ssa.MakeClosure {
+	for {
+		switch w := v.(type) {
+		case *ssa.MakeInterface:
+			v = w.X
+		case *ssa.ChangeType:
+			v = w.X
+		case *ssa.MakeClosure:
+			if _, bound := callsite.BoundSite(w); bound {
+				return nil
 			}
-		}
-		for _, read := range part.reads {
-			if !slices.ContainsFunc(sum.reads, func(r capturedRead) bool {
-				return r.ptr == read.ptr && r.key == read.key && r.mc.Parent() == read.mc.Parent()
-			}) {
-				sum.reads = append(sum.reads, read)
-			}
+			return w
+		default:
+			return nil
 		}
 	}
-	lits.sum = sum
-	return sum
 }
 
-// handedOnLiterals returns the closures of function literals that v may be:
-// v unwrapped (unwrapFuncValue, also a box in an interface), or each edge of
-// a merge of such values. A bound method value is not one.
-func handedOnLiterals(v ssa.Value, ctx *Context, seen map[ssa.Value]bool) []*ssa.MakeClosure {
-	v = unwrapFuncValue(v, ctx, true)
-	if seen[v] {
+// literalOnlyHandedOn reports whether every use of v, a function literal or
+// its box or conversion, hands it on as it is: an argument or the callee of
+// a call other than a builtin, an element of the varargs of such a call
+// (varargsCall), a send, or a store or a map update into a location outside
+// the function (externalLocation).
+func literalOnlyHandedOn(v ssa.Value, ctx *Context) bool {
+	return !slices.ContainsFunc(*v.Referrers(), func(r ssa.Instruction) bool {
+		switch r := r.(type) {
+		case *ssa.MakeInterface:
+			return !literalOnlyHandedOn(r, ctx)
+		case *ssa.ChangeType:
+			return !literalOnlyHandedOn(r, ctx)
+		case ssa.CallInstruction:
+			_, builtin := r.Common().Value.(*ssa.Builtin)
+			return builtin
+		case *ssa.Send:
+			return r.X != v
+		case *ssa.Store:
+			return r.Val != v || varargsCall(r, ctx) == nil && !externalLocation(r.Addr)
+		case *ssa.MapUpdate:
+			return r.Value != v || !externalLocation(r.Map)
+		}
+		_, debug := r.(*ssa.DebugRef)
+		return !debug
+	})
+}
+
+// varargsCall returns the call whose varargs store fills, as go/ssa builds
+// them: an element of an array it allocates for the call, sliced, and passed
+// as the last argument. It is nil for any other store, for a builtin such as
+// append, and for a read-only stdlib function such as fmt.Println
+// (pollutionsource.IsReadOnlyVariadicArg), which only formats its arguments.
+func varargsCall(store *ssa.Store, ctx *Context) ssa.CallInstruction {
+	idx, ok := store.Addr.(*ssa.IndexAddr)
+	if !ok {
 		return nil
 	}
-	seen[v] = true
-	switch w := v.(type) {
-	case *ssa.MakeClosure:
-		if _, bound := callsite.BoundSite(w); !bound {
-			return []*ssa.MakeClosure{w}
-		}
-	case *ssa.Phi:
-		var mcs []*ssa.MakeClosure
-		for _, e := range w.Edges {
-			mcs = append(mcs, handedOnLiterals(e, ctx, seen)...)
-		}
-		return mcs
+	array, ok := idx.X.(*ssa.Alloc)
+	if !ok || array.Comment != "varargs" || pollutionsource.IsReadOnlyVariadicArg(idx, store.Val, ctx.RootTracer.FuncVars()) {
+		return nil
 	}
-	return nil
-}
-
-// captureCache keeps what returnedCaptureRoots asks about the literals of
-// the function being analyzed (#397). The summary of a literal and the
-// answers about a captured variable do not depend on where the literal is
-// handed on, so each is found once. A read of a variable depends on its read
-// point, and is kept per read point.
-type captureCache struct {
-	ctx       *Context
-	summaries map[*ssa.MakeClosure]*literalSummary
-	flows     map[*ssa.FreeVar]*assignFlow
-	index     map[ssa.Instruction]int
-	others    map[*ssa.FreeVar]bool
-	branches  map[*ssa.FreeVar]bool
-	writes    map[capturedWriteKey]bool
-	calls     map[*ssa.MakeClosure][]*ssa.Call
-	reads     map[capturedReadKey][]ssa.Value
-	values    map[ssa.Value]*handedLiterals
-	single    map[*ssa.Alloc]*ssa.Store
-}
-
-// captureCache returns the cache of the function being analyzed.
-func (c *Context) captureCache() *captureCache {
-	if c.captures == nil {
-		c.captures = &captureCache{
-			ctx:       c,
-			summaries: map[*ssa.MakeClosure]*literalSummary{},
-			flows:     map[*ssa.FreeVar]*assignFlow{},
-			index:     map[ssa.Instruction]int{},
-			others:    map[*ssa.FreeVar]bool{},
-			branches:  map[*ssa.FreeVar]bool{},
-			writes:    map[capturedWriteKey]bool{},
-			calls:     map[*ssa.MakeClosure][]*ssa.Call{},
-			reads:     map[capturedReadKey][]ssa.Value{},
-			values:    map[ssa.Value]*handedLiterals{},
-			single:    map[*ssa.Alloc]*ssa.Store{},
-		}
-	}
-	return c.captures
-}
-
-// literalSummary is what a function literal may return of what it captured,
-// apart from where it is handed on: the roots it returns from outside it,
-// and the captured variables it returns as they are where it is handed on.
-type literalSummary struct {
-	roots []ssa.Value
-	reads []capturedRead
-}
-
-// capturedRead is a captured variable, or a field path of one, that a
-// literal returns: ptr is the variable's address in the function that makes
-// mc, and path the field path, with key its string form.
-type capturedRead struct {
-	ptr  ssa.Value
-	path []int
-	key  string
-	mc   *ssa.MakeClosure
-}
-
-// capturedReadKey is a variable, a field path of it, and where it is read.
-type capturedReadKey struct {
-	ptr  ssa.Value
-	path string
-	at   ssa.Instruction
-}
-
-// capturedWriteKey is a captured variable, and whether stores into its fields
-// count (see writesCaptured).
-type capturedWriteKey struct {
-	fv     *ssa.FreeVar
-	fields bool
-}
-
-// summary returns the summary of the literal that mc makes. A literal's
-// summary holds what it returns itself (summaryBuilder) and the summaries of
-// the literals it calls through a variable. Literals that call each other,
-// as mutually recursive getters do, share one summary: the summaries are
-// found per strongly connected component of those calls (summarySCC), so
-// each literal is walked once.
-func (c *captureCache) summary(mc *ssa.MakeClosure) *literalSummary {
-	if sum, done := c.summaries[mc]; done {
-		return sum
-	}
-	(&summarySCC{c: c, index: map[*ssa.MakeClosure]int{}, low: map[*ssa.MakeClosure]int{}, onStack: map[*ssa.MakeClosure]bool{}, own: map[*ssa.MakeClosure]*summaryBuilder{}}).visit(mc)
-	return c.summaries[mc]
-}
-
-// summarySCC finds summaries with Tarjan's algorithm over the calls of
-// literals through variables.
-type summarySCC struct {
-	c       *captureCache
-	index   map[*ssa.MakeClosure]int
-	low     map[*ssa.MakeClosure]int
-	onStack map[*ssa.MakeClosure]bool
-	stack   []*ssa.MakeClosure
-	own     map[*ssa.MakeClosure]*summaryBuilder
-}
-
-// visit walks mc and the literals it calls, and keeps the summary of each
-// component once it is complete.
-func (s *summarySCC) visit(mc *ssa.MakeClosure) {
-	s.index[mc], s.low[mc] = len(s.index), len(s.index)
-	s.stack = append(s.stack, mc)
-	s.onStack[mc] = true
-	b := &summaryBuilder{c: s.c, followed: map[*ssa.MakeClosure]bool{}, seen: map[ssa.Value]bool{}}
-	b.follow(mc, nil, nil)
-	s.own[mc] = b
-	for _, w := range b.calls {
-		if _, done := s.c.summaries[w]; done {
+	for _, r := range *array.Referrers() {
+		slice, ok := r.(*ssa.Slice)
+		if !ok {
 			continue
 		}
-		if _, seen := s.index[w]; !seen {
-			s.visit(w)
-			s.low[mc] = min(s.low[mc], s.low[w])
-		} else if s.onStack[w] {
-			s.low[mc] = min(s.low[mc], s.index[w])
-		}
-	}
-	if s.low[mc] != s.index[mc] {
-		return
-	}
-	// mc is the root of a component: its members are on the stack above it.
-	i := slices.Index(s.stack, mc)
-	members := s.stack[i:]
-	s.stack = s.stack[:i]
-	union := &summaryBuilder{c: s.c}
-	for _, m := range members {
-		s.onStack[m] = false
-		union.inside = append(union.inside, s.own[m].inside...)
-	}
-	for _, m := range members {
-		own := s.own[m]
-		union.addOutside(own.sum.roots)
-		for _, read := range own.sum.reads {
-			union.addRead(read)
-		}
-		for _, w := range own.calls {
-			if sum, done := s.c.summaries[w]; done {
-				union.addOutside(sum.roots)
-				for _, read := range sum.reads {
-					union.addRead(read)
+		for _, use := range *slice.Referrers() {
+			if call, ok := use.(ssa.CallInstruction); ok {
+				if _, builtin := call.Common().Value.(*ssa.Builtin); !builtin {
+					return call
 				}
 			}
 		}
 	}
-	for _, m := range members {
-		s.c.summaries[m] = &union.sum
-	}
+	return nil
 }
 
-// read returns the roots of what read holds where a literal is handed on at
-// handOff (readPoint). A variable of a function that encloses the function
-// that makes the literal is read where that function's closure is made.
-func (c *captureCache) read(read capturedRead, handOff ssa.Instruction) []ssa.Value {
-	at, ptr := c.readPoint(handOff, read.mc), read.ptr
+// externalLocation reports whether addr, or the container it is an element
+// or a field of, is outside the function: a parameter, a global, or what is
+// read through one.
+func externalLocation(addr ssa.Value) bool {
 	for {
-		fv, ok := ptr.(*ssa.FreeVar)
-		if !ok {
-			break
+		switch a := addr.(type) {
+		case *ssa.Parameter, *ssa.Global:
+			return true
+		case *ssa.IndexAddr:
+			addr = a.X
+		case *ssa.FieldAddr:
+			addr = a.X
+		case *ssa.UnOp:
+			if a.Op != token.MUL {
+				return false
+			}
+			addr = a.X
+		default:
+			return false
 		}
-		// A closure that SSA removed as unreachable has no binding. ptr is
-		// then nil, which points to nothing.
-		at, ptr = callsite.FreeVarMakeClosure(fv.Parent()), callsite.FreeVarBinding(fv)
 	}
-	key := capturedReadKey{ptr, read.key, at}
-	if alloc, ok := ptr.(*ssa.Alloc); ok && len(read.path) == 0 {
-		// A variable that one store assigns, and nothing else changes,
-		// holds the stored value at every read the store dominates.
-		if store := c.onlyStore(alloc); store != nil && c.dominates(store, at) {
-			key.at = store
-		}
-	}
-	if roots, done := c.reads[key]; done {
-		return roots
-	}
-	// at is in the function of ptr, a variable there.
-	var loopInfo *cfg.LoopInfo
-	if alloc, ok := ptr.(*ssa.Alloc); ok && alloc.Parent() == c.ctx.CurrentFn {
-		loopInfo = c.ctx.LoopInfo
-	}
-	roots := readVariable(c.ctx, ptr, read.path, at, loopInfo)
-	c.reads[key] = roots
-	return roots
 }
 
-// onlyStore returns the one store into alloc when nothing else may change
-// it: the variable is only loaded, and the closures that capture it only
-// load it. It is nil otherwise.
-func (c *captureCache) onlyStore(alloc *ssa.Alloc) *ssa.Store {
-	if store, done := c.single[alloc]; done {
-		return store
+// capturedVariables returns the variables of the function being analyzed
+// that the literal mc may return as they are: a load of a variable it
+// captures, through merges, or what a getter literal it calls through a
+// captured variable returns. A variable must hold that getter as its one
+// store. The answer is kept per literal.
+func capturedVariables(mc *ssa.MakeClosure, ctx *Context) []*ssa.Alloc {
+	if vars, done := ctx.literalVars[mc]; done {
+		return vars
 	}
+	w := &capturedWalk{ctx: ctx, seen: map[ssa.Value]bool{}, followed: map[*ssa.MakeClosure]bool{}}
+	w.follow(mc)
+	if ctx.literalVars == nil {
+		ctx.literalVars = map[*ssa.MakeClosure][]*ssa.Alloc{}
+	}
+	ctx.literalVars[mc] = w.vars
+	return w.vars
+}
+
+// capturedWalk follows the returns of literals for capturedVariables.
+type capturedWalk struct {
+	ctx      *Context
+	seen     map[ssa.Value]bool
+	followed map[*ssa.MakeClosure]bool
+	vars     []*ssa.Alloc
+}
+
+// follow visits the *gorm.DB results of the returns of the literal mc, once.
+func (w *capturedWalk) follow(mc *ssa.MakeClosure) {
+	if w.followed[mc] {
+		return
+	}
+	w.followed[mc] = true
+	for _, b := range mc.Fn.(*ssa.Function).Blocks {
+		if ret, ok := b.Instrs[len(b.Instrs)-1].(*ssa.Return); ok {
+			for _, r := range ret.Results {
+				if typeutil.IsGormDB(r.Type()) {
+					w.visit(r, mc)
+				}
+			}
+		}
+	}
+}
+
+// visit adds the variable that r, a value of the literal mc, loads as it
+// is, through merges and getter literals.
+func (w *capturedWalk) visit(r ssa.Value, mc *ssa.MakeClosure) {
+	if w.seen[r] {
+		return
+	}
+	w.seen[r] = true
+	switch r := r.(type) {
+	case *ssa.Phi:
+		for _, e := range r.Edges {
+			w.visit(e, mc)
+		}
+	case *ssa.UnOp:
+		if alloc := w.captured(mc, r); alloc != nil && !slices.Contains(w.vars, alloc) {
+			w.vars = append(w.vars, alloc)
+		}
+	case *ssa.Call:
+		// A getter literal called through a captured variable.
+		if load, ok := r.Call.Value.(*ssa.UnOp); ok {
+			if alloc := w.captured(mc, load); alloc != nil {
+				if store := onlyStore(alloc); store != nil {
+					if getter := directLiteral(store.Val); getter != nil && getter.Parent() == w.ctx.CurrentFn {
+						w.follow(getter)
+					}
+				}
+			}
+		}
+	}
+}
+
+// captured returns the variable of the function being analyzed that load, a
+// load of a variable that mc captures, reads, or nil.
+func (w *capturedWalk) captured(mc *ssa.MakeClosure, load *ssa.UnOp) *ssa.Alloc {
+	fv, ok := load.X.(*ssa.FreeVar)
+	if !ok || load.Op != token.MUL {
+		return nil
+	}
+	fn := mc.Fn.(*ssa.Function)
+	alloc, ok := mc.Bindings[slices.Index(fn.FreeVars, fv)].(*ssa.Alloc)
+	if !ok || alloc.Parent() != w.ctx.CurrentFn {
+		return nil
+	}
+	return alloc
+}
+
+// onlyStore returns the one store into alloc when the variable is assigned
+// once and never has its address taken: every other use loads it, or a
+// closure captures it and only loads it. It is nil otherwise.
+func onlyStore(alloc *ssa.Alloc) *ssa.Store {
 	var only *ssa.Store
 	var onlyLoaded func(addr ssa.Value) bool
 	onlyLoaded = func(addr ssa.Value) bool {
@@ -1366,420 +1035,45 @@ func (c *captureCache) onlyStore(alloc *ssa.Alloc) *ssa.Store {
 					return false
 				}
 			case *ssa.MakeClosure:
-				return !onlyLoaded(capturedAs(r, addr))
+				fn := r.Fn.(*ssa.Function)
+				return !onlyLoaded(fn.FreeVars[slices.Index(r.Bindings, addr)])
 			}
 			return true
 		})
 	}
 	if !onlyLoaded(alloc) {
-		only = nil
+		return nil
 	}
-	c.single[alloc] = only
 	return only
 }
 
-// dominates reports whether store runs before at on every path to it: its
-// block dominates at's block, and it comes first in a shared block.
-func (c *captureCache) dominates(store *ssa.Store, at ssa.Instruction) bool {
-	if store.Block() == at.Block() {
-		return c.indexOf(store) < c.indexOf(at)
+// runsBefore reports whether a runs before b on every path to b: a's block
+// dominates b's, and a comes first in a shared block.
+func (c *Context) runsBefore(a, b ssa.Instruction) bool {
+	if a.Block() != b.Block() {
+		return a.Parent() == b.Parent() && a.Block().Dominates(b.Block())
 	}
-	return store.Parent() == at.Parent() && store.Block().Dominates(at.Block())
+	if _, done := c.instrIndex[a]; !done {
+		if c.instrIndex == nil {
+			c.instrIndex = map[ssa.Instruction]int{}
+		}
+		for i, instr := range a.Block().Instrs {
+			c.instrIndex[instr] = i
+		}
+	}
+	return c.instrIndex[a] < c.instrIndex[b]
 }
 
-// readVariable returns the roots of the variable ptr, or of its field path,
-// as a read at at sees them.
-func readVariable(ctx *Context, ptr ssa.Value, path []int, at ssa.Instruction, loopInfo *cfg.LoopInfo) []ssa.Value {
-	if len(path) == 0 {
-		return ctx.RootTracer.PointeeRoots(ptr, at, loopInfo)
+// handOn records v, handed on by instr, as a branch of every root it may
+// hold: a send, or a store into a slice, a map or memory. Other code may use
+// what it was handed, so the hand-off is a branch like a call that takes v
+// (#374). It is reported when it runs again, as in a loop, and the roots of a
+// merge besides the first get a branch through it.
+func handOn(instr ssa.Instruction, v ssa.Value, ctx *Context) {
+	u := siteUse{ctx: ctx, block: instr.Block(), pos: ctx.pos(instr.Pos())}
+	if roots := u.roots(v); roots != nil {
+		u.branch(roots, pollution.UsageInfo{Block: u.block, Pos: u.pos, Escapes: true}, func(ssa.Value) bool { return false })
 	}
-	var roots []ssa.Value
-	if alloc, ok := ptr.(*ssa.Alloc); ok {
-		for _, v := range ctx.RootTracer.ParamReadSelected(alloc, path, at) {
-			roots = append(roots, ctx.RootTracer.MutableRoots(v, loopInfo)...)
-		}
-	}
-	return roots
-}
-
-// readPoint returns where the variables that the literal mc captures are
-// read when it is handed on at at: at itself, or, when at is in a closure
-// nested in the function that makes mc, where that closure runs there. That
-// is its one plain call when it has one and runs nowhere else
-// (callsite.ClosureCalls), or where it is made otherwise. A literal made
-// where at is not nested is read where it is made.
-func (c *captureCache) readPoint(at ssa.Instruction, mc *ssa.MakeClosure) ssa.Instruction {
-	for at.Parent() != mc.Parent() {
-		next := callsite.FreeVarMakeClosure(at.Parent())
-		if next == nil {
-			return mc
-		}
-		at = next
-		calls, done := c.calls[next]
-		if !done {
-			calls = callsite.ClosureCalls(next)
-			c.calls[next] = calls
-		}
-		if len(calls) == 1 {
-			at = calls[0]
-		}
-	}
-	return at
-}
-
-// summaryBuilder finds what a literal returns itself. It follows merges, a
-// nested literal called in place, and a captured variable or a field of one,
-// and it records the literals called through a variable (calls), whose
-// summaries summarySCC adds. go/ssa
-// captures every variable by reference, so a captured value is a load of a
-// FreeVar, or of a field of one. A variable counts when some path reaches the
-// load without assigning it (unassignedAt): a literal that assigns it first
-// returns its own chain, which is a use in its body. A variable that a
-// closure, other than one called in place, may assign is left out, since when
-// that closure runs is not known. So is a struct variable the literal writes
-// to, and a variable whose value the literal's body branches.
-type summaryBuilder struct {
-	c *captureCache
-	// inside holds the literals followed. A root defined in one of them is
-	// the literal's own chain or parameter.
-	inside   []*ssa.Function
-	followed map[*ssa.MakeClosure]bool
-	seen     map[ssa.Value]bool
-	sum      literalSummary
-	// calls holds the literals the literal calls through a variable, whose
-	// summaries summarySCC adds.
-	calls []*ssa.MakeClosure
-}
-
-// literalFrame is a function literal whose returns summaryBuilder follows.
-// outer is the frame of the literal that calls it in place at call. It is nil
-// for a literal whose captured variables are read where the literal is
-// handed on.
-type literalFrame struct {
-	fn    *ssa.Function
-	mc    *ssa.MakeClosure
-	outer *literalFrame
-	call  ssa.Instruction
-}
-
-// follow visits the returns of the literal that mc makes, once.
-func (b *summaryBuilder) follow(mc *ssa.MakeClosure, outer *literalFrame, call ssa.Instruction) {
-	fn := mc.Fn.(*ssa.Function)
-	if !typeutil.HasGormDBResult(fn.Signature.Results()) || b.followed[mc] {
-		return
-	}
-	b.followed[mc] = true
-	b.inside = append(b.inside, fn)
-	f := &literalFrame{fn: fn, mc: mc, outer: outer, call: call}
-	for _, block := range fn.Blocks {
-		ret, ok := block.Instrs[len(block.Instrs)-1].(*ssa.Return)
-		if !ok {
-			continue
-		}
-		for _, r := range ret.Results {
-			if typeutil.IsGormDB(r.Type()) {
-				b.visit(r, f)
-			}
-		}
-	}
-}
-
-// visit adds what r, a value of f.fn, holds as captured.
-func (b *summaryBuilder) visit(r ssa.Value, f *literalFrame) {
-	if b.seen[r] {
-		return
-	}
-	b.seen[r] = true
-	switch r := r.(type) {
-	case *ssa.Phi:
-		for _, e := range r.Edges {
-			b.visit(e, f)
-		}
-	case *ssa.Call:
-		// A nested literal called in place returns what it returns. One
-		// called through a variable, as a getter chain is, reads its captured
-		// variables where the literal is handed on.
-		if mc, ok := r.Call.Value.(*ssa.MakeClosure); ok && mc.Parent() == f.fn {
-			b.follow(mc, f, r)
-			return
-		}
-		for _, mc := range handedOnLiterals(r.Call.Value, b.c.ctx, map[ssa.Value]bool{}) {
-			if !slices.Contains(b.calls, mc) {
-				b.calls = append(b.calls, mc)
-			}
-		}
-	case *ssa.UnOp:
-		if fv, path, ok := capturedPath(r.X); ok {
-			b.visitCaptured(fv, path, f, r)
-			return
-		}
-		b.addOutside(b.c.ctx.RootTracer.MutableRoots(r, nil))
-	default:
-		b.addOutside(b.c.ctx.RootTracer.MutableRoots(r, nil))
-	}
-}
-
-// capturedPath returns the captured variable that addr is, or a field of,
-// and the field path from it: a FreeVar, or a FieldAddr chain on one.
-func capturedPath(addr ssa.Value) (*ssa.FreeVar, []int, bool) {
-	var path []int
-	for {
-		switch a := addr.(type) {
-		case *ssa.FreeVar:
-			return a, path, true
-		case *ssa.FieldAddr:
-			path = append([]int{a.Field}, path...)
-			addr = a.X
-		default:
-			return nil, nil, false
-		}
-	}
-}
-
-// visitCaptured adds a variable that f captures by reference, or the field
-// path of it, loaded at load. It follows the variable out through the frames
-// that call f in place, to where the literal's own function captures it.
-func (b *summaryBuilder) visitCaptured(fv *ssa.FreeVar, path []int, f *literalFrame, load ssa.Instruction) {
-	c, at := b.c, load
-	for {
-		if len(path) > 0 && c.writesCaptured(fv, true) || !c.unassignedAt(fv, at) || c.assignedByOtherClosure(fv) || c.branchesCaptured(fv) {
-			return
-		}
-		ptr := f.mc.Bindings[slices.Index(f.fn.FreeVars, fv)]
-		if f.outer == nil {
-			b.addRead(capturedRead{ptr: ptr, path: path, key: fmt.Sprint(path), mc: f.mc})
-			return
-		}
-		next, ok := ptr.(*ssa.FreeVar)
-		if !ok {
-			// A variable of the outer literal's own body, read where the
-			// nested literal is made.
-			b.addOutside(readVariable(c.ctx, ptr, path, f.mc, nil))
-			return
-		}
-		fv, at, f = next, f.call, f.outer
-	}
-}
-
-// addRead adds read once.
-func (b *summaryBuilder) addRead(read capturedRead) {
-	if !slices.ContainsFunc(b.sum.reads, func(r capturedRead) bool {
-		return r.ptr == read.ptr && r.key == read.key && r.mc == read.mc
-	}) {
-		b.sum.reads = append(b.sum.reads, read)
-	}
-}
-
-// addOutside adds the roots that are not defined in a followed literal or in
-// a function nested in one. A root inside one is the literal's own chain or
-// parameter, which its body uses.
-func (b *summaryBuilder) addOutside(roots []ssa.Value) {
-	for _, root := range roots {
-		block := tracer.RootBlock(root)
-		if (block == nil || !slices.ContainsFunc(b.inside, func(fn *ssa.Function) bool { return nestedIn(block.Parent(), fn) })) && !slices.Contains(b.sum.roots, root) {
-			b.sum.roots = append(b.sum.roots, root)
-		}
-	}
-}
-
-// nestedIn reports whether g is fn or a function nested in it.
-func nestedIn(g, fn *ssa.Function) bool {
-	for ; g != nil; g = g.Parent() {
-		if g == fn {
-			return true
-		}
-	}
-	return false
-}
-
-// assignFlow is where the captured variable of a function may be unassigned
-// (see unassignedAt): the blocks it may enter unassigned, and the index of the
-// first instruction of each block that assigns it. never is set for a
-// variable that nothing in the function may assign, which is unassigned
-// everywhere.
-type assignFlow struct {
-	never bool
-	entry map[*ssa.BasicBlock]bool
-	first map[*ssa.BasicBlock]int
-}
-
-// unassignedAt reports whether some path from the entry of at's function
-// reaches at without assigning the captured variable fv: without a store to
-// it, or a call in place of a literal that assigns it on every path.
-func (c *captureCache) unassignedAt(fv *ssa.FreeVar, at ssa.Instruction) bool {
-	flow := c.flow(fv)
-	block := at.Block()
-	if flow.never {
-		return true
-	}
-	if !flow.entry[block] {
-		return false
-	}
-	first, assigned := flow.first[block]
-	return !assigned || c.indexOf(at) <= first
-}
-
-// flow returns the assignFlow of fv. It is found forward from the blocks
-// with no predecessor, the entry and the recover block.
-func (c *captureCache) flow(fv *ssa.FreeVar) *assignFlow {
-	if flow, done := c.flows[fv]; done {
-		return flow
-	}
-	// Only a store to it, or a literal that captures it, may assign it.
-	flow := &assignFlow{never: !slices.ContainsFunc(*fv.Referrers(), func(r ssa.Instruction) bool {
-		switch r.(type) {
-		case *ssa.Store, *ssa.MakeClosure:
-			return true
-		}
-		return false
-	})}
-	if flow.never {
-		c.flows[fv] = flow
-		return flow
-	}
-	flow.entry, flow.first = map[*ssa.BasicBlock]bool{}, map[*ssa.BasicBlock]int{}
-	var work []*ssa.BasicBlock
-	for _, block := range fv.Parent().Blocks {
-		if i := slices.IndexFunc(block.Instrs, func(instr ssa.Instruction) bool { return c.assignsCaptured(instr, fv) }); i >= 0 {
-			flow.first[block] = i
-		}
-		if len(block.Preds) == 0 {
-			flow.entry[block] = true
-			work = append(work, block)
-		}
-	}
-	for len(work) > 0 {
-		block := work[len(work)-1]
-		work = work[:len(work)-1]
-		if _, assigned := flow.first[block]; assigned {
-			continue
-		}
-		for _, succ := range block.Succs {
-			if !flow.entry[succ] {
-				flow.entry[succ] = true
-				work = append(work, succ)
-			}
-		}
-	}
-	c.flows[fv] = flow
-	return flow
-}
-
-// indexOf returns the index of instr in its block.
-func (c *captureCache) indexOf(instr ssa.Instruction) int {
-	if _, done := c.index[instr]; !done {
-		for i, in := range instr.Block().Instrs {
-			c.index[in] = i
-		}
-	}
-	return c.index[instr]
-}
-
-// assignsCaptured reports whether instr assigns the captured variable fv: a
-// store to it, or a call in place of a literal that captures it and assigns
-// it on every path to a return. The literal is nested in fv's function, so
-// the question goes down a finite nesting.
-func (c *captureCache) assignsCaptured(instr ssa.Instruction, fv *ssa.FreeVar) bool {
-	switch i := instr.(type) {
-	case *ssa.Store:
-		return i.Addr == fv
-	case *ssa.Call:
-		mc, ok := i.Call.Value.(*ssa.MakeClosure)
-		if !ok || !slices.Contains(mc.Bindings, ssa.Value(fv)) {
-			return false
-		}
-		inner := capturedAs(mc, fv)
-		return !slices.ContainsFunc(inner.Parent().Blocks, func(block *ssa.BasicBlock) bool {
-			ret, ok := block.Instrs[len(block.Instrs)-1].(*ssa.Return)
-			return ok && c.unassignedAt(inner, ret)
-		})
-	}
-	return false
-}
-
-// assignedByOtherClosure reports whether a closure that fv's function makes
-// may assign the captured variable fv, other than one it only calls in place
-// (callsite.ClosureOnlyCalled), whose assignments unassignedAt reads. Such a
-// closure may run at any time.
-func (c *captureCache) assignedByOtherClosure(fv *ssa.FreeVar) bool {
-	if assigned, done := c.others[fv]; done {
-		return assigned
-	}
-	assigned := slices.ContainsFunc(*fv.Referrers(), func(ref ssa.Instruction) bool {
-		mc, ok := ref.(*ssa.MakeClosure)
-		if !ok {
-			return false
-		}
-		inner := capturedAs(mc, fv)
-		if callsite.ClosureOnlyCalled(mc) {
-			return c.assignedByOtherClosure(inner)
-		}
-		return c.writesCaptured(inner, false)
-	})
-	c.others[fv] = assigned
-	return assigned
-}
-
-// writesCaptured reports whether fv's function, or a closure it makes,
-// stores to the captured variable fv, or, with fields, into a field of it.
-func (c *captureCache) writesCaptured(fv *ssa.FreeVar, fields bool) bool {
-	key := capturedWriteKey{fv, fields}
-	if writes, done := c.writes[key]; done {
-		return writes
-	}
-	var writesTo func(addr ssa.Value) bool
-	writesTo = func(addr ssa.Value) bool {
-		return slices.ContainsFunc(*addr.Referrers(), func(r ssa.Instruction) bool {
-			switch r := r.(type) {
-			case *ssa.Store:
-				return r.Addr == addr
-			case *ssa.FieldAddr:
-				return fields && writesTo(r)
-			case *ssa.MakeClosure:
-				return c.writesCaptured(capturedAs(r, addr), fields)
-			}
-			return false
-		})
-	}
-	writes := writesTo(fv)
-	c.writes[key] = writes
-	return writes
-}
-
-// capturedAs returns the FreeVar through which the closure that mc makes
-// captures v, one of mc's bindings.
-func capturedAs(mc *ssa.MakeClosure, v ssa.Value) *ssa.FreeVar {
-	return mc.Fn.(*ssa.Function).FreeVars[slices.Index(mc.Bindings, v)]
-}
-
-// branchesCaptured reports whether fv's function, or a closure it makes,
-// calls a *gorm.DB method that branches the value loaded from the captured
-// variable fv. That call is already a use of the value by the literal, so
-// handing the literal on adds none. It also stands for a path that returns
-// the value unchanged, which is exclusive with it, as in
-// `if c { q = q.Where("z") }; return q`.
-func (c *captureCache) branchesCaptured(fv *ssa.FreeVar) bool {
-	if branches, done := c.branches[fv]; done {
-		return branches
-	}
-	branches := slices.ContainsFunc(*fv.Referrers(), func(ref ssa.Instruction) bool {
-		switch r := ref.(type) {
-		case *ssa.UnOp:
-			return slices.ContainsFunc(*r.Referrers(), func(use ssa.Instruction) bool {
-				call, ok := use.(ssa.CallInstruction)
-				if !ok {
-					return false
-				}
-				site := callsite.SiteOfWithoutFuncVars(call)
-				return site.IsGormMethod() && site.Recv == ssa.Value(r) && !typeutil.IsImmutableReturningBuiltin(site.Method()) && !typeutil.IsStateOnlyMethod(site.Method())
-			})
-		case *ssa.MakeClosure:
-			return c.branchesCaptured(capturedAs(r, fv))
-		}
-		return false
-	})
-	c.branches[fv] = branches
-	return branches
 }
 
 // handsOnMethodValue reports whether a store into addr hands a method value
@@ -1800,8 +1094,10 @@ type sendHandler struct{}
 func (h *sendHandler) handle(send *ssa.Send, ctx *Context) {
 	if gormVal, kind := pollutionsource.Leak(send, ctx.RootTracer.FuncVars()); kind != pollutionsource.KindNone {
 		handOn(send, gormVal, ctx)
-	} else {
-		handOnFuncValue(send, send.X, nil, ctx)
+	} else if recv := boundGormReceiver(send.X, ctx); recv != nil {
+		handOn(send, recv, ctx)
+	} else if roots := literalRoots(send.X, send, ctx); roots != nil {
+		handOnLiteral(send, send.Pos(), roots, ctx)
 	}
 }
 
@@ -1817,8 +1113,19 @@ type storeHandler struct{}
 func (h *storeHandler) handle(store *ssa.Store, ctx *Context) {
 	if gormVal, kind := pollutionsource.Leak(store, ctx.RootTracer.FuncVars()); kind != pollutionsource.KindNone {
 		handOn(store, gormVal, ctx)
-	} else if handsOnMethodValue(store.Addr) {
-		handOnFuncValue(store, store.Val, store.Addr, ctx)
+	} else if recv := boundGormReceiver(store.Val, ctx); recv != nil && handsOnMethodValue(store.Addr) {
+		handOn(store, recv, ctx)
+	} else if varargsCall(store, ctx) != nil || externalLocation(store.Addr) {
+		if roots := literalRoots(store.Val, store, ctx); roots != nil {
+			// go/ssa gives a store into the varargs no position, so the
+			// hand-off is placed at the literal, as a method value's is at
+			// its expression: each element of the varargs is a hand-off.
+			pos := store.Pos()
+			if !pos.IsValid() {
+				pos = directLiteral(store.Val).Fn.Pos()
+			}
+			handOnLiteral(store, pos, roots, ctx)
+		}
 	}
 }
 
@@ -1830,8 +1137,12 @@ type mapUpdateHandler struct{}
 func (h *mapUpdateHandler) handle(mapUpdate *ssa.MapUpdate, ctx *Context) {
 	if gormVal, kind := pollutionsource.Leak(mapUpdate, ctx.RootTracer.FuncVars()); kind != pollutionsource.KindNone {
 		handOn(mapUpdate, gormVal, ctx)
-	} else {
-		handOnFuncValue(mapUpdate, mapUpdate.Value, mapUpdate.Map, ctx)
+	} else if recv := boundGormReceiver(mapUpdate.Value, ctx); recv != nil {
+		handOn(mapUpdate, recv, ctx)
+	} else if externalLocation(mapUpdate.Map) {
+		if roots := literalRoots(mapUpdate.Value, mapUpdate, ctx); roots != nil {
+			handOnLiteral(mapUpdate, mapUpdate.Pos(), roots, ctx)
+		}
 	}
 }
 

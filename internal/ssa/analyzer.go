@@ -228,7 +228,7 @@ func (a *Analyzer) processFunction(fn *ssa.Function, tracker *pollution.Tracker,
 					// parameter rather than a captured variable — see #60).
 					// Skip provably-dead closures: their uses never execute, so
 					// analyzing them yields false positives (#68).
-					if !isMethodValue(mc) && (a.rootTracer.ClosureCapturesGormDB(mc) || a.rootTracer.IsScopesCallbackFunc(closureFn)) && !isDeadClosure(mc) {
+					if !isMethodValue(mc) && (tracer.ClosureCapturesGormDB(mc) || a.rootTracer.IsScopesCallbackFunc(closureFn)) && !isDeadClosure(mc) {
 						// If the closure is invoked at a single call site, order
 						// its captured uses by that call-site position (#68). When
 						// there is no single such site (IIFE, defer/go, multiple
