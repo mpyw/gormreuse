@@ -2,6 +2,15 @@
 
 These notes say what changes for users in each release, and what to do about it. The full commit list of each release is on [GitHub Releases](https://github.com/mpyw/gormreuse/releases). Releases up to 0.22.0 have their notes there only.
 
+## Unreleased
+
+### Fewer false reports
+
+| No longer reported | Example |
+| --- | --- |
+| A use followed by `break` or `return` in a range-over-func body (#399). go/ssa turns these exits into `return false`, and the iterator stops. A use that can reach the end of the body or a `continue` is still reported, and so is a `break` inside a `switch` or a `select` | `for v := range seq { if v > 0 { q.Find(&u); break } }` |
+| The same in a nested range-over-func loop, with `break outer` or `return` (#399). The code after the inner loop is followed with the exit the inner body took. A `break` that leaves only the inner loop, or `continue outer`, is still reported | `outer: for range rows { for range cols { q.Find(&u); break outer } }` |
+
 ## 0.24.1 (2026-10-21)
 
 Documentation only. The analyzer behaves exactly as in 0.24.0.

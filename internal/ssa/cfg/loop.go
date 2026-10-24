@@ -27,8 +27,9 @@ type LoopInfo struct {
 	loopHeaders map[*ssa.BasicBlock]bool // Blocks that are loop headers
 
 	// loops holds the blocks of each loop, one set per header. The back-edges
-	// of one header (a continue and the end of the body) make one loop. A
-	// range-over-func body is one loop with no header.
+	// of one header (a continue and the end of the body) make one loop. In a
+	// range-over-func body, the blocks that can reach a `return true` are one
+	// more loop with no header. A body that always leaves the loop has none.
 	loops []map[*ssa.BasicBlock]bool
 }
 
@@ -98,7 +99,6 @@ func (a *Analyzer) findLoops(fn *ssa.Function) *LoopInfo {
 	}
 	if IsRangeFuncLoopBody(fn) {
 		if body := rangeFuncLoopBlocks(fn); len(body) > 0 {
-			maps.Copy(info.loopBlocks, body)
 			info.loops = append(info.loops, body)
 		}
 	}
@@ -165,15 +165,12 @@ func rangeFuncLoopBlocks(fn *ssa.Function) map[*ssa.BasicBlock]bool {
 // loopReturnsTrue reports whether b ends in a return of a yield closure that
 // may return true.
 func loopReturnsTrue(b *ssa.BasicBlock) bool {
-	if len(b.Instrs) == 0 {
-		return false
-	}
 	ret, ok := b.Instrs[len(b.Instrs)-1].(*ssa.Return)
 	if !ok || len(ret.Results) != 1 {
 		return false
 	}
 	c, ok := ret.Results[0].(*ssa.Const)
-	return !ok || c.Value == nil || constant.BoolVal(c.Value)
+	return !ok || constant.BoolVal(c.Value)
 }
 
 // markLoopBlocks marks blocks that are part of the loop whose header is loopHead

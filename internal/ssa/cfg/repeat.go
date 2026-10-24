@@ -1,6 +1,9 @@
 package cfg
 
 import (
+	"fmt"
+	"go/constant"
+	"go/token"
 	"slices"
 
 	"golang.org/x/tools/go/ssa"
@@ -45,8 +48,15 @@ type Repeats struct {
 	// MakeClosure, so the closure may run twice for one run of the parent.
 	multi bool
 
+	// made is the MakeClosure of fn, nil for a function with no free
+	// variables or with no declaring function.
+	made *ssa.MakeClosure
+
 	// sitesRepeat memoizes sitesRepeatAfter by def.
 	sitesRepeat map[*ssa.BasicBlock]bool
+
+	// exitsRepeat memoizes exitsRepeatAfter.
+	exitsRepeat map[repeatExitKey]bool
 }
 
 // Repeats returns the Repeats of fn analysed on its own: a closure's sites in
@@ -65,6 +75,7 @@ func (a *Analyzer) Repeats(fn *ssa.Function) *Repeats {
 type repeatSite struct {
 	holder *Repeats
 	block  *ssa.BasicBlock
+	run    ssa.Instruction
 }
 
 // Closure returns the Repeats of fn, a closure that r's function declares. It
@@ -82,10 +93,11 @@ func (r *Repeats) Closure(fn *ssa.Function) *Repeats {
 	}
 	g.closures[r] = c
 	sites := r.cfg.repeatSitesOf(fn)
+	c.made = sites.made
 	c.multi = r.repeatRunsMayFollow(fn, sites)
 	if !c.multi {
 		for _, run := range sites.runs {
-			c.sites = append(c.sites, repeatSite{holder: r.nested(run.Parent()), block: run.Block()})
+			c.sites = append(c.sites, repeatSite{holder: r.nested(run.Parent()), block: run.Block(), run: run})
 		}
 	}
 	return c
@@ -280,6 +292,9 @@ func (r *Repeats) repeatsAfter(use, def *ssa.BasicBlock) bool {
 	if def != nil && def.Parent() == r.fn || r.parent == nil {
 		return false
 	}
+	if exits, ok := repeatYieldExits(r.fn, use); ok {
+		return r.exitsRepeatAfter(def, exits)
+	}
 	return r.sitesRepeatAfter(def)
 }
 
@@ -306,6 +321,204 @@ func (r *Repeats) sitesRepeatAfter(def *ssa.BasicBlock) bool {
 	})
 	r.sitesRepeat[def] = got
 	return got
+}
+
+// repeatExits are the exits that a range-over-func body may take after a use
+// (#399). Before each `return false`, go/ssa stores a constant into jump, a
+// variable that the code after the loop reads to go on: to the next
+// statement, out of an enclosing loop, or out of the function.
+type repeatExits struct {
+	jump  *ssa.FreeVar
+	codes []int64
+}
+
+// repeatExitKey memoizes exitsRepeatAfter by def and the exits.
+type repeatExitKey struct {
+	def   *ssa.BasicBlock
+	codes string
+}
+
+// repeatYieldExits returns the exits that fn, a range-over-func body, may take
+// from block from. ok is false when fn is no such body, when a path from from
+// reaches a `return true`, so the body may run again, or when an exit is not
+// in the form go/ssa writes.
+func repeatYieldExits(fn *ssa.Function, from *ssa.BasicBlock) (exits repeatExits, ok bool) {
+	if !IsRangeFuncLoopBody(fn) {
+		return repeatExits{}, false
+	}
+	seen := map[*ssa.BasicBlock]bool{from: true}
+	work := []*ssa.BasicBlock{from}
+	read := true
+	for len(work) > 0 {
+		b := work[len(work)-1]
+		work = work[:len(work)-1]
+		if ret, isRet := b.Instrs[len(b.Instrs)-1].(*ssa.Return); isRet {
+			read = exits.add(ret) && read
+		}
+		for _, succ := range b.Succs {
+			if !seen[succ] {
+				seen[succ] = true
+				work = append(work, succ)
+			}
+		}
+	}
+	slices.Sort(exits.codes)
+	return exits, read && exits.jump != nil
+}
+
+// add adds the exit that ret takes. It reports false when ret is not a
+// `return false` that stores its code as go/ssa writes it, or stores it into
+// another variable than the exits before.
+func (e *repeatExits) add(ret *ssa.Return) bool {
+	jump, code, found := repeatExitCode(ret)
+	if !found || e.jump != nil && e.jump != jump {
+		return false
+	}
+	e.jump = jump
+	if !slices.Contains(e.codes, code) {
+		e.codes = append(e.codes, code)
+	}
+	return true
+}
+
+// repeatExitCode returns the variable and the code that ret's block stores
+// just before ret, when ret is a `return false` of a range-over-func body.
+func repeatExitCode(ret *ssa.Return) (*ssa.FreeVar, int64, bool) {
+	instrs := ret.Block().Instrs
+	result, isConst := ret.Results[0].(*ssa.Const)
+	var store *ssa.Store
+	if len(instrs) > 1 {
+		store, _ = instrs[len(instrs)-2].(*ssa.Store)
+	}
+	if !isConst || constant.BoolVal(result.Value) || store == nil {
+		return nil, 0, false
+	}
+	jump, isFree := store.Addr.(*ssa.FreeVar)
+	code, known := repeatConstInt(store.Val)
+	return jump, code, isFree && known
+}
+
+// repeatConstInt returns the value of v when it is an integer constant.
+func repeatConstInt(v ssa.Value) (int64, bool) {
+	c, ok := v.(*ssa.Const)
+	if !ok || c.Value == nil || c.Value.Kind() != constant.Int {
+		return 0, false
+	}
+	return constant.Int64Val(c.Value)
+}
+
+// exitsRepeatAfter is sitesRepeatAfter for a use in r's closure, a
+// range-over-func body, that leaves the loop by one of exits. The function
+// that runs the loop goes on by the exit taken. So the use runs again only
+// when that function may run the loop again after one of these exits: a break
+// to an outer loop or a return leaves that function's loop too (#399). The
+// answer is memoized by def and the exits.
+func (r *Repeats) exitsRepeatAfter(def *ssa.BasicBlock, exits repeatExits) bool {
+	if r.multi || len(r.sites) != 1 || exits.jump == nil {
+		return r.sitesRepeatAfter(def)
+	}
+	key := repeatExitKey{def: def, codes: fmt.Sprint(exits.codes)}
+	if got, ok := r.exitsRepeat[key]; ok {
+		return got
+	}
+	if r.exitsRepeat == nil {
+		r.exitsRepeat = make(map[repeatExitKey]bool)
+	}
+	r.exitsRepeat[key] = true
+	site := r.sites[0]
+	binding := r.made.Bindings[slices.Index(r.fn.FreeVars, exits.jump)]
+	again, outer := repeatExitRunsAgain(site, binding, exits.codes)
+	h := site.holder
+	var got bool
+	switch {
+	case def != nil && def.Parent() == h.fn:
+		got = again && h.repeatsAfter(site.block, def)
+	case again:
+		got = true
+	case IsRangeFuncLoopBody(h.fn):
+		got = h.exitsRepeatAfter(def, outer)
+	default:
+		got = h.parent != nil && h.sitesRepeatAfter(def)
+	}
+	r.exitsRepeat[key] = got
+	return got
+}
+
+// repeatExitRunsAgain follows the function that holds site from site.run,
+// the call of an iterator, when the body leaves the loop with one of codes in
+// binding, the variable go/ssa reads after the loop. It reports whether the
+// function may run site again, or, for a range-over-func body, return true so
+// that it runs again. An exit or a condition it cannot read counts as running
+// again. Otherwise it returns the exits that a range-over-func body takes.
+func repeatExitRunsAgain(site repeatSite, binding ssa.Value, codes []int64) (bool, repeatExits) {
+	rangeFunc := IsRangeFuncLoopBody(site.block.Parent())
+	start := slices.Index(site.block.Instrs, site.run) + 1
+	var exits repeatExits
+	for _, code := range codes {
+		// The code is read where the call returns. A read in a later block
+		// may follow a store, so it is not known.
+		vals := map[ssa.Value]int64{}
+		conds := map[ssa.Value]bool{}
+		seen := map[*ssa.BasicBlock]bool{}
+		block, from := site.block, start
+		var work []*ssa.BasicBlock
+		for {
+			var succs []*ssa.BasicBlock
+			for _, instr := range block.Instrs[from:] {
+				switch instr := instr.(type) {
+				case *ssa.UnOp:
+					if instr.Op == token.MUL && instr.X == binding && block == site.block {
+						vals[instr] = code
+					}
+				case *ssa.BinOp:
+					x, xok := repeatIntOf(instr.X, vals)
+					y, yok := repeatIntOf(instr.Y, vals)
+					if xok && yok && (instr.Op == token.EQL || instr.Op == token.NEQ) {
+						conds[instr] = (x == y) == (instr.Op == token.EQL)
+					}
+				case *ssa.If:
+					succs = block.Succs
+					if c, ok := conds[instr.Cond]; ok {
+						succs = succs[1:]
+						if c {
+							succs = block.Succs[:1]
+						}
+					}
+				case *ssa.Jump:
+					succs = block.Succs
+				case *ssa.Return:
+					if rangeFunc && !exits.add(instr) {
+						return true, repeatExits{}
+					}
+				}
+			}
+			for _, succ := range succs {
+				if succ == site.block {
+					return true, repeatExits{}
+				}
+				if !seen[succ] {
+					seen[succ] = true
+					work = append(work, succ)
+				}
+			}
+			if len(work) == 0 {
+				break
+			}
+			block, from = work[len(work)-1], 0
+			work = work[:len(work)-1]
+		}
+	}
+	slices.Sort(exits.codes)
+	return false, exits
+}
+
+// repeatIntOf returns the integer that v holds: a constant, or a load that
+// vals holds.
+func repeatIntOf(v ssa.Value, vals map[ssa.Value]int64) (int64, bool) {
+	if n, ok := vals[v]; ok {
+		return n, true
+	}
+	return repeatConstInt(v)
 }
 
 // liftRepeatDef moves def, the block of a definition, to the function of r
