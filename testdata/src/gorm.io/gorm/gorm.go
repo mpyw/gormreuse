@@ -1,20 +1,42 @@
 // Package gorm is a stub for testing purposes.
 package gorm
 
-import "context"
+import (
+	"context"
+	"strings"
+)
 
 // DB is the main database struct.
 type DB struct {
+	*Config
 	Error        error
 	RowsAffected int64
 	Statement    *Statement
 }
 
+// Config is the configuration of a handle. gorm's Session copies it for the
+// new handle. The stub keeps one of its fields and none of its methods.
+type Config struct {
+	SkipDefaultTransaction bool
+}
+
 // Statement holds the clauses of a query.
 type Statement struct {
-	Table string
-	DB    *DB
+	Table    string
+	DB       *DB
+	Context  context.Context
+	Distinct bool
+	Selects  []string
+	// Clauses holds clause.Clause values in gorm. gorm.go imports no clause
+	// package, so the stub keeps the map only.
+	Clauses  map[string]interface{}
+	Preloads map[string][]interface{}
+	SQL      strings.Builder
+	Vars     []interface{}
 }
+
+// AddClause adds a clause to the Statement in place.
+func (stmt *Statement) AddClause(v interface{}) {}
 
 // Parse reads the schema of value. It reads only the configuration of
 // stmt.DB.

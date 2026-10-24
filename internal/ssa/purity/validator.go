@@ -46,6 +46,7 @@ import (
 	"github.com/mpyw/gormreuse/internal/directive"
 	"github.com/mpyw/gormreuse/internal/ssa/callsite"
 	"github.com/mpyw/gormreuse/internal/ssa/pollutionsource"
+	"github.com/mpyw/gormreuse/internal/ssa/stmtwrite"
 	"github.com/mpyw/gormreuse/internal/ssa/tracer"
 	"github.com/mpyw/gormreuse/internal/typeutil"
 )
@@ -89,13 +90,16 @@ func NewValidator(fn *ssa.Function, pureFuncs, immutableReturnFuncs *directive.D
 }
 
 // Validate checks that the function satisfies the pure contract:
-// - Does not pollute *gorm.DB arguments (no non-pure method calls on them)
-// - Does not let them escape
+//   - Does not pollute *gorm.DB arguments (no non-pure method calls on them)
+//   - Does not let them escape
+//   - Does not write them directly: writes are the function's direct writes,
+//     which its caller takes from the per-pass stmtwrite.Cache (Cache.Of)
+//     (#405)
 //
 // Note: Pure functions MAY return mutable *gorm.DB values. The "pure" contract only
 // guarantees that the function doesn't pollute its arguments - callers must treat
 // the return value as potentially mutable.
-func (v *Validator) Validate() []Violation {
+func (v *Validator) Validate(writes map[ssa.Instruction]stmtwrite.Write) []Violation {
 	fn := v.fn
 	if fn == nil || fn.Blocks == nil {
 		return nil
@@ -106,6 +110,7 @@ func (v *Validator) Validate() []Violation {
 	}
 
 	violations := v.validateBody(fn)
+	violations = append(violations, v.checkDirectWrites(violations, writes)...)
 
 	// A call that passes several derived arguments reports each one at the
 	// same position, so drop exact duplicates.
@@ -569,6 +574,38 @@ func (v *Validator) checkStoreEscape(store *ssa.Store) []Violation {
 		Message:    "pure function leaks *gorm.DB argument via " + via,
 		Definitive: true,
 	}}
+}
+
+// checkDirectWrites reports writes, the direct writes of the function into
+// the query of a *gorm.DB parameter (#405), such as `*db = gorm.DB{}`,
+// `db.Statement.Distinct = true` or `delete(db.Statement.Clauses, "X")`:
+// they change its query in place, as db.Where does. stmtwrite decides them,
+// as it does for the inferred immutable-param. found holds the violations
+// found already. A Store of the argument itself into its own memory that
+// already has a definitive one, as the escape of db.Statement.DB = db, is not
+// reported again. Another value stored over the argument's memory, as in
+// db.Statement.DB = other.Where("x"), gives both reports.
+func (v *Validator) checkDirectWrites(found []Violation, writes map[ssa.Instruction]stmtwrite.Write) []Violation {
+	if len(writes) == 0 {
+		return nil
+	}
+	reported := make(map[token.Pos]bool, len(found))
+	for _, viol := range found {
+		reported[viol.Pos] = reported[viol.Pos] || viol.Definitive
+	}
+	var violations []Violation
+	for instr, write := range writes {
+		if write.OwnStore && reported[instr.Pos()] {
+			continue
+		}
+		violations = append(violations, Violation{
+			Pos:        instr.Pos(),
+			Message:    "pure function pollutes *gorm.DB argument by writing to it directly",
+			Definitive: true,
+		})
+	}
+	slices.SortFunc(violations, func(a, b Violation) int { return int(a.Pos - b.Pos) })
+	return violations
 }
 
 // checkLeak reports a contract violation when a param-derived *gorm.DB escapes

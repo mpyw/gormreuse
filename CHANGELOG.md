@@ -4,6 +4,13 @@ These notes say what changes for users in each release, and what to do about it.
 
 ## Unreleased
 
+### New diagnostics
+
+| Now reported | Example | What to do |
+| --- | --- | --- |
+| A `pure` function that writes into its argument through a direct path (#405). That is `*db = v`, `db.Statement = v`, a field of the `Statement`, or a map or a slice it holds (also with `delete`, `clear` or `copy`), also in a closure. `Error`, `RowsAffected` and `Config` may still be written. A write through `db.Statement.DB`, a `*gorm.Statement` parameter, a local copy, a `Session` result, a holder parameter, an `append` result or a call is not followed | `//gormreuse:pure func mark(db *gorm.DB) { db.Statement.Distinct = true }`. Message: `pure function pollutes *gorm.DB argument by writing to it directly`. Callers stop trusting it, so `mark(sub)` before the outer query of `sub` is reported | Fix the function, or remove `pure` |
+| A helper that writes into its parameter's `Statement` through a direct path is no longer inferred `immutable-param` (#405) | `func h(tx *gorm.DB) { tx.Statement.Clauses["X"] = c; tx.Find(&a); tx.Count(&n) }`, also `delete(tx.Statement.Clauses, "WHERE")`. Its reuse is reported again. A helper that only reads the `Statement` is still inferred | Make the argument immutable with `Session`, or stop writing into the `Statement` |
+
 ### Fewer false reports
 
 | No longer reported | Example |

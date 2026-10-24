@@ -2651,6 +2651,44 @@ func wrap3(db *gorm.DB) func() *gorm.DB {
 </td></tr>
 <tr><td>
 
+**Must NOT** write to an argument directly.
+
+A write into its `Statement`, or over the `*gorm.DB` itself, changes its query in place, as `Where` does. Only a direct path from a `*gorm.DB` parameter counts:
+
+- `*db = v` and `db.Statement = v`;
+- a field of the `Statement`, as in `db.Statement.Distinct = true`;
+- a map or a slice the `Statement` holds: `db.Statement.Clauses[k] = v`, `db.Statement.Selects[i] = v`, and `delete`, `clear` or `copy` into one;
+- the same through the parameter in a closure, a `go` or a `defer` statement in the body, also through a copy `db := db` in an inner block before any branch, when nothing assigns that copy again.
+
+A write through anything else is not followed, since it may write memory the argument does not hold: `db.Statement.DB`, which is the parent of a `Session` copy that shares the `Statement`, a `*gorm.Statement` parameter, which may be a fresh `Statement`, a local variable that is assigned again, captured or has its address taken, a copy such as `c := *db.Statement`, a `Session` or `Debug` result, a parameter that holds a `*gorm.DB`, an `append` result, a lookup, a conversion, a merge, or a call such as `sort.Strings(db.Statement.Selects)` (see [Known Limitations](#known-limitations)).
+
+These may be written:
+
+- The argument's `Error` and `RowsAffected`. They hold the outcome of a query, as `AddError` does.
+- Its `Config`. It holds no clause. A write to it, such as `db.DryRun = true`, still changes how the caller's later queries run, and is not reported (see [Known Limitations](#known-limitations)).
+
+Message: `pure function pollutes *gorm.DB argument by writing to it directly`
+
+</td><td>
+
+```go
+//gormreuse:pure
+func mark(db *gorm.DB) {
+    db.Statement.Distinct = true          // reported
+    db.Statement.Clauses["X"] = c         // reported
+    delete(db.Statement.Clauses, "WHERE") // reported
+    *db = gorm.DB{}                       // reported
+    db.Error = nil                        // OK
+    copied := *db.Statement
+    copied.Distinct = true                // OK: a local copy
+    copied.Clauses["X"] = c               // not reported: through a copy
+    sort.Strings(db.Statement.Selects)    // not reported: a call
+}
+```
+
+</td></tr>
+<tr><td>
+
 **Must NOT** pass an argument to a function that is not pure.
 
 This includes a pure function that fails this contract itself. It also includes a method called through an interface that may hold the argument but is not the boxed argument itself.
@@ -3851,6 +3889,8 @@ func caller(db *gorm.DB) {
 **Not inferred.** A discarded chain statement on the parameter. On a mid-chain value it changes the caller's value in place. On an immutable one it does nothing.
 
 The same holds in a closure, as in `func() { tx.Where("a") }()`. It also holds in a helper the function passes the parameter to, as in `applyTenant(tx)`.
+
+A write into the parameter's `Statement` changes it in place too. That includes a write into a map or a slice the `Statement` holds, as in `tx.Statement.Clauses["X"] = c` or `delete(tx.Statement.Clauses, "WHERE")`, through a direct path from the parameter, as for the [`pure`](#gormreusepure) contract. A write through anything else, such as a local copy, a `Session` result or a call, is not followed, as before. Reads of scalar and interface fields, as in `log(tx.Statement.Table)` or `tx.Statement.Context.Value(k)`, stay reads.
 
 </td></tr>
 <tr><td>
@@ -5465,7 +5505,7 @@ gormreuse reports a reuse only when it can follow the value. These cases are kno
 
 | Kind | Cases | Meaning |
 | --- | --- | --- |
-| Missed reuse (false negatives) | 17 | Reuse that is not reported |
+| Missed reuse (false negatives) | 19 | Reuse that is not reported |
 | Extra reports (false positives) | 5 | Safe code that is reported |
 | Wrong position | — | A report on the wrong line |
 | No fix | — | A report without a suggested fix |
@@ -5700,6 +5740,33 @@ load("b") // not reported
 ```
 
 </td><td>A call through the returned func value has no known callee</td></tr>
+<tr><td><!-- fixtures: pswNotDirect, pswHolderParams, pswReassignedParam, pswInferNotDirect -->
+
+A pure function, or a helper inferred `immutable-param`, that writes the argument's query through anything but a direct path: a `*gorm.Statement` parameter, a local variable that is assigned again, captured or has its address taken, a copy, a `Session` or `Debug` result, a holder parameter, an `append` result, or a call:
+
+```go
+//gormreuse:pure
+func mark(db *gorm.DB, w clause.Clause) {
+    st := db.Statement
+    func() { st.Clauses["X"] = w }()                      // not reported: a captured variable
+    db.Session(&gorm.Session{}).Statement.Distinct = true // not reported: a Session result
+    sort.Strings(db.Statement.Selects)                    // not reported: a call
+}
+```
+
+</td><td>Only a direct path from the parameter surely reaches the argument. The others may write memory it does not hold</td></tr>
+<tr><td><!-- fixtures: pswConfig -->
+
+A pure function that writes the argument's `Config`:
+
+```go
+//gormreuse:pure
+func dry(db *gorm.DB) {
+    db.DryRun = true // not reported
+}
+```
+
+</td><td><code>Config</code> holds no clause, but the write changes how the caller's later queries run</td></tr>
 </table>
 
 </details>

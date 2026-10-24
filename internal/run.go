@@ -54,6 +54,7 @@ import (
 	"github.com/mpyw/gormreuse/internal/ssa/cfg"
 	"github.com/mpyw/gormreuse/internal/ssa/pollution"
 	"github.com/mpyw/gormreuse/internal/ssa/purity"
+	"github.com/mpyw/gormreuse/internal/ssa/stmtwrite"
 	"github.com/mpyw/gormreuse/internal/ssa/tracer"
 )
 
@@ -167,7 +168,11 @@ func RunSSA(
 	// as pure at its call sites (issue #66), and the result of one that keeps
 	// it may be its argument (#188), so this must complete for ALL functions
 	// before the analysis pass runs — a caller may be visited before its callee.
-	pureVerdicts := validatePureFuncs(funcs, pureFuncs, immutableReturnFuncs, funcVars, table, skip, report, guard)
+	// The direct writes of each function into its *gorm.DB parameters (#405)
+	// depend only on its body, so the pure contract and the immutable-param
+	// inference share them.
+	directWrites := stmtwrite.Cache{}
+	pureVerdicts := validatePureFuncs(funcs, pureFuncs, immutableReturnFuncs, funcVars, table, directWrites, skip, report, guard)
 
 	// Collect Scopes/Preload callbacks once: their *gorm.DB parameter receives a
 	// mid-chain (clone==0) value, so reuse inside them must be detected (#60).
@@ -231,7 +236,7 @@ func RunSSA(
 	guard.runPackage("immutable-param inference", func() {
 		changesInPlace = inferImmutableParams(funcs, ssaInfo.Pkg.Func("init"), immutableParamFuncs, func() *tracer.RootTracer {
 			return tracer.NewRootTracer(pureFuncs, immutableReturnFuncs, immutableParamFuncs, pureVerdicts, mutableCallbacks, immutableCallbacks, funcVars)
-		}, func(fn *ssa.Function) []int { return table.Of(fn).FinisherOnly }, globals, skip)
+		}, func(fn *ssa.Function) []int { return table.Of(fn).FinisherOnly }, directWrites, globals, skip)
 	})
 
 	// Enforce the body-side immutable-input contract (#62 cases 2.3/2.4) and

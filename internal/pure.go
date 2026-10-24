@@ -11,6 +11,7 @@ import (
 	"github.com/mpyw/gormreuse/internal/ssa/callsite"
 	"github.com/mpyw/gormreuse/internal/ssa/origin"
 	"github.com/mpyw/gormreuse/internal/ssa/purity"
+	"github.com/mpyw/gormreuse/internal/ssa/stmtwrite"
 	"github.com/mpyw/gormreuse/internal/ssa/tracer"
 )
 
@@ -35,6 +36,7 @@ func validatePureFuncs(
 	pureFuncs, immutableReturnFuncs *directive.DirectiveFuncSet,
 	funcVars callsite.FuncVars,
 	table *facts.Table,
+	directWrites stmtwrite.Cache,
 	skip func(*ssa.Function) bool,
 	report func(token.Pos, string),
 	guard *panicGuard,
@@ -72,7 +74,7 @@ func validatePureFuncs(
 			validator := purity.NewValidator(fn, pureFuncs, immutableReturnFuncs, verdicts, funcVars)
 			// Only a definitive violation revokes pure-trust at call sites;
 			// conservative func-arg violations do not (avoids FP cascades).
-			if slices.ContainsFunc(validator.Validate(), func(v purity.Violation) bool { return v.Definitive }) {
+			if slices.ContainsFunc(validator.Validate(directWrites.Of(fn)), func(v purity.Violation) bool { return v.Definitive }) {
 				verdicts.Failed[fn] = true
 				delete(verdicts.Returned, fn)
 				changed = true
@@ -106,7 +108,7 @@ func validatePureFuncs(
 	reported := make(map[purity.Violation]bool)
 	for _, fn := range targets {
 		guard.run("pure", fn, func() {
-			for _, v := range purity.NewValidator(fn, pureFuncs, immutableReturnFuncs, verdicts, funcVars).Validate() {
+			for _, v := range purity.NewValidator(fn, pureFuncs, immutableReturnFuncs, verdicts, funcVars).Validate(directWrites.Of(fn)) {
 				if reported[v] {
 					continue
 				}
