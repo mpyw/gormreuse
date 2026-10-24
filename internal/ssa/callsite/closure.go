@@ -13,6 +13,10 @@ type ClosureRun struct {
 	// Called is set when Instr is a plain call of the closure value that does
 	// not also pass it on.
 	Called bool
+	// Invoked is set when Instr runs the closure value itself: a plain call,
+	// or a go or defer statement of it, that does not also pass it on. Any
+	// other run hands the value on, and it may run later any number of times.
+	Invoked bool
 }
 
 // ClosureRuns returns the instructions where v, a closure value (a
@@ -97,7 +101,13 @@ func ClosureRuns(v ssa.Value) []ClosureRun {
 				}
 			case *ssa.Call:
 				if ref.Call.Value == v && !slices.Contains(ref.Call.Args, v) {
-					runs = append(runs, ClosureRun{Instr: ref, Called: true})
+					runs = append(runs, ClosureRun{Instr: ref, Called: true, Invoked: true})
+					continue
+				}
+			case *ssa.Go, *ssa.Defer:
+				call := ref.(ssa.CallInstruction).Common()
+				if call.Value == v && !slices.Contains(call.Args, v) {
+					runs = append(runs, ClosureRun{Instr: ref, Invoked: true})
 					continue
 				}
 			}

@@ -1,6 +1,6 @@
 --- range_func_exit.go	1970-01-01 00:00:00
 +++ range_func_exit.go.golden	1970-01-01 00:00:00
-@@ -1,410 +1,410 @@
+@@ -1,468 +1,468 @@
  package internal
  
  import (
@@ -228,6 +228,69 @@
  			q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
  			break
  		}
+ 	}
+ }
+ 
+ // rangeFuncExitStoreCapturedBreak: a closure stored into a captured variable
+ // before the break runs at each later call through the variable.
+ func rangeFuncExitStoreCapturedBreak(db *gorm.DB, seq iter.Seq[int]) {
+-	q := db.Where("x")
++	q := db.Where("x").Session(&gorm.Session{})
+ 	var f func()
+ 	for range seq {
+ 		f = func() { q.Find(nil) } // want `\*gorm\.DB reused: second branch from mutable root`
+ 		break
+ 	}
+ 	f()
+ 	f()
+ }
+ 
+ // rangeFuncExitStoreCapturedNested: the same from a nested loop that leaves
+ // both loops.
+ func rangeFuncExitStoreCapturedNested(db *gorm.DB, outer, inner iter.Seq[int]) {
+-	q := db.Where("x")
++	q := db.Where("x").Session(&gorm.Session{})
+ 	var f func()
+ 	for range outer {
+ 		for range inner {
+ 			f = func() { q.Find(nil) } // want `\*gorm\.DB reused: second branch from mutable root`
+ 			break
+ 		}
+ 		break
+ 	}
+ 	f()
+ 	f()
+ }
+ 
+ // rangeFuncExitPassClosureBreak: a closure passed to a function before the
+ // break may run there any number of times.
+ func rangeFuncExitPassClosureBreak(db *gorm.DB, seq iter.Seq[int], run func(func())) {
+-	q := db.Where("x")
++	q := db.Where("x").Session(&gorm.Session{})
+ 	for range seq {
+ 		run(func() { q.Find(nil) }) // want `\*gorm\.DB reused: second branch from mutable root`
+ 		break
+ 	}
+ }
+ 
+ // rangeFuncExitSendClosureBreak: a closure sent on a channel before the
+ // break.
+ func rangeFuncExitSendClosureBreak(db *gorm.DB, seq iter.Seq[int], ch chan func()) {
+-	q := db.Where("x")
++	q := db.Where("x").Session(&gorm.Session{})
+ 	for range seq {
+ 		ch <- func() { q.Find(nil) } // want `\*gorm\.DB reused: second branch from mutable root`
+ 		break
+ 	}
+ }
+ 
+ // rangeFuncExitMapClosureReturn: a closure stored in a map before a return.
+ func rangeFuncExitMapClosureReturn(db *gorm.DB, seq iter.Seq[int], m map[int]func()) {
+-	q := db.Where("x")
++	q := db.Where("x").Session(&gorm.Session{})
+ 	for range seq {
+ 		m[0] = func() { q.Find(nil) } // want `\*gorm\.DB reused: second branch from mutable root`
+ 		return
  	}
  }
  

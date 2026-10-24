@@ -164,6 +164,8 @@ func rangeFuncLoopBlocks(fn *ssa.Function) map[*ssa.BasicBlock]bool {
 
 // loopReturnsTrue reports whether b ends in a return of a yield closure that
 // may return true.
+//
+//declscope:shared // repeat.go's repeatExitCode reads the exits it rules out
 func loopReturnsTrue(b *ssa.BasicBlock) bool {
 	ret, ok := b.Instrs[len(b.Instrs)-1].(*ssa.Return)
 	if !ok || len(ret.Results) != 1 {

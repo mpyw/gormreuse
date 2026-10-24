@@ -213,6 +213,64 @@ func rangeFuncExitSelectBreak(db *gorm.DB, seq iter.Seq[int], ch chan int) {
 	}
 }
 
+// rangeFuncExitStoreCapturedBreak: a closure stored into a captured variable
+// before the break runs at each later call through the variable.
+func rangeFuncExitStoreCapturedBreak(db *gorm.DB, seq iter.Seq[int]) {
+	q := db.Where("x")
+	var f func()
+	for range seq {
+		f = func() { q.Find(nil) } // want `\*gorm\.DB reused: second branch from mutable root`
+		break
+	}
+	f()
+	f()
+}
+
+// rangeFuncExitStoreCapturedNested: the same from a nested loop that leaves
+// both loops.
+func rangeFuncExitStoreCapturedNested(db *gorm.DB, outer, inner iter.Seq[int]) {
+	q := db.Where("x")
+	var f func()
+	for range outer {
+		for range inner {
+			f = func() { q.Find(nil) } // want `\*gorm\.DB reused: second branch from mutable root`
+			break
+		}
+		break
+	}
+	f()
+	f()
+}
+
+// rangeFuncExitPassClosureBreak: a closure passed to a function before the
+// break may run there any number of times.
+func rangeFuncExitPassClosureBreak(db *gorm.DB, seq iter.Seq[int], run func(func())) {
+	q := db.Where("x")
+	for range seq {
+		run(func() { q.Find(nil) }) // want `\*gorm\.DB reused: second branch from mutable root`
+		break
+	}
+}
+
+// rangeFuncExitSendClosureBreak: a closure sent on a channel before the
+// break.
+func rangeFuncExitSendClosureBreak(db *gorm.DB, seq iter.Seq[int], ch chan func()) {
+	q := db.Where("x")
+	for range seq {
+		ch <- func() { q.Find(nil) } // want `\*gorm\.DB reused: second branch from mutable root`
+		break
+	}
+}
+
+// rangeFuncExitMapClosureReturn: a closure stored in a map before a return.
+func rangeFuncExitMapClosureReturn(db *gorm.DB, seq iter.Seq[int], m map[int]func()) {
+	q := db.Where("x")
+	for range seq {
+		m[0] = func() { q.Find(nil) } // want `\*gorm\.DB reused: second branch from mutable root`
+		return
+	}
+}
+
 // =============================================================================
 // SHOULD NOT REPORT
 // =============================================================================
