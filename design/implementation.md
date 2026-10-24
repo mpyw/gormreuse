@@ -711,12 +711,21 @@ The results do not change. The goldens, and `-json` and `-fix -diff` over `e2e/i
 | Range-over-func bodies (#177) | See below |
 | A root defined in the loop body (#375) | Two uses of it on exclusive branches are not a reuse. See below |
 
-**Range-over-func loops (#177).** SSA compiles the body of `for v := range seq` (Go 1.23+) into a synthetic closure. The iterator calls it once per element. go/ssa marks it with `Synthetic == "range-over-func yield"`. The closure has no back-edge, so `DetectLoops` treats every block of it as in a loop.
+**Range-over-func loops (#177).** SSA compiles the body of `for v := range seq` (Go 1.23+) into a synthetic closure. The iterator calls it once per element. go/ssa marks it with `Synthetic == "range-over-func yield"`. The closure has no back-edge. So `DetectLoops` puts in a loop the blocks of it that can reach a `return true` (`rangeFuncLoopBlocks`, #399).
+
+| Exit | go/ssa returns | The body runs again |
+| --- | --- | --- |
+| The end of the body, `continue` | `true` | Yes |
+| `break`, `return`, `goto` or a labelled `break`/`continue` out of the loop | `false` | No. The iterator must stop, and go/ssa panics when it calls the body again |
+
+A result that is not a constant counts as `true`. So `if c { q.Find(nil); break }` runs once, as in a plain loop. A use that reaches both exits repeats.
 
 - A root defined outside the body and used inside it is reported, as in a plain `for range`.
-- A root defined inside the body is in a loop block, so it is fresh on each iteration.
+- A root defined inside the body is fresh on each run of the body. In a block that can reach the end of the body or a `continue`, it is in the loop. In a block that only leaves the loop, it is defined once.
 - The body reaches outer variables through `FreeVar`s, so `q = q.Where(v)` inside it is a `Store` to a `FreeVar`, not to an `Alloc`. `isAssignment` treats a `FreeVar` as a merge point like an `Alloc` ([Which merges are reassignments](#which-merges-are-reassignments)). Its values are those of the captured variable, so the store is an assignment only when that variable can hold `root`. That is the in-place update of a plain loop. A store into another variable, such as `last = q.Where(v)`, still counts as a use of `q`.
-- A closure nested inside the body (an IIFE, a `defer`) runs once per run of the body, so it repeats as the body does.
+- A closure nested inside the body (an IIFE, a `defer`) runs once per run of the body, so it repeats as the body does. A closure made in a block that only reaches a `return false` runs once, when the body calls it, defers it or spawns it there.
+- A closure that the body hands on instead, by a store, an argument, a send or a map update, may run any number of times after the loop. The calls through the variable it is stored in are not followed: `for range seq { f = func() { q.Find(nil) }; break }; f(); f()`. So such a site counts as running again whenever the root is defined outside a range-over-func body that holds it, even before a `break` (`repeatSite.handedOnInRangeFuncBody`). That holds also for a hand-off in a closure that runs within the body, at any depth, such as `func() { f = func() { q.Find(nil) } }(); break`. The functions from the site's out to the root's are asked, and a closure on the way that runs nowhere hands nothing on. This keeps the reports from before #399, when every block of the body was in a loop. The iterator call of a nested body is not such a site, since the exit codes below follow it.
+- The inner body of a nested loop is such a closure, made in the outer body. Before each `return false`, go/ssa stores a constant exit code into a variable that the code after the inner loop reads, to go on, to leave an outer loop, or to return. For a use that only reaches `return false`, `Repeats.exitsRepeatAfter` collects those codes (`repeatYieldExits`). `repeatExitRunsAgain` then follows the code after the loop with each code, through the comparisons on the variable. The use repeats when that code may run the loop again, or, in an outer range-over-func body, return `true`. When the outer body also returns `false`, its own codes are followed one level up. So `break outer` and a `return` from a nested body run once (`rangeFuncExitLabeledBreak`, `rangeFuncExitNestedReturn`, `rangeFuncExitBreakPlainLoop`), while `break` to a middle loop or `continue outer` repeat. A code or a condition it cannot read counts as running again.
 - A store in the body is a store at the loop (#341). The iterator calls the body only while the loop statement runs. So a read after the loop sees the body's stores. It also sees the value before the loop, since the body may run no time. That is what the loop-header Phi of a plain loop gives ([Captured variables](#captured-variables)).
 - For the same reason, a read in the body sees only the stores that reach the loop, not those after it.
 
@@ -1183,7 +1192,7 @@ The loop check reports a use in a loop of a root defined outside it. `tracer.Roo
 | A call, a Phi (instructions) | Its own block |
 | `FieldRoot` | The block of its call (`FieldRoot.Block`) |
 | `PointeeRoot` | The block of its call (`PointeeRoot.Block`, [Addresses of variables](#addresses-of-variables)) |
-| `*ssa.Parameter` | The entry block of its function. That block is in a loop only for a range-over-func body, whose parameters are the values of the current iteration. So `for q := range seq { q.Find(nil) }` is not reported |
+| `*ssa.Parameter` | The entry block of its function. That block is in a loop only for a range-over-func body that can reach the end of its body or a `continue` (#399). The parameters are the values of the current iteration, so `for q := range seq { q.Find(nil) }` is not reported |
 | Anything else | None, so outside. The tracer returns no other kind: it follows a `FreeVar` to its binding and a global to its stores, and a constant is no root |
 
 A root defined in another function, such as an enclosing function's root used in a closure, has a block that is not in the closure's loops. It is outside, and is placed as [Uses that run more than once](#uses-that-run-more-than-once) describes.

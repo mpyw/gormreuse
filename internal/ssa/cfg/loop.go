@@ -1,6 +1,7 @@
 package cfg
 
 import (
+	"go/constant"
 	"maps"
 	"slices"
 
@@ -26,8 +27,9 @@ type LoopInfo struct {
 	loopHeaders map[*ssa.BasicBlock]bool // Blocks that are loop headers
 
 	// loops holds the blocks of each loop, one set per header. The back-edges
-	// of one header (a continue and the end of the body) make one loop. A
-	// range-over-func body is one loop with no header.
+	// of one header (a continue and the end of the body) make one loop. In a
+	// range-over-func body, the blocks that can reach a `return true` are one
+	// more loop with no header. A body that always leaves the loop has none.
 	loops []map[*ssa.BasicBlock]bool
 }
 
@@ -71,9 +73,10 @@ func (l *LoopInfo) IsInLoopWithout(block, def *ssa.BasicBlock) bool {
 //
 // The body of a range-over-func loop (`for v := range seq`) has no back-edge:
 // SSA compiles it into a synthetic yield closure that the iterator calls once
-// per element. Every block of that closure is therefore in a loop (#177). It
-// has no header, because values from earlier iterations reach it through
-// captured variables, not Phi nodes.
+// per element (#177). Its blocks that can reach a `return true` are in a loop
+// (rangeFuncLoopBlocks, #399). A block that only reaches a break or a return
+// runs at most once. The loop has no header, because values from earlier
+// iterations reach it through captured variables, not Phi nodes.
 //
 // The result is cached: each call for fn returns the same LoopInfo, which
 // must not be changed.
@@ -95,12 +98,9 @@ func (a *Analyzer) findLoops(fn *ssa.Function) *LoopInfo {
 		return info
 	}
 	if IsRangeFuncLoopBody(fn) {
-		body := make(map[*ssa.BasicBlock]bool)
-		for _, b := range fn.Blocks {
-			body[b] = true
-			info.loopBlocks[b] = true
+		if body := rangeFuncLoopBlocks(fn); len(body) > 0 {
+			info.loops = append(info.loops, body)
 		}
-		info.loops = append(info.loops, body)
 	}
 
 	// Build block index map (for back-edge detection)
@@ -131,6 +131,48 @@ func (a *Analyzer) findLoops(fn *ssa.Function) *LoopInfo {
 		maps.Copy(info.loopBlocks, loop)
 	}
 	return info
+}
+
+// rangeFuncLoopBlocks returns the blocks of fn, the yield closure of a
+// range-over-func loop, that may run again on a later iteration (#399). go/ssa
+// compiles the end of the body and a continue into `return true`, so the
+// iterator calls the body again. A break, a return, or a jump out of the loop
+// is `return false`, and the iterator must stop: go/ssa panics when it calls
+// the body after that. So a block is in the loop only when it can reach a
+// return of true. A result that is not a constant counts as true.
+func rangeFuncLoopBlocks(fn *ssa.Function) map[*ssa.BasicBlock]bool {
+	body := make(map[*ssa.BasicBlock]bool)
+	var work []*ssa.BasicBlock
+	for _, b := range fn.Blocks {
+		if loopReturnsTrue(b) {
+			body[b] = true
+			work = append(work, b)
+		}
+	}
+	for len(work) > 0 {
+		b := work[len(work)-1]
+		work = work[:len(work)-1]
+		for _, p := range b.Preds {
+			if !body[p] {
+				body[p] = true
+				work = append(work, p)
+			}
+		}
+	}
+	return body
+}
+
+// loopReturnsTrue reports whether b ends in a return of a yield closure that
+// may return true.
+//
+//declscope:shared // repeat.go's repeatExitCode reads the exits it rules out
+func loopReturnsTrue(b *ssa.BasicBlock) bool {
+	ret, ok := b.Instrs[len(b.Instrs)-1].(*ssa.Return)
+	if !ok || len(ret.Results) != 1 {
+		return false
+	}
+	c, ok := ret.Results[0].(*ssa.Const)
+	return !ok || constant.BoolVal(c.Value)
 }
 
 // markLoopBlocks marks blocks that are part of the loop whose header is loopHead
