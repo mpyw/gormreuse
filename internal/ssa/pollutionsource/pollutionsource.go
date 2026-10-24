@@ -26,7 +26,7 @@
 //   - Packing into the varargs array of a known read-only stdlib function
 //     (fmt.Println(db), log.Printf("%v", db), t.Logf("%v", db)); these never
 //     retain or mutate their arguments. User-defined variadic functions stay
-//     conservatively polluting. See IsReadOnlyVariadicArg.
+//     conservatively polluting. See isReadOnlyVariadicArg.
 //   - Packing into the varargs array of a *gorm.DB method that only reads
 //     its *gorm.DB arguments (db.Where("id IN (?)", sub)), when the array
 //     goes nowhere else. The main handler records such an argument as a read
@@ -106,7 +106,7 @@ func Leak(instr ssa.Instruction, vars callsite.FuncVars) (ssa.Value, Kind) {
 		if !ok {
 			return nil, KindNone
 		}
-		if IsReadOnlyVariadicArg(idx, i.Val, vars) || isReadOnlyArray(idx.X) {
+		if isReadOnlyVariadicArg(idx, i.Val, vars) || isReadOnlyArray(idx.X) {
 			return nil, KindNone
 		}
 		return v, KindSliceStore
@@ -132,7 +132,7 @@ var readOnlyVariadicPkgs = map[string]bool{
 	"testing": true,
 }
 
-// IsReadOnlyVariadicArg reports whether the store packs an interface-boxed
+// isReadOnlyVariadicArg reports whether the store packs an interface-boxed
 // *gorm.DB into the varargs array of a variadic call to a known read-only
 // stdlib function (see readOnlyVariadicPkgs). In SSA fmt.Println(q) is:
 //
@@ -153,7 +153,7 @@ var readOnlyVariadicPkgs = map[string]bool{
 //   - user-defined variadic ...interface{} functions (may branch the value),
 //
 // all of which stay conservatively polluting.
-func IsReadOnlyVariadicArg(idx *ssa.IndexAddr, val ssa.Value, vars callsite.FuncVars) bool {
+func isReadOnlyVariadicArg(idx *ssa.IndexAddr, val ssa.Value, vars callsite.FuncVars) bool {
 	if _, ok := val.(*ssa.MakeInterface); !ok {
 		return false
 	}

@@ -42,7 +42,6 @@ import (
 	"go/token"
 	"go/types"
 	"slices"
-	"strings"
 
 	"golang.org/x/tools/go/ssa"
 
@@ -89,9 +88,9 @@ type Context struct {
 	assignMerges map[*ssa.Call][]ssa.Value
 	mergeFree    map[ssa.Value]bool
 
-	// containers memoizes containerEscapes per container: the element
-	// stores of one composite literal all ask about it (#397).
-	containers map[containerKey]bool
+	// containers memoizes directContainerHandedOn per container: the
+	// element stores of one composite literal all ask about it (#397).
+	containers map[ssa.Value]bool
 
 	// captures keeps what returnedCaptureRoots finds about the function's
 	// literals (#397).
@@ -830,14 +829,13 @@ func handOnRoots(instr ssa.Instruction, pos token.Pos, roots []ssa.Value, ctx *C
 // handOnFuncValue records the roots that the function value v, sent or
 // stored by instr, hands on (funcValueRoots). container is what a store or a
 // map update writes into, or nil for a send. A function literal stored into
-// a container is handed on only when the container may leave the function
-// (containerEscapes). go/ssa gives the store of a function literal into the
-// varargs of a call, also of append, no position, so the hand-off is placed
-// at that call (handOffPos).
+// a container is handed on only as literalStoreHandsOn says. go/ssa gives
+// the store of a function literal into the varargs of a call no position, so
+// the hand-off is placed at that call (handOffPos).
 func handOnFuncValue(instr ssa.Instruction, v, container ssa.Value, ctx *Context) {
 	var handsOn func() bool
 	if container != nil {
-		handsOn = func() bool { return containerEscapes(container, ctx) }
+		handsOn = func() bool { return literalStoreHandsOn(container, ctx) }
 	}
 	roots := funcValueRoots(v, instr, ctx, handsOn)
 	handOnRoots(instr, handOffPos(instr, v), roots, ctx)
@@ -845,8 +843,8 @@ func handOnFuncValue(instr ssa.Instruction, v, container ssa.Value, ctx *Context
 
 // handOffPos returns the position of instr, which hands v on. go/ssa gives
 // none to the store of a function literal into an element. A store into the
-// varargs array of a call, also of append, is placed at that call. Any other
-// is placed at the function literal, which such a store holds unboxed.
+// varargs array of a call is placed at that call. Any other is placed at the
+// function literal, which such a store holds unboxed.
 func handOffPos(instr ssa.Instruction, v ssa.Value) token.Pos {
 	if pos := instr.Pos(); pos.IsValid() {
 		return pos
@@ -882,148 +880,49 @@ func (u siteUse) escape(roots []ssa.Value) {
 	u.branch(roots, pollution.UsageInfo{Block: u.block, Pos: u.pos, Escapes: true}, func(ssa.Value) bool { return false })
 }
 
-// containerEscapes reports whether a function literal stored into container,
-// the address of an element or a field, or a map, may be handed on (#397):
-// whether code outside the function may get the container, or a function
-// value read out of it.
+// literalStoreHandsOn reports whether a function literal stored into
+// container, the address of an element or a field, or a map, is handed on
+// (#397). It is only when the literal goes into a location outside the
+// function (externalContainer), or straight into a container the function
+// allocates whose own value is then handed on (directContainerHandedOn):
 //
-// The container is a local array, slice, struct or map, and the values that
-// hold it as it is: a slice of it, a copy into a local variable, a load of
-// that variable, the result of append, a merge, a box in an interface, or a
-// local container it is stored in. Code that only reads it keeps it local:
-// len and cap, a range over it, and a read-only stdlib function such as
-// fmt.Println (pollutionsource.IsReadOnlyVariadicCall). A function value
-// read out of it may only be called, with the result dropped:
+//	run([]func() *gorm.DB{f})  // handed on
+//	m[k] = f                   // handed on, m a parameter
+//	fs := make([]func() *gorm.DB, 1)
+//	fs[0] = f                  // not followed: a slice of the allocation
 //
-//	fs := []func() *gorm.DB{func() *gorm.DB { return q }}
-//	for _, f := range fs {
-//		f() // not handed on
-//	}
-//	run(fs[0]) // handed on
-//
-// Any other use counts as handing it on, and so does any other container.
-// The types on the way from container to its base are the ones the function
-// built the literal into, so they are followed even when another package
-// declares them, as in `cs := []other.Config{{Hook: f}}; other.Run(cs[0])`.
-// The answer is kept per container and those types, as the stores of one
-// composite literal all ask about it.
-func containerEscapes(container ssa.Value, ctx *Context) bool {
+// Any other shape counts as no hand-off: the literal is followed through no
+// load, merge, append, element read, conversion, nesting or capture, which
+// keeps a local table of literals from being reported (Known Limitations).
+func literalStoreHandsOn(container ssa.Value, ctx *Context) bool {
 	base := containerBase(container)
-	origins, local := containerOrigins(container)
-	if !local {
+	if externalContainer(base) {
 		return true
 	}
-	built := map[types.Type]bool{}
-	var key strings.Builder
-	for a := container; a != base; {
-		switch addr := a.(type) {
-		case *ssa.IndexAddr:
-			a = addr.X
-		case *ssa.FieldAddr:
-			a = addr.X
+	switch c := container.(type) {
+	case *ssa.IndexAddr:
+		if c.X != base {
+			return false
 		}
-		built[addressedType(a.Type())] = true
-		key.WriteString(types.TypeString(a.Type(), nil))
+	case *ssa.FieldAddr:
+		if c.X != base {
+			return false
+		}
 	}
-	for _, o := range origins {
-		fmt.Fprintf(&key, "|%p", o)
+	switch base.(type) {
+	case *ssa.Alloc, *ssa.MakeSlice, *ssa.MakeMap:
+	default:
+		return false
 	}
-	k := containerKey{base, key.String()}
-	if escapes, done := ctx.containers[k]; done {
-		return escapes
+	if handsOn, done := ctx.containers[base]; done {
+		return handsOn
 	}
 	if ctx.containers == nil {
-		ctx.containers = map[containerKey]bool{}
+		ctx.containers = map[ssa.Value]bool{}
 	}
-	var pkg *types.Package
-	if ctx.CurrentFn.Pkg != nil {
-		pkg = ctx.CurrentFn.Pkg.Pkg
-	}
-	escapes := (&containerWalk{vars: ctx.RootTracer.FuncVars(), pkg: pkg, built: built, seen: map[ssa.Value]bool{}}).escapes(origins)
-	ctx.containers[k] = escapes
-	return escapes
-}
-
-// addressedType returns the type that a value of type t addresses when it
-// is indexed or selected: what a pointer points to, or t itself, as for a
-// slice or a map.
-func addressedType(t types.Type) types.Type {
-	if ptr, ok := t.Underlying().(*types.Pointer); ok {
-		return ptr.Elem()
-	}
-	return t
-}
-
-// containerOrigins returns the local containers that the container addr
-// writes into may be: what it is an element, a field, a slice, a conversion
-// or a merge of, the result of append (its operands), and what was stored
-// into a local variable it is loaded from. They are allocations of the
-// function: an Alloc, a MakeSlice or a MakeMap. local is false when addr may
-// also be a container that code outside the function made or may hold, such
-// as a parameter, a global, a captured variable or what a call returned. A
-// nil, as in `var fs []T`, holds nothing.
-func containerOrigins(addr ssa.Value) (origins []ssa.Value, local bool) {
-	seen := map[ssa.Value]bool{}
-	local = true
-	var visit func(v ssa.Value)
-	visit = func(v ssa.Value) {
-		if !local || seen[v] {
-			return
-		}
-		seen[v] = true
-		switch v := v.(type) {
-		case *ssa.IndexAddr:
-			visit(v.X)
-		case *ssa.FieldAddr:
-			visit(v.X)
-		case *ssa.Slice:
-			visit(v.X)
-		case *ssa.ChangeType:
-			visit(v.X)
-		case *ssa.Phi:
-			for _, e := range v.Edges {
-				visit(e)
-			}
-		case *ssa.UnOp:
-			// A load of a local variable is what was stored into it. Any
-			// other load, as through a parameter, comes from outside.
-			alloc, ok := v.X.(*ssa.Alloc)
-			if !ok || v.Op != token.MUL {
-				local = false
-				return
-			}
-			for _, r := range *alloc.Referrers() {
-				if store, ok := r.(*ssa.Store); ok && store.Addr == alloc {
-					visit(store.Val)
-				}
-			}
-		case *ssa.Call:
-			// append returns its first operand, or a new array that holds
-			// its elements and those of the varargs.
-			b, ok := v.Call.Value.(*ssa.Builtin)
-			if !ok || b.Name() != "append" {
-				local = false
-				return
-			}
-			for _, arg := range v.Call.Args {
-				visit(arg)
-			}
-		case *ssa.Const:
-		case *ssa.Alloc, *ssa.MakeSlice, *ssa.MakeMap:
-			origins = append(origins, v)
-		default:
-			local = false
-		}
-	}
-	visit(addr)
-	return origins, local
-}
-
-// containerKey is a container and the types a literal is stored into it
-// through (see containerEscapes).
-type containerKey struct {
-	base  ssa.Value
-	types string
+	handsOn := directContainerHandedOn(base, ctx)
+	ctx.containers[base] = handsOn
+	return handsOn
 }
 
 // containerBase returns the container whose element or field addr is.
@@ -1040,208 +939,68 @@ func containerBase(addr ssa.Value) ssa.Value {
 	}
 }
 
-// containerWalk follows the values that hold a container (see
-// containerEscapes). pkg is the package of the function being analyzed, and
-// built the types the function stored the literal into.
-type containerWalk struct {
-	vars  callsite.FuncVars
-	pkg   *types.Package
-	built map[types.Type]bool
-	seen  map[ssa.Value]bool
-	work  []ssa.Value
-}
-
-// containerTypeHoldsFunc reports whether a value of type t may hold a
-// function value that the function stored: a func or an interface, or a
-// struct, an array, a slice, a map, a pointer or a tuple that holds one. A
-// *gorm.DB holds none, and neither does a struct type of another package
-// than pkg, whose fields the function does not build, unless the function
-// built the literal into it (built). seen stops a type that holds itself.
-func containerTypeHoldsFunc(t types.Type, pkg *types.Package, built, seen map[types.Type]bool) bool {
-	if typeutil.IsGormDB(t) || seen[t] {
-		return false
-	}
-	seen[t] = true
-	if named, ok := types.Unalias(t).(*types.Named); ok && named.Obj().Pkg() != pkg && !built[t] {
-		if _, ok := named.Underlying().(*types.Struct); ok {
-			return false
-		}
-	}
-	holds := func(t types.Type) bool { return containerTypeHoldsFunc(t, pkg, built, seen) }
-	switch u := t.Underlying().(type) {
-	case *types.Signature, *types.Interface:
-		return true
-	case *types.Struct:
-		for f := range u.Fields() {
-			if holds(f.Type()) {
-				return true
-			}
-		}
-	case *types.Tuple:
-		for v := range u.Variables() {
-			if holds(v.Type()) {
-				return true
-			}
-		}
-	case *types.Array:
-		return holds(u.Elem())
-	case *types.Slice:
-		return holds(u.Elem())
-	case *types.Map:
-		return holds(u.Key()) || holds(u.Elem())
-	case *types.Pointer:
-		return holds(u.Elem())
-	}
-	return false
-}
-
-// escapes reports whether code outside the function may get one of
-// origins, or a function value read out of it.
-func (w *containerWalk) escapes(origins []ssa.Value) bool {
-	for _, o := range origins {
-		w.push(o)
-	}
-	for len(w.work) > 0 {
-		c := w.work[len(w.work)-1]
-		w.work = w.work[:len(w.work)-1]
-		if slices.ContainsFunc(*c.Referrers(), func(r ssa.Instruction) bool { return w.useEscapes(c, r) }) {
+// externalContainer reports whether v is a location outside the function: a
+// parameter, a global, or what is read through one. A captured variable is a
+// local of the enclosing function, so it is not one.
+func externalContainer(v ssa.Value) bool {
+	for {
+		switch w := v.(type) {
+		case *ssa.Parameter, *ssa.Global:
 			return true
-		}
-	}
-	return false
-}
-
-// push adds v, a value that holds the container or a value read out of it,
-// to the walk once.
-func (w *containerWalk) push(v ssa.Value) {
-	if !w.seen[v] {
-		w.seen[v] = true
-		w.work = append(w.work, v)
-	}
-}
-
-// useEscapes reports whether the use r of c, a value that holds the
-// container, hands it on or a function value read out of it.
-func (w *containerWalk) useEscapes(c ssa.Value, r ssa.Instruction) bool {
-	switch r := r.(type) {
-	case *ssa.DebugRef:
-	case *ssa.IndexAddr, *ssa.FieldAddr, *ssa.Slice, *ssa.Phi, *ssa.ChangeType, *ssa.MakeInterface:
-		w.push(r.(ssa.Value))
-	case *ssa.Store:
-		if r.Val != c {
-			return false // a store into it
-		}
-		// A copy into a local variable, or into a local container, is the
-		// container too.
-		into, local := containerOrigins(r.Addr)
-		if !local {
-			return true
-		}
-		for _, o := range into {
-			w.push(o)
-		}
-	case *ssa.MapUpdate:
-		if r.Map != c {
-			into, local := containerOrigins(r.Map)
-			if !local {
-				return true
-			}
-			for _, o := range into {
-				w.push(o)
-			}
-		}
-	case *ssa.UnOp:
-		// A load through the address of an element is the element. A load
-		// of the container itself, as from a local variable, is the
-		// container, whatever its type.
-		switch c.(type) {
-		case *ssa.IndexAddr, *ssa.FieldAddr:
-			return w.elemEscapes(r)
-		}
-		w.push(r)
-	case *ssa.Index, *ssa.Field, *ssa.Lookup:
-		// An element of a value.
-		return w.elemEscapes(r.(ssa.Value))
-	case *ssa.Extract:
-		return w.elemEscapes(r)
-	case *ssa.Range, *ssa.Next:
-		w.push(r.(ssa.Value))
-	case ssa.CallInstruction:
-		return w.callEscapes(c, r)
-	default:
-		return true
-	}
-	return false
-}
-
-// callEscapes reports whether call, which takes c, a value that holds the
-// container, hands it on. append returns it again. len and cap only read it,
-// delete and clear only remove from it, and a read-only stdlib function only
-// reads it.
-func (w *containerWalk) callEscapes(c ssa.Value, call ssa.CallInstruction) bool {
-	if b, ok := call.Common().Value.(*ssa.Builtin); ok {
-		switch b.Name() {
-		case "len", "cap", "delete", "clear":
-			return false
-		case "append":
-			w.push(call.Value())
-			return false
-		}
-	}
-	return !pollutionsource.IsReadOnlyVariadicCall(call, c, w.vars)
-}
-
-// elemEscapes reports whether e, a value read out of the container, may be
-// handed on. A value that may hold a function value
-// (containerTypeHoldsFunc), such as a struct, an array, a slice, a map, a
-// tuple or a pointer to one, is followed as the container. A function value
-// may only be called, with its result dropped, compared with nil, or boxed
-// for a read-only stdlib function such as fmt.Println
-// (pollutionsource.IsReadOnlyVariadicArg). A value of any other type holds
-// no function literal.
-func (w *containerWalk) elemEscapes(e ssa.Value) bool {
-	switch e.Type().Underlying().(type) {
-	case *types.Signature, *types.Interface:
-	default:
-		if containerTypeHoldsFunc(e.Type(), w.pkg, w.built, map[types.Type]bool{}) {
-			w.push(e)
-		}
-		return false
-	}
-	return slices.ContainsFunc(*e.Referrers(), func(r ssa.Instruction) bool {
-		switch r := r.(type) {
-		case *ssa.Phi:
-			// A variable that holds one of several elements.
-			if w.seen[r] {
+		case *ssa.UnOp:
+			if w.Op != token.MUL {
 				return false
 			}
-			w.seen[r] = true
-			return w.elemEscapes(r)
-		case *ssa.MakeInterface:
-			return slices.ContainsFunc(*r.Referrers(), func(use ssa.Instruction) bool {
-				store, ok := use.(*ssa.Store)
-				if !ok {
-					return true
+			v = w.X
+		case *ssa.IndexAddr:
+			v = w.X
+		case *ssa.FieldAddr:
+			v = w.X
+		default:
+			return false
+		}
+	}
+}
+
+// directContainerHandedOn reports whether the value of base, a container the
+// function allocates, is handed on as it is: base itself, the slice of it
+// that a slice literal or varargs is, or the struct value of a struct
+// literal. It is handed on when it is passed to a call (other than a builtin
+// or a read-only stdlib function such as fmt.Println), sent, stored or put
+// into a map outside the function, or returned.
+func directContainerHandedOn(base ssa.Value, ctx *Context) bool {
+	values := []ssa.Value{base}
+	for _, r := range *base.Referrers() {
+		switch r := r.(type) {
+		case *ssa.Slice:
+			if r.X == base {
+				values = append(values, r)
+			}
+		case *ssa.UnOp:
+			if r.Op == token.MUL {
+				values = append(values, r)
+			}
+		}
+	}
+	vars := ctx.RootTracer.FuncVars()
+	return slices.ContainsFunc(values, func(v ssa.Value) bool {
+		return slices.ContainsFunc(*v.Referrers(), func(r ssa.Instruction) bool {
+			switch r := r.(type) {
+			case ssa.CallInstruction:
+				if _, builtin := r.Common().Value.(*ssa.Builtin); builtin {
+					return false
 				}
-				idx, ok := store.Addr.(*ssa.IndexAddr)
-				return !ok || !pollutionsource.IsReadOnlyVariadicArg(idx, r, w.vars)
-			})
-		}
-		call, ok := r.(ssa.CallInstruction)
-		if !ok {
-			// A comparison with nil does not run it.
-			_, debug := r.(*ssa.DebugRef)
-			_, cmp := r.(*ssa.BinOp)
-			return !debug && !cmp
-		}
-		if call.Common().Value != e || slices.Contains(call.Common().Args, e) {
-			return true
-		}
-		// A plain call whose result is used, as in fs[0]().Find(nil).
-		result := call.Value()
-		return result != nil && slices.ContainsFunc(*result.Referrers(), func(r ssa.Instruction) bool {
-			_, debug := r.(*ssa.DebugRef)
-			return !debug
+				return slices.Contains(r.Common().Args, v) && !pollutionsource.IsReadOnlyVariadicCall(r, v, vars)
+			case *ssa.Send:
+				return r.X == v
+			case *ssa.Store:
+				return r.Val == v && externalContainer(containerBase(r.Addr))
+			case *ssa.MapUpdate:
+				return r.Value == v && externalContainer(r.Map)
+			case *ssa.Return:
+				return slices.Contains(r.Results, v)
+			}
+			return false
 		})
 	})
 }

@@ -612,7 +612,7 @@ q.Find(&users)
 
 </td><td>
 
-It may be called elsewhere, and the caller may chain on `q`. A `Scopes` or `Preload` callback that returns `q` counts too, and so does a slice, a struct or a map holding such a literal that is passed on. A literal that returns its own parameter, its own chain, a `Session` copy or an immutable value does not. Neither does one kept in a local slice, struct or map whose literals are only called with the result dropped (`for _, f := range fs { f() }`), or read with `len` or `range`. Nor does one passed to `fmt` or `log`.
+It may be called elsewhere, and the caller may chain on `q`. A `Scopes` or `Preload` callback that returns `q` counts too. So does a slice, struct or map literal that holds such a literal and is itself passed on, as in `run([]func() *gorm.DB{f})`, and a store into a parameter's map or a global. A literal that returns its own parameter, its own chain, a `Session` copy or an immutable value does not. Neither does one in a container that is reached in any other way, such as `fs := make([]func() *gorm.DB, 1); fs[0] = f; runAll(fs)` (see Known Limitations), or one passed to `fmt` or `log`.
 
 </td></tr>
 <tr><td>Type assertion out of an interface</td><td>
@@ -5479,7 +5479,7 @@ gormreuse reports a reuse only when it can follow the value. These cases are kno
 
 | Kind | Cases | Meaning |
 | --- | --- | --- |
-| Missed reuse (false negatives) | 23 | Reuse that is not reported |
+| Missed reuse (false negatives) | 24 | Reuse that is not reported |
 | Extra reports (false positives) | 5 | Safe code that is reported |
 | Wrong position | — | A report on the wrong line |
 | No fix | — | A report without a suggested fix |
@@ -5792,6 +5792,18 @@ q.Find(nil) // not reported
 ```
 
 </td><td>The closure captures no <code>*gorm.DB</code>, so it is not analyzed</td></tr>
+<tr><td><!-- fixtures: crcConstMakeHandedOn, crcConstMakeFieldHandedOn, crcLitSliceIndexedHandedOn, crcPhiSliceHandedOn, crcPhiMapHandedOn, crcAppendThenIndexHandedOn, crcCopyIntoContainerHandedOn, crcCapturedSliceIndexed, crcCallResultSlice, crcAppendParam, crcLocalSliceElemHandedOn, crcLocalSliceResultUsed, crcLocalSliceCaptured, crcLocalSliceInMap, crcLocalStructFieldHandedOn, crcLocalMapCommaOk, crcLocalSliceElemSent, crcAppended, crcPointerElem, crcPointerElemRanged, crcPointerMapElem, crcPointerToVariable, crcMapInSlice, crcElemBoxed, crcOtherPackageStructInSlice, crcArrayInSlice, crcMadeSlice, crcMadeSliceField, crcMadeSliceOfSlices, crcMadeMap, crcReceivedSlice -->
+
+A function literal stored into a container that is not handed on directly:
+
+```go
+fs := make([]func() *gorm.DB, 1)
+fs[0] = func() *gorm.DB { return q }
+runAll(fs)
+q.Find(nil) // not reported
+```
+
+</td><td>Only a container literal that holds the function literal and is itself passed on is followed</td></tr>
 </table>
 
 </details>
