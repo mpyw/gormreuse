@@ -387,7 +387,7 @@ gormreuse has no flags of its own. These come from the analysis driver:
 | Inside a function | `gormreuse: internal error analyzing <func>: ...` at that function. gormreuse does not trust the directives that the function's failed check was proving |
 | In work that reads the whole package | `gormreuse: internal error in <stage> of package <path>: ...` at the package clause |
 
-Please [open an issue](https://github.com/mpyw/gormreuse/issues) with the code. Set `GORMREUSE_DEBUG_PANIC=1` to get the stack trace instead.
+Please [open an issue](https://github.com/mpyw/gormreuse/issues) with the code. Set `GORMREUSE_DEBUG_PANIC=1` to add the stack trace to the report.
 
 </details>
 
@@ -5918,6 +5918,10 @@ Develop on Go 1.27 or later. The main module and the E2E module (`e2e/internal`)
 | `GORMREUSE_UPDATE_GOLDEN=1 go test -run TestGoldenFiles .` | Rewrites the `.golden` and `.diff` fixtures after a change to detection or fixes. A plain `go test` only compares them |
 | `./test_all.sh` | Runs every check CI runs: declscope, the tests of both modules, a build, and golangci-lint on both modules. Install the tools with `mise install` |
 | `go build -o bin/gormreuse ./cmd/gormreuse` | Builds the command |
+
+## AI usage
+
+gormreuse is developed with AI coding agents (Claude Code). The fixtures under `testdata/src/` define what it reports.
 
 ## License
 

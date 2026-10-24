@@ -376,7 +376,7 @@ Code is left out of the analysis in two ways only, and neither is silent (#186).
 | Panic while analyzing a function | `panicGuard` in `internal/guard.go` recovers it. It reports `gormreuse: internal error analyzing <func>: <panic>; please report this at ...` at the function, once per function, through `pass.Reportf`. No ignore directive suppresses it |
 | Panic in a package-wide stage | `panicGuard.runPackage` reports `gormreuse: internal error in <stage> of package <path>: ...` at the package clause of the first file |
 
-`GORMREUSE_DEBUG_PANIC=1` re-panics with the function name, for a stack trace.
+`GORMREUSE_DEBUG_PANIC=1` adds the stack trace to the report. The analysis still goes on, as without it.
 
 **A panic leaves the conservative result (#315).** `panicGuard.run` reports whether the work finished.
 
