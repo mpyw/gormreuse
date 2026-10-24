@@ -46,6 +46,7 @@ import (
 	"github.com/mpyw/gormreuse/internal/directive"
 	"github.com/mpyw/gormreuse/internal/ssa/callsite"
 	"github.com/mpyw/gormreuse/internal/ssa/pollutionsource"
+	"github.com/mpyw/gormreuse/internal/ssa/stmtwrite"
 	"github.com/mpyw/gormreuse/internal/ssa/tracer"
 	"github.com/mpyw/gormreuse/internal/typeutil"
 )
@@ -106,6 +107,7 @@ func (v *Validator) Validate() []Violation {
 	}
 
 	violations := v.validateBody(fn)
+	violations = append(violations, v.checkDirectWrites(violations)...)
 
 	// A call that passes several derived arguments reports each one at the
 	// same position, so drop exact duplicates.
@@ -169,21 +171,10 @@ func (v *Validator) validateBody(fn *ssa.Function) []Violation {
 			switch i := instr.(type) {
 			case ssa.CallInstruction:
 				violations = append(violations, v.checkCallPollution(i)...)
-				if at := validatorBuiltinWriteTarget(i.Common()); at != nil {
-					violations = append(violations, v.checkDirectWrite(at, i.Pos())...)
-				}
 			case *ssa.MakeClosure:
 				violations = append(violations, v.checkClosure(i)...)
 			case *ssa.Store:
-				// A store of the argument into its own memory, as in
-				// db.Statement.DB = db, is reported once, as the escape.
-				escapes := v.checkStoreEscape(i)
-				violations = append(violations, escapes...)
-				if len(escapes) == 0 {
-					violations = append(violations, v.checkDirectWrite(i.Addr, i.Pos())...)
-				}
-			case *ssa.MapUpdate:
-				violations = append(violations, v.checkDirectWrite(i.Map, i.Pos())...)
+				violations = append(violations, v.checkStoreEscape(i)...)
 			case *ssa.Return:
 				if fn == v.fn {
 					violations = append(violations, v.checkWrappedReturn(i)...)
@@ -582,118 +573,61 @@ func (v *Validator) checkStoreEscape(store *ssa.Store) []Violation {
 	}}
 }
 
-// checkDirectWrite reports a write into memory that the argument reaches
-// through its *gorm.DB or its Statement (#405): `*db = gorm.DB{}`,
-// `db.Statement.Distinct = true`, `st := db.Statement; st.Selects = ...`,
-// `db.Statement.Clauses["X"] = c` or `delete(db.Statement.Clauses, "X")`.
-// Such a write changes the argument's query in place, as db.Where does. at is
-// the address of a store, or the map or slice that a map update, delete,
-// clear or copy changes.
-func (v *Validator) checkDirectWrite(at ssa.Value, pos token.Pos) []Violation {
-	if !v.writesArgument(at) {
-		return nil
-	}
-	return []Violation{{
-		Pos:        pos,
-		Message:    "pure function pollutes *gorm.DB argument by writing to it directly",
-		Definitive: true,
-	}}
-}
-
-// validatorBuiltinWriteTarget returns the map or slice that a call of the
-// builtin delete, clear or copy changes in place, or nil for any other call.
-func validatorBuiltinWriteTarget(call *ssa.CallCommon) ssa.Value {
-	b, ok := call.Value.(*ssa.Builtin)
-	if !ok || len(call.Args) == 0 {
-		return nil
-	}
-	switch b.Name() {
-	case "delete", "clear", "copy":
-		return call.Args[0]
-	}
-	return nil
-}
-
-// writesArgument reports whether a write to at changes the argument. It
-// follows at back through field and element addresses, loads, slices, map
-// lookups and merges. go/ssa keeps a struct or an array variable in memory, so
-// a write through one is a field or an element address, never a Field or an
-// Index of a value. The write changes the argument when the path passes
-// through a parameter-derived *gorm.DB or *gorm.Statement, and does not end
-// in a local variable whose own memory is written.
-//
-// A local copy, as in `c := *db.Statement; c.Distinct = true`, is such a
-// variable. A map, a slice or a pointer loaded from it is still shared with
-// the argument, so `c.Clauses["X"] = 1` changes the argument. A captured
-// variable, a holder parameter or a *gorm.Statement parameter is not local.
-// The Error, RowsAffected and Config fields of a *gorm.DB are left out: the
-// first two hold the outcome of a query, as AddError does, and Config is
-// shared by every handle of the connection and holds no clause.
-func (v *Validator) writesArgument(at ssa.Value) bool {
-	type step struct {
-		at               ssa.Value
-		anchored, shared bool
-	}
-	seen := map[step]bool{}
-	var walk func(at ssa.Value, anchored, shared bool) bool
-	walk = func(at ssa.Value, anchored, shared bool) bool {
-		if seen[step{at, anchored, shared}] {
-			return false
+// checkDirectWrites reports the writes into the query memory of the
+// argument (#405), such as `*db = gorm.DB{}`, `db.Statement.Distinct = true`
+// or `delete(db.Statement.Clauses, "X")`: they change its query in place, as
+// db.Where does. stmtwrite decides what is a write, from every derived
+// gorm.DB and gorm.Statement of the function and its closures, so the
+// inferred immutable-param reads the same answer. A write is definitive. A
+// hand-off of that memory to code that may write it, such as
+// sort.Strings(db.Statement.Selects), is a warning, as passing the argument
+// to a function that is not pure is. found holds the violations found
+// already: a position that has one, such as the escape of
+// db.Statement.DB = db, is not reported again.
+func (v *Validator) checkDirectWrites(found []Violation) []Violation {
+	var handles []ssa.Value
+	for val := range v.paramDerived {
+		// A local variable of the type, as in c := *db, is the function's
+		// own copy, not the argument's handle, also where a closure captures
+		// it. A gorm.Statement passed by value still holds the argument's
+		// maps and slices.
+		if validatorIsVariable(val) || !typeutil.IsGormDB(val.Type()) && !typeutil.IsGormStatement(val.Type()) {
+			continue
 		}
-		seen[step{at, anchored, shared}] = true
-		anchored = anchored || v.paramDerived[at] && validatorIsGormHandle(at.Type())
-		switch x := at.(type) {
-		case *ssa.FieldAddr:
-			return !validatorIsGormDBStateField(x.X.Type(), x.Field) && walk(x.X, anchored, shared)
-		case *ssa.IndexAddr:
-			// A slice element lives in memory that the slice shares. An
-			// array element belongs to the array's variable.
-			_, isSlice := x.X.Type().Underlying().(*types.Slice)
-			return walk(x.X, anchored, shared || isSlice)
-		case *ssa.Lookup:
-			return walk(x.X, anchored, shared)
-		case *ssa.Slice:
-			return walk(x.X, anchored, shared)
-		case *ssa.ChangeType:
-			return walk(x.X, anchored, shared)
-		case *ssa.UnOp:
-			// What a write reaches through a loaded value is shared with the
-			// memory it was loaded from.
-			return x.Op == token.MUL && walk(x.X, anchored, true)
-		case *ssa.Phi:
-			return slices.ContainsFunc(x.Edges, func(edge ssa.Value) bool { return walk(edge, anchored, shared) })
-		case *ssa.Alloc:
-			return anchored && shared
+		handles = append(handles, val)
+	}
+	reported := make(map[token.Pos]bool, len(found))
+	for _, viol := range found {
+		reported[viol.Pos] = true
+	}
+	var violations []Violation
+	for instr, write := range stmtwrite.FromHandles(handles) {
+		if reported[instr.Pos()] {
+			continue
 		}
-		return anchored
+		switch write {
+		case stmtwrite.Certain:
+			violations = append(violations, Violation{
+				Pos:        instr.Pos(),
+				Message:    "pure function pollutes *gorm.DB argument by writing to it directly",
+				Definitive: true,
+			})
+		case stmtwrite.Maybe:
+			violations = append(violations, Violation{
+				Pos:     instr.Pos(),
+				Message: "pure function hands the query memory of its *gorm.DB argument to code that may change it",
+			})
+		}
 	}
-	return walk(at, false, false)
+	slices.SortFunc(violations, func(a, b Violation) int { return int(a.Pos - b.Pos) })
+	return violations
 }
 
-// validatorIsGormHandle reports whether t is *gorm.DB or *gorm.Statement:
-// memory that the argument's query lives in.
-func validatorIsGormHandle(t types.Type) bool {
-	ptr, ok := types.Unalias(t).(*types.Pointer)
-	if !ok {
-		return false
-	}
-	if _, isPtr := types.Unalias(ptr.Elem()).(*types.Pointer); isPtr {
-		return false
-	}
-	return typeutil.IsGormDB(ptr.Elem()) || typeutil.IsGormStatement(ptr.Elem())
-}
-
-// validatorIsGormDBStateField reports whether field i of the struct ptr, the
-// operand of a FieldAddr, points to is a field of gorm.DB that a write may
-// change in a pure function: Error, RowsAffected or Config (see
-// writesArgument).
-func validatorIsGormDBStateField(ptr types.Type, i int) bool {
-	if !typeutil.IsGormDB(ptr) {
-		return false
-	}
-	st := ptr.Underlying().(*types.Pointer).Elem().Underlying().(*types.Struct)
-	switch st.Field(i).Name() {
-	case "Error", "RowsAffected", "Config":
+// validatorIsVariable reports whether val is the address of a local
+// variable: its Alloc, or a closure's FreeVar bound to one.
+func validatorIsVariable(val ssa.Value) bool {
+	switch val.(type) {
+	case *ssa.Alloc, *ssa.FreeVar:
 		return true
 	}
 	return false

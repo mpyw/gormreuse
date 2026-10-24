@@ -5,20 +5,29 @@ import "context"
 
 // DB is the main database struct.
 type DB struct {
+	*Config
 	Error        error
 	RowsAffected int64
 	Statement    *Statement
+}
+
+// Config is the configuration that every handle of a connection shares. The
+// stub keeps one of its fields and none of its methods.
+type Config struct {
+	SkipDefaultTransaction bool
 }
 
 // Statement holds the clauses of a query.
 type Statement struct {
 	Table    string
 	DB       *DB
+	Context  context.Context
 	Distinct bool
 	Selects  []string
 	// Clauses holds clause.Clause values in gorm. gorm.go imports no clause
 	// package, so the stub keeps the map only.
-	Clauses map[string]interface{}
+	Clauses  map[string]interface{}
+	Preloads map[string][]interface{}
 }
 
 // AddClause adds a clause to the Statement in place.

@@ -2656,16 +2656,22 @@ func wrap3(db *gorm.DB) func() *gorm.DB {
 A write into its `Statement`, or over the `*gorm.DB` itself, changes its query in place, as `Where` does. This includes:
 
 - a write through a variable that holds the `Statement`, also one a closure captures;
-- a write into a map or a slice that the `Statement` holds, also with `delete`, `clear` or `copy`;
-- a write into a `*gorm.Statement` parameter.
+- a write into a map or a slice that the `Statement` holds, also with `delete`, `clear`, `copy`, or an `append` to a slice of it such as `Selects[:0]`;
+- a write into a `*gorm.Statement` parameter;
+- a write through the `Statement` of a `Session` or `Debug` copy that shares it. A `Session` with `Context`, `PrepareStmt`, `SkipHooks` or `Initialized`, and `WithContext`, clone it.
 
 These may be written:
 
 - The argument's `Error` and `RowsAffected`. They hold the outcome of a query, as `AddError` does.
 - Its `Config`. Every handle of the connection shares it, and it holds no clause.
-- The fields of a local copy of the `*gorm.DB` or of the `Statement`. But the maps and slices of such a copy are still the argument's, so a write into them is reported.
+- The fields of a local copy of the `*gorm.DB` or of the `Statement`. But the maps and slices of such a copy are still the argument's, so a write into them is reported, unless the copy's field was replaced first.
+- A scalar, a string or an interface read from the `Statement`, such as `Table` or `Context`. It is a copy.
 
 Message: `pure function pollutes *gorm.DB argument by writing to it directly`
+
+Handing a map or a slice of the `Statement` to a function that may change it, as in `sort.Strings(db.Statement.Selects)`, is a warning, as passing the argument to a function that is not pure is. `strings` and the reading functions of `slices` and `maps` only read it, and a value boxed for `fmt` is not followed.
+
+Message: `pure function hands the query memory of its *gorm.DB argument to code that may change it`
 
 </td><td>
 
@@ -2682,6 +2688,8 @@ func mark(db *gorm.DB) {
     copied := *db.Statement
     copied.Distinct = true           // OK: a local copy
     copied.Clauses["X"] = c          // reported: the map is shared
+    db.Session(&gorm.Session{}).Statement.Distinct = true // reported: shared
+    sort.Strings(db.Statement.Selects) // warning
 }
 ```
 
@@ -3889,7 +3897,7 @@ func caller(db *gorm.DB) {
 
 The same holds in a closure, as in `func() { tx.Where("a") }()`. It also holds in a helper the function passes the parameter to, as in `applyTenant(tx)`.
 
-A write into the parameter's `Statement` changes it in place too. That includes a write into a map or a slice the `Statement` holds, as in `tx.Statement.Clauses["X"] = c` or `delete(tx.Statement.Clauses, "WHERE")`. It also includes handing such a map or slice to a function, a channel or another map.
+A write into the parameter's `Statement` changes it in place too. That includes a write into a map or a slice the `Statement` holds, as in `tx.Statement.Clauses["X"] = c` or `delete(tx.Statement.Clauses, "WHERE")`. It also includes handing such a map or slice to a function, a channel or another map. A scalar or interface field is a copy, so `log(tx.Statement.Table)` or `tx.Statement.Context.Value(k)` is still a read. The same rules decide this as the [`pure`](#gormreusepure) contract.
 
 </td></tr>
 <tr><td>
@@ -5504,7 +5512,7 @@ gormreuse reports a reuse only when it can follow the value. These cases are kno
 
 | Kind | Cases | Meaning |
 | --- | --- | --- |
-| Missed reuse (false negatives) | 17 | Reuse that is not reported |
+| Missed reuse (false negatives) | 19 | Reuse that is not reported |
 | Extra reports (false positives) | 5 | Safe code that is reported |
 | Wrong position | — | A report on the wrong line |
 | No fix | — | A report without a suggested fix |
@@ -5739,6 +5747,33 @@ load("b") // not reported
 ```
 
 </td><td>A call through the returned func value has no known callee</td></tr>
+<tr><td><!-- fixtures: pswSessionNewDB, pswInferSessionShared -->
+
+A write through the `Statement` of a `Session` copy, with `NewDB` in a pure function, or in a helper inferred `immutable-param`:
+
+```go
+//gormreuse:pure
+func mark(db *gorm.DB) {
+    // not reported
+    db.Session(&gorm.Session{NewDB: true}).Statement.Distinct = true
+}
+```
+
+</td><td>gorm keeps the <code>Statement</code> for <code>NewDB</code>, but gormreuse takes it as isolated. The inference reads only the parameter's own fields</td></tr>
+<tr><td><!-- fixtures: pswBoxedHandedOn -->
+
+A pure function that hands the Statement's map, boxed in an interface, to a function that writes it:
+
+```go
+func fill(v any) { v.(map[string]interface{})["X"] = 1 }
+
+//gormreuse:pure
+func mark(db *gorm.DB) {
+    fill(db.Statement.Clauses) // not reported
+}
+```
+
+</td><td>A value boxed in an interface is followed only into a type assertion in the same function</td></tr>
 </table>
 
 </details>

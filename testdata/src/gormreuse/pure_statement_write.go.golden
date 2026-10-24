@@ -1,6 +1,14 @@
 package internal
 
-import "gorm.io/gorm"
+import (
+	"context"
+	"fmt"
+	"slices"
+	"sort"
+	"strings"
+
+	"gorm.io/gorm"
+)
 
 // =============================================================================
 // PURE FUNCTIONS THAT WRITE TO THE ARGUMENT DIRECTLY (#405)
@@ -182,6 +190,185 @@ func pswOverwriteFrom(a, b *gorm.DB) {
 	*a = *b // want `pure function leaks \*gorm\.DB argument via store through a pointer`
 }
 
+// pswSessionShared writes the Statement of a Session or Debug copy, which
+// shares the argument's Statement (#405 review).
+//
+//gormreuse:pure
+func pswSessionShared(db *gorm.DB) {
+	x := db.Session(&gorm.Session{})
+	x.Statement.Distinct = true                                  // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
+	db.Session(&gorm.Session{}).Statement.Clauses["X"] = 1       // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
+	db.Debug().Statement.Selects = nil                           // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
+	db.Session(&gorm.Session{DryRun: true}).Statement.Table = "" // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
+}
+
+// pswAppendResliced appends to a slice of the Statement's Selects, which
+// overwrites its elements in place.
+//
+//gormreuse:pure
+func pswAppendResliced(db *gorm.DB) {
+	_ = append(db.Statement.Selects[:0], "x") // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
+}
+
+// pswConvertedSlice writes through a slice converted to an array pointer, and
+// through a map boxed in an interface and asserted back.
+//
+//gormreuse:pure
+func pswConvertedSlice(db *gorm.DB) {
+	(*[1]string)(db.Statement.Selects)[0] = "x" // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
+	var m any = db.Statement.Clauses
+	m.(map[string]interface{})["X"] = 1 // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
+}
+
+// pswHandsOnMemory hands the Statement's map and slice to functions that may
+// change them. It is a warning, as passing the argument to a function that is
+// not pure is, so callers still trust it.
+//
+//gormreuse:pure
+func pswHandsOnMemory(db *gorm.DB) {
+	pswFill(db.Statement.Clauses)      // want `pure function hands the query memory of its \*gorm\.DB argument to code that may change it`
+	sort.Strings(db.Statement.Selects) // want `pure function hands the query memory of its \*gorm\.DB argument to code that may change it`
+}
+
+// pswCapturedLocalCopy writes the shared map of a local copy in a closure.
+//
+//gormreuse:pure
+func pswCapturedLocalCopy(db *gorm.DB) {
+	c := *db.Statement
+	func() {
+		c.Clauses["X"] = 1 // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
+	}()
+}
+
+// pswReplacedLater replaces the copy's map only after the write, so the write
+// reaches the argument.
+//
+//gormreuse:pure
+func pswReplacedLater(db *gorm.DB, cond bool) {
+	c := *db.Statement
+	if cond {
+		c.Clauses = map[string]interface{}{}
+	}
+	c.Clauses["X"] = 1 // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
+}
+
+// pswSessionNewDB writes the Statement of a NewDB Session, which gorm does
+// not clone either. The Session config reader takes NewDB as isolating,
+// which holds for a chain on the copy, not for a write to its Statement.
+// [LIMITATION]
+//
+//gormreuse:pure
+func pswSessionNewDB(db *gorm.DB) {
+	db.Session(&gorm.Session{NewDB: true}).Statement.Distinct = true
+}
+
+// pswBoxedHandedOn hands the Statement's map, boxed in an interface, to a
+// function that asserts it back and writes it. A boxed value is followed only
+// into a type assertion in the function.
+// [LIMITATION]
+//
+//gormreuse:pure
+func pswBoxedHandedOn(db *gorm.DB) {
+	pswFillAny(db.Statement.Clauses)
+}
+
+func pswFillAny(v any) { v.(map[string]interface{})["X"] = 1 }
+
+// pswPreloads writes the slices that the Statement's Preloads map holds:
+// through a lookup, a comma-ok lookup and a range over the map.
+//
+//gormreuse:pure
+func pswPreloads(db *gorm.DB) {
+	db.Statement.Preloads["A"][0] = 1 // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
+	if v, ok := db.Statement.Preloads["B"]; ok {
+		v[0] = 1 // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
+	}
+	for _, v := range db.Statement.Preloads {
+		v[0] = 1 // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
+	}
+}
+
+// pswBoxedMerged asserts back a map boxed in an interface that a merge may
+// hold.
+//
+//gormreuse:pure
+func pswBoxedMerged(db *gorm.DB, other any, c bool) {
+	var m any = db.Statement.Clauses
+	if c {
+		m = other
+	}
+	m.(map[string]interface{})["X"] = 1 // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
+}
+
+// pswStoredInClosure stores the map into a variable inside a closure, and
+// writes it after.
+//
+//gormreuse:pure
+func pswStoredInClosure(db *gorm.DB) {
+	var c map[string]interface{}
+	func() { c = db.Statement.Clauses }()
+	c["X"] = 1 // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
+}
+
+// pswReplacedInClosure replaces the copy's map in a closure, which may not
+// run before the write, and pswReplacedAfter only after the write.
+//
+//gormreuse:pure
+func pswReplacedInClosure(db *gorm.DB) {
+	c := *db.Statement
+	func() { c.Clauses = map[string]interface{}{} }()
+	c.Clauses["X"] = 1 // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
+}
+
+//gormreuse:pure
+func pswReplacedAfter(db *gorm.DB) {
+	c := *db.Statement
+	c.Clauses["X"] = 1 // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
+	c.Clauses = nil
+}
+
+// pswLocalArray stores the map into an element of a local array at an index
+// that is not a constant, so a read of any element may be it.
+//
+//gormreuse:pure
+func pswLocalArrayAnyIndex(db *gorm.DB, i int) {
+	var arr [2]map[string]interface{}
+	arr[i] = db.Statement.Clauses
+	arr[0]["X"] = 1 // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
+}
+
+// pswStatementValue writes the map of a gorm.Statement passed by value: the
+// map is still the caller's.
+//
+//gormreuse:pure
+func pswStatementValue(db *gorm.DB, st gorm.Statement) {
+	st.Clauses["X"] = 1 // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
+}
+
+// pswLiteralCall hands the map to a function literal, which may change it.
+//
+//gormreuse:pure
+func pswLiteralCall(db *gorm.DB) {
+	func(m map[string]interface{}) { m["X"] = 1 }(db.Statement.Clauses) // want `pure function hands the query memory of its \*gorm\.DB argument to code that may change it`
+}
+
+// pswCopyByAddress hands the address of a local copy to a function, which
+// reaches the maps the copy shares.
+//
+//gormreuse:pure
+func pswCopyByAddress(db *gorm.DB) {
+	c := *db.Statement
+	pswTakeStatement(&c) // want `pure function passes \*gorm\.DB argument to non-pure function pswTakeStatement`
+}
+
+func pswTakeStatement(st *gorm.Statement) { st.Clauses["X"] = 1 }
+
+func pswCallerHandsOn(db *gorm.DB) {
+	q := db.Where("x")
+	pswHandsOnMemory(q) // a warning keeps the trust
+	q.Find(nil)
+}
+
 // pswCallerSubquery: mark(sub) changes the subquery that outer reads, as
 // it does without the directive.
 func pswCallerSubquery(db *gorm.DB) {
@@ -265,10 +452,63 @@ func pswRebindPointer(pq **gorm.DB) {
 	*pq = nil
 }
 
+// pswSessionCloned writes the Statement of a Session that clones it: one
+// with Context, SkipHooks or Initialized, or WithContext.
+//
 //gormreuse:pure
-func pswFreshHandle(db *gorm.DB) {
-	x := db.Session(&gorm.Session{})
-	x.Statement.Distinct = true
+func pswSessionCloned(db *gorm.DB, ctx context.Context) {
+	db.Session(&gorm.Session{Context: ctx}).Statement.Distinct = true
+	db.Session(&gorm.Session{SkipHooks: true}).Statement.Distinct = true
+	db.Session(&gorm.Session{Initialized: true}).Statement.Distinct = true
+	db.WithContext(ctx).Statement.Distinct = true
+}
+
+// pswFreshStatement writes a map that the function made, held by a new
+// Statement or by a local copy whose field it replaced first (#405 review).
+//
+//gormreuse:pure
+func pswFreshStatement(db *gorm.DB) {
+	st := &gorm.Statement{DB: db, Clauses: map[string]interface{}{}}
+	st.Clauses["X"] = 1
+	c := *db.Statement
+	c.Clauses = map[string]interface{}{}
+	c.Clauses["X"] = 1
+}
+
+// pswReaders hands the Statement's slice and map to functions that only read
+// them, and boxes them for fmt.
+//
+//gormreuse:pure
+func pswReaders(db *gorm.DB) string {
+	_ = slices.Contains(db.Statement.Selects, "id")
+	_ = append([]string{}, db.Statement.Selects...)
+	fmt.Println(db.Statement.Clauses, db.Statement.Table)
+	return strings.Join(db.Statement.Selects, ",")
+}
+
+// pswScalars hands on and stores scalar and interface fields of the
+// Statement: copies, which writes do not change.
+//
+//gormreuse:pure
+func pswScalars(db *gorm.DB, out *pswOut, m map[string]string, ch chan context.Context) {
+	pswProbeLog(db.Statement.Table)
+	out.Table = db.Statement.Table
+	m["t"] = db.Statement.Table
+	ch <- db.Statement.Context
+	_ = db.Statement.Context.Value("k")
+}
+
+func pswProbeLog(string) {}
+
+type pswOut struct{ Table string }
+
+// pswConfig writes the Config that every handle of the connection shares. It
+// holds no clause.
+//
+//gormreuse:pure
+func pswConfig(db *gorm.DB) {
+	db.Config.SkipDefaultTransaction = true
+	db.SkipDefaultTransaction = false
 }
 
 //gormreuse:pure
@@ -410,6 +650,82 @@ func pswInferReads(db *gorm.DB) {
 	db.Count(nil)
 }
 
+func pswInferSorted(db *gorm.DB) {
+	sort.Strings(db.Statement.Selects)
+	db.Find(nil)
+	db.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+func pswInferAppendResliced(db *gorm.DB) {
+	_ = append(db.Statement.Selects[:0], "x")
+	db.Find(nil)
+	db.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+func pswInferConverted(db *gorm.DB) {
+	(*[1]string)(db.Statement.Selects)[0] = "x"
+	db.Find(nil)
+	db.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+func pswInferBoxed(db *gorm.DB) {
+	var m any = db.Statement.Clauses
+	m.(map[string]interface{})["X"] = 1
+	db.Find(nil)
+	db.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// The helpers below only read scalar and interface fields of the Statement,
+// or hand its slice to a reader. Their writes change copies, so they are
+// inferred as on main, and their reuse is not reported (#405 review).
+func pswInferLogsTable(db *gorm.DB) {
+	pswProbeLog(db.Statement.Table)
+	db.Find(nil)
+	db.Count(nil)
+}
+
+func pswInferPrintsTable(db *gorm.DB) {
+	fmt.Println("t", db.Statement.Table)
+	db.Find(nil)
+	db.Count(nil)
+}
+
+func pswInferStoresTable(db *gorm.DB, out *pswOut) {
+	out.Table = db.Statement.Table
+	db.Find(nil)
+	db.Count(nil)
+}
+
+func pswInferMapsTable(db *gorm.DB, m map[string]string) {
+	m["t"] = db.Statement.Table
+	db.Find(nil)
+	db.Count(nil)
+}
+
+func pswInferContext(db *gorm.DB) {
+	ctx := db.Statement.Context
+	_ = ctx.Value("k")
+	db.Find(nil)
+	db.Count(nil)
+}
+
+func pswInferJoins(db *gorm.DB) {
+	_ = strings.Join(db.Statement.Selects, ",")
+	_ = slices.Index(db.Statement.Selects, "id")
+	db.Find(nil)
+	db.Count(nil)
+}
+
+// pswInferSessionShared writes the Statement of a Session copy of its
+// parameter, which is the parameter's. The inference reads the fields of the
+// parameter itself only.
+// [LIMITATION]
+func pswInferSessionShared(db *gorm.DB) {
+	db.Session(&gorm.Session{}).Statement.Distinct = true
+	db.Find(nil)
+	db.Count(nil)
+}
+
 func pswInferCallers(db *gorm.DB) {
 	pswInferClauses(db.Session(&gorm.Session{}))
 	pswInferSelectsElem(db.Session(&gorm.Session{}))
@@ -427,4 +743,15 @@ func pswInferCallers(db *gorm.DB) {
 	pswInferReadsCopy(db.Session(&gorm.Session{}))
 	pswInferReadsInClosure(db.Session(&gorm.Session{}))
 	pswInferReadsInLoop(db.Session(&gorm.Session{}))
+	pswInferSorted(db.Session(&gorm.Session{}))
+	pswInferAppendResliced(db.Session(&gorm.Session{}))
+	pswInferConverted(db.Session(&gorm.Session{}))
+	pswInferBoxed(db.Session(&gorm.Session{}))
+	pswInferLogsTable(db.Session(&gorm.Session{}))
+	pswInferPrintsTable(db.Session(&gorm.Session{}))
+	pswInferStoresTable(db.Session(&gorm.Session{}), nil)
+	pswInferMapsTable(db.Session(&gorm.Session{}), nil)
+	pswInferContext(db.Session(&gorm.Session{}))
+	pswInferJoins(db.Session(&gorm.Session{}))
+	pswInferSessionShared(db.Session(&gorm.Session{}))
 }

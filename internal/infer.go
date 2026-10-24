@@ -13,6 +13,7 @@ import (
 	"github.com/mpyw/gormreuse/internal/ssa/callsite"
 	"github.com/mpyw/gormreuse/internal/ssa/origin"
 	"github.com/mpyw/gormreuse/internal/ssa/purity"
+	"github.com/mpyw/gormreuse/internal/ssa/stmtwrite"
 	"github.com/mpyw/gormreuse/internal/ssa/tracer"
 	"github.com/mpyw/gormreuse/internal/typeutil"
 )
@@ -516,8 +517,9 @@ func inferHoldStep(instr ssa.Instruction, held, vars map[ssa.Value]bool, tree ma
 // as in tx.Error or tx.Dialector. The Statement is a pointer that a write
 // through it changes in place, so only the reads of its own fields count, as
 // in tx.Statement.Context. A field of the Statement that is a map, a slice or
-// a pointer is shared with it, so a write through one (#405), as in
-// tx.Statement.Clauses["X"] = c, is a change too.
+// a handle is shared with it, so a write through one (#405), as in
+// tx.Statement.Clauses["X"] = c, is a change too. stmtwrite decides it, as it
+// does for the pure contract.
 func inferReadsField(fa *ssa.FieldAddr) bool {
 	ptr, ok := fa.X.Type().Underlying().(*types.Pointer)
 	if !ok {
@@ -533,86 +535,10 @@ func inferReadsField(fa *ssa.FieldAddr) bool {
 			field, isField := ref.(*ssa.FieldAddr)
 			_, debug := ref.(*ssa.DebugRef)
 			return !debug && (!isField || !inferOnlyLoads(field, func(load *ssa.UnOp) bool {
-				return !inferWritesThrough(load, map[ssa.Value]bool{})
+				return stmtwrite.FromValue(load) == stmtwrite.None
 			}))
 		})
 	})
-}
-
-// inferWritesThrough reports whether a value read from the Statement, such as
-// its Clauses map or its Selects slice, may be written through: a map update,
-// a store into an element or a field it points to, or a delete, clear or copy
-// of it. It follows the value into slices, map lookups, merges, local
-// variables and closures that capture it. A call that is not a builtin may
-// write it, and so may code it is sent or stored to.
-func inferWritesThrough(v ssa.Value, seen map[ssa.Value]bool) bool {
-	if seen[v] {
-		return false
-	}
-	seen[v] = true
-	return slices.ContainsFunc(*v.Referrers(), func(ref ssa.Instruction) bool {
-		switch ref := ref.(type) {
-		case *ssa.MapUpdate:
-			return true // into it, or it stored in another map
-		case *ssa.Store:
-			if ref.Addr == v {
-				// A store into a local variable that holds the value, as in
-				// c = other, replaces it and writes through nothing.
-				_, variable := v.(*ssa.Alloc)
-				return !variable
-			}
-			alloc, local := ref.Addr.(*ssa.Alloc)
-			return !local || inferWritesThrough(alloc, seen)
-		case *ssa.UnOp:
-			return ref.Op == token.MUL && inferIsReference(ref.Type()) && inferWritesThrough(ref, seen)
-		case *ssa.IndexAddr, *ssa.FieldAddr, *ssa.Index, *ssa.Field, *ssa.Lookup, *ssa.Extract,
-			*ssa.Slice, *ssa.ChangeType, *ssa.MakeInterface, *ssa.Phi:
-			return inferWritesThrough(ref.(ssa.Value), seen)
-		case *ssa.MakeClosure:
-			freeVars := ref.Fn.(*ssa.Function).FreeVars
-			for i, b := range ref.Bindings {
-				if b == v && inferWritesThrough(freeVars[i], seen) {
-					return true
-				}
-			}
-			return false
-		case ssa.CallInstruction:
-			return inferCallWritesThrough(ref, v, seen)
-		case *ssa.Send:
-			return true
-		}
-		return false
-	})
-}
-
-// inferCallWritesThrough reports whether call may write through v, a value
-// read from the Statement that it gets. Of the builtins, delete, clear and
-// copy write their first argument, and append may return v's memory. Any
-// other call may write it.
-func inferCallWritesThrough(call ssa.CallInstruction, v ssa.Value, seen map[ssa.Value]bool) bool {
-	common := call.Common()
-	b, ok := common.Value.(*ssa.Builtin)
-	if !ok {
-		return true
-	}
-	switch b.Name() {
-	case "delete", "clear", "copy":
-		return common.Args[0] == v
-	case "append":
-		result, isValue := call.(*ssa.Call)
-		return isValue && inferWritesThrough(result, seen)
-	}
-	return false
-}
-
-// inferIsReference reports whether a value of type t refers to memory that a
-// write through it changes: a pointer, a map or a slice.
-func inferIsReference(t types.Type) bool {
-	switch t.Underlying().(type) {
-	case *types.Pointer, *types.Map, *types.Slice:
-		return true
-	}
-	return false
 }
 
 // inferOnlyLoads reports whether every use of addr is a load, for which ok,
