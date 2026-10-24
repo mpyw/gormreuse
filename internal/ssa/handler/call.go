@@ -547,7 +547,9 @@ func (u siteUse) handleArgs() {
 	// A pure method may still branch what its receiver holds (#404).
 	call := u.call()
 	if site.Declared != nil && ctx.RootTracer.IsPureFunction(site.Declared) {
-		u.handleHolders(true)
+		if site.Recv != nil {
+			u.handleHolders([]ssa.Value{site.Recv})
+		}
 		return
 	}
 	if call != nil && pollutionsource.IsReadOnlyWrapperCall(call, site) {
@@ -609,7 +611,11 @@ func (u siteUse) handleArgs() {
 		u.branch(roots, pollution.UsageInfo{Block: u.block, Pos: u.pos, Escapes: true, Direct: u.direct(gormArg, roots)}, assigns)
 	}
 
-	u.handleHolders(false)
+	operands := site.Args
+	if site.Recv != nil {
+		operands = append([]ssa.Value{site.Recv}, operands...)
+	}
+	u.handleHolders(operands)
 }
 
 // handleHolders handles the structs that the site hands on, as an argument or
@@ -637,22 +643,16 @@ func (u siteUse) handleArgs() {
 // memory, or packed into a variadic argument is not followed. Neither is a
 // call through an interface, whose receiver is boxed before the call.
 //
-// argsRead is true for a call of a pure function, which only reads its
-// arguments. Its receiver is still handed on (#404).
-func (u siteUse) handleHolders(argsRead bool) {
+// operands are what the site hands on: its receiver and its arguments. A pure
+// function only reads its arguments, so handleArgs passes its receiver alone
+// (#404).
+func (u siteUse) handleHolders(operands []ssa.Value) {
 	site, ctx := u.site, u.ctx
 	if site.IsGormMethod() || isGormStatementMethod(site) {
 		return
 	}
 	if site.Declared != nil && ctx.RootTracer.HasParamReads(site.Declared) {
 		return
-	}
-	operands := site.Args
-	if argsRead {
-		operands = nil
-	}
-	if site.Recv != nil {
-		operands = append([]ssa.Value{site.Recv}, operands...)
 	}
 	// Each held value is branched once, with every root it may hold, as an
 	// argument is. Two fields that hold one root branch it once.
