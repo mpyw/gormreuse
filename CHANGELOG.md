@@ -2,6 +2,14 @@
 
 These notes say what changes for users in each release, and what to do about it. The full commit list of each release is on [GitHub Releases](https://github.com/mpyw/gormreuse/releases). Releases up to 0.22.0 have their notes there only.
 
+## Unreleased
+
+### Changed
+
+| Change | Effect |
+| --- | --- |
+| A pass without the inspect or the ctrlflow result returns `ErrNoInspector` or `ErrNoCtrlflow`, in place of panicking | Only a pass built by hand, or an analyzer registered without gormreuse's requirements, sees it. A driver that runs `gormreuse.Analyzer` always gives both results |
+
 ## 0.25.0 (2026-10-25)
 
 ### New diagnostics
