@@ -23,6 +23,7 @@ var limitationKinds = []string{
 	"**Extra reports (false positives)",
 	"**Wrong position",
 	"**No fix",
+	"**Unsafe fix",
 }
 
 // TestKnownLimitationsListed keeps the Known Limitations section of

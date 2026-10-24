@@ -103,7 +103,29 @@ type UsageInfo struct {
 	// the other with no run of that call in between (#375). Direct is only
 	// meaningful for the first root of the use's value.
 	Direct bool
+
+	// PureReceiver is set on the branch that a //gormreuse:pure method makes
+	// of what its receiver holds (#404), and says how the call runs. The
+	// pure check does not cover the receiver, so the method may change the
+	// root in place. The fix generator reads it (see the fix package).
+	PureReceiver PureReceiverKind
 }
+
+// PureReceiverKind says whether a use is the branch a //gormreuse:pure method
+// makes through its receiver (#404), and how the call runs.
+type PureReceiverKind uint8
+
+const (
+	// NotPureReceiver is any other use.
+	NotPureReceiver PureReceiverKind = iota
+	// PureReceiverCall is a plain call, also through a method value.
+	PureReceiverCall
+	// PureReceiverGo is a go statement, which runs alongside the uses after
+	// it.
+	PureReceiverGo
+	// PureReceiverDefer is a defer statement, which runs after every use.
+	PureReceiverDefer
+)
 
 // aliasUse is a use of a Session/Debug copy, with the position of the call
 // that took the copy. When argument is set, it is a use of a chain that holds
@@ -769,9 +791,26 @@ func rootPos(root ssa.Value) token.Pos {
 // no such use, only branches in go and defer statements, has its first
 // branch among those, recorded before the one reported (#309). They are not
 // ordered by position, so they count only then.
+//
+// The branch a pure method makes through its receiver (#404) is left out, so
+// a report that main gave names the same first branch. It is named only when
+// no other use is a candidate, by the same rules, as in `r.list(nil); go
+// q.Find(nil)`.
 func (t *Tracker) firstBranchPos(root ssa.Value) token.Pos {
+	if best := t.firstBranchAmong(root, false); best.IsValid() {
+		return best
+	}
+	return t.firstBranchAmong(root, true)
+}
+
+// firstBranchAmong is firstBranchPos over the uses of root, with the branches
+// of pure methods through their receivers when pure is set.
+func (t *Tracker) firstBranchAmong(root ssa.Value, pure bool) token.Pos {
 	best := token.NoPos
 	earliest := func(u UsageInfo) {
+		if u.PureReceiver != NotPureReceiver && !pure {
+			return
+		}
 		if u.Pos.IsValid() && (!best.IsValid() || u.Pos < best) {
 			best = u.Pos
 		}

@@ -544,9 +544,15 @@ func (u siteUse) handleArgs() {
 	// Check if this is a pure function - pure functions don't pollute args.
 	// Neither does a wrapper such as sql.Named("s", sub) whose result is only
 	// a read-only argument: the method that takes it reads sub (#253).
+	// A pure method may still branch what its receiver holds (#404).
 	call := u.call()
-	if site.Declared != nil && ctx.RootTracer.IsPureFunction(site.Declared) ||
-		call != nil && pollutionsource.IsReadOnlyWrapperCall(call, site) {
+	if site.Declared != nil && ctx.RootTracer.IsPureFunction(site.Declared) {
+		if site.Recv != nil {
+			u.handleHolders([]ssa.Value{site.Recv}, pollution.UsageInfo{Block: u.block, Pos: u.pos, Escapes: true, PureReceiver: pureReceiverKind(site.Instr)})
+		}
+		return
+	}
+	if call != nil && pollutionsource.IsReadOnlyWrapperCall(call, site) {
 		return
 	}
 
@@ -605,7 +611,23 @@ func (u siteUse) handleArgs() {
 		u.branch(roots, pollution.UsageInfo{Block: u.block, Pos: u.pos, Escapes: true, Direct: u.direct(gormArg, roots)}, assigns)
 	}
 
-	u.handleHolders()
+	operands := site.Args
+	if site.Recv != nil {
+		operands = append([]ssa.Value{site.Recv}, operands...)
+	}
+	u.handleHolders(operands, pollution.UsageInfo{Block: u.block, Pos: u.pos, Escapes: true})
+}
+
+// pureReceiverKind returns how instr, a call of a pure method, runs (see
+// pollution.PureReceiverKind).
+func pureReceiverKind(instr ssa.CallInstruction) pollution.PureReceiverKind {
+	switch instr.(type) {
+	case *ssa.Go:
+		return pollution.PureReceiverGo
+	case *ssa.Defer:
+		return pollution.PureReceiverDefer
+	}
+	return pollution.PureReceiverCall
 }
 
 // handleHolders handles the structs that the site hands on, as an argument or
@@ -620,28 +642,30 @@ func (u siteUse) handleArgs() {
 // These are the hand-offs that -fix already takes as escapes (#310): a
 // struct, its address, or a copy of it passed to a call, also boxed in an
 // interface or as the receiver of a method value. A gorm method only reads a
-// struct it is passed, and so does a pure function, or a static call to a
-// package that does not reach gorm and gets no function. So does a method of
-// gorm.Statement, as in `stmt := &gorm.Statement{DB: db}; stmt.Parse(&User{})`:
+// struct it is passed, and so does a pure function as an argument, but not as
+// its receiver, which the pure check does not cover (#404). So does a static
+// call to a package that does not reach gorm and gets no function. So does a
+// method of gorm.Statement, as in
+// `stmt := &gorm.Statement{DB: db}; stmt.Parse(&User{})`:
 // it reads only the configuration of stmt.DB, such as its Dialector and
 // NamingStrategy, and calls AddError, which changes no clause. So does a getter
 // whose call is traced as the field it returns (RootTracer.HasParamReads,
 // #342): `r.DB().Find(&a)` is one branch of what r.db holds, at the Find. A
-// struct sent on a
-// channel, stored in a slice, a map or another variable's memory, or packed
-// into a variadic argument is not followed. Neither is a call through an
-// interface, whose receiver is boxed before the call.
-func (u siteUse) handleHolders() {
+// struct sent on a channel, stored in a slice, a map or another variable's
+// memory, or packed into a variadic argument is not followed. Neither is a
+// call through an interface, whose receiver is boxed before the call.
+//
+// operands are what the site hands on: its receiver and its arguments. A pure
+// function only reads its arguments, so handleArgs passes its receiver alone,
+// and marks the branch it makes (pollution.UsageInfo.PureReceiver, #404). use
+// is the branch each held root gets.
+func (u siteUse) handleHolders(operands []ssa.Value, use pollution.UsageInfo) {
 	site, ctx := u.site, u.ctx
 	if site.IsGormMethod() || isGormStatementMethod(site) {
 		return
 	}
-	if site.Declared != nil && (ctx.RootTracer.IsPureFunction(site.Declared) || ctx.RootTracer.HasParamReads(site.Declared)) {
+	if site.Declared != nil && ctx.RootTracer.HasParamReads(site.Declared) {
 		return
-	}
-	operands := site.Args
-	if site.Recv != nil {
-		operands = append([]ssa.Value{site.Recv}, operands...)
 	}
 	// Each held value is branched once, with every root it may hold, as an
 	// argument is. Two fields that hold one root branch it once.
@@ -663,7 +687,6 @@ func (u siteUse) handleHolders() {
 	if len(held) == 0 || !holderCalleeReachesGorm(site) {
 		return
 	}
-	use := pollution.UsageInfo{Block: u.block, Pos: u.pos, Escapes: true}
 	for _, roots := range held {
 		u.branch(roots, use, func(ssa.Value) bool { return false })
 	}
