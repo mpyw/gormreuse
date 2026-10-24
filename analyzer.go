@@ -43,6 +43,7 @@
 package gormreuse
 
 import (
+	"errors"
 	"go/ast"
 	"slices"
 	"strings"
@@ -88,8 +89,23 @@ var Analyzer = &analysis.Analyzer{
 	Run:       run,
 }
 
+// ErrNoInspector is returned when the pass carries no inspect result, which
+// means the analyzer was registered without its requirement.
+var ErrNoInspector = errors.New("gormreuse: inspect result missing")
+
+// ErrNoCtrlflow is returned when the pass carries no ctrlflow result, which
+// means the analyzer was registered without its requirement. The SSA that
+// gormreuse builds reads it.
+var ErrNoCtrlflow = errors.New("gormreuse: ctrlflow result missing")
+
 func run(pass *analysis.Pass) (any, error) {
-	insp := pass.ResultOf[inspect.Analyzer].(*inspector.Inspector)
+	insp, ok := pass.ResultOf[inspect.Analyzer].(*inspector.Inspector)
+	if !ok {
+		return nil, ErrNoInspector
+	}
+	if _, ok := pass.ResultOf[ctrlflow.Analyzer].(*ctrlflow.CFGs); !ok {
+		return nil, ErrNoCtrlflow
+	}
 
 	// Report the diagnostics in position order, so that -json output is the
 	// same on every run (#273).
@@ -156,7 +172,7 @@ func run(pass *analysis.Pass) (any, error) {
 	}
 
 	// Run SSA-based analysis
-	internal.RunSSA(pass, ssaInfo, ignores, pureFuncs, immutableReturnFuncs, immutableParamFuncs, immutableInputSet, skipFiles)
+	internal.RunSSA(pass, insp, ssaInfo, ignores, pureFuncs, immutableReturnFuncs, immutableParamFuncs, immutableInputSet, skipFiles)
 
 	return nil, nil
 }

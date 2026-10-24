@@ -43,6 +43,7 @@ import (
 
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/analysis/passes/buildssa"
+	"golang.org/x/tools/go/ast/inspector"
 	"golang.org/x/tools/go/ssa"
 
 	"github.com/mpyw/gormreuse/internal/directive"
@@ -81,6 +82,7 @@ import (
 // unused.
 func RunSSA(
 	pass *analysis.Pass,
+	insp *inspector.Inspector,
 	ssaInfo *buildssa.SSA,
 	ignores *directive.Ignores,
 	pureFuncs, immutableReturnFuncs, immutableParamFuncs *directive.DirectiveFuncSet,
@@ -294,7 +296,7 @@ func RunSSA(
 	// relies on changing its caller's value, so no fix isolates an argument
 	// to it (#346).
 	discardsParam := reportImmutableParamDiscards(funcs, immutableParamFuncs, pureFuncs, skip, report, guard)
-	fixGen := fix.NewGenerator(pass, scopesCallbacks, inputTracer, runCallers(funcs, ssaInfo.Pkg), reportSeesWholePackage(pass), cfgs, discardsParam, func(fn *ssa.Function) []int { return table.Of(fn).FinisherOnly }, inferImmutableParamRule(changesInPlace, inputTracer, immutableParamFuncs, globals))
+	fixGen := fix.NewGenerator(pass, insp, scopesCallbacks, inputTracer, runCallers(funcs, ssaInfo.Pkg), reportSeesWholePackage(pass), cfgs, discardsParam, func(fn *ssa.Function) []int { return table.Of(fn).FinisherOnly }, inferImmutableParamRule(changesInPlace, inputTracer, immutableParamFuncs, globals))
 
 	// Determine which //gormreuse:immutable-param functions actually rely on
 	// immutability — they would reuse a *gorm.DB parameter if it were treated as

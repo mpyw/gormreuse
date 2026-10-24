@@ -3,9 +3,14 @@
 package gormreuse
 
 import (
+	"errors"
 	"go/parser"
 	"go/token"
 	"testing"
+
+	"golang.org/x/tools/go/analysis"
+	"golang.org/x/tools/go/analysis/passes/inspect"
+	"golang.org/x/tools/go/ast/inspector"
 
 	"github.com/mpyw/gormreuse/internal"
 )
@@ -40,5 +45,24 @@ func TestIsGeneratedFile(t *testing.T) {
 				t.Errorf("isGeneratedFile() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestRunWithoutResults checks that a pass missing a required result gets
+// an error, not a panic.
+func TestRunWithoutResults(t *testing.T) {
+	tests := []struct {
+		name     string
+		resultOf map[*analysis.Analyzer]any
+		want     error
+	}{
+		{"no inspect", map[*analysis.Analyzer]any{}, ErrNoInspector},
+		{"no ctrlflow", map[*analysis.Analyzer]any{inspect.Analyzer: inspector.New(nil)}, ErrNoCtrlflow},
+	}
+	for _, tt := range tests {
+		pass := &analysis.Pass{Fset: token.NewFileSet(), ResultOf: tt.resultOf}
+		if _, err := run(pass); !errors.Is(err, tt.want) {
+			t.Errorf("%s: got %v, want %v", tt.name, err, tt.want)
+		}
 	}
 }
