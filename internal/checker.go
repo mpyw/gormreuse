@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"cmp"
 	"slices"
 
 	"golang.org/x/tools/go/analysis"
@@ -126,6 +127,12 @@ func (c *checker) report(violations []pollution.Violation) {
 			}
 		}
 		if len(reuse) > 0 {
+			// A report that holds only because of a pure method's receiver
+			// branch (#404) comes after one that holds without it, so the
+			// diagnostic keeps the text it had before #404.
+			slices.SortStableFunc(reuse, func(a, b pollution.Violation) int {
+				return cmp.Compare(checkerBoolInt(a.FromPureReceiver), checkerBoolInt(b.FromPureReceiver))
+			})
 			c.reportViolation(reuse[0], func() []analysis.SuggestedFix {
 				var fixes []analysis.SuggestedFix
 				for _, fv := range fixFor {
@@ -172,4 +179,12 @@ func (c *checker) reportViolation(v pollution.Violation, fixes func() []analysis
 		Message:        v.Message,
 		SuggestedFixes: suggestedFixes,
 	})
+}
+
+// checkerBoolInt returns 1 for true and 0 for false, to sort by a flag.
+func checkerBoolInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }

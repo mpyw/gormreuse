@@ -280,6 +280,19 @@ var growthCases = []growthCase{
 		b.WriteString("}\n")
 		return []string{b.String()}
 	}},
+	// n calls of a pure method whose receiver holds the root, each followed by
+	// a query on it (#404). Each call is a branch, and the uses of one block
+	// are ordered by their instructions, which are indexed once per block.
+	{name: "purereceivers", limit: growthNearLinear, shape: func(n int) []string {
+		var b strings.Builder
+		b.WriteString("type repo struct{ db *gorm.DB }\n\n//gormreuse:pure\nfunc (r repo) list(x int) int { return x }\n\n")
+		b.WriteString("func f(db *gorm.DB) {\n\tq := db.Where(\"x\")\n\tr := repo{db: q}\n")
+		for i := range n {
+			fmt.Fprintf(&b, "\tr.list(%d)\n\tq.Where(\"c%d\").Find(nil)\n", i, i)
+		}
+		b.WriteString("}\n")
+		return []string{b.String()}
+	}},
 	// n uses of one root in separate blocks.
 	{name: "usesbr", limit: growthQuadratic, shape: func(n int) []string {
 		var b strings.Builder

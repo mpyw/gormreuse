@@ -170,6 +170,10 @@ type Tracker struct {
 	// PollutedBefore, which does consult this map.
 	branchUses map[ssa.Value][]UsageInfo
 
+	// callIndex holds, for each block, the index of each call by its
+	// position (see instrIndex).
+	callIndex map[*ssa.BasicBlock]map[token.Pos]int
+
 	// aliasUses maps roots to uses of a Session/Debug copy that shares the
 	// root's Statement (#174). Such a use reads the Statement as it is at that
 	// moment, so any earlier in-place change to the root leaks into it: a
@@ -414,9 +418,16 @@ func (t *Tracker) DetectViolations() {
 	// report.
 	for _, root := range sortedRoots(t, t.aliasUses) {
 		changes := slices.Concat(t.pollutingUses[root], t.assignmentUses[root])
+		// The changes that were uses before #404 come first, so a report
+		// cites the change it cited before. A pure method's receiver branch
+		// is cited only when no other change explains the report.
+		otherChanges := withoutPureReceiver(slices.Clone(changes))
 		argumentReads := make(map[token.Pos]Violation)
 		for _, use := range t.aliasUses[root] {
-			change, ok := t.earlierReaching(changes, use.UsageInfo, use.copyPos)
+			change, ok := t.earlierReaching(otherChanges, use.UsageInfo, use.copyPos)
+			if !ok {
+				change, ok = t.earlierReaching(changes, use.UsageInfo, use.copyPos)
+			}
 			switch {
 			case !ok:
 			case !use.argument:
@@ -844,9 +855,11 @@ func (t *Tracker) firstBranchPos(root ssa.Value, target UsageInfo, fromPure bool
 		return t.firstBranchAmong(root, true)
 	}
 	best := token.NoPos
-	for _, u := range slices.Concat(t.pollutingUses[root], t.branchUses[root]) {
-		if u.Pos.IsValid() && (u.Pos != target.Pos || u.Block != target.Block) && runsBefore(u, target) && t.reaches(root, u, target) && (!best.IsValid() || u.Pos < best) {
-			best = u.Pos
+	for _, uses := range [][]UsageInfo{t.pollutingUses[root], t.branchUses[root]} {
+		for _, u := range uses {
+			if u.Pos.IsValid() && (!best.IsValid() || u.Pos < best) && (u.Pos != target.Pos || u.Block != target.Block) && t.runsBefore(u, target) && t.reaches(root, u, target) {
+				best = u.Pos
+			}
 		}
 	}
 	if best.IsValid() {
@@ -861,9 +874,9 @@ func (t *Tracker) firstBranchPos(root ssa.Value, target UsageInfo, fromPure bool
 // argument is evaluated before the call that takes it, as r.list(nil) is
 // before the q.Where of q.Where("a", r.list(nil)), though it comes later in
 // the source.
-func runsBefore(a, b UsageInfo) bool {
+func (t *Tracker) runsBefore(a, b UsageInfo) bool {
 	if (a.PureReceiver || b.PureReceiver) && a.Block != nil && a.Block == b.Block {
-		if ia, ib := instrIndex(a), instrIndex(b); ia >= 0 && ib >= 0 {
+		if ia, ib := t.instrIndex(a), t.instrIndex(b); ia >= 0 && ib >= 0 {
 			return ia < ib
 		}
 	}
@@ -872,12 +885,27 @@ func runsBefore(a, b UsageInfo) bool {
 
 // instrIndex returns the index in use.Block of the call that use is, or -1
 // when the use has no call at its position there, as a use ordered at the
-// call site of its closure (#68).
-func instrIndex(use UsageInfo) int {
-	return slices.IndexFunc(use.Block.Instrs, func(instr ssa.Instruction) bool {
-		_, call := instr.(ssa.CallInstruction)
-		return call && instr.Pos() == use.Pos
-	})
+// call site of its closure (#68). The calls of each block are indexed once.
+func (t *Tracker) instrIndex(use UsageInfo) int {
+	calls, ok := t.callIndex[use.Block]
+	if !ok {
+		calls = make(map[token.Pos]int)
+		for i, instr := range use.Block.Instrs {
+			if _, call := instr.(ssa.CallInstruction); call {
+				if _, seen := calls[instr.Pos()]; !seen {
+					calls[instr.Pos()] = i
+				}
+			}
+		}
+		if t.callIndex == nil {
+			t.callIndex = make(map[*ssa.BasicBlock]map[token.Pos]int)
+		}
+		t.callIndex[use.Block] = calls
+	}
+	if i, ok := calls[use.Pos]; ok {
+		return i
+	}
+	return -1
 }
 
 // firstBranchAmong is firstBranchPos over the uses of root, with the branches
@@ -920,34 +948,27 @@ func (t *Tracker) getAllUses(root ssa.Value) []UsageInfo {
 // checkViolationsBetween checks if any source use can reach any target use.
 // Returns positions of target uses that are reachable from a source use.
 func (t *Tracker) checkViolationsBetween(targets, sources []UsageInfo, root ssa.Value) {
-	for _, target := range targets {
-		reported, byOther := false, false
-		for _, src := range sources {
-			effort.Step()
-			// Skip self-comparison for same-list checks
-			if src.Pos == target.Pos && src.Block == target.Block {
-				continue
-			}
-
-			// Only report if src runs BEFORE target (see runsBefore)
-			if !runsBefore(src, target) {
-				continue
-			}
-
-			// Check CFG reachability (across closures, at their invocation
-			// sites), on a path that keeps the root of src (#375). A pure
-			// method's receiver branch alone makes a new report (#404), so
-			// the search goes on for another source.
-			if t.reaches(root, src, target) {
-				reported = true
-				if !src.PureReceiver && !target.PureReceiver {
-					byOther = true
-					break
-				}
-			}
+	// A source that runs before target and reaches it, on a path that keeps
+	// the root of src (#375), across closures at their invocation sites.
+	reaching := func(src, target UsageInfo) bool {
+		effort.Step()
+		// Skip self-comparison for same-list checks
+		if src.Pos == target.Pos && src.Block == target.Block {
+			return false
 		}
-		if reported {
-			t.addViolationWithContext(target, root, !byOther)
+		return t.runsBefore(src, target) && t.reaches(root, src, target)
+	}
+	for _, target := range targets {
+		// The sources that were uses before #404 come first, so a report that
+		// holds without a pure method's receiver branch is found as it was,
+		// and stops the search at the same source. Only then may such a
+		// branch make a report of its own (Violation.FromPureReceiver).
+		if !target.PureReceiver && slices.ContainsFunc(sources, func(src UsageInfo) bool { return !src.PureReceiver && reaching(src, target) }) {
+			t.addViolationWithContext(target, root, false)
+			continue
+		}
+		if slices.ContainsFunc(sources, func(src UsageInfo) bool { return (src.PureReceiver || target.PureReceiver) && reaching(src, target) }) {
+			t.addViolationWithContext(target, root, true)
 		}
 	}
 }

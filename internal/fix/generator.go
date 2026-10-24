@@ -165,6 +165,12 @@ func (g *Generator) Generate(v pollution.Violation) []analysis.SuggestedFix {
 	if root == nil {
 		return nil // Cannot fix without root information
 	}
+	// A root with a report that holds only because of a pure method's
+	// receiver branch gets no fix, not even the immutable-param directive
+	// (#404, pollution.Violation.PureReceiverReport).
+	if v.PureReceiverReport {
+		return nil
+	}
 
 	// A parameter root has no definition site to Session(). When every caller
 	// is known and passes an isolated value, the fix declares the function

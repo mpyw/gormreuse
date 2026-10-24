@@ -1,6 +1,6 @@
 --- pure_receiver.go	1970-01-01 00:00:00
 +++ pure_receiver.go.golden	1970-01-01 00:00:00
-@@ -1,420 +1,420 @@
+@@ -1,468 +1,469 @@
  package internal
  
  import (
@@ -280,6 +280,56 @@
  		q.Find(nil)
  		q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root \(root at pure_receiver\.go:265, first branch at pure_receiver\.go:271\); make the root immutable with \.Session`
  	}
+ }
+ 
+ func prHandBoth(a, b *gorm.DB) {
+ 	a.Find(nil)
+ 	b.Find(nil)
+ }
+ 
+ // prSamePositionKept: prHandBoth(s, q) is a report of q that main gave,
+ // and a report of s that only the pure call explains. The diagnostic keeps
+ // main's text, about q.
++//gormreuse:immutable-param
+ func prSamePositionKept(db *gorm.DB) {
+ 	s := db.Where("s")
+-	q := db.Where("q") // want `\*gorm\.DB reused: second branch from mutable root`
++	q := db.Where("q").Session(&gorm.Session{}) // want `\*gorm\.DB reused: second branch from mutable root`
+ 	r := prRepo{db: s}
+ 	r.list(nil)
+ 	q.Find(nil)
+ 	prHandBoth(s, q) // want `\*gorm\.DB reused: second branch from mutable root \(root at pure_receiver\.go:286, first branch at pure_receiver\.go:289\); make the root immutable with \.Session`
+ }
+ 
+ // prAliasChangeKept: the copy's report cites q.Where("b"), as main did, not
+ // the pure call before it.
+ func prAliasChangeKept(db *gorm.DB) {
+ 	q := db.Where("a")
+ 	c := q.Session(&gorm.Session{})
+ 	r := prRepo{db: q}
+ 	r.list(nil)
+ 	q.Where("b") // want `\*gorm\.DB reused: second branch from mutable root`
+ 	c.Find(nil)  // want `\*gorm\.DB reused: Session/Debug copy shares the Statement of a mutable root \(root at pure_receiver\.go:296, changed at pure_receiver\.go:300\)`
+ }
+ 
+ // prParamRootNoFix: a parameter root with a report that only the pure call
+ // explains gets no fix, neither a Session nor a directive.
+ func prParamRootNoFix(db *gorm.DB) {
+ 	r := prRepo{db: db}
+ 	r.list(nil)
+ 	db.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // prParamDirectiveNoFix has no caller, so -fix would declare it
+ // //gormreuse:immutable-param. Its report is new, so it gets no fix at all.
+ func prParamDirectiveNoFix(tx *gorm.DB) {
+ 	r := prRepo{db: tx}
+ 	r.list(nil)
+ 	tx.Create(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ func prParamRootCaller(db *gorm.DB) {
+ 	prParamRootNoFix(db.Session(&gorm.Session{}))
  }
  
  // =============================================================================
