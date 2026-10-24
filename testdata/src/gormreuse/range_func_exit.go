@@ -342,6 +342,49 @@ func rangeFuncExitIIFE2StoreCapturedReturn(db *gorm.DB, seq iter.Seq[int]) func(
 	return nil
 }
 
+// rangeFuncExitErrNilAfterLoop: a nil comparison after the loop is read
+// while the exit is followed, and the use after it is still a second branch.
+func rangeFuncExitErrNilAfterLoop(db *gorm.DB, seq iter.Seq[int]) error {
+	q := db.Where("x")
+	var err error
+	for range seq {
+		err = q.Find(nil).Error
+		break
+	}
+	if err != nil {
+		return err
+	}
+	return q.Count(nil).Error // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// rangeFuncExitPtrNilAfterLoop: the same with a pointer compared with nil.
+func rangeFuncExitPtrNilAfterLoop(db *gorm.DB, seq iter.Seq[int], p *int) {
+	q := db.Where("x")
+	for range seq {
+		q.Find(nil)
+		break
+	}
+	if p == nil {
+		return
+	}
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// rangeFuncExitErrorNilNested: the outer body compares q.Error with nil after
+// the inner loop, then goes on, so the inner use repeats.
+func rangeFuncExitErrorNilNested(db *gorm.DB, outer, inner iter.Seq[int]) {
+	q := db.Where("x")
+	for range outer {
+		for range inner {
+			q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+			break
+		}
+		if q.Error != nil {
+			return
+		}
+	}
+}
+
 // rangeFuncExitHolder holds a closure in a field.
 type rangeFuncExitHolder struct{ f func() }
 

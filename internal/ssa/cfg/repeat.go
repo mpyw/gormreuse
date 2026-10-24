@@ -454,10 +454,12 @@ func repeatExitCode(ret *ssa.Return) (*ssa.FreeVar, int64, bool) {
 	return jump, code, isFree && known
 }
 
-// repeatConstInt returns the value of v when it is an integer constant.
+// repeatConstInt returns the value of v when it is an integer constant. v may
+// be any operand of a comparison after the loop, so it may be a nil constant,
+// whose Value is nil, or a constant of another kind (#399).
 func repeatConstInt(v ssa.Value) (int64, bool) {
 	c, ok := v.(*ssa.Const)
-	if !ok || c.Value.Kind() != constant.Int {
+	if !ok || c.Value == nil || c.Value.Kind() != constant.Int {
 		return 0, false
 	}
 	return constant.Int64Val(c.Value)

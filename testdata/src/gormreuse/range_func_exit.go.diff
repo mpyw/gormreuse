@@ -1,6 +1,6 @@
 --- range_func_exit.go	1970-01-01 00:00:00
 +++ range_func_exit.go.golden	1970-01-01 00:00:00
-@@ -1,554 +1,554 @@
+@@ -1,597 +1,597 @@
  package internal
  
  import (
@@ -369,6 +369,51 @@
  		return f
  	}
  	return nil
+ }
+ 
+ // rangeFuncExitErrNilAfterLoop: a nil comparison after the loop is read
+ // while the exit is followed, and the use after it is still a second branch.
+ func rangeFuncExitErrNilAfterLoop(db *gorm.DB, seq iter.Seq[int]) error {
+-	q := db.Where("x")
++	q := db.Where("x").Session(&gorm.Session{})
+ 	var err error
+ 	for range seq {
+ 		err = q.Find(nil).Error
+ 		break
+ 	}
+ 	if err != nil {
+ 		return err
+ 	}
+ 	return q.Count(nil).Error // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // rangeFuncExitPtrNilAfterLoop: the same with a pointer compared with nil.
+ func rangeFuncExitPtrNilAfterLoop(db *gorm.DB, seq iter.Seq[int], p *int) {
+-	q := db.Where("x")
++	q := db.Where("x").Session(&gorm.Session{})
+ 	for range seq {
+ 		q.Find(nil)
+ 		break
+ 	}
+ 	if p == nil {
+ 		return
+ 	}
+ 	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ }
+ 
+ // rangeFuncExitErrorNilNested: the outer body compares q.Error with nil after
+ // the inner loop, then goes on, so the inner use repeats.
+ func rangeFuncExitErrorNilNested(db *gorm.DB, outer, inner iter.Seq[int]) {
+ 	q := db.Where("x")
+ 	for range outer {
+ 		for range inner {
+ 			q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+ 			break
+ 		}
+ 		if q.Error != nil {
+ 			return
+ 		}
+ 	}
  }
  
  // rangeFuncExitHolder holds a closure in a field.
