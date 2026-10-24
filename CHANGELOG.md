@@ -2,7 +2,7 @@
 
 These notes say what changes for users in each release, and what to do about it. The full commit list of each release is on [GitHub Releases](https://github.com/mpyw/gormreuse/releases). Releases up to 0.22.0 have their notes there only.
 
-## Unreleased
+## 0.25.0 (2026-10-25)
 
 ### New diagnostics
 
