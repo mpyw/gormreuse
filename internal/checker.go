@@ -62,7 +62,9 @@ func newChecker(pass *analysis.Pass, ignores *directive.Ignores, rootTracer *tra
 func (c *checker) analyze(fn *ssa.Function) []pollution.Violation {
 	violations := ssautil.NewAnalyzer(fn, c.rootTracer, c.needsImmutableParam, c.cfgs).Analyze()
 	for _, v := range violations {
-		if v.Root != nil && c.ignores.Covers(v.Pos) {
+		// A report that only a pure method's receiver branch explains (#404)
+		// was not a report before, so ignoring it takes no fix away.
+		if v.Root != nil && !v.FromPureReceiver && c.ignores.Covers(v.Pos) {
 			c.ignoredRoots[v.Root] = true
 		}
 		c.pureReports.add(v, c.ignores.Covers(v.Pos))
@@ -131,7 +133,10 @@ func (c *checker) report(violations []pollution.Violation) {
 				continue
 			}
 			reuse = append(reuse, v)
-			if !slices.ContainsFunc(fixFor, func(f pollution.Violation) bool { return f.Root == v.Root }) {
+			// A root whose only report here needs a pure method's receiver
+			// branch (#404) had no report here before, so this diagnostic
+			// does not carry its fix.
+			if !v.FromPureReceiver && !slices.ContainsFunc(fixFor, func(f pollution.Violation) bool { return f.Root == v.Root }) {
 				fixFor = append(fixFor, v)
 			}
 		}
@@ -142,6 +147,10 @@ func (c *checker) report(violations []pollution.Violation) {
 			slices.SortStableFunc(reuse, func(a, b pollution.Violation) int {
 				return cmp.Compare(checkerBoolInt(a.FromPureReceiver), checkerBoolInt(b.FromPureReceiver))
 			})
+			// The advice of the diagnostic depends on its root's fix (see
+			// reportViolation), so the fix is decided even when this
+			// diagnostic does not carry it.
+			fixOf(reuse[0])
 			c.reportViolation(reuse[0], func() []analysis.SuggestedFix {
 				var fixes []analysis.SuggestedFix
 				for _, fv := range fixFor {

@@ -381,6 +381,68 @@ func prAliasReportNoFix(db *gorm.DB, b bool) {
 	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
+// prHiddenRootFixedAsBefore: use2(q, p) reports q, as before #404, and
+// hides a report of p that only the pure call explains. The diagnostic
+// carries q's fix only, as before.
+func prHiddenRootFixedAsBefore(db1, db2 *gorm.DB, n int) {
+	q := db1.Where("a")
+	p := db2.Where("b")
+	switch n {
+	case 1:
+		p.Where("z")
+	case 2:
+		p.First(nil)
+	default:
+		q.Find(nil)
+		prRepo{db: p}.list(nil)
+		prHandBoth(q, p) // want `\*gorm\.DB reused: second branch from mutable root \(root at pure_receiver\.go:388, first branch at pure_receiver\.go:396\)`
+	}
+}
+
+// prArgumentReadKept: the report of the query that reads sub is the one it
+// was before #404, at x.First, not one that only the pure call on the other
+// path explains.
+func prArgumentReadKept(db, db2 *gorm.DB, c bool) {
+	sub := db.Select("id")
+	x := db2.Where("id IN (?)", sub).Session(&gorm.Session{})
+	if c {
+		prRepo{db: sub}.list(nil)
+		x.Find(nil)
+		return
+	}
+	sub.Where("a").Find(nil)
+	x.First(nil) // want `\*gorm\.DB reused: mutable root passed as a query argument is read when the query runs \(root at pure_receiver\.go:406, changed at pure_receiver\.go:413\)`
+}
+
+type prPair struct{ A, B *gorm.DB }
+
+func prMakePair(db *gorm.DB) prPair {
+	return prPair{db.Where("a"), db.Where("b")} // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// prRootOrderKept: prHandBoth(p.A, p.B) names the root it named before #404.
+// The pure call on the other path does not change which root comes first.
+func prRootOrderKept(db *gorm.DB, c bool) {
+	p := prMakePair(db)
+	if c {
+		prRepo{db: p.B}.list(nil)
+		return
+	}
+	p.A.Find(nil)
+	p.B.Find(nil)
+	prHandBoth(p.A, p.B) // want `\*gorm\.DB reused: second branch from mutable root \(root at pure_receiver\.go:426, first branch at pure_receiver\.go:431\)`
+}
+
+// prIgnoredPureReportFix: the ignore suppresses the report that only the pure
+// call explains. q keeps the fix it had before #404.
+func prIgnoredPureReportFix(db *gorm.DB) {
+	q := db.Where("a")
+	q.Find(nil)
+	q.First(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	r := prRepo{db: q}
+	r.list(nil) //gormreuse:ignore
+}
+
 // =============================================================================
 // UNSAFE FIX: A PURE CALL AFTER A STORE INTO OTHER MEMORY
 //

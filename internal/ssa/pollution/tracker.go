@@ -174,6 +174,10 @@ type Tracker struct {
 	// position (see instrIndex).
 	callIndex map[*ssa.BasicBlock]map[token.Pos]int
 
+	// byPos holds the branches of each root in position order (see
+	// branchesByPos).
+	byPos map[ssa.Value][]UsageInfo
+
 	// aliasUses maps roots to uses of a Session/Debug copy that shares the
 	// root's Statement (#174). Such a use reads the Statement as it is at that
 	// moment, so any earlier in-place change to the root leaks into it: a
@@ -344,7 +348,10 @@ func (t *Tracker) PollutedBefore(root ssa.Value, target UsageInfo, around, may b
 			byOther = byOther || !use.PureReceiver
 		}
 	}
-	for _, use := range slices.Concat(t.pollutingUses[root], t.branchUses[root]) {
+	for _, use := range t.pollutingUses[root] {
+		visit(use)
+	}
+	for _, use := range t.branchUses[root] {
 		visit(use)
 	}
 	if may {
@@ -422,7 +429,12 @@ func (t *Tracker) DetectViolations() {
 		// cites the change it cited before. A pure method's receiver branch
 		// is cited only when no other change explains the report.
 		otherChanges := withoutPureReceiver(slices.Clone(changes))
+		// One report per call that took the argument. A report that a change
+		// other than a pure call explains fills the slot first, so the report
+		// stays as it was before #404. One that only a pure call explains
+		// (#404) fills it only when no other does.
 		argumentReads := make(map[token.Pos]Violation)
+		pureArgumentReads := make(map[token.Pos]Violation)
 		for _, use := range t.aliasUses[root] {
 			change, ok := t.earlierReaching(otherChanges, use.UsageInfo, use.copyPos)
 			var pureRoot ssa.Value
@@ -434,8 +446,15 @@ func (t *Tracker) DetectViolations() {
 			case !ok:
 			case !use.argument:
 				t.violations = append(t.violations, Violation{Pos: use.Pos, Message: t.aliasMessage(root, change.Pos), PureReceiverRoot: pureRoot})
-			case argumentReads[use.copyPos].Pos == token.NoPos || use.Pos < argumentReads[use.copyPos].Pos:
-				argumentReads[use.copyPos] = Violation{Pos: use.Pos, Message: t.argumentMessage(root, change.Pos), PureReceiverRoot: pureRoot}
+			case pureRoot == nil && (argumentReads[use.copyPos].Pos == token.NoPos || use.Pos < argumentReads[use.copyPos].Pos):
+				argumentReads[use.copyPos] = Violation{Pos: use.Pos, Message: t.argumentMessage(root, change.Pos)}
+			case pureRoot != nil && (pureArgumentReads[use.copyPos].Pos == token.NoPos || use.Pos < pureArgumentReads[use.copyPos].Pos):
+				pureArgumentReads[use.copyPos] = Violation{Pos: use.Pos, Message: t.argumentMessage(root, change.Pos), PureReceiverRoot: pureRoot}
+			}
+		}
+		for copyPos, v := range pureArgumentReads {
+			if _, ok := argumentReads[copyPos]; !ok {
+				argumentReads[copyPos] = v
 			}
 		}
 		for _, copyPos := range slices.Sorted(maps.Keys(argumentReads)) {
@@ -563,7 +582,9 @@ func (k *rootOrder) name() {
 func (t *Tracker) earliestUse(root ssa.Value) token.Pos {
 	best := token.NoPos
 	for _, u := range t.getAllUses(root) {
-		if best == token.NoPos || u.Pos < best {
+		// A pure method's receiver branch (#404) was no use before, so it does
+		// not change the order of the roots.
+		if !u.PureReceiver && (best == token.NoPos || u.Pos < best) {
 			best = u.Pos
 		}
 	}
@@ -824,18 +845,30 @@ func (t *Tracker) firstBranchPos(root ssa.Value, target UsageInfo, fromPure bool
 		}
 		return t.firstBranchAmong(root, true)
 	}
-	best := token.NoPos
-	for _, uses := range [][]UsageInfo{t.pollutingUses[root], t.branchUses[root]} {
-		for _, u := range uses {
-			if u.Pos.IsValid() && (!best.IsValid() || u.Pos < best) && (u.Pos != target.Pos || u.Block != target.Block) && t.runsBefore(u, target) && t.reaches(root, u, target) {
-				best = u.Pos
-			}
+	// The uses in position order, so the first that runs before target is
+	// the earliest. They are sorted once per root.
+	for _, u := range t.branchesByPos(root) {
+		if (u.Pos != target.Pos || u.Block != target.Block) && t.runsBefore(u, target) && t.reaches(root, u, target) {
+			return u.Pos
 		}
 	}
-	if best.IsValid() {
-		return best
-	}
 	return t.firstBranchAmong(root, true)
+}
+
+// branchesByPos returns the polluting and branch uses of root with a valid
+// position, in position order (see firstBranchPos). It is computed once per
+// root, after the uses are recorded.
+func (t *Tracker) branchesByPos(root ssa.Value) []UsageInfo {
+	if uses, ok := t.byPos[root]; ok {
+		return uses
+	}
+	uses := slices.DeleteFunc(slices.Concat(t.pollutingUses[root], t.branchUses[root]), func(u UsageInfo) bool { return !u.Pos.IsValid() })
+	slices.SortStableFunc(uses, func(a, b UsageInfo) int { return cmp.Compare(a.Pos, b.Pos) })
+	if t.byPos == nil {
+		t.byPos = make(map[ssa.Value][]UsageInfo)
+	}
+	t.byPos[root] = uses
+	return uses
 }
 
 // runsBefore reports whether use a runs before use b. Uses are ordered by
@@ -928,16 +961,27 @@ func (t *Tracker) checkViolationsBetween(targets, sources []UsageInfo, root ssa.
 		}
 		return t.runsBefore(src, target) && t.reaches(root, src, target)
 	}
-	for _, target := range targets {
-		// The sources that were uses before #404 come first, so a report that
-		// holds without a pure method's receiver branch is found as it was,
-		// and stops the search at the same source. Only then may such a
-		// branch make a report of its own (Violation.FromPureReceiver).
-		if !target.PureReceiver && slices.ContainsFunc(sources, func(src UsageInfo) bool { return !src.PureReceiver && reaching(src, target) }) {
-			t.addViolationWithContext(target, root, false)
-			continue
+	// The sources that were uses before #404 come first, so a report that
+	// holds without a pure method's receiver branch is found as it was, and
+	// stops the search at the same source. Only then may such a branch make a
+	// report of its own (Violation.FromPureReceiver).
+	// The pure branches are searched nearest first: the one that reaches a
+	// use is most often just before it, as in `r.list(nil); q.Find(nil)`.
+	var other, pure []UsageInfo
+	for _, src := range sources {
+		if src.PureReceiver {
+			pure = append(pure, src)
+		} else {
+			other = append(other, src)
 		}
-		if slices.ContainsFunc(sources, func(src UsageInfo) bool { return (src.PureReceiver || target.PureReceiver) && reaching(src, target) }) {
+	}
+	slices.SortStableFunc(pure, func(a, b UsageInfo) int { return cmp.Compare(b.Pos, a.Pos) })
+	for _, target := range targets {
+		reach := func(src UsageInfo) bool { return reaching(src, target) }
+		switch {
+		case !target.PureReceiver && slices.ContainsFunc(other, reach):
+			t.addViolationWithContext(target, root, false)
+		case target.PureReceiver && slices.ContainsFunc(other, reach), slices.ContainsFunc(pure, reach):
 			t.addViolationWithContext(target, root, true)
 		}
 	}
