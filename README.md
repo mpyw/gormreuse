@@ -612,7 +612,7 @@ q.Find(&users)
 
 </td><td>
 
-It may be called elsewhere, and the caller may chain on `q`. A `Scopes` or `Preload` callback that returns `q` counts too. So does a slice, struct or map literal that holds such a literal and is itself passed on, as in `run([]func() *gorm.DB{f})`, and a store into a parameter's map or a global. A literal that returns its own parameter, its own chain, a `Session` copy or an immutable value does not. Neither does one in a container that is reached in any other way, such as `fs := make([]func() *gorm.DB, 1); fs[0] = f; runAll(fs)` (see Known Limitations), or one passed to `fmt` or `log`.
+It may be called elsewhere, and the caller may chain on `q`. A `Scopes` or `Preload` callback that returns `q` counts too, and so does a store into a parameter's map or a global. A container that holds such a literal counts only when the literal is stored straight into it, and the container itself is then passed to a call, sent, or stored into a parameter or a global. These containers count: a slice, struct or map literal, `make` with a non-constant length, `new(T)`, and a `var j T` local whose field is assigned, as in `run([]func() *gorm.DB{f})`. A `make` with a constant length is not followed: go/ssa builds it as an array and a slice of it, and the store goes into the slice. Neither is a container the function returns, one reached in any other way, such as through an element, an `append` or a variable assigned on a branch (see Known Limitations), or one passed to `fmt`, `log` or `testing`. A literal that returns its own parameter, its own chain, a `Session` copy or an immutable value hands nothing on.
 
 </td></tr>
 <tr><td>Type assertion out of an interface</td><td>
@@ -5792,7 +5792,7 @@ q.Find(nil) // not reported
 ```
 
 </td><td>The closure captures no <code>*gorm.DB</code>, so it is not analyzed</td></tr>
-<tr><td><!-- fixtures: crcConstMakeHandedOn, crcConstMakeFieldHandedOn, crcLitSliceIndexedHandedOn, crcPhiSliceHandedOn, crcPhiMapHandedOn, crcAppendThenIndexHandedOn, crcCopyIntoContainerHandedOn, crcCapturedSliceIndexed, crcCallResultSlice, crcAppendParam, crcLocalSliceElemHandedOn, crcLocalSliceResultUsed, crcLocalSliceCaptured, crcLocalSliceInMap, crcLocalStructFieldHandedOn, crcLocalMapCommaOk, crcLocalSliceElemSent, crcAppended, crcPointerElem, crcPointerElemRanged, crcPointerMapElem, crcPointerToVariable, crcMapInSlice, crcElemBoxed, crcOtherPackageStructInSlice, crcArrayInSlice, crcMadeSlice, crcMadeSliceField, crcMadeSliceOfSlices, crcMadeMap, crcReceivedSlice -->
+<tr><td><!-- fixtures: crcConstMakeHandedOn, crcConstMakeFieldHandedOn, crcLitSliceIndexedHandedOn, crcPhiSliceHandedOn, crcPhiMapHandedOn, crcAppendThenIndexHandedOn, crcCopyIntoContainerHandedOn, crcCapturedSliceIndexed, crcCallResultSlice, crcAppendParam, crcLocalSliceElemHandedOn, crcLocalSliceResultUsed, crcLocalSliceCaptured, crcLocalSliceInMap, crcLocalStructFieldHandedOn, crcLocalMapCommaOk, crcLocalSliceElemSent, crcAppended, crcPointerElem, crcPointerElemRanged, crcPointerMapElem, crcPointerToVariable, crcMapInSlice, crcElemBoxed, crcOtherPackageStructInSlice, crcArrayInSlice, crcMadeSlice, crcMadeSliceField, crcMadeSliceOfSlices, crcMadeMap, crcReceivedSlice, crcReturnedSlice -->
 
 A function literal stored into a container that is not handed on directly:
 

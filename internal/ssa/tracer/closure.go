@@ -32,8 +32,12 @@ func (t *RootTracer) ClosureCapturesGormDB(mc *ssa.MakeClosure) bool {
 		if closureHoldsGormDB(binding.Type(), make(map[types.Type]bool)) {
 			return true
 		}
+		vals := closureFuncValues(binding)
+		if len(vals) == 0 {
+			continue
+		}
 		handsOn := closureFreeVarHandedOn(fn.FreeVars[i])
-		if slices.ContainsFunc(closureFuncValues(binding), func(v *ssa.MakeClosure) bool {
+		if slices.ContainsFunc(vals, func(v *ssa.MakeClosure) bool {
 			return t.closureFuncValueCapturesGormDB(v, handsOn)
 		}) {
 			return true

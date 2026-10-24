@@ -570,6 +570,39 @@ func crcNestedArray(db *gorm.DB) {
 	q.Find(nil)
 }
 
+// crcPassedBeforeStore: the struct is passed on before the literal is
+// stored into it, so the literal is not handed on.
+func crcPassedBeforeStore(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x")
+	var j crcJob
+	crcRunJob(j)
+	j.build = func() *gorm.DB { return q }
+	j.build()
+	q.Find(nil)
+}
+
+// crcPassedOnBranchBeforeStore: the same on a branch.
+func crcPassedOnBranchBeforeStore(db *gorm.DB, c bool) {
+	q := db.Session(&gorm.Session{}).Where("x")
+	var j crcJob
+	if c {
+		crcRunJob(j)
+	}
+	j.build = func() *gorm.DB { return q }
+	q.Find(nil)
+}
+
+// crcResetAfterStore: the variable is reset after the literal is stored, so
+// what is passed on does not hold it.
+func crcResetAfterStore(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x")
+	var j crcJob
+	j.build = func() *gorm.DB { return q }
+	q.Find(nil)
+	j = crcJob{}
+	crcRunJob(j)
+}
+
 // crcCapturedFieldLater: the literal returns a field of a captured struct,
 // read where it is handed on. A value stored into the field later is not
 // what was handed on.
@@ -1042,11 +1075,47 @@ func crcSentSlice(db *gorm.DB, ch chan []func() *gorm.DB) {
 	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
-// crcReturnedSlice: a slice literal that holds the literal is returned.
-func crcReturnedSlice(db *gorm.DB) []func() *gorm.DB {
+// crcRunJobP calls the job's builder through a pointer.
+func crcRunJobP(j *crcJob) {
+	j.build().Find(nil)
+}
+
+// crcNewStructHandedOn: new(T) whose field holds the literal is passed on.
+func crcNewStructHandedOn(db *gorm.DB) {
 	q := db.Session(&gorm.Session{}).Where("x")
-	q.Find(nil)
-	return []func() *gorm.DB{func() *gorm.DB { return q }} // want `\*gorm\.DB reused: second branch from mutable root`
+	j := new(crcJob)
+	j.build = func() *gorm.DB { return q }
+	crcRunJobP(j)
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// crcVarStructHandedOn: a local struct variable whose field holds the
+// literal is passed on.
+func crcVarStructHandedOn(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x")
+	var j crcJob
+	j.build = func() *gorm.DB { return q }
+	crcRunJob(j)
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// crcClosureInLoopHandOff: a hand-off in a closure called once per
+// iteration is reported at its own line.
+func crcClosureInLoopHandOff(db *gorm.DB, items []string) {
+	q := db.Session(&gorm.Session{}).Where("x")
+	for range items {
+		h := func() {
+			crcRun(func() *gorm.DB { return q }) // want `\*gorm\.DB reused: second branch from mutable root`
+		}
+		h()
+	}
+}
+
+// crcMapLiteralHandedOn: a map literal that holds the literal is passed on.
+func crcMapLiteralHandedOn(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x")
+	crcRunFuncMap(map[int]func() *gorm.DB{0: func() *gorm.DB { return q }})
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // crcMethodValueInLocalSlice: a method value stored in a local slice is a
@@ -1479,4 +1548,13 @@ func crcReceivedSlice(db *gorm.DB, ch chan []func() *gorm.DB) {
 	fs := <-ch
 	fs[0] = func() *gorm.DB { return q }
 	q.Find(nil)
+}
+
+// crcReturnedSlice: [LIMITATION] a slice literal that holds the literal is
+// returned. A container the function returns is not followed, as a literal
+// it returns is not.
+func crcReturnedSlice(db *gorm.DB) []func() *gorm.DB {
+	q := db.Session(&gorm.Session{}).Where("x")
+	q.Find(nil)
+	return []func() *gorm.DB{func() *gorm.DB { return q }}
 }

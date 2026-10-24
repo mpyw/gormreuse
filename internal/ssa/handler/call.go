@@ -88,9 +88,9 @@ type Context struct {
 	assignMerges map[*ssa.Call][]ssa.Value
 	mergeFree    map[ssa.Value]bool
 
-	// containers memoizes directContainerHandedOn per container: the
+	// containers memoizes directContainerHandOffs per container: the
 	// element stores of one composite literal all ask about it (#397).
-	containers map[ssa.Value]bool
+	containers map[ssa.Value]*containerHandOffs
 
 	// captures keeps what returnedCaptureRoots finds about the function's
 	// literals (#397).
@@ -583,8 +583,17 @@ func (u siteUse) handleArgs() {
 		// A method value such as q.Find hands its receiver on, as a closure
 		// that calls q.Find does (#374). So does a function literal that
 		// returns a captured *gorm.DB (#397).
-		if roots := funcValueRoots(arg, site.Instr, ctx, nil); roots != nil {
-			u.escape(roots)
+		if roots, literal := funcValueRoots(arg, site.Instr, ctx, nil); roots != nil {
+			if literal {
+				// A literal's hand-off keeps its own position, not that of
+				// the call of the closure it is in (#68), so it never takes
+				// the place of a report there.
+				lu := u
+				lu.pos = site.Instr.Pos()
+				lu.escape(roots)
+			} else {
+				u.escape(roots)
+			}
 			continue
 		}
 		// Check if arg is *gorm.DB (directly or wrapped in MakeInterface).
@@ -791,21 +800,22 @@ func unwrapFuncValue(v ssa.Value, ctx *Context, boxed bool) ssa.Value {
 // or the captured values a function literal returns (#397). at is the
 // instruction that hands v on. handsOn, when not nil, decides whether a
 // function literal is handed on at all; it is asked only once v is known to
-// be one, since it may walk a container. It is nil for any other value.
-func funcValueRoots(v ssa.Value, at ssa.Instruction, ctx *Context, handsOn func() bool) []ssa.Value {
+// be one. literal tells which kind the roots come from. The roots are nil for
+// any other value.
+func funcValueRoots(v ssa.Value, at ssa.Instruction, ctx *Context, handsOn func() bool) (roots []ssa.Value, literal bool) {
 	switch v.Type().Underlying().(type) {
 	case *types.Signature, *types.Interface:
 	default:
-		return nil
+		return nil, false
 	}
 	if recv := boundGormReceiver(v, ctx); recv != nil {
-		return ctx.RootTracer.MutableRoots(recv, ctx.LoopInfo)
+		return ctx.RootTracer.MutableRoots(recv, ctx.LoopInfo), false
 	}
 	lits := ctx.captureCache().literals(v)
 	if len(lits.mcs) == 0 || handsOn != nil && !handsOn() {
-		return nil
+		return nil, true
 	}
-	return returnedCaptureRoots(lits, at, ctx)
+	return returnedCaptureRoots(lits, at, ctx), true
 }
 
 // handOn records v, handed on by instr, as a branch of every root it may
@@ -835,26 +845,30 @@ func handOnRoots(instr ssa.Instruction, pos token.Pos, roots []ssa.Value, ctx *C
 func handOnFuncValue(instr ssa.Instruction, v, container ssa.Value, ctx *Context) {
 	var handsOn func() bool
 	if container != nil {
-		handsOn = func() bool { return literalStoreHandsOn(container, ctx) }
+		handsOn = func() bool { return literalStoreHandsOn(instr, container, ctx) }
 	}
-	roots := funcValueRoots(v, instr, ctx, handsOn)
-	handOnRoots(instr, handOffPos(instr, v), roots, ctx)
+	roots, literal := funcValueRoots(v, instr, ctx, handsOn)
+	if !literal {
+		handOnRoots(instr, instr.Pos(), roots, ctx)
+		return
+	}
+	// A literal's hand-off keeps its own position, as in handleArgs.
+	if roots != nil {
+		siteUse{ctx: ctx, block: instr.Block(), pos: handOffPos(instr)}.escape(roots)
+	}
 }
 
-// handOffPos returns the position of instr, which hands v on. go/ssa gives
-// none to the store of a function literal into an element. A store into the
-// varargs array of a call is placed at that call. Any other is placed at the
-// function literal, which such a store holds unboxed.
-func handOffPos(instr ssa.Instruction, v ssa.Value) token.Pos {
-	if pos := instr.Pos(); pos.IsValid() {
-		return pos
-	}
-	if store, ok := instr.(*ssa.Store); ok {
+// handOffPos returns the position of instr, a store or a send that hands a
+// function literal on. go/ssa gives the store of a function literal into the
+// varargs array of a call no position, so it is placed at that call.
+func handOffPos(instr ssa.Instruction) token.Pos {
+	pos := instr.Pos()
+	if store, ok := instr.(*ssa.Store); ok && !pos.IsValid() {
 		if call := varargsCall(store.Addr); call != nil {
-			return call.Pos()
+			pos = call.Pos()
 		}
 	}
-	return v.Pos()
+	return pos
 }
 
 // varargsCall returns the call that passes the array addr is an element of,
@@ -880,11 +894,12 @@ func (u siteUse) escape(roots []ssa.Value) {
 	u.branch(roots, pollution.UsageInfo{Block: u.block, Pos: u.pos, Escapes: true}, func(ssa.Value) bool { return false })
 }
 
-// literalStoreHandsOn reports whether a function literal stored into
-// container, the address of an element or a field, or a map, is handed on
-// (#397). It is only when the literal goes into a location outside the
+// literalStoreHandsOn reports whether a function literal stored by store
+// into container, the address of an element or a field, or a map, is handed
+// on (#397). It is only when the literal goes into a location outside the
 // function (externalContainer), or straight into a container the function
-// allocates whose own value is then handed on (directContainerHandedOn):
+// allocates whose own value is handed on after the store
+// (containerHandOffs):
 //
 //	run([]func() *gorm.DB{f})  // handed on
 //	m[k] = f                   // handed on, m a parameter
@@ -894,7 +909,9 @@ func (u siteUse) escape(roots []ssa.Value) {
 // Any other shape counts as no hand-off: the literal is followed through no
 // load, merge, append, element read, conversion, nesting or capture, which
 // keeps a local table of literals from being reported (Known Limitations).
-func literalStoreHandsOn(container ssa.Value, ctx *Context) bool {
+// Main reports no literal hand-off, so leaving a shape out is never a
+// regression against it.
+func literalStoreHandsOn(store ssa.Instruction, container ssa.Value, ctx *Context) bool {
 	base := containerBase(container)
 	if externalContainer(base) {
 		return true
@@ -914,15 +931,38 @@ func literalStoreHandsOn(container ssa.Value, ctx *Context) bool {
 	default:
 		return false
 	}
-	if handsOn, done := ctx.containers[base]; done {
-		return handsOn
+	offs, done := ctx.containers[base]
+	if !done {
+		offs = directContainerHandOffs(base, ctx)
+		if ctx.containers == nil {
+			ctx.containers = map[ssa.Value]*containerHandOffs{}
+		}
+		ctx.containers[base] = offs
 	}
-	if ctx.containers == nil {
-		ctx.containers = map[ssa.Value]bool{}
+	c := ctx.captureCache()
+	// A store of the whole variable after the literal's store may replace
+	// it, so then the literal is not followed.
+	if slices.ContainsFunc(offs.wholes, func(w *ssa.Store) bool { return !c.before(w, store) }) {
+		return false
 	}
-	handsOn := directContainerHandedOn(base, ctx)
-	ctx.containers[base] = handsOn
-	return handsOn
+	return slices.ContainsFunc(offs.reads, func(read ssa.Instruction) bool { return c.before(store, read) })
+}
+
+// before reports whether a runs before b on every path to b: a's block
+// dominates b's, and a comes first in a shared block.
+func (c *captureCache) before(a, b ssa.Instruction) bool {
+	if a.Block() == b.Block() {
+		return c.indexOf(a) < c.indexOf(b)
+	}
+	return a.Parent() == b.Parent() && a.Block().Dominates(b.Block())
+}
+
+// containerHandOffs is where the own value of a container the function
+// allocates is handed on: the instruction that reads the container for each
+// hand-off, and the stores of the whole variable when the container is one.
+type containerHandOffs struct {
+	reads  []ssa.Instruction
+	wholes []*ssa.Store
 }
 
 // containerBase returns the container whose element or field addr is.
@@ -962,13 +1002,16 @@ func externalContainer(v ssa.Value) bool {
 	}
 }
 
-// directContainerHandedOn reports whether the value of base, a container the
+// directContainerHandOffs returns where the value of base, a container the
 // function allocates, is handed on as it is: base itself, the slice of it
 // that a slice literal or varargs is, or the struct value of a struct
 // literal. It is handed on when it is passed to a call (other than a builtin
-// or a read-only stdlib function such as fmt.Println), sent, stored or put
-// into a map outside the function, or returned.
-func directContainerHandedOn(base ssa.Value, ctx *Context) bool {
+// or a read-only stdlib function such as fmt.Println), sent, or stored or put
+// into a map outside the function. The read of a struct value is its load;
+// the read of any other value is the hand-off itself. A container that the
+// function returns is not followed, as a literal it returns is not.
+func directContainerHandOffs(base ssa.Value, ctx *Context) *containerHandOffs {
+	offs := &containerHandOffs{}
 	values := []ssa.Value{base}
 	for _, r := range *base.Referrers() {
 		switch r := r.(type) {
@@ -980,29 +1023,45 @@ func directContainerHandedOn(base ssa.Value, ctx *Context) bool {
 			if r.Op == token.MUL {
 				values = append(values, r)
 			}
+		case *ssa.Store:
+			if r.Addr == base {
+				offs.wholes = append(offs.wholes, r)
+			}
 		}
 	}
 	vars := ctx.RootTracer.FuncVars()
-	return slices.ContainsFunc(values, func(v ssa.Value) bool {
-		return slices.ContainsFunc(*v.Referrers(), func(r ssa.Instruction) bool {
-			switch r := r.(type) {
-			case ssa.CallInstruction:
-				if _, builtin := r.Common().Value.(*ssa.Builtin); builtin {
-					return false
-				}
-				return slices.Contains(r.Common().Args, v) && !pollutionsource.IsReadOnlyVariadicCall(r, v, vars)
-			case *ssa.Send:
-				return r.X == v
-			case *ssa.Store:
-				return r.Val == v && externalContainer(containerBase(r.Addr))
-			case *ssa.MapUpdate:
-				return r.Value == v && externalContainer(r.Map)
-			case *ssa.Return:
-				return slices.Contains(r.Results, v)
+	for _, v := range values {
+		for _, r := range *v.Referrers() {
+			if !containerHandsOn(v, r, vars) {
+				continue
 			}
+			read := r
+			if load, ok := v.(*ssa.UnOp); ok {
+				read = load
+			}
+			offs.reads = append(offs.reads, read)
+		}
+	}
+	return offs
+}
+
+// containerHandsOn reports whether r hands v, the own value of a container,
+// on (see directContainerHandOffs).
+func containerHandsOn(v ssa.Value, r ssa.Instruction, vars callsite.FuncVars) bool {
+	switch r := r.(type) {
+	case ssa.CallInstruction:
+		if _, builtin := r.Common().Value.(*ssa.Builtin); builtin {
 			return false
-		})
-	})
+		}
+		return slices.Contains(r.Common().Args, v) && !pollutionsource.IsReadOnlyVariadicCall(r, v, vars)
+	case *ssa.Send:
+		return r.X == v
+	case *ssa.Store:
+		return r.Val == v && externalContainer(containerBase(r.Addr))
+	case *ssa.MapUpdate:
+		return r.Value == v && externalContainer(r.Map)
+	}
+	return false
 }
 
 // returnedCaptureRoots returns the mutable roots of the captured *gorm.DB
