@@ -32,6 +32,11 @@ func (o prOuter) list(dst *gorm.DB) { o.repo.db.Where("leak").Find(nil) }
 //gormreuse:pure
 func (r prRepo) find(q *gorm.DB) int { _ = q; r.db.Find(nil); return 0 }
 
+type prParams struct{ db *gorm.DB }
+
+//gormreuse:pure
+func (r prRepo) usep(p prParams) { _ = p }
+
 // =============================================================================
 // SHOULD REPORT
 // =============================================================================
@@ -72,6 +77,47 @@ func prMethodValue(db *gorm.DB) {
 	list := prRepo{db: q}.list
 	list(nil)
 	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// prArgumentStructFix hands q to a pure method inside an argument struct.
+// The method only reads its arguments, so the struct does not escape there,
+// and -fix still makes the root immutable.
+func prArgumentStructFix(db *gorm.DB) {
+	r := prRepo{db: db.Session(&gorm.Session{})}
+	q := db.Where("x")
+	p := prParams{db: q}
+	r.usep(p)
+	q.Find(nil)
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// prReceiverStructNoFix hands q to a pure method as its receiver, between
+// two uses. The method may change q in place, so -fix offers no Session.
+func prReceiverStructNoFix(db *gorm.DB) {
+	q := db.Where("x")
+	r := prRepo{db: q}
+	q.Find(nil)
+	r.list(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// prDeferArgumentStructFix defers a pure method that gets q inside an
+// argument struct. -fix still makes the root immutable.
+func prDeferArgumentStructFix(db *gorm.DB) {
+	r := prRepo{db: db.Session(&gorm.Session{})}
+	q := db.Where("x")
+	defer r.usep(prParams{db: q})
+	q.Find(nil)
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// prDeferReceiver defers a pure method on a struct that holds q. A deferred
+// call runs after the function's other uses, so the defer is the second
+// branch.
+func prDeferReceiver(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x")
+	defer prRepo{db: q}.list(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	q.Find(nil)
 }
 
 // =============================================================================

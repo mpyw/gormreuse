@@ -66,18 +66,22 @@ func (g *Generator) holderChangesRoot(v pollution.Violation, ordered bool) bool 
 //     at the end of the store's block. A local struct copied into such
 //     memory is reached the same way after the copy.
 //
-// A //gormreuse:pure function changes nothing it is handed, as in
-// paDeref(&q). A pure method may change what its receiver holds (#404), so
-// its call is an escape. Code in a closure is not ordered against the uses, so an
-// escape there, or a store there into memory that is not a local struct, is
-// taken as seen.
+// A //gormreuse:pure function changes nothing it is handed as an argument, as
+// in paDeref(&q). Its body check does not cover the receiver, so a pure method
+// may change what its receiver holds (#404). A pure call is therefore an escape
+// only where the struct reaches it as the receiver, or where the struct is in
+// other memory, which the receiver may reach. Code in a closure is not ordered
+// against the uses, so an escape there, or a store there into memory that is
+// not a local struct, is taken as seen.
 func (g *Generator) holderStoreChangesRoot(v pollution.Violation, store *ssa.Store, ordered bool) bool {
 	fn := v.Root.Parent()
 	def := tracer.RootBlock(v.Root)
-	seen := func(instr ssa.Instruction) bool {
+	// seen reports whether a use may see a change made where instr reaches
+	// the struct through via. via is nil for other memory.
+	seen := func(instr ssa.Instruction, via ssa.Value) bool {
 		if call, ok := instr.(ssa.CallInstruction); ok {
-			// A pure method may change what its receiver holds (#404).
-			if site := g.tracer.Site(call); !site.IsGormMethod() && site.Recv == nil && g.tracer.IsPureFunction(site.Declared) {
+			if site := g.tracer.Site(call); !site.IsGormMethod() && g.tracer.IsPureFunction(site.Declared) &&
+				(site.Recv == nil || via != nil && via != site.Recv) {
 				return false
 			}
 		}
@@ -92,14 +96,15 @@ func (g *Generator) holderStoreChangesRoot(v pollution.Violation, store *ssa.Sto
 			return true
 		}
 		next, later := g.holderNextCall(at)
-		return next != nil && seen(next) || later && holderChangeSeenAfterBlock(g.cfg, def, at.Block(), v.AllUses, ordered)
+		return next != nil && seen(next, nil) || later && holderChangeSeenAfterBlock(g.cfg, def, at.Block(), v.AllUses, ordered)
 	}
 	alloc, ok := holderBase(store.Addr)
 	if !ok {
 		return reached(store)
 	}
 	h := g.holderEscapes(alloc)
-	return slices.ContainsFunc(h.escapes, seen) || slices.ContainsFunc(h.copies, reached)
+	return slices.ContainsFunc(h.escapes, func(e holderEscape) bool { return seen(e.instr, e.via) }) ||
+		slices.ContainsFunc(h.copies, reached)
 }
 
 // holderChangeSeenAfterBlock reports whether a use may see a change made at
@@ -205,8 +210,15 @@ func holderBase(addr ssa.Value) (*ssa.Alloc, bool) {
 // it (#181).
 type holderWalk struct {
 	seen    map[ssa.Value]bool
-	escapes []ssa.Instruction
+	escapes []holderEscape
 	copies  []*ssa.Store
+}
+
+// holderEscape is an instruction that hands on a local struct, and via, the
+// operand through which it reaches the struct.
+type holderEscape struct {
+	instr ssa.Instruction
+	via   ssa.Value
 }
 
 // addr walks the uses of addr, the address of the struct or of a part of it.
@@ -233,7 +245,7 @@ func (h *holderWalk) addr(addr ssa.Value) {
 			h.captured(r, addr, h.addr)
 		case *ssa.DebugRef:
 		default:
-			h.escapes = append(h.escapes, r)
+			h.escapes = append(h.escapes, holderEscape{r, addr})
 		}
 	}
 }
@@ -259,13 +271,13 @@ func (h *holderWalk) pointerVar(store *ssa.Store, v ssa.Value) {
 			h.addr(r)
 		case *ssa.Store:
 			if r.Val == v {
-				h.escapes = append(h.escapes, r)
+				h.escapes = append(h.escapes, holderEscape{r, v})
 			}
 		case *ssa.MakeClosure:
 			h.captured(r, v, func(fv ssa.Value) { h.pointerVar(store, fv) })
 		case *ssa.DebugRef:
 		default:
-			h.escapes = append(h.escapes, r)
+			h.escapes = append(h.escapes, holderEscape{r, v})
 		}
 	}
 }
@@ -304,7 +316,7 @@ func (h *holderWalk) value(v ssa.Value) {
 			}
 		case *ssa.DebugRef:
 		default:
-			h.escapes = append(h.escapes, r)
+			h.escapes = append(h.escapes, holderEscape{r, v})
 		}
 	}
 }

@@ -2685,7 +2685,7 @@ func pass(db *gorm.DB) {
 
 **MAY** use its receiver. A method's receiver is not an argument.
 
-So a call of a pure method still branches the mutable `*gorm.DB` its receiver holds. `repo{db: q}.ok(x); q.Find(nil)` is reported, as it is without the directive.
+So a call of a pure method still branches the mutable `*gorm.DB` its receiver holds. `(&repo{db: q}).ok(x); q.Find(nil)` is reported, as it is without the directive.
 
 </td><td>
 

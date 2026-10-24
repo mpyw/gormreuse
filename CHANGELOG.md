@@ -2,6 +2,12 @@
 
 These notes say what changes for users in each release, and what to do about it. The full commit list of each release is on [GitHub Releases](https://github.com/mpyw/gormreuse/releases). Releases up to 0.22.0 have their notes there only.
 
+## Unreleased
+
+| Change | Effect |
+| --- | --- |
+| A pure method's receiver is a branch (#404) | `//gormreuse:pure` covers a method's arguments, not its receiver. So a pure method could add a condition to the `*gorm.DB` its receiver holds, and the later query on it was missed: `repo{db: q}.list(); q.Find(&us)`. Such a call now branches what its receiver holds, as a method without the directive does. A receiver that holds a connection, such as a `gorm.Open` result, gives no new report. `-fix` offers no Session for such a root when a use may follow the call. A struct passed as an argument to a pure method is still only read |
+
 ## 0.24.1 (2026-10-21)
 
 Documentation only. The analyzer behaves exactly as in 0.24.0.

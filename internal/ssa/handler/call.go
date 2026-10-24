@@ -547,7 +547,7 @@ func (u siteUse) handleArgs() {
 	// A pure method may still branch what its receiver holds (#404).
 	call := u.call()
 	if site.Declared != nil && ctx.RootTracer.IsPureFunction(site.Declared) {
-		u.handleHolders()
+		u.handleHolders(true)
 		return
 	}
 	if call != nil && pollutionsource.IsReadOnlyWrapperCall(call, site) {
@@ -609,7 +609,7 @@ func (u siteUse) handleArgs() {
 		u.branch(roots, pollution.UsageInfo{Block: u.block, Pos: u.pos, Escapes: true, Direct: u.direct(gormArg, roots)}, assigns)
 	}
 
-	u.handleHolders()
+	u.handleHolders(false)
 }
 
 // handleHolders handles the structs that the site hands on, as an argument or
@@ -633,11 +633,13 @@ func (u siteUse) handleArgs() {
 // NamingStrategy, and calls AddError, which changes no clause. So does a getter
 // whose call is traced as the field it returns (RootTracer.HasParamReads,
 // #342): `r.DB().Find(&a)` is one branch of what r.db holds, at the Find. A
-// struct sent on a
-// channel, stored in a slice, a map or another variable's memory, or packed
-// into a variadic argument is not followed. Neither is a call through an
-// interface, whose receiver is boxed before the call.
-func (u siteUse) handleHolders() {
+// struct sent on a channel, stored in a slice, a map or another variable's
+// memory, or packed into a variadic argument is not followed. Neither is a
+// call through an interface, whose receiver is boxed before the call.
+//
+// argsRead is true for a call of a pure function, which only reads its
+// arguments. Its receiver is still handed on (#404).
+func (u siteUse) handleHolders(argsRead bool) {
 	site, ctx := u.site, u.ctx
 	if site.IsGormMethod() || isGormStatementMethod(site) {
 		return
@@ -646,9 +648,7 @@ func (u siteUse) handleHolders() {
 		return
 	}
 	operands := site.Args
-	if site.Declared != nil && ctx.RootTracer.IsPureFunction(site.Declared) {
-		// pure covers the parameters only. Its body check does not seed the
-		// receiver, so a pure method may branch what its receiver holds (#404).
+	if argsRead {
 		operands = nil
 	}
 	if site.Recv != nil {
