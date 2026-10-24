@@ -2498,7 +2498,7 @@ func withTenant(db *gorm.DB, tenantID int) *gorm.DB {
 >
 > - calls a chain method on it;
 > - passes it to a function that is not pure;
-> - returns it;
+> - returns it, directly or through a getter (`return r.Get()`);
 > - writes its query: a field of its `Statement`, or a map or a slice the `Statement` holds;
 > - calls such a method on its receiver.
 >

@@ -94,6 +94,42 @@ func (r prRepo) getDB() *gorm.DB { return r.db }
 //gormreuse:pure
 func (r prRepo) viaGetter(dst *gorm.DB) { r.getDB().Session(&gorm.Session{}).Count(nil) }
 
+//gormreuse:pure
+func (r prRepo) handleViaGetter(dst *gorm.DB) *gorm.DB { return r.getDB() }
+
+// cycA and cycB call each other on their receiver, and cycB changes it, so
+// both do. cycC and cycD are the same with the change on the other side.
+
+//gormreuse:pure
+func (r prRepo) cycA(dst *gorm.DB, n int) {
+	if n > 0 {
+		r.cycB(dst, n-1)
+	}
+}
+
+//gormreuse:pure
+func (r prRepo) cycB(dst *gorm.DB, n int) {
+	if n > 0 {
+		r.cycA(dst, n-1)
+	}
+	r.db.Where("leak").Find(nil)
+}
+
+//gormreuse:pure
+func (r prRepo) cycC(dst *gorm.DB, n int) {
+	if n > 0 {
+		r.cycD(dst, n-1)
+	}
+	r.db.Where("leak").Find(nil)
+}
+
+//gormreuse:pure
+func (r prRepo) cycD(dst *gorm.DB, n int) {
+	if n > 0 {
+		r.cycC(dst, n-1)
+	}
+}
+
 // prUseRepo calls list on its argument. list changes its receiver, so it is
 // checked here like a function that is not pure.
 //
@@ -277,6 +313,23 @@ func prReturnsHandle(db *gorm.DB) {
 	q := db.Session(&gorm.Session{}).Where("x")
 	prRepo{db: q}.handle(nil).Where("y").Find(nil)
 	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// prReturnsHandleViaGetter: the pure method returns its receiver's DB
+// through a getter.
+func prReturnsHandleViaGetter(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x")
+	prRepo{db: q}.handleViaGetter(nil).Where("y").Find(nil)
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// prRecursiveMethods: methods that call each other change the receiver
+// through the cycle.
+func prRecursiveMethods(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x")
+	prRepo{db: q}.cycA(nil, 1)
+	prRepo{db: q}.cycD(nil, 1) // want `\*gorm\.DB reused: second branch from mutable root`
+	q.Find(nil)                // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // prGenericReceiver: the receiver holds q behind a type parameter.

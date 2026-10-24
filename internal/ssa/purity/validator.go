@@ -44,6 +44,7 @@ import (
 	"golang.org/x/tools/go/ssa"
 
 	"github.com/mpyw/gormreuse/internal/directive"
+	"github.com/mpyw/gormreuse/internal/effort"
 	"github.com/mpyw/gormreuse/internal/ssa/callsite"
 	"github.com/mpyw/gormreuse/internal/ssa/origin"
 	"github.com/mpyw/gormreuse/internal/ssa/pollutionsource"
@@ -155,9 +156,10 @@ func (v *Validator) ChangesReceiver(changes func(*ssa.Function) bool) bool {
 func (v *Validator) handsReceiverOn(fn *ssa.Function, handles map[ssa.Value]*ssa.Parameter, changes func(*ssa.Function) bool) bool {
 	for _, block := range fn.Blocks {
 		for _, instr := range block.Instrs {
+			effort.Step()
 			switch i := instr.(type) {
 			case *ssa.Return:
-				if fn == v.fn && slices.ContainsFunc(i.Results, func(res ssa.Value) bool { return handles[res] != nil }) {
+				if fn == v.fn && slices.ContainsFunc(i.Results, func(res ssa.Value) bool { return handles[res] != nil || v.getterOfDerived(res) }) {
 					return true
 				}
 			case ssa.CallInstruction:
@@ -169,6 +171,16 @@ func (v *Validator) handsReceiverOn(fn *ssa.Function, handles map[ssa.Value]*ssa
 		}
 	}
 	return slices.ContainsFunc(fn.AnonFuncs, func(anon *ssa.Function) bool { return v.handsReceiverOn(anon, handles, changes) })
+}
+
+// getterOfDerived reports whether res is a *gorm.DB that a getter (see
+// validatorIsFieldGetter) returns from a derived value, as `return r.Get()`.
+func (v *Validator) getterOfDerived(res ssa.Value) bool {
+	call, ok := res.(*ssa.Call)
+	if !ok || !typeutil.IsGormDB(res.Type()) || !validatorIsFieldGetter(call.Call.StaticCallee()) {
+		return false
+	}
+	return slices.ContainsFunc(call.Call.Args, v.isDerivedArg)
 }
 
 // validatorIsFieldGetter reports whether the body of callee only selects fields of

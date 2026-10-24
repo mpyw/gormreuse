@@ -2,6 +2,14 @@
 
 These notes say what changes for users in each release, and what to do about it. The full commit list of each release is on [GitHub Releases](https://github.com/mpyw/gormreuse/releases). Releases up to 0.22.0 have their notes there only.
 
+## Unreleased
+
+### New diagnostics
+
+| Now reported | Example | What to do |
+| --- | --- | --- |
+| A call of a `pure` method that changes a `*gorm.DB` its receiver holds (#404). `pure` covers the arguments only, so the call branches what the receiver holds, as for a method without the directive. `-fix` offers no `Session` for that root | `//gormreuse:pure func (r repo) list(dst *gorm.DB) { r.db.Where("x").Find(&us) }`, then `repo{db: q}.list(nil); q.Find(&a)` | Make `q` immutable with `Session`, or stop changing the receiver in the method |
+
 ## 0.25.0 (2026-10-25)
 
 ### New diagnostics
@@ -10,7 +18,6 @@ These notes say what changes for users in each release, and what to do about it.
 | --- | --- | --- |
 | A `pure` function that writes into its argument through a direct path (#405). That is `*db = v`, `db.Statement = v`, a field of the `Statement`, or a map or a slice it holds (also with `delete`, `clear` or `copy`), also in a closure. `Error`, `RowsAffected` and `Config` may still be written. A write through `db.Statement.DB`, a `*gorm.Statement` parameter, a local copy, a `Session` result, a holder parameter, an `append` result or a call is not followed | `//gormreuse:pure func mark(db *gorm.DB) { db.Statement.Distinct = true }`. Message: `pure function pollutes *gorm.DB argument by writing to it directly`. Callers stop trusting it, so `mark(sub)` before the outer query of `sub` is reported | Fix the function, or remove `pure` |
 | A helper that writes into its parameter's `Statement` through a direct path is no longer inferred `immutable-param` (#405) | `func h(tx *gorm.DB) { tx.Statement.Clauses["X"] = c; tx.Find(&a); tx.Count(&n) }`, also `delete(tx.Statement.Clauses, "WHERE")`. Its reuse is reported again. A helper that only reads the `Statement` is still inferred | Make the argument immutable with `Session`, or stop writing into the `Statement` |
-| A call of a `pure` method that changes a `*gorm.DB` its receiver holds (#404). `pure` covers the arguments only, so the call branches what the receiver holds, as for a method without the directive. `-fix` offers no `Session` for that root | `//gormreuse:pure func (r repo) list(dst *gorm.DB) { r.db.Where("x").Find(&us) }`, then `repo{db: q}.list(nil); q.Find(&a)` | Make `q` immutable with `Session`, or stop changing the receiver in the method |
 
 ### Fewer false reports
 
