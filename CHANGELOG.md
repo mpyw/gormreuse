@@ -2,6 +2,14 @@
 
 These notes say what changes for users in each release, and what to do about it. The full commit list of each release is on [GitHub Releases](https://github.com/mpyw/gormreuse/releases). Releases up to 0.22.0 have their notes there only.
 
+## Unreleased
+
+### New diagnostics
+
+| Now reported | Example | What to do |
+| --- | --- | --- |
+| A function literal handed on that returns a captured `*gorm.DB` (#397). The code that gets it may call it and chain on the result, as `Scopes` and `Preload` do | `run(func() *gorm.DB { return q }); q.Find(&us)`, `db.Scopes(func(d *gorm.DB) *gorm.DB { return q }).Find(&a); q.Find(&b)` | Return the callback's own parameter, or make `q` immutable with `Session`. `-fix` offers the Session where it does for a method value handed on |
+
 ## 0.24.1 (2026-10-21)
 
 Documentation only. The analyzer behaves exactly as in 0.24.0.

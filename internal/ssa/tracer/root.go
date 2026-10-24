@@ -136,6 +136,8 @@ type RootTracer struct {
 	cfgs *cfg.Analyzer // CFG cache for the Repeats of closures
 	//declscope:shared // closure.go's closureReturnsImmutable fills it
 	immutableClosures map[*ssa.Function]bool // Memo of closureReturnsImmutable (#308)
+	//declscope:shared // closure.go's closureReturnsCapturedGormDB fills it
+	capturing map[*ssa.MakeClosure]bool // Memo of closureReturnsCapturedGormDB (#397)
 	//declscope:shared // pointee.go keeps its PointeeRoots and searches in it
 	pointees pointeeMemo // What calls may store through a variable's address (#345)
 	//declscope:shared // elem.go keeps its ElemRoots and containers in it
