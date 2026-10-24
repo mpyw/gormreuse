@@ -44,7 +44,6 @@ import (
 	"slices"
 
 	"golang.org/x/tools/go/analysis"
-	"golang.org/x/tools/go/analysis/passes/inspect"
 	"golang.org/x/tools/go/ast/inspector"
 	"golang.org/x/tools/go/ssa"
 
@@ -125,7 +124,7 @@ type Generator struct {
 // another package, from its fact (see HandoffFinisherOnlyParams, #347); it
 // may be nil. immutableParam holds the rules of the immutable-param
 // inference that the directive fix must meet too (#387).
-func NewGenerator(pass *analysis.Pass, scopesCallbacks map[*ssa.Function]bool, rt *tracer.RootTracer, funcs []*ssa.Function, seesAllCallers func(token.Pos) bool, cfgs *cfg.Analyzer, discardsParam map[*ssa.Function]bool, importedFinisherOnly func(*ssa.Function) []int, immutableParam ImmutableParamRule) *Generator {
+func NewGenerator(pass *analysis.Pass, insp *inspector.Inspector, scopesCallbacks map[*ssa.Function]bool, rt *tracer.RootTracer, funcs []*ssa.Function, seesAllCallers func(token.Pos) bool, cfgs *cfg.Analyzer, discardsParam map[*ssa.Function]bool, importedFinisherOnly func(*ssa.Function) []int, immutableParam ImmutableParamRule) *Generator {
 	// Build token.File -> ast.File mapping
 	files := make(map[*token.File]*ast.File)
 	for _, f := range pass.Files {
@@ -137,7 +136,7 @@ func NewGenerator(pass *analysis.Pass, scopesCallbacks map[*ssa.Function]bool, r
 
 	// Reuse the pass inspector instead of building one per file.
 	cursors := make(map[*ast.File]inspector.Cursor)
-	for cur := range pass.ResultOf[inspect.Analyzer].(*inspector.Inspector).Root().Children() {
+	for cur := range insp.Root().Children() {
 		cursors[cur.Node().(*ast.File)] = cur
 	}
 
