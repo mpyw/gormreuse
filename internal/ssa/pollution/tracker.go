@@ -73,6 +73,15 @@ type Violation struct {
 	// other violation.
 	Call  ssa.CallInstruction
 	Param int
+
+	// FromPureReceiver is set on a reuse violation that holds only because
+	// of a pure method's branch through its receiver (UsageInfo.PureReceiver,
+	// #404): the reported use is such a branch, or no other use explains it.
+	// PureReceiverReport is set on every violation of a root that has one,
+	// once CollectViolations ran. The fix generator offers such a root no
+	// Session, and leaves every other root as it was before #404.
+	FromPureReceiver   bool
+	PureReceiverReport bool
 }
 
 // UsageInfo tracks a single usage of a root (exported for fix generation).
@@ -105,27 +114,12 @@ type UsageInfo struct {
 	Direct bool
 
 	// PureReceiver is set on the branch that a //gormreuse:pure method makes
-	// of what its receiver holds (#404), and says how the call runs. The
-	// pure check does not cover the receiver, so the method may change the
-	// root in place. The fix generator reads it (see the fix package).
-	PureReceiver PureReceiverKind
+	// of what its receiver holds (#404). The pure check does not cover the
+	// receiver, so the method may change the root in place. Before #404 such
+	// a call was no use at all, so a report that needs it is new
+	// (Violation.FromPureReceiver).
+	PureReceiver bool
 }
-
-// PureReceiverKind says whether a use is the branch a //gormreuse:pure method
-// makes through its receiver (#404), and how the call runs.
-type PureReceiverKind uint8
-
-const (
-	// NotPureReceiver is any other use.
-	NotPureReceiver PureReceiverKind = iota
-	// PureReceiverCall is a plain call, also through a method value.
-	PureReceiverCall
-	// PureReceiverGo is a go statement, which runs alongside the uses after
-	// it.
-	PureReceiverGo
-	// PureReceiverDefer is a defer statement, which runs after every use.
-	PureReceiverDefer
-)
 
 // aliasUse is a use of a Session/Debug copy, with the position of the call
 // that took the copy. When argument is set, it is a use of a chain that holds
@@ -173,7 +167,7 @@ type Tracker struct {
 	// They are intentionally NOT scanned by DetectViolations: defer/go run at a
 	// different time than their textual position, so position-ordered detection
 	// would misfire. Violations among them are reported inline at record time via
-	// IsPollutedAt and IsPollutedAround, which do consult this map.
+	// PollutedBefore, which does consult this map.
 	branchUses map[ssa.Value][]UsageInfo
 
 	// aliasUses maps roots to uses of a Session/Debug copy that shares the
@@ -305,37 +299,6 @@ func (t *Tracker) RecordMayBranch(root ssa.Value, use UsageInfo, ordered bool) {
 	t.mayUses[root] = append(t.mayUses[root], mayUse{UsageInfo: use, ordered: ordered})
 }
 
-// IsMayBranchedAt reports whether a branch recorded by RecordMayBranch can
-// reach target, a use of root (for go).
-func (t *Tracker) IsMayBranchedAt(root ssa.Value, target UsageInfo) bool {
-	return slices.ContainsFunc(t.mayUses[root], func(use mayUse) bool { return t.reaches(root, use.UsageInfo, target) })
-}
-
-// IsMayBranchedAround reports whether a branch recorded by RecordMayBranch
-// may run in the same run of the function as target, a use of root, before
-// or after it (for defer).
-func (t *Tracker) IsMayBranchedAround(root ssa.Value, target UsageInfo) bool {
-	return slices.ContainsFunc(t.mayUses[root], func(use mayUse) bool { return t.runsWith(root, use.UsageInfo, target) })
-}
-
-// IsPollutedAt checks if a root has polluting usage that can reach target, a
-// use of root (for go). Includes deferred/goroutine branch uses (see the
-// branchUses field doc).
-func (t *Tracker) IsPollutedAt(root ssa.Value, target UsageInfo) bool {
-	reaches := func(use UsageInfo) bool { return t.reaches(root, use, target) }
-	return slices.ContainsFunc(t.pollutingUses[root], reaches) || slices.ContainsFunc(t.branchUses[root], reaches)
-}
-
-// IsPollutedAround reports whether a polluting use of root, deferred and
-// spawned ones included, may run in the same run of the function as target,
-// before or after it (for defer). A deferred call runs when the function
-// returns, so any use that may run in that run of the function comes before
-// it. A use on a branch exclusive with the defer statement does not (#375).
-func (t *Tracker) IsPollutedAround(root ssa.Value, target UsageInfo) bool {
-	with := func(use UsageInfo) bool { return t.runsWith(root, use, target) }
-	return slices.ContainsFunc(t.pollutingUses[root], with) || slices.ContainsFunc(t.branchUses[root], with)
-}
-
 // runsWith reports whether a and b, two uses of root, may both run in one run
 // of their function, in either order.
 func (t *Tracker) runsWith(root ssa.Value, a, b UsageInfo) bool {
@@ -351,9 +314,41 @@ func (t *Tracker) AddContractViolation(pos token.Pos, message string, call ssa.C
 	t.violations = append(t.violations, Violation{Pos: pos, Message: message, Call: call, Param: param})
 }
 
-// AddViolationWithRoot adds a violation with root information for fix generation.
-func (t *Tracker) AddViolationWithRoot(pos token.Pos, root ssa.Value) {
-	t.addViolationWithContext(pos, root)
+// AddViolationWithRoot adds a violation with root information for fix
+// generation. target is the reported use, and fromPure is set when the
+// violation holds only because of a pure method's receiver branch (see
+// Violation.FromPureReceiver).
+func (t *Tracker) AddViolationWithRoot(target UsageInfo, root ssa.Value, fromPure bool) {
+	t.addViolationWithContext(target, root, fromPure)
+}
+
+// PollutedBefore reports whether a branch of root may run before target, a
+// use of root in a go statement (around unset) or a defer statement (around
+// set), and whether one that is not a pure method's receiver branch does.
+// The branches are the polluting uses, deferred and spawned ones included,
+// and, with may set, those through a merge that may hold root.
+func (t *Tracker) PollutedBefore(root ssa.Value, target UsageInfo, around, may bool) (polluted, byOther bool) {
+	check := func(use UsageInfo) bool {
+		if around {
+			return t.runsWith(root, use, target)
+		}
+		return t.reaches(root, use, target)
+	}
+	visit := func(use UsageInfo) {
+		if check(use) {
+			polluted = true
+			byOther = byOther || !use.PureReceiver
+		}
+	}
+	for _, use := range slices.Concat(t.pollutingUses[root], t.branchUses[root]) {
+		visit(use)
+	}
+	if may {
+		for _, use := range t.mayUses[root] {
+			visit(use.UsageInfo)
+		}
+	}
+	return polluted, byOther
 }
 
 // DetectViolations performs violation detection after all uses are recorded.
@@ -442,8 +437,10 @@ func (t *Tracker) DetectViolations() {
 		// A loop-carried call is its own root, so the path to it always runs
 		// the call again: reaches would never hold.
 		for _, target := range t.loopCarriedUses[root] {
-			if slices.ContainsFunc(t.pollutingUses[root], func(src UsageInfo) bool { return t.isReachable(src.Block, target.Block) }) {
-				t.addViolationWithContext(target.Pos, root)
+			reaching := func(src UsageInfo) bool { return t.isReachable(src.Block, target.Block) }
+			if slices.ContainsFunc(t.pollutingUses[root], reaching) {
+				byOther := slices.ContainsFunc(t.pollutingUses[root], func(src UsageInfo) bool { return !src.PureReceiver && reaching(src) })
+				t.addViolationWithContext(target, root, !byOther)
 			}
 		}
 	}
@@ -577,23 +574,62 @@ func funcName(v ssa.Value) string {
 // uses, which nothing changes, so a root reused n times costs one list, not
 // n (#350). They share its hidden uses the same way (#389).
 func (t *Tracker) CollectViolations() []Violation {
+	t.markPureReceiverReports()
 	shared := make(map[ssa.Value][]UsageInfo)
 	hidden := make(map[ssa.Value][]UsageInfo)
 	for i := range t.violations {
 		if root := t.violations[i].Root; root != nil {
 			uses, ok := shared[root]
 			if !ok {
-				uses = t.getAllUses(root)
-				uses = slices.Clip(uses)
+				uses = slices.Clip(withoutPureReceiver(t.getAllUses(root)))
 				shared[root] = uses
-				hidden[root] = slices.Clip(t.hiddenUses(root))
+				hidden[root] = slices.Clip(withoutPureReceiver(t.hiddenUses(root)))
 			}
 			t.violations[i].AllUses = t.violationUses(t.violations[i], uses)
-			t.violations[i].HiddenUses = len(t.branchUses[root]) > 0 || len(t.aliasUses[root]) > 0 || len(t.loopCarriedUses[root]) > 0 || len(t.mayUses[root]) > 0
+			t.violations[i].HiddenUses = len(hidden[root]) > 0
 			t.violations[i].Hidden = hidden[root]
 		}
 	}
 	return t.violations
+}
+
+// withoutPureReceiver returns uses without the branches that pure methods
+// make through their receivers (#404). The fix of a root sees the uses it saw
+// before #404: a root with a report that needs such a branch gets no fix at
+// all (Violation.PureReceiverReport), and the fix of any other root is as it
+// was.
+func withoutPureReceiver(uses []UsageInfo) []UsageInfo {
+	return slices.DeleteFunc(uses, func(use UsageInfo) bool { return use.PureReceiver })
+}
+
+// markPureReceiverReports drops a violation that holds only because of a
+// pure method's receiver branch (#404) where another check reports the same
+// use of the same root without it, so the report keeps its text from before
+// #404. Then it marks every violation of a root that still has such a report
+// (Violation.PureReceiverReport).
+func (t *Tracker) markPureReceiverReports() {
+	type rootPos struct {
+		root ssa.Value
+		pos  token.Pos
+	}
+	other := make(map[rootPos]bool)
+	for _, v := range t.violations {
+		if v.Root != nil && !v.FromPureReceiver {
+			other[rootPos{v.Root, v.Pos}] = true
+		}
+	}
+	t.violations = slices.DeleteFunc(t.violations, func(v Violation) bool {
+		return v.FromPureReceiver && other[rootPos{v.Root, v.Pos}]
+	})
+	marked := make(map[ssa.Value]bool)
+	for _, v := range t.violations {
+		if v.FromPureReceiver {
+			marked[v.Root] = true
+		}
+	}
+	for i := range t.violations {
+		t.violations[i].PureReceiverReport = marked[t.violations[i].Root]
+	}
 }
 
 // hiddenUses returns the uses of root that AllUses does not list (see
@@ -619,12 +655,12 @@ func (t *Tracker) hiddenUses(root ssa.Value) []UsageInfo {
 // by its violations.
 func (t *Tracker) violationUses(v Violation, uses []UsageInfo) []UsageInfo {
 	for _, use := range t.mayUses[v.Root] {
-		if use.Pos == v.Pos && !slices.ContainsFunc(uses, func(u UsageInfo) bool { return u.Pos == use.Pos }) {
+		if use.Pos == v.Pos && !use.PureReceiver && !slices.ContainsFunc(uses, func(u UsageInfo) bool { return u.Pos == use.Pos }) {
 			uses = append(uses, use.UsageInfo) // a full slice: appending copies it
 		}
 	}
 	if len(uses) == 0 {
-		uses = slices.Clone(t.branchUses[v.Root])
+		uses = withoutPureReceiver(slices.Clone(t.branchUses[v.Root]))
 	}
 	return uses
 }
@@ -698,26 +734,29 @@ func (t *Tracker) invocationChain(block *ssa.BasicBlock) []*ssa.BasicBlock {
 
 // addViolationWithContext adds a violation with root information for fix
 // generation. CollectViolations adds the root's uses.
-func (t *Tracker) addViolationWithContext(pos token.Pos, root ssa.Value) {
+func (t *Tracker) addViolationWithContext(target UsageInfo, root ssa.Value, fromPure bool) {
 	t.violations = append(t.violations, Violation{
-		Pos:     pos,
-		Message: t.reuseMessage(root),
-		Root:    root,
+		Pos:              target.Pos,
+		Message:          t.reuseMessage(root, target, fromPure),
+		Root:             root,
+		FromPureReceiver: fromPure,
 	})
 }
 
 // reuseMessage builds the reuse diagnostic. It names the mutable root and its
 // first branch (when their positions are known) so the report points the user
 // at all three sites — root, first branch, and the offending second branch (the
-// diagnostic's own position) — not just the last one (#76).
-func (t *Tracker) reuseMessage(root ssa.Value) string {
+// diagnostic's own position) — not just the last one (#76). target is the
+// reported use, and fromPure says that only a pure method's receiver branch
+// explains the report (see firstBranchPos).
+func (t *Tracker) reuseMessage(root ssa.Value, target UsageInfo, fromPure bool) string {
 	msg := "*gorm.DB reused: second branch from mutable root"
 
 	var locs []string
 	if root != nil && rootPos(root).IsValid() {
 		locs = append(locs, "root at "+t.loc(rootPos(root)))
 	}
-	if fb := t.firstBranchPos(root); fb.IsValid() {
+	if fb := t.firstBranchPos(root, target, fromPure); fb.IsValid() {
 		locs = append(locs, "first branch at "+t.loc(fb))
 	}
 	if len(locs) > 0 {
@@ -792,15 +831,53 @@ func rootPos(root ssa.Value) token.Pos {
 // branch among those, recorded before the one reported (#309). They are not
 // ordered by position, so they count only then.
 //
-// The branch a pure method makes through its receiver (#404) is left out, so
-// a report that main gave names the same first branch. It is named only when
-// no other use is a candidate, by the same rules, as in `r.list(nil); go
-// q.Find(nil)`.
-func (t *Tracker) firstBranchPos(root ssa.Value) token.Pos {
-	if best := t.firstBranchAmong(root, false); best.IsValid() {
+// A pure method's branch through its receiver (#404) is left out of a report
+// that holds without it, so that report names what it did before #404. A
+// report that holds only because of such a branch (fromPure) names the
+// earliest branch that runs before target, the reported use, such a branch
+// included (runsBefore). It falls back to the earliest branch, as before.
+func (t *Tracker) firstBranchPos(root ssa.Value, target UsageInfo, fromPure bool) token.Pos {
+	if !fromPure {
+		if best := t.firstBranchAmong(root, false); best.IsValid() {
+			return best
+		}
+		return t.firstBranchAmong(root, true)
+	}
+	best := token.NoPos
+	for _, u := range slices.Concat(t.pollutingUses[root], t.branchUses[root]) {
+		if u.Pos.IsValid() && (u.Pos != target.Pos || u.Block != target.Block) && runsBefore(u, target) && t.reaches(root, u, target) && (!best.IsValid() || u.Pos < best) {
+			best = u.Pos
+		}
+	}
+	if best.IsValid() {
 		return best
 	}
 	return t.firstBranchAmong(root, true)
+}
+
+// runsBefore reports whether use a runs before use b. Uses are ordered by
+// position, as they always were. A pure method's receiver branch (#404) in
+// the same block as the other use is ordered by its instruction instead: an
+// argument is evaluated before the call that takes it, as r.list(nil) is
+// before the q.Where of q.Where("a", r.list(nil)), though it comes later in
+// the source.
+func runsBefore(a, b UsageInfo) bool {
+	if (a.PureReceiver || b.PureReceiver) && a.Block != nil && a.Block == b.Block {
+		if ia, ib := instrIndex(a), instrIndex(b); ia >= 0 && ib >= 0 {
+			return ia < ib
+		}
+	}
+	return a.Pos < b.Pos
+}
+
+// instrIndex returns the index in use.Block of the call that use is, or -1
+// when the use has no call at its position there, as a use ordered at the
+// call site of its closure (#68).
+func instrIndex(use UsageInfo) int {
+	return slices.IndexFunc(use.Block.Instrs, func(instr ssa.Instruction) bool {
+		_, call := instr.(ssa.CallInstruction)
+		return call && instr.Pos() == use.Pos
+	})
 }
 
 // firstBranchAmong is firstBranchPos over the uses of root, with the branches
@@ -808,7 +885,7 @@ func (t *Tracker) firstBranchPos(root ssa.Value) token.Pos {
 func (t *Tracker) firstBranchAmong(root ssa.Value, pure bool) token.Pos {
 	best := token.NoPos
 	earliest := func(u UsageInfo) {
-		if u.PureReceiver != NotPureReceiver && !pure {
+		if u.PureReceiver && !pure {
 			return
 		}
 		if u.Pos.IsValid() && (!best.IsValid() || u.Pos < best) {
@@ -844,6 +921,7 @@ func (t *Tracker) getAllUses(root ssa.Value) []UsageInfo {
 // Returns positions of target uses that are reachable from a source use.
 func (t *Tracker) checkViolationsBetween(targets, sources []UsageInfo, root ssa.Value) {
 	for _, target := range targets {
+		reported, byOther := false, false
 		for _, src := range sources {
 			effort.Step()
 			// Skip self-comparison for same-list checks
@@ -851,17 +929,25 @@ func (t *Tracker) checkViolationsBetween(targets, sources []UsageInfo, root ssa.
 				continue
 			}
 
-			// Only report if src is BEFORE target (earlier position)
-			if src.Pos >= target.Pos {
+			// Only report if src runs BEFORE target (see runsBefore)
+			if !runsBefore(src, target) {
 				continue
 			}
 
 			// Check CFG reachability (across closures, at their invocation
-			// sites), on a path that keeps the root of src (#375)
+			// sites), on a path that keeps the root of src (#375). A pure
+			// method's receiver branch alone makes a new report (#404), so
+			// the search goes on for another source.
 			if t.reaches(root, src, target) {
-				t.addViolationWithContext(target.Pos, root)
-				break
+				reported = true
+				if !src.PureReceiver && !target.PureReceiver {
+					byOther = true
+					break
+				}
 			}
+		}
+		if reported {
+			t.addViolationWithContext(target, root, !byOther)
 		}
 	}
 }

@@ -40,16 +40,17 @@ import (
 //   - the root is stored into a struct field or an element that other code
 //     can reach, as in `s := &Svc{db: q}; s.apply()` (see
 //     holderChangesRoot, #310);
-//   - a //gormreuse:pure method branches it through its receiver, as in
-//     `r := repo{db: q}; r.list()`, and another use of the root may see what
-//     it changes (changePureReceiverSeen). The pure check does not cover the
-//     receiver (#404).
+//   - the root has a report that holds only because a //gormreuse:pure
+//     method branches it through its receiver, as in
+//     `r := repo{db: q}; r.list(); q.Find(nil)` (#404). The pure check does
+//     not cover the receiver. Every other root is fixed as before #404
+//     (pollution.Violation.PureReceiverReport).
 //
 // A Session at the root makes each of them see a copy (#243).
 //
 //declscope:shared // generator.go's Generate withholds the fix with it
 func (g *Generator) changedElsewhere(v pollution.Violation, noDiscarded bool) bool {
-	if uses := slices.Concat(v.AllUses, v.Hidden); slices.ContainsFunc(uses, func(use pollution.UsageInfo) bool { return g.changePureReceiverSeen(v.Root, use, uses) }) {
+	if v.PureReceiverReport {
 		return true
 	}
 	ordered := usesOrdered(v)
@@ -83,43 +84,6 @@ func (g *Generator) changedElsewhere(v pollution.Violation, noDiscarded bool) bo
 		}
 	}
 	return deferChanges > 0 && (deferUses > 1 || deferRepeats)
-}
-
-// changePureReceiverSeen reports whether use is the branch a
-// //gormreuse:pure method makes of what its receiver holds (#404), and
-// another of uses, the uses of root, may see what the method changes in
-// place. A Session at the root would make the method change a copy, which is
-// only unsafe when a later use sees the change:
-//   - A go statement runs alongside the uses after it, so it may be seen.
-//   - A defer statement runs after every use, so it is not.
-//   - Any other call may be seen when it may run again for one run of the
-//     root's definition, when another use comes after it in its block, or
-//     when its block reaches another use's block. A use in another function,
-//     such as a closure, is not ordered, and counts too.
-//
-// So a pure call on an exclusive path (`if c { r.list(nil); return }`), or
-// after every other use, keeps the fix it had before #404.
-func (g *Generator) changePureReceiverSeen(root ssa.Value, use pollution.UsageInfo, uses []pollution.UsageInfo) bool {
-	switch use.PureReceiver {
-	case pollution.NotPureReceiver, pollution.PureReceiverDefer:
-		return false
-	case pollution.PureReceiverGo:
-		return true
-	}
-	if use.Block == nil || useRepeatsAfter(g.cfg, use.Block, tracer.RootBlock(root)) {
-		return true
-	}
-	return slices.ContainsFunc(uses, func(other pollution.UsageInfo) bool {
-		switch {
-		case other.Pos == use.Pos && other.Block == use.Block:
-			return false
-		case other.Block == nil || other.Block.Parent() != use.Block.Parent():
-			return true
-		case other.Block == use.Block:
-			return other.Pos > use.Pos
-		}
-		return g.cfg.CanReach(use.Block, other.Block)
-	})
 }
 
 // finisherErrorChanges reports whether a Session at the root would change

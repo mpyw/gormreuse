@@ -5047,7 +5047,7 @@ q.Find(nil)
 
 </td><td>
 
-A `//gormreuse:pure` method branches the root through its receiver, before another use or in a `go` statement. `pure` does not check the receiver, so the method may change the root in place, and a Session would hide that change from the later use (#404). A pure call after every use, on an early return such as `if c { r.list(); return }`, or in a `defer` statement keeps the fix.
+A `//gormreuse:pure` method branches the root through its receiver, and that makes a report of its own. `pure` does not check the receiver, so the method may change the root in place. gormreuse offers no fix for a root with such a report (#404). A pure call that makes no report, as on an early return such as `if c { r.list(); return }`, leaves the fix as it was.
 
 </td></tr>
 </table>
@@ -5861,7 +5861,7 @@ q.Find(nil)
 q.Find(nil) // reported
 ```
 
-Check such a fix by hand. A pure method whose receiver holds the root is the exception: it is reported as a branch, and it gets no fix.
+A pure method that holds the root in its receiver, but is the first use on its path, makes no report, so the fix does not see it either: `if c { q.Find(nil) } else { r.list(nil) }; q.Count(nil)` gets a Session. Check such a fix by hand. When the pure method does make a report, the root gets no fix.
 
 </details>
 

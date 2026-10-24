@@ -357,14 +357,11 @@ func (u siteUse) checkRoots(roots []ssa.Value, use pollution.UsageInfo) {
 		if i > 0 {
 			use.Direct = false
 		}
-		var polluted bool
-		if u.site.Mode == callsite.SiteDefer {
-			polluted = t.IsPollutedAround(r, use) || i == 0 && t.IsMayBranchedAround(r, use)
-		} else {
-			polluted = t.IsPollutedAt(r, use) || i == 0 && t.IsMayBranchedAt(r, use)
-		}
+		polluted, byOther := t.PollutedBefore(r, use, u.site.Mode == callsite.SiteDefer, i == 0)
 		if polluted {
-			t.AddViolationWithRoot(u.pos, r)
+			target := use
+			target.Pos = u.pos
+			t.AddViolationWithRoot(target, r, use.PureReceiver || !byOther)
 		}
 	}
 }
@@ -415,7 +412,9 @@ func (u siteUse) branch(roots []ssa.Value, use pollution.UsageInfo, assigns func
 	// value, such as a Session result, which FindAllMutableRoots keeps.
 	for _, r := range roots {
 		if !assigns(r) && !u.ctx.RootTracer.IsImmutableCall(r) && u.ctx.Repeats.RepeatsAfter(u.block, tracer.RootBlock(r)) {
-			t.AddViolationWithRoot(u.pos, r)
+			target := use
+			target.Pos = u.pos
+			t.AddViolationWithRoot(target, r, use.PureReceiver)
 		}
 	}
 }
@@ -548,7 +547,7 @@ func (u siteUse) handleArgs() {
 	call := u.call()
 	if site.Declared != nil && ctx.RootTracer.IsPureFunction(site.Declared) {
 		if site.Recv != nil {
-			u.handleHolders([]ssa.Value{site.Recv}, pollution.UsageInfo{Block: u.block, Pos: u.pos, Escapes: true, PureReceiver: pureReceiverKind(site.Instr)})
+			u.handleHolders([]ssa.Value{site.Recv}, pollution.UsageInfo{Block: u.block, Pos: u.pos, Escapes: true, PureReceiver: true})
 		}
 		return
 	}
@@ -616,18 +615,6 @@ func (u siteUse) handleArgs() {
 		operands = append([]ssa.Value{site.Recv}, operands...)
 	}
 	u.handleHolders(operands, pollution.UsageInfo{Block: u.block, Pos: u.pos, Escapes: true})
-}
-
-// pureReceiverKind returns how instr, a call of a pure method, runs (see
-// pollution.PureReceiverKind).
-func pureReceiverKind(instr ssa.CallInstruction) pollution.PureReceiverKind {
-	switch instr.(type) {
-	case *ssa.Go:
-		return pollution.PureReceiverGo
-	case *ssa.Defer:
-		return pollution.PureReceiverDefer
-	}
-	return pollution.PureReceiverCall
 }
 
 // handleHolders handles the structs that the site hands on, as an argument or

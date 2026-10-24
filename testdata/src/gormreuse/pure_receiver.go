@@ -158,10 +158,10 @@ func prOnce(db *gorm.DB) {
 	prRepo{db: q}.list(nil)
 }
 
-// prReceiverLastFix hands q to a pure method as its receiver after both
-// queries. The call is reported, but nothing after it sees what it changes,
-// so the Session fix stays.
-func prReceiverLastFix(db *gorm.DB) {
+// prReceiverLastNoFix hands q to a pure method as its receiver after both
+// queries. The call is a report that #404 adds, so the root gets no fix,
+// wherever the call is.
+func prReceiverLastNoFix(db *gorm.DB) {
 	q := db.Where("x")
 	r := prRepo{db: q}
 	q.Find(nil)
@@ -169,20 +169,9 @@ func prReceiverLastFix(db *gorm.DB) {
 	r.list(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
-// prLastInBranchFix does the same in a branch after both queries.
-func prLastInBranchFix(db *gorm.DB, c bool) {
-	q := db.Where("x")
-	r := prRepo{db: q}
-	q.Find(nil)
-	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
-	if c {
-		r.list(nil) // want `\*gorm\.DB reused: second branch from mutable root`
-	}
-}
-
-// prDeferredReceiverFix defers the pure call. It runs after every query, so
-// the Session fix stays.
-func prDeferredReceiverFix(db *gorm.DB) {
+// prDeferredReceiverNoFix defers the pure call. It is a report that #404
+// adds, so the root gets no fix.
+func prDeferredReceiverNoFix(db *gorm.DB) {
 	q := db.Where("x")
 	r := prRepo{db: q}
 	defer r.list(nil) // want `\*gorm\.DB reused: second branch from mutable root`
@@ -190,13 +179,36 @@ func prDeferredReceiverFix(db *gorm.DB) {
 	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
-// prSpawnedReceiverNoFix spawns the pure call. It runs alongside the query,
-// so no fix is offered.
+// prSpawnedReceiverNoFix spawns the pure call, a report that #404 adds. No
+// fix.
 func prSpawnedReceiverNoFix(db *gorm.DB) {
 	q := db.Where("x")
 	r := prRepo{db: q}
 	go r.list(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 	q.Find(nil)
+}
+
+// prArgumentOrderNoFix: r.find runs before the q.Where whose argument it is,
+// so the q.Where is the second branch, and the pure call is named as the
+// first. The report is new, so no fix.
+func prArgumentOrderNoFix(db *gorm.DB) {
+	q := db.Where("x")
+	r := prRepo{db: q}
+	q.Where("a", // want `\*gorm\.DB reused: second branch from mutable root \(root at pure_receiver\.go:195, first branch at pure_receiver\.go:198\); make the root immutable with \.Session`
+		r.find(nil),
+	).Find(nil)
+}
+
+// prClosureExitFix calls the pure method in a closure on the path that
+// returns. The reports are as before #404, and so is the fix.
+func prClosureExitFix(db *gorm.DB, c bool) {
+	q := db.Where("x")
+	if c {
+		func() { prRepo{db: q}.list(nil) }()
+		return
+	}
+	q.Find(nil)
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // prLoopExitFix calls the pure method only on the path that leaves the loop.
@@ -209,18 +221,19 @@ func prLoopExitFix(db *gorm.DB, xs []int) {
 			r.list(nil)
 			return
 		}
-		q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root \(root at pure_receiver\.go:205, first branch at pure_receiver\.go:212\); make the root immutable with \.Session`
+		q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root \(root at pure_receiver\.go:217, first branch at pure_receiver\.go:224\); make the root immutable with \.Session`
 	}
 }
 
-// prFirstBranchKeptNoFix: the pure call comes first, but a report main
-// already gave keeps naming main's first branch, q.Find.
-func prFirstBranchKeptNoFix(db *gorm.DB) {
+// prFirstBranchNoFix: the pure call comes first. The first query is a report
+// that #404 adds, and names the pure call as its first branch. The second
+// query was reported before #404, and keeps naming the first query.
+func prFirstBranchNoFix(db *gorm.DB) {
 	q := db.Where("x")
 	r := prRepo{db: q}
 	r.list(nil)
-	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root \(root at pure_receiver\.go:219, first branch at pure_receiver\.go:222\); make the root immutable with \.Session`
-	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root \(root at pure_receiver\.go:219, first branch at pure_receiver\.go:222\); make the root immutable with \.Session`
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root \(root at pure_receiver\.go:232, first branch at pure_receiver\.go:234\); make the root immutable with \.Session`
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root \(root at pure_receiver\.go:232, first branch at pure_receiver\.go:235\); make the root immutable with \.Session`
 }
 
 // prParamReceiverNoFix stores q behind a pointer parameter, then calls a pure
@@ -244,7 +257,7 @@ func prEarlyReturnFix(db *gorm.DB, c bool) {
 		return
 	}
 	q.Find(nil)
-	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root \(root at pure_receiver\.go:240, first branch at pure_receiver\.go:246\); make the root immutable with \.Session`
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root \(root at pure_receiver\.go:253, first branch at pure_receiver\.go:259\); make the root immutable with \.Session`
 }
 
 // prSwitchFix does the same in another case of a switch.
@@ -256,7 +269,7 @@ func prSwitchFix(db *gorm.DB, k int) {
 		r.list(nil)
 	case 2:
 		q.Find(nil)
-		q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root \(root at pure_receiver\.go:252, first branch at pure_receiver\.go:258\); make the root immutable with \.Session`
+		q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root \(root at pure_receiver\.go:265, first branch at pure_receiver\.go:271\); make the root immutable with \.Session`
 	}
 }
 
@@ -378,6 +391,20 @@ func prUnsafeSortLiteral(db *gorm.DB) {
 	prSortLiteral(nil)
 	q.Find(nil)
 	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// [LIMITATION] prUnsafeExclusiveReceiver: the pure call is the first use on
+// its path, so no report names it, and the q.Count report is as before #404.
+// Its Session drops the change r.list makes on the else path.
+func prUnsafeExclusiveReceiver(db *gorm.DB, c bool) {
+	q := db.Where("x")
+	r := prRepo{db: q}
+	if c {
+		q.Find(nil)
+	} else {
+		r.list(nil)
+	}
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
 // [LIMITATION] prUnsafeRetainedReceiver: the pure method keeps the address of
