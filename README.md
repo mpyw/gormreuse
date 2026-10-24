@@ -2491,6 +2491,9 @@ func withTenant(db *gorm.DB, tenantID int) *gorm.DB {
 }
 ```
 
+> [!NOTE]
+> **The receiver is not covered (#404).** `pure` covers the arguments only. A pure method that changes a `*gorm.DB` its receiver holds hands the receiver on, as a method without the directive does. Changing means calling a chain method on it, passing it on, or writing its `Statement`. So `repo{db: q}.list(nil); q.Find(nil)` is reported, and `-fix` offers no `Session` there. A pure method that only reads its receiver, or does not touch it, is unchanged.
+
 <details>
 <summary>Placement, calls without the directive, and the full contract</summary>
 

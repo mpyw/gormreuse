@@ -103,6 +103,8 @@ func validatePureFuncs(
 		}
 	}
 
+	verdicts.ChangesReceiver = pureChangedReceivers(targets, pureFuncs, immutableReturnFuncs, verdicts, funcVars, guard)
+
 	// A closure body is validated both as its own pure function and as part of
 	// a pure function that creates it, so the same violation can come twice.
 	reported := make(map[purity.Violation]bool)
@@ -118,6 +120,40 @@ func validatePureFuncs(
 		})
 	}
 	return verdicts
+}
+
+// pureChangedReceivers returns the trusted pure methods in targets that may
+// change a *gorm.DB their receiver holds (#404). A method that calls such a
+// method on its receiver changes it too, so the set grows until nothing
+// changes. A check that panicked counts as a change.
+func pureChangedReceivers(
+	targets []*ssa.Function,
+	pureFuncs, immutableReturnFuncs *directive.DirectiveFuncSet,
+	verdicts *tracer.PureVerdicts,
+	funcVars callsite.FuncVars,
+	guard *panicGuard,
+) map[*ssa.Function]bool {
+	changed := make(map[*ssa.Function]bool)
+	changes := func(fn *ssa.Function) bool {
+		return changed[fn] || verdicts.Imported.Of(fn).PureChangesReceiver
+	}
+	for grew := true; grew; {
+		grew = false
+		for _, fn := range targets {
+			if changed[fn] || verdicts.Failed[fn] || fn.Signature.Recv() == nil {
+				continue
+			}
+			yes := true
+			guard.run("pure", fn, func() {
+				yes = purity.NewValidator(fn, pureFuncs, immutableReturnFuncs, verdicts, funcVars).ChangesReceiver(changes)
+			})
+			if yes {
+				changed[fn] = true
+				grew = true
+			}
+		}
+	}
+	return changed
 }
 
 // pureCallers maps each function to the functions in targets whose

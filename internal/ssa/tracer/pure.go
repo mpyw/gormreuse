@@ -24,9 +24,26 @@ type PureVerdicts struct {
 	// argument.
 	Returned map[*ssa.Function][]int
 
+	// ChangesReceiver lists the pure methods that may change a *gorm.DB their
+	// receiver holds (#404). The contract covers the arguments only, so a call
+	// of one is a branch of what its receiver holds, as for any method.
+	ChangesReceiver map[*ssa.Function]bool
+
 	// Imported holds the verdicts that other packages exported for their pure
-	// functions (#195). Failed and Returned hold only this package's.
+	// functions (#195). Failed, Returned and ChangesReceiver hold only this
+	// package's.
 	Imported *facts.Table
+}
+
+// changesReceiverOf reports whether fn is a pure method that may change a
+// *gorm.DB its receiver holds (see ChangesReceiver). The verdicts are keyed by
+// the declared function.
+func (p *PureVerdicts) changesReceiverOf(fn *ssa.Function) bool {
+	if p == nil || fn == nil {
+		return false
+	}
+	declared := origin.Declared(fn)
+	return p.ChangesReceiver[declared] || p.Imported.Of(declared).PureChangesReceiver
 }
 
 // HasFailed reports whether fn is a pure function that broke its contract. The
@@ -94,6 +111,13 @@ func (t *RootTracer) IsPureFunction(fn *ssa.Function) bool {
 		return false
 	}
 	return t.pureFuncs.Contains(fn)
+}
+
+// PureChangesReceiver reports whether fn is a pure method that may change a
+// *gorm.DB its receiver holds (#404). A call of one hands its receiver on, as
+// a call of a method that is not pure does. Its arguments stay exempt.
+func (t *RootTracer) PureChangesReceiver(fn *ssa.Function) bool {
+	return t.pure.changesReceiverOf(fn)
 }
 
 // pureReturnedArgs returns the arguments of a call to a trusted

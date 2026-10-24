@@ -45,6 +45,7 @@ import (
 
 	"github.com/mpyw/gormreuse/internal/directive"
 	"github.com/mpyw/gormreuse/internal/ssa/callsite"
+	"github.com/mpyw/gormreuse/internal/ssa/origin"
 	"github.com/mpyw/gormreuse/internal/ssa/pollutionsource"
 	"github.com/mpyw/gormreuse/internal/ssa/stmtwrite"
 	"github.com/mpyw/gormreuse/internal/ssa/tracer"
@@ -122,6 +123,68 @@ func (v *Validator) Validate(writes map[ssa.Instruction]stmtwrite.Write) []Viola
 		seen[viol] = true
 		return false
 	})
+}
+
+// ChangesReceiver reports whether a pure method may change a *gorm.DB its
+// receiver holds (#404). The contract covers the arguments only, so the
+// receiver is checked on its own: it is the only seed, and every use the
+// contract reports for an argument counts, warnings included. So does a write
+// through a *gorm.DB or *gorm.Statement read from it, and a call on it of a
+// pure method that changes its own receiver (changes).
+func (v *Validator) ChangesReceiver(changes func(*ssa.Function) bool) bool {
+	fn := v.fn
+	if fn == nil || fn.Blocks == nil || fn.Signature.Recv() == nil || !v.holdsGormDB(fn.Params[0].Type()) {
+		return false
+	}
+	v.paramDerived[fn.Params[0]] = true
+	return len(v.validateBody(fn)) > 0 || v.writesReceiver(fn, changes)
+}
+
+// writesReceiver reports whether fn, or a closure inside it, writes through a
+// derived handle or calls a pure method that changes the derived receiver it
+// is given (see ChangesReceiver). validateBody has seeded the closures.
+func (v *Validator) writesReceiver(fn *ssa.Function, changes func(*ssa.Function) bool) bool {
+	for _, block := range fn.Blocks {
+		for _, instr := range block.Instrs {
+			switch i := instr.(type) {
+			case *ssa.Store:
+				if v.writesThroughHandle(i.Addr) {
+					return true
+				}
+			case *ssa.MapUpdate:
+				if v.writesThroughHandle(i.Map) {
+					return true
+				}
+			case ssa.CallInstruction:
+				common := i.Common()
+				if b, ok := common.Value.(*ssa.Builtin); ok {
+					switch b.Name() {
+					case "delete", "clear", "copy":
+						if v.writesThroughHandle(common.Args[0]) {
+							return true
+						}
+					}
+					continue
+				}
+				site := callsite.SiteOf(i, v.funcVars)
+				if site.Recv != nil && v.paramDerived[site.Recv] && site.Declared != nil && changes(origin.Declared(site.Declared)) {
+					return true
+				}
+			}
+		}
+	}
+	return slices.ContainsFunc(fn.AnonFuncs, func(anon *ssa.Function) bool { return v.writesReceiver(anon, changes) })
+}
+
+// writesThroughHandle reports whether a write to addr lands in memory reached
+// from a derived *gorm.DB or *gorm.Statement.
+func (v *Validator) writesThroughHandle(addr ssa.Value) bool {
+	for x := addr; x != nil; x = v.derivationOperand(x) {
+		if v.paramDerived[x] && (typeutil.IsGormDB(x.Type()) || typeutil.IsGormStatement(x.Type())) {
+			return true
+		}
+	}
+	return false
 }
 
 // ReturnedParams returns the indexes into fn.Params of the parameters the

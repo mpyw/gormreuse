@@ -1,0 +1,226 @@
+package internal
+
+import "gorm.io/gorm"
+
+// =============================================================================
+// PURE RECEIVER (#404)
+//
+// //gormreuse:pure covers a function's arguments, not a method's receiver. A
+// pure method that may change a *gorm.DB its receiver holds hands its receiver
+// on, as a method that is not pure does: the call is a branch of each mutable
+// root the receiver holds, and -fix takes it as an escape. Its arguments stay
+// exempt. A pure method that only reads its receiver, or does not touch it,
+// is unchanged.
+// =============================================================================
+
+type prRepo struct{ db *gorm.DB }
+
+type prEmbedded struct{ *gorm.DB }
+
+type prOuter struct{ inner prRepo }
+
+//gormreuse:pure
+func (r prRepo) list(dst *gorm.DB) { r.db.Where("leak").Find(nil) }
+
+//gormreuse:pure
+func (r *prRepo) listP(dst *gorm.DB) { r.db.Where("leak").Find(nil) }
+
+//gormreuse:pure
+func (e prEmbedded) run(dst *gorm.DB) { e.Where("leak").Find(nil) }
+
+//gormreuse:pure
+func (o prOuter) list(dst *gorm.DB) { o.inner.db.Where("leak").Find(nil) }
+
+//gormreuse:pure
+func (r prRepo) viaHelper(dst *gorm.DB) { prApply(r.db) }
+
+//gormreuse:pure
+func (r prRepo) mark(dst *gorm.DB) { r.db.Statement.Distinct = true }
+
+//gormreuse:pure
+func (r prRepo) viaPureMethod(dst *gorm.DB) { r.list(dst) }
+
+//gormreuse:pure
+func (r prRepo) inClosure(dst *gorm.DB) {
+	func() { r.db.Where("leak").Find(nil) }()
+}
+
+//gormreuse:pure
+func (r prRepo) setClause(dst *gorm.DB) { r.db.Statement.Clauses["X"] = 1 }
+
+//gormreuse:pure
+func (r prRepo) dropWhere(dst *gorm.DB) { delete(r.db.Statement.Clauses, "WHERE") }
+
+//gormreuse:pure
+func (r prRepo) count(dst *gorm.DB) { r.db.Session(&gorm.Session{}).Count(nil) }
+
+//gormreuse:pure
+func (r prRepo) selected(dst *gorm.DB) int { return len(r.db.Statement.Selects) }
+
+//gormreuse:pure
+func (r prRepo) name(dst *gorm.DB) string { return "repo" }
+
+//gormreuse:pure
+func (r prRepo) inspect(other prRepo) { r.db.Where("x").Find(nil) }
+
+func prApply(db *gorm.DB) { db.Where("leak") }
+
+// =============================================================================
+// SHOULD REPORT
+// =============================================================================
+
+// prValueReceiver: a pure method with a value receiver changes q.
+func prValueReceiver(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x")
+	prRepo{db: q}.list(nil)
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// prPointerReceiver: the same with a pointer receiver.
+func prPointerReceiver(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x")
+	(&prRepo{db: q}).listP(nil)
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// prEmbeddedReceiver: the receiver embeds *gorm.DB.
+func prEmbeddedReceiver(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x")
+	prEmbedded{q}.run(nil)
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// prNestedField: the receiver holds q in a nested struct.
+func prNestedField(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x")
+	prOuter{inner: prRepo{db: q}}.list(nil)
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// prMethodValue: the call goes through a method value.
+func prMethodValue(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x")
+	f := prRepo{db: q}.list
+	f(nil)
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// prSpawned: the call runs in a go statement. It is reported at the
+// statement, as a spawned call of any method is.
+func prSpawned(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x")
+	go prRepo{db: q}.list(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	q.Find(nil)
+}
+
+// prDeferred: the call is deferred, so it runs after the query.
+func prDeferred(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x")
+	defer prRepo{db: q}.list(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	q.Find(nil)
+}
+
+// prHelper: the pure method hands its receiver's DB to a helper.
+func prHelper(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x")
+	prRepo{db: q}.viaHelper(nil)
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// prStatementWrite: the pure method writes its receiver's Statement.
+func prStatementWrite(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x")
+	prRepo{db: q}.mark(nil)
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// prClauseWrite: the pure method writes into its receiver's Statement map.
+func prClauseWrite(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x")
+	prRepo{db: q}.setClause(nil)
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// prClauseDelete: the pure method deletes from its receiver's Statement map.
+func prClauseDelete(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x")
+	prRepo{db: q}.dropWhere(nil)
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// prThroughPureMethod: the pure method calls another one that changes the
+// receiver.
+func prThroughPureMethod(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x")
+	prRepo{db: q}.viaPureMethod(nil)
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// prClosure: the pure method changes its receiver in a closure.
+func prClosure(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x")
+	prRepo{db: q}.inClosure(nil)
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// prFixWithheld: q is reused, and the pure method changes it in place, so a
+// Session at q would drop that change. No fix is offered, as for a method
+// that is not pure.
+func prFixWithheld(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x")
+	r := prRepo{db: q}
+	q.Find(nil)
+	r.list(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}
+
+// =============================================================================
+// SHOULD NOT REPORT
+// =============================================================================
+
+// prConnectionReceiver: the receiver holds an immutable handle.
+func prConnectionReceiver(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x")
+	prRepo{db: db.Session(&gorm.Session{})}.list(nil)
+	q.Find(nil)
+}
+
+// prReadsReceiver: the pure method only reads its receiver.
+func prReadsReceiver(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x")
+	prRepo{db: q}.count(nil)
+	q.Find(nil)
+}
+
+// prLenOfReceiver: the pure method only takes a length from its receiver.
+func prLenOfReceiver(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x")
+	_ = prRepo{db: q}.selected(nil)
+	q.Find(nil)
+}
+
+// prIgnoresReceiver: the pure method does not touch its receiver's DB.
+func prIgnoresReceiver(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x")
+	_ = prRepo{db: q}.name(nil)
+	q.Find(nil)
+}
+
+// prPureArgument: q is in a struct passed as an argument of a pure method,
+// which the contract covers. The method changes only its own receiver, which
+// holds an immutable handle.
+func prPureArgument(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x")
+	prRepo{db: db.Session(&gorm.Session{})}.inspect(prRepo{db: q})
+	q.Find(nil)
+}
+
+// prFixKept: the pure method does not touch its receiver, so -fix gives q a
+// Session as for any reuse.
+func prFixKept(db *gorm.DB) {
+	q := db.Session(&gorm.Session{}).Where("x")
+	r := prRepo{db: q}
+	_ = r.name(nil)
+	q.Find(nil)
+	q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+}

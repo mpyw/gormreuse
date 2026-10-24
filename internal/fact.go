@@ -63,6 +63,7 @@ func exportFacts(pass *analysis.Pass, ssaInfo *buildssa.SSA, src factSources, sk
 			if src.pureFuncs.Contains(fn) {
 				f.Pure = true
 				f.PureFailed = src.pureVerdicts.Failed[fn]
+				f.PureChangesReceiver = src.pureVerdicts.ChangesReceiver[fn]
 				f.Returned = src.pureVerdicts.Returned[fn]
 				f.ReturnsOnlyParams = len(f.Returned) > 0 && src.tracer.PureReturnsOnlyParams(fn)
 			}
