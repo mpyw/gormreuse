@@ -67,7 +67,8 @@ func (g *Generator) holderChangesRoot(v pollution.Violation, ordered bool) bool 
 //     memory is reached the same way after the copy.
 //
 // A //gormreuse:pure function changes nothing it is handed, as in
-// paDeref(&q). Code in a closure is not ordered against the uses, so an
+// paDeref(&q). A pure method may change what its receiver holds (#404), so
+// its call is an escape. Code in a closure is not ordered against the uses, so an
 // escape there, or a store there into memory that is not a local struct, is
 // taken as seen.
 func (g *Generator) holderStoreChangesRoot(v pollution.Violation, store *ssa.Store, ordered bool) bool {
@@ -75,7 +76,8 @@ func (g *Generator) holderStoreChangesRoot(v pollution.Violation, store *ssa.Sto
 	def := tracer.RootBlock(v.Root)
 	seen := func(instr ssa.Instruction) bool {
 		if call, ok := instr.(ssa.CallInstruction); ok {
-			if site := g.tracer.Site(call); !site.IsGormMethod() && g.tracer.IsPureFunction(site.Declared) {
+			// A pure method may change what its receiver holds (#404).
+			if site := g.tracer.Site(call); !site.IsGormMethod() && site.Recv == nil && g.tracer.IsPureFunction(site.Declared) {
 				return false
 			}
 		}

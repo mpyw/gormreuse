@@ -667,7 +667,7 @@ q.Find(&users)
 
 The callee can reach it through the struct. This does not apply to:
 
-- a pure function
+- a pure function, when the struct is an argument. The receiver of a pure method still counts, because `pure` does not check the receiver
 - an inferred getter
 - a `*gorm.DB` method
 - a method of `gorm.Statement`
@@ -2684,6 +2684,8 @@ func pass(db *gorm.DB) {
 **MAY** pass an argument to output functions: `fmt`, `log` and `testing`.
 
 **MAY** use its receiver. A method's receiver is not an argument.
+
+So a call of a pure method still branches the mutable `*gorm.DB` its receiver holds. `repo{db: q}.ok(x); q.Find(nil)` is reported, as it is without the directive.
 
 </td><td>
 
