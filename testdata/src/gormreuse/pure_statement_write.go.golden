@@ -2,6 +2,7 @@ package internal
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"slices"
 	"sort"
@@ -210,6 +211,14 @@ func pswAppendResliced(db *gorm.DB) {
 	_ = append(db.Statement.Selects[:0], "x") // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
 }
 
+// pswAppendShorter appends to a reslice of Selects cut at another slice's
+// length, which may be below its own.
+//
+//gormreuse:pure
+func pswAppendShorter(db *gorm.DB, other []string) {
+	_ = append(db.Statement.Selects[:len(other)], "x") // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
+}
+
 // pswConvertedSlice writes through a slice converted to an array pointer, and
 // through a map boxed in an interface and asserted back.
 //
@@ -220,14 +229,15 @@ func pswConvertedSlice(db *gorm.DB) {
 	m.(map[string]interface{})["X"] = 1 // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
 }
 
-// pswHandsOnMemory hands the Statement's map and slice to functions that may
-// change them. It is a warning, as passing the argument to a function that is
-// not pure is, so callers still trust it.
+// pswHandsOnMemory hands the Statement's map and slice to functions that
+// change them. A hand-off to a call is not followed, as it was not before
+// #405: the callee's body would decide it.
+// [LIMITATION]
 //
 //gormreuse:pure
 func pswHandsOnMemory(db *gorm.DB) {
-	pswFill(db.Statement.Clauses)      // want `pure function hands the query memory of its \*gorm\.DB argument to code that may change it`
-	sort.Strings(db.Statement.Selects) // want `pure function hands the query memory of its \*gorm\.DB argument to code that may change it`
+	pswFill(db.Statement.Clauses)
+	sort.Strings(db.Statement.Selects)
 }
 
 // pswCapturedLocalCopy writes the shared map of a local copy in a closure.
@@ -345,11 +355,12 @@ func pswStatementValue(db *gorm.DB, st gorm.Statement) {
 	st.Clauses["X"] = 1 // want `pure function pollutes \*gorm\.DB argument by writing to it directly`
 }
 
-// pswLiteralCall hands the map to a function literal, which may change it.
+// pswLiteralCall hands the map to a function literal, which changes it.
+// [LIMITATION]
 //
 //gormreuse:pure
 func pswLiteralCall(db *gorm.DB) {
-	func(m map[string]interface{}) { m["X"] = 1 }(db.Statement.Clauses) // want `pure function hands the query memory of its \*gorm\.DB argument to code that may change it`
+	func(m map[string]interface{}) { m["X"] = 1 }(db.Statement.Clauses)
 }
 
 // pswCopyByAddress hands the address of a local copy to a function, which
@@ -363,9 +374,34 @@ func pswCopyByAddress(db *gorm.DB) {
 
 func pswTakeStatement(st *gorm.Statement) { st.Clauses["X"] = 1 }
 
+// pswAddressHandedOn hands the address of a Statement field to functions
+// that write through it, and calls methods of the Statement's SQL builder.
+// [LIMITATION]
+//
+//gormreuse:pure
+func pswAddressHandedOn(db *gorm.DB, b []byte) {
+	_ = json.Unmarshal(b, &db.Statement.Selects)
+	_, _ = fmt.Sscan("t", &db.Statement.Table)
+	db.Statement.SQL.WriteString("DROP")
+	db.Statement.SQL.Reset()
+}
+
+// pswKeyedByHandle uses the argument as a map key. The map is the package's,
+// not the argument's memory.
+//
+//gormreuse:pure
+func pswKeyedByHandle(db *gorm.DB) {
+	pswPerDB[db]["n"]++
+	if m, ok := pswPerDB[db]; ok {
+		m["n"] = 0
+	}
+}
+
+var pswPerDB = map[*gorm.DB]map[string]int{}
+
 func pswCallerHandsOn(db *gorm.DB) {
 	q := db.Where("x")
-	pswHandsOnMemory(q) // a warning keeps the trust
+	pswHandsOnMemory(q) // missed: pswHandsOnMemory is still trusted
 	q.Find(nil)
 }
 
@@ -482,6 +518,11 @@ func pswFreshStatement(db *gorm.DB) {
 func pswReaders(db *gorm.DB) string {
 	_ = slices.Contains(db.Statement.Selects, "id")
 	_ = append([]string{}, db.Statement.Selects...)
+	s := db.Statement.Selects
+	_ = append(s[:len(s):len(s)], "x")
+	_ = append(db.Statement.Selects[:0:0], "x")
+	_ = append(db.Statement.Selects[1:], "x")
+	_ = append(db.Statement.Selects[:len(db.Statement.Selects)], "x")
 	fmt.Println(db.Statement.Clauses, db.Statement.Table)
 	return strings.Join(db.Statement.Selects, ",")
 }
@@ -502,8 +543,11 @@ func pswProbeLog(string) {}
 
 type pswOut struct{ Table string }
 
-// pswConfig writes the Config that every handle of the connection shares. It
-// holds no clause.
+// pswConfig writes the argument's Config. It holds no clause, so it is
+// allowed, but a write such as DryRun or Logger changes how the caller's
+// later queries run. gorm's Session copies the Config, so the caller's handle
+// may hold the same one.
+// [LIMITATION]
 //
 //gormreuse:pure
 func pswConfig(db *gorm.DB) {
@@ -593,24 +637,33 @@ func pswInferAppendShared(db *gorm.DB) {
 	db.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
+// pswInferHandedOn hands the Statement memory on, which is not followed, as before
+// #405.
+// [LIMITATION]
 func pswInferHandedOn(db *gorm.DB) {
 	pswFill(db.Statement.Clauses)
 	db.Find(nil)
-	db.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	db.Count(nil)
 }
 
 func pswFill(m map[string]interface{}) { m["X"] = 1 }
 
+// pswInferSent hands the Statement memory on, which is not followed, as before
+// #405.
+// [LIMITATION]
 func pswInferSent(db *gorm.DB, ch chan map[string]interface{}) {
 	ch <- db.Statement.Clauses
 	db.Find(nil)
-	db.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	db.Count(nil)
 }
 
+// pswInferStoredInMap hands the Statement memory on, which is not followed, as before
+// #405.
+// [LIMITATION]
 func pswInferStoredInMap(db *gorm.DB, m map[string]map[string]interface{}) {
 	m["c"] = db.Statement.Clauses
 	db.Find(nil)
-	db.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	db.Count(nil)
 }
 
 // pswInferReadsInClosure and pswInferReadsInLoop only read the Statement, in a
@@ -650,10 +703,13 @@ func pswInferReads(db *gorm.DB) {
 	db.Count(nil)
 }
 
+// pswInferSorted hands the Statement memory on, which is not followed, as before
+// #405.
+// [LIMITATION]
 func pswInferSorted(db *gorm.DB) {
 	sort.Strings(db.Statement.Selects)
 	db.Find(nil)
-	db.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root`
+	db.Count(nil)
 }
 
 func pswInferAppendResliced(db *gorm.DB) {

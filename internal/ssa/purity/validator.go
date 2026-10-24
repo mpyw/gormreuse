@@ -578,11 +578,8 @@ func (v *Validator) checkStoreEscape(store *ssa.Store) []Violation {
 // or `delete(db.Statement.Clauses, "X")`: they change its query in place, as
 // db.Where does. stmtwrite decides what is a write, from every derived
 // gorm.DB and gorm.Statement of the function and its closures, so the
-// inferred immutable-param reads the same answer. A write is definitive. A
-// hand-off of that memory to code that may write it, such as
-// sort.Strings(db.Statement.Selects), is a warning, as passing the argument
-// to a function that is not pure is. found holds the violations found
-// already: a position that has one, such as the escape of
+// inferred immutable-param reads the same answer. found holds the
+// violations found already: a position that has one, such as the escape of
 // db.Statement.DB = db, is not reported again.
 func (v *Validator) checkDirectWrites(found []Violation) []Violation {
 	var handles []ssa.Value
@@ -601,23 +598,15 @@ func (v *Validator) checkDirectWrites(found []Violation) []Violation {
 		reported[viol.Pos] = true
 	}
 	var violations []Violation
-	for instr, write := range stmtwrite.FromHandles(handles) {
+	for instr := range stmtwrite.Writes(handles) {
 		if reported[instr.Pos()] {
 			continue
 		}
-		switch write {
-		case stmtwrite.Certain:
-			violations = append(violations, Violation{
-				Pos:        instr.Pos(),
-				Message:    "pure function pollutes *gorm.DB argument by writing to it directly",
-				Definitive: true,
-			})
-		case stmtwrite.Maybe:
-			violations = append(violations, Violation{
-				Pos:     instr.Pos(),
-				Message: "pure function hands the query memory of its *gorm.DB argument to code that may change it",
-			})
-		}
+		violations = append(violations, Violation{
+			Pos:        instr.Pos(),
+			Message:    "pure function pollutes *gorm.DB argument by writing to it directly",
+			Definitive: true,
+		})
 	}
 	slices.SortFunc(violations, func(a, b Violation) int { return int(a.Pos - b.Pos) })
 	return violations

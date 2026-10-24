@@ -358,12 +358,13 @@ func inferChangesInPlace(funcs []*ssa.Function, finisherOnly func(*ssa.Function)
 	}
 	changes := make(map[*ssa.Function]bool)
 	callers := make(map[*ssa.Function][]*ssa.Function)
+	writes := stmtwrite.NewCache()
 	var queue []*ssa.Function
 	for _, fn := range funcs {
 		if !declared[fn] {
 			continue
 		}
-		own, callees := inferParamUses(fn, declared, finisherOnly)
+		own, callees := inferParamUses(fn, declared, finisherOnly, writes)
 		if own {
 			changes[fn] = true
 			queue = append(queue, fn)
@@ -388,8 +389,8 @@ func inferChangesInPlace(funcs []*ssa.Function, finisherOnly func(*ssa.Function)
 // inferParamUses reads how fn and its closures use fn's *gorm.DB parameters
 // (see inferChangesInPlace). own reports a use that may change one in place.
 // callees are the functions of declared that get one as an argument: fn
-// changes it when one of them does.
-func inferParamUses(fn *ssa.Function, declared map[*ssa.Function]bool, finisherOnly func(*ssa.Function) []int) (own bool, callees []*ssa.Function) {
+// changes it when one of them does. writes shares the work of stmtwrite.
+func inferParamUses(fn *ssa.Function, declared map[*ssa.Function]bool, finisherOnly func(*ssa.Function) []int, writes *stmtwrite.Cache) (own bool, callees []*ssa.Function) {
 	tree := make(map[*ssa.Function]bool)
 	var instrs []ssa.Instruction
 	callsite.WalkInstrs([]*ssa.Function{fn}, func(instr ssa.Instruction) {
@@ -418,7 +419,7 @@ func inferParamUses(fn *ssa.Function, declared map[*ssa.Function]bool, finisherO
 			case *ssa.Store:
 				own = own || !vars[ref.Addr]
 			case *ssa.FieldAddr:
-				own = own || !inferReadsField(ref)
+				own = own || !inferReadsField(ref, writes)
 			case ssa.CallInstruction:
 				changes, callee := inferCallChangesParam(ref, v, tree, declared, finisherOnly)
 				own = own || changes
@@ -519,8 +520,8 @@ func inferHoldStep(instr ssa.Instruction, held, vars map[ssa.Value]bool, tree ma
 // in tx.Statement.Context. A field of the Statement that is a map, a slice or
 // a handle is shared with it, so a write through one (#405), as in
 // tx.Statement.Clauses["X"] = c, is a change too. stmtwrite decides it, as it
-// does for the pure contract.
-func inferReadsField(fa *ssa.FieldAddr) bool {
+// does for the pure contract. writes shares its work across the function.
+func inferReadsField(fa *ssa.FieldAddr, writes *stmtwrite.Cache) bool {
 	ptr, ok := fa.X.Type().Underlying().(*types.Pointer)
 	if !ok {
 		return false
@@ -535,7 +536,7 @@ func inferReadsField(fa *ssa.FieldAddr) bool {
 			field, isField := ref.(*ssa.FieldAddr)
 			_, debug := ref.(*ssa.DebugRef)
 			return !debug && (!isField || !inferOnlyLoads(field, func(load *ssa.UnOp) bool {
-				return stmtwrite.FromValue(load) == stmtwrite.None
+				return !writes.WritesThrough(load)
 			}))
 		})
 	})

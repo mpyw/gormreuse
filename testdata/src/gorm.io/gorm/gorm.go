@@ -1,7 +1,10 @@
 // Package gorm is a stub for testing purposes.
 package gorm
 
-import "context"
+import (
+	"context"
+	"strings"
+)
 
 // DB is the main database struct.
 type DB struct {
@@ -28,6 +31,7 @@ type Statement struct {
 	// package, so the stub keeps the map only.
 	Clauses  map[string]interface{}
 	Preloads map[string][]interface{}
+	SQL      strings.Builder
 }
 
 // AddClause adds a clause to the Statement in place.
