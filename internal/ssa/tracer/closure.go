@@ -34,15 +34,23 @@ func (t *RootTracer) ClosureCapturesGormDB(mc *ssa.MakeClosure) bool {
 		}
 		handsOn := closureFreeVarHandedOn(fn.FreeVars[i])
 		if slices.ContainsFunc(closureFuncValues(binding), func(v *ssa.MakeClosure) bool {
-			if site, bound := callsite.BoundSite(v); bound {
-				return closureHoldsGormDB(site.Recv.Type(), make(map[types.Type]bool))
-			}
-			return handsOn && t.closureReturnsCapturedGormDB(v)
+			return t.closureFuncValueCapturesGormDB(v, handsOn)
 		}) {
 			return true
 		}
 	}
 	return false
+}
+
+// closureFuncValueCapturesGormDB reports whether v, a closure stored into a
+// captured variable, may give a *gorm.DB to the code that calls it: a method
+// value of a receiver that holds one, or, with literals, a function literal
+// that returns a captured one (closureReturnsCapturedGormDB).
+func (t *RootTracer) closureFuncValueCapturesGormDB(v *ssa.MakeClosure, literals bool) bool {
+	if site, bound := callsite.BoundSite(v); bound {
+		return closureHoldsGormDB(site.Recv.Type(), make(map[types.Type]bool))
+	}
+	return literals && t.closureReturnsCapturedGormDB(v)
 }
 
 // closureFuncValues returns the closures stored into binding, a variable
@@ -81,10 +89,7 @@ func (t *RootTracer) closureReturnsCapturedGormDB(mc *ssa.MakeClosure) bool {
 	t.capturing[mc] = false
 	captures := typeutil.HasGormDBResult(mc.Fn.(*ssa.Function).Signature.Results()) && slices.ContainsFunc(mc.Bindings, func(binding ssa.Value) bool {
 		return closureHoldsGormDB(binding.Type(), make(map[types.Type]bool)) || slices.ContainsFunc(closureFuncValues(binding), func(v *ssa.MakeClosure) bool {
-			if site, bound := callsite.BoundSite(v); bound {
-				return closureHoldsGormDB(site.Recv.Type(), make(map[types.Type]bool))
-			}
-			return t.closureReturnsCapturedGormDB(v)
+			return t.closureFuncValueCapturesGormDB(v, true)
 		})
 	})
 	t.capturing[mc] = captures

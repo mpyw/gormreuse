@@ -1327,6 +1327,84 @@ var growthCases = []growthCase{
 		fmt.Fprintf(&b, "\trun(f%d)\n}\n", n)
 		return []string{b.String()}
 	}},
+	// One literal with n returns of a captured root, handed on n times: the
+	// literal's returns are walked once, not at every hand-off (#397).
+	{name: "literalreturns", limit: growthNearLinear, shape: func(n int) []string {
+		var b strings.Builder
+		b.WriteString("func run(func() *gorm.DB) {}\n\nfunc f(db *gorm.DB, x int) {\n\tq := db.Where(\"x\")\n\tg := func() *gorm.DB {\n")
+		for i := range n {
+			fmt.Fprintf(&b, "\t\tif x == %d {\n\t\t\treturn q\n\t\t}\n", i)
+		}
+		b.WriteString("\t\treturn q\n\t}\n")
+		for range n {
+			b.WriteString("\trun(g)\n")
+		}
+		b.WriteString("}\n")
+		return []string{b.String()}
+	}},
+	// One literal with n literals called in place that may assign the
+	// captured root, and n returns, handed on n times (#397). cfg.Repeats
+	// compares the runs of the closures in pairs, as it did before #397, so
+	// the case is quadratic. literalstores holds the part #397 adds, where
+	// the root may be unassigned, to linear growth.
+	{name: "literaliifes", limit: growthQuadratic, shape: func(n int) []string {
+		var b strings.Builder
+		b.WriteString("func run(func() *gorm.DB) {}\n\nfunc f(db *gorm.DB, x int) {\n\tq := db.Where(\"x\")\n\tg := func() *gorm.DB {\n")
+		for i := range n {
+			fmt.Fprintf(&b, "\t\tfunc() {\n\t\t\tif x == %d {\n\t\t\t\treturn\n\t\t\t}\n\t\t\tq = nil\n\t\t}()\n\t\tif x == %d {\n\t\t\treturn q\n\t\t}\n", i, i)
+		}
+		b.WriteString("\t\treturn q\n\t}\n")
+		for range n {
+			b.WriteString("\trun(g)\n")
+		}
+		b.WriteString("}\n")
+		return []string{b.String()}
+	}},
+	// One literal with n stores to the captured root and n returns of it,
+	// handed on twice: where the root may be unassigned is found once for all
+	// the returns (#397).
+	{name: "literalstores", n: 400, limit: growthNearLinear, shape: func(n int) []string {
+		var b strings.Builder
+		b.WriteString("func run(func() *gorm.DB) {}\n\nfunc f(db *gorm.DB, x int) {\n\tq := db.Where(\"x\")\n\tg := func() *gorm.DB {\n")
+		for i := range n {
+			fmt.Fprintf(&b, "\t\tif x == %d {\n\t\t\treturn q\n\t\t}\n\t\tif x == -%d {\n\t\t\tq = nil\n\t\t}\n", i, i)
+		}
+		b.WriteString("\t\treturn q\n\t}\n\trun(g)\n\trun(g)\n}\n")
+		return []string{b.String()}
+	}},
+	// One literal that returns one of n captured roots, handed on n times:
+	// each root's variable is read once (#397).
+	{name: "literalphis", limit: growthNearLinear, shape: func(n int) []string {
+		var b strings.Builder
+		b.WriteString("func run(func() *gorm.DB) {}\n\nfunc f(db *gorm.DB, x int) {\n")
+		for i := range n {
+			fmt.Fprintf(&b, "\tq%d := db.Where(\"x\")\n", i)
+		}
+		b.WriteString("\tg := func() *gorm.DB {\n\t\tr := q0\n")
+		for i := 1; i < n; i++ {
+			fmt.Fprintf(&b, "\t\tif x == %d {\n\t\t\tr = q%d\n\t\t}\n", i, i)
+		}
+		b.WriteString("\t\treturn r\n\t}\n")
+		for range n {
+			b.WriteString("\trun(g)\n")
+		}
+		b.WriteString("}\n")
+		return []string{b.String()}
+	}},
+	// A variable that holds one of n literals, handed on n times: the
+	// literals of the variable are found and merged once (#397).
+	{name: "literalmerges", limit: growthNearLinear, shape: func(n int) []string {
+		var b strings.Builder
+		b.WriteString("func run(func() *gorm.DB) {}\n\nfunc f(db *gorm.DB, x int) {\n\tq := db.Where(\"x\")\n\tg := func() *gorm.DB { return q }\n")
+		for i := range n {
+			fmt.Fprintf(&b, "\tif x == %d {\n\t\tg = func() *gorm.DB { return q }\n\t}\n", i)
+		}
+		for range n {
+			b.WriteString("\trun(g)\n")
+		}
+		b.WriteString("}\n")
+		return []string{b.String()}
+	}},
 	// n loops that each append a query of their own to a slice, then a loop
 	// that reads it: each append runs again, and the values the slice may
 	// hold are found once (#374). Its steps are quadratic, but no more than
