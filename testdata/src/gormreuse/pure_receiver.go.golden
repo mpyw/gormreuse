@@ -179,6 +179,33 @@ func prParamReceiverNoFix(db *gorm.DB, p *prRepo) {
 	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root`
 }
 
+// prEarlyReturnFix calls a pure method on q's holder on a path that returns
+// before the queries. That branch shares no path with them, so the report,
+// its first branch and its fix are as without #404.
+func prEarlyReturnFix(db *gorm.DB, c bool) {
+	q := db.Where("x").Session(&gorm.Session{})
+	r := prRepo{db: q}
+	if c {
+		r.list(nil)
+		return
+	}
+	q.Find(nil)
+	q.Find(nil) // want `\*gorm\.DB reused: second branch from mutable root \(root at pure_receiver\.go:186, first branch at pure_receiver\.go:192\); make the root immutable with \.Session`
+}
+
+// prSwitchFix does the same in another case of a switch.
+func prSwitchFix(db *gorm.DB, k int) {
+	q := db.Where("x").Session(&gorm.Session{})
+	r := prRepo{db: q}
+	switch k {
+	case 1:
+		r.list(nil)
+	case 2:
+		q.Find(nil)
+		q.Count(nil) // want `\*gorm\.DB reused: second branch from mutable root \(root at pure_receiver\.go:198, first branch at pure_receiver\.go:204\); make the root immutable with \.Session`
+	}
+}
+
 // =============================================================================
 // UNSAFE FIX: A PURE CALL AFTER A STORE INTO OTHER MEMORY
 //

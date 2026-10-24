@@ -41,14 +41,15 @@ import (
 //     can reach, as in `s := &Svc{db: q}; s.apply()` (see
 //     holderChangesRoot, #310);
 //   - a //gormreuse:pure method branches it through its receiver, as in
-//     `r := repo{db: q}; r.list()`. The pure check does not cover the
-//     receiver (#404).
+//     `r := repo{db: q}; r.list()`, on a path that another use of the root
+//     shares (changePureReceiverSharesPath). The pure check does not cover
+//     the receiver (#404).
 //
 // A Session at the root makes each of them see a copy (#243).
 //
 //declscope:shared // generator.go's Generate withholds the fix with it
 func (g *Generator) changedElsewhere(v pollution.Violation, noDiscarded bool) bool {
-	if slices.ContainsFunc(v.AllUses, changeIsPureReceiverUse) || slices.ContainsFunc(v.Hidden, changeIsPureReceiverUse) {
+	if slices.ContainsFunc(slices.Concat(v.AllUses, v.Hidden), func(use pollution.UsageInfo) bool { return g.changePureReceiverSharesPath(v, use) }) {
 		return true
 	}
 	ordered := usesOrdered(v)
@@ -84,11 +85,31 @@ func (g *Generator) changedElsewhere(v pollution.Violation, noDiscarded bool) bo
 	return deferChanges > 0 && (deferUses > 1 || deferRepeats)
 }
 
-// changeIsPureReceiverUse reports whether use is the branch a //gormreuse:pure
-// method makes of what its receiver holds (#404). The method may change the
-// root in place, through its receiver, at any point the fix cannot order.
-func changeIsPureReceiverUse(use pollution.UsageInfo) bool {
-	return use.PureReceiver
+// changePureReceiverSharesPath reports whether use is the branch a
+// //gormreuse:pure method makes of what its receiver holds (#404), on a path
+// that another use of v's root shares. The method may change the root in
+// place, at a point the fix cannot order. Such a use shares a path when it
+// may run again for one run of the root's definition, or when another use
+// can reach it or be reached from it: in the same block, in another function
+// such as a closure, or along the CFG. A pure call on its own exclusive path,
+// as in `if c { r.list(); return }; q.Find(nil); q.Find(nil)`, changes
+// nothing that the reported uses see, so the fix stays as it was before #404.
+func (g *Generator) changePureReceiverSharesPath(v pollution.Violation, use pollution.UsageInfo) bool {
+	if !use.PureReceiver {
+		return false
+	}
+	if use.Block == nil || useRepeatsAfter(g.cfg, use.Block, tracer.RootBlock(v.Root)) {
+		return true
+	}
+	return slices.ContainsFunc(slices.Concat(v.AllUses, v.Hidden), func(other pollution.UsageInfo) bool {
+		switch {
+		case other.Pos == use.Pos && other.Block == use.Block:
+			return false
+		case other.Block == nil || other.Block == use.Block || other.Block.Parent() != use.Block.Parent():
+			return true
+		}
+		return g.cfg.CanReach(use.Block, other.Block) || g.cfg.CanReach(other.Block, use.Block)
+	})
 }
 
 // finisherErrorChanges reports whether a Session at the root would change

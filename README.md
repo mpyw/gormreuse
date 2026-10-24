@@ -5047,7 +5047,7 @@ q.Find(nil)
 
 </td><td>
 
-A `//gormreuse:pure` method branches the root through its receiver. `pure` does not check the receiver, so the method may change the root in place, and a Session would drop that change (#404).
+A `//gormreuse:pure` method branches the root through its receiver, on a path the other uses share. `pure` does not check the receiver, so the method may change the root in place, and a Session would drop that change (#404). A pure call on an exclusive path, such as `if c { r.list(); return }`, keeps the fix.
 
 </td></tr>
 </table>

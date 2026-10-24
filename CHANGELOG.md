@@ -6,7 +6,7 @@ These notes say what changes for users in each release, and what to do about it.
 
 | Change | Effect |
 | --- | --- |
-| A pure method's receiver is a branch (#404) | `//gormreuse:pure` covers a method's arguments, not its receiver. So a pure method could add a condition to the `*gorm.DB` its receiver holds, and the later query on it was missed: `repo{db: q}.list(); q.Find(&us)`. Such a call now branches what its receiver holds, as a method without the directive does. A receiver that holds a connection, such as a `gorm.Open` result, gives no new report. `-fix` offers no Session for such a root, since the method may change it in place. A struct passed as an argument to a pure method is still only read, and keeps its fix |
+| A pure method's receiver is a branch (#404) | `//gormreuse:pure` covers a method's arguments, not its receiver. So a pure method could add a condition to the `*gorm.DB` its receiver holds, and the later query on it was missed: `repo{db: q}.list(); q.Find(&us)`. Such a call now branches what its receiver holds, as a method without the directive does. A receiver that holds a connection, such as a `gorm.Open` result, gives no new report. `-fix` offers no Session for such a root when the call shares a path with its other uses, since the method may change it in place. A call on an exclusive path, such as an early return, changes neither the fix nor the message. A struct passed as an argument to a pure method is still only read, and keeps its fix |
 
 ## 0.24.1 (2026-10-21)
 
