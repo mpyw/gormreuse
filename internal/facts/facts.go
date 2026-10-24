@@ -32,6 +32,9 @@ type Func struct {
 	// the contract. Such a function is not trusted as pure, and a pure
 	// function that passes it its argument breaks the contract too (#187).
 	PureFailed bool
+	// PureChangesReceiver is set when a pure method may change a *gorm.DB its
+	// receiver holds. A call of it branches what its receiver holds (#404).
+	PureChangesReceiver bool
 	// Returned holds the indexes into the parameters, the receiver first, that
 	// the result of a trusted pure function may be (#188).
 	Returned []int
@@ -72,6 +75,7 @@ func (f *Func) String() string {
 	}
 	add(f.Pure, "pure")
 	add(f.PureFailed, "pure-failed")
+	add(f.PureChangesReceiver, "pure-changes-receiver")
 	add(len(f.Returned) > 0, fmt.Sprintf("returns%v", f.Returned))
 	add(f.ReturnsOnlyParams, "returns-only-params")
 	add(f.ImmutableReturn, "immutable-return")
@@ -88,7 +92,7 @@ func (f *Func) String() string {
 
 // isZero reports whether f says nothing.
 func (f *Func) isZero() bool {
-	return !f.Pure && !f.PureFailed && len(f.Returned) == 0 && !f.ReturnsOnlyParams &&
+	return !f.Pure && !f.PureFailed && !f.PureChangesReceiver && len(f.Returned) == 0 && !f.ReturnsOnlyParams &&
 		!f.ImmutableReturn && len(f.ParamReads) == 0 && !f.BranchesImmutableParam && len(f.ImmutableInput) == 0 && len(f.FinisherOnly) == 0
 }
 

@@ -103,6 +103,8 @@ func validatePureFuncs(
 		}
 	}
 
+	verdicts.ChangesReceiver = pureChangedReceivers(targets, callers, pureFuncs, immutableReturnFuncs, verdicts, funcVars, guard)
+
 	// A closure body is validated both as its own pure function and as part of
 	// a pure function that creates it, so the same violation can come twice.
 	reported := make(map[purity.Violation]bool)
@@ -118,6 +120,107 @@ func validatePureFuncs(
 		})
 	}
 	return verdicts
+}
+
+// pureChangedReceivers returns the trusted pure methods in targets that may
+// change a *gorm.DB their receiver holds (#404). A method that calls such a
+// method on its receiver changes it too, so the methods are checked callees
+// first: in the order the strongly connected components of the call graph
+// (callers, see pureCallers) finish. A method outside a cycle is checked once,
+// after every method it calls is decided, whatever calls it. The methods of a
+// cycle are checked again until none changes. A check that panicked counts as
+// a change.
+func pureChangedReceivers(
+	targets []*ssa.Function,
+	callers map[*ssa.Function][]*ssa.Function,
+	pureFuncs, immutableReturnFuncs *directive.DirectiveFuncSet,
+	verdicts *tracer.PureVerdicts,
+	funcVars callsite.FuncVars,
+	guard *panicGuard,
+) map[*ssa.Function]bool {
+	changed := make(map[*ssa.Function]bool)
+	changes := func(fn *ssa.Function) bool {
+		return changed[fn] || verdicts.Imported.Of(fn).PureChangesReceiver
+	}
+	check := func(fn *ssa.Function) bool {
+		yes := true
+		guard.run("pure", fn, func() {
+			yes = purity.NewValidator(fn, pureFuncs, immutableReturnFuncs, verdicts, funcVars).ChangesReceiver(changes)
+		})
+		return yes
+	}
+	for _, scc := range pureCalleesFirst(targets, callers, verdicts) {
+		for again := true; again; {
+			again = false
+			for _, fn := range scc {
+				if !changed[fn] && check(fn) {
+					changed[fn] = true
+					again = len(scc) > 1
+				}
+			}
+		}
+	}
+	return changed
+}
+
+// pureCalleesFirst returns the strongly connected components of the call
+// graph among the trusted pure methods of targets, each after every component
+// it calls (Tarjan's order).
+func pureCalleesFirst(targets []*ssa.Function, callers map[*ssa.Function][]*ssa.Function, verdicts *tracer.PureVerdicts) [][]*ssa.Function {
+	node := func(fn *ssa.Function) bool { return !verdicts.Failed[fn] && fn.Signature.Recv() != nil }
+	callees := make(map[*ssa.Function][]*ssa.Function)
+	var nodes []*ssa.Function
+	for _, fn := range targets {
+		if !node(fn) {
+			continue
+		}
+		nodes = append(nodes, fn)
+		for _, caller := range callers[fn] {
+			if node(caller) {
+				callees[caller] = append(callees[caller], fn)
+			}
+		}
+	}
+	index := make(map[*ssa.Function]int)
+	low := make(map[*ssa.Function]int)
+	onStack := make(map[*ssa.Function]bool)
+	var stack []*ssa.Function
+	var order [][]*ssa.Function
+	var visit func(fn *ssa.Function)
+	visit = func(fn *ssa.Function) {
+		index[fn] = len(index) + 1
+		low[fn] = index[fn]
+		stack = append(stack, fn)
+		onStack[fn] = true
+		for _, callee := range callees[fn] {
+			if index[callee] == 0 {
+				visit(callee)
+				low[fn] = min(low[fn], low[callee])
+			} else if onStack[callee] {
+				low[fn] = min(low[fn], index[callee])
+			}
+		}
+		if low[fn] != index[fn] {
+			return
+		}
+		var scc []*ssa.Function
+		for {
+			top := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			onStack[top] = false
+			scc = append(scc, top)
+			if top == fn {
+				break
+			}
+		}
+		order = append(order, scc)
+	}
+	for _, fn := range nodes {
+		if index[fn] == 0 {
+			visit(fn)
+		}
+	}
+	return order
 }
 
 // pureCallers maps each function to the functions in targets whose

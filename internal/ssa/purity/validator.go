@@ -44,7 +44,9 @@ import (
 	"golang.org/x/tools/go/ssa"
 
 	"github.com/mpyw/gormreuse/internal/directive"
+	"github.com/mpyw/gormreuse/internal/effort"
 	"github.com/mpyw/gormreuse/internal/ssa/callsite"
+	"github.com/mpyw/gormreuse/internal/ssa/origin"
 	"github.com/mpyw/gormreuse/internal/ssa/pollutionsource"
 	"github.com/mpyw/gormreuse/internal/ssa/stmtwrite"
 	"github.com/mpyw/gormreuse/internal/ssa/tracer"
@@ -74,6 +76,10 @@ type Validator struct {
 	funcVars     callsite.FuncVars
 	paramDerived map[ssa.Value]bool
 	holdsCache   map[types.Type]bool
+	// receiver is set while ChangesReceiver checks a method's receiver
+	// (#404). A wrapped return and a call of an inferred getter do not count
+	// then, and a value of a type parameter may hold a *gorm.DB.
+	receiver bool
 }
 
 // NewValidator creates a Validator for a function marked as pure.
@@ -122,6 +128,85 @@ func (v *Validator) Validate(writes map[ssa.Instruction]stmtwrite.Write) []Viola
 		seen[viol] = true
 		return false
 	})
+}
+
+// ChangesReceiver reports whether a pure method may change a *gorm.DB its
+// receiver holds (#404). The contract covers the arguments only, so the
+// receiver is checked on its own, as the only seed. These count:
+//   - a use that the contract reports for an argument, warnings included,
+//     except a wrapped return and a call of an inferred getter, which only
+//     read it;
+//   - a direct write into the query of a *gorm.DB read from its fields, by the
+//     rules of package stmtwrite;
+//   - a return of a *gorm.DB read from its fields, which hands it on;
+//   - a call on it of a pure method that changes its own receiver (changes).
+func (v *Validator) ChangesReceiver(changes func(*ssa.Function) bool) bool {
+	fn := v.fn
+	v.receiver = true
+	if fn.Signature.Recv() == nil || !v.holdsGormDB(fn.Params[0].Type()) {
+		return false
+	}
+	v.paramDerived[fn.Params[0]] = true
+	return len(v.validateBody(fn)) > 0 || stmtwrite.WritesReceiver(fn) || v.handsReceiverOn(fn, stmtwrite.ReceiverHandles(fn), changes)
+}
+
+// handsReceiverOn reports whether the method returns one of handles, or it or
+// a closure inside it calls a pure method that changes the derived receiver it
+// is given (see ChangesReceiver). validateBody has seeded the closures.
+func (v *Validator) handsReceiverOn(fn *ssa.Function, handles map[ssa.Value]*ssa.Parameter, changes func(*ssa.Function) bool) bool {
+	for _, block := range fn.Blocks {
+		for _, instr := range block.Instrs {
+			effort.Step()
+			switch i := instr.(type) {
+			case *ssa.Return:
+				if fn == v.fn && slices.ContainsFunc(i.Results, func(res ssa.Value) bool { return handles[res] != nil || v.getterOfDerived(res) }) {
+					return true
+				}
+			case ssa.CallInstruction:
+				site := callsite.SiteOf(i, v.funcVars)
+				if site.Recv != nil && v.paramDerived[site.Recv] && site.Declared != nil && changes(origin.Declared(site.Declared)) {
+					return true
+				}
+			}
+		}
+	}
+	return slices.ContainsFunc(fn.AnonFuncs, func(anon *ssa.Function) bool { return v.handsReceiverOn(anon, handles, changes) })
+}
+
+// getterOfDerived reports whether res is a *gorm.DB that a getter (see
+// validatorIsFieldGetter) returns from a derived value, as `return r.Get()`.
+func (v *Validator) getterOfDerived(res ssa.Value) bool {
+	call, ok := res.(*ssa.Call)
+	if !ok || !typeutil.IsGormDB(res.Type()) || !validatorIsFieldGetter(call.Call.StaticCallee()) {
+		return false
+	}
+	return slices.ContainsFunc(call.Call.Args, v.isDerivedArg)
+}
+
+// validatorIsFieldGetter reports whether the body of callee only selects fields of
+// its parameters and returns them, as `func (r repo) DB() *gorm.DB { return
+// r.db }` does. A call of one reads what it is given (#404).
+func validatorIsFieldGetter(callee *ssa.Function) bool {
+	if callee == nil || len(callee.Blocks) != 1 {
+		return false
+	}
+	for _, instr := range callee.Blocks[0].Instrs {
+		switch i := instr.(type) {
+		case *ssa.Field, *ssa.FieldAddr, *ssa.Return, *ssa.DebugRef, *ssa.Alloc:
+		case *ssa.UnOp:
+			if i.Op != token.MUL {
+				return false
+			}
+		case *ssa.Store:
+			// go/ssa spills a value receiver to a local of its own.
+			if _, local := i.Addr.(*ssa.Alloc); !local {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // ReturnedParams returns the indexes into fn.Params of the parameters the
@@ -179,7 +264,7 @@ func (v *Validator) validateBody(fn *ssa.Function) []Violation {
 			case *ssa.Store:
 				violations = append(violations, v.checkStoreEscape(i)...)
 			case *ssa.Return:
-				if fn == v.fn {
+				if fn == v.fn && !v.receiver {
 					violations = append(violations, v.checkWrappedReturn(i)...)
 				}
 			}
@@ -639,8 +724,21 @@ func (v *Validator) checkLeak(instr ssa.Instruction) []Violation {
 }
 
 func (v *Validator) checkFunctionCallPollution(common *ssa.CallCommon, callee *ssa.Function, pos token.Pos) []Violation {
-	// Pure callees don't pollute their arguments.
+	// Pure callees don't pollute their arguments. A getter only reads the
+	// receiver it is given (#404).
+	if v.receiver && validatorIsFieldGetter(callee) {
+		return nil
+	}
 	if v.isTrustedPure(callee) {
+		// The contract does not cover a method's receiver, so one that
+		// changes it is not trusted with it (#404): passing a derived value
+		// there is the warning a method that is not pure gives.
+		if recv := v.receiverOperand(common, callee); recv != nil && v.pure.ChangesReceiverOf(callee) && v.isDerivedArg(recv) {
+			return []Violation{{
+				Pos:     pos,
+				Message: "pure function passes *gorm.DB argument to non-pure function " + v.calleeName(common, callee),
+			}}
+		}
 		return nil
 	}
 	failed := callee != nil && v.pure.HasFailed(callee)
@@ -754,6 +852,15 @@ func (v *Validator) packsLeakedDerived(array ssa.Value) bool {
 	return false
 }
 
+// receiverOperand returns what a static call of the method callee passes as
+// its receiver, or nil for a function.
+func (v *Validator) receiverOperand(common *ssa.CallCommon, callee *ssa.Function) ssa.Value {
+	if callee.Signature.Recv() == nil || common.IsInvoke() || len(common.Args) == 0 {
+		return nil
+	}
+	return common.Args[0]
+}
+
 // isTrustedPure reports whether callee is marked pure and has not failed
 // validation.
 func (v *Validator) isTrustedPure(callee *ssa.Function) bool {
@@ -784,6 +891,12 @@ func (v *Validator) holdsGormDB(t types.Type) bool {
 		return result
 	}
 	v.holdsCache[t] = false // cycle guard for recursive types
+	if _, ok := types.Unalias(t).(*types.TypeParam); ok {
+		// A receiver's type parameter may be a *gorm.DB (#404). An
+		// argument's is not followed.
+		v.holdsCache[t] = v.receiver
+		return v.receiver
+	}
 	if typeutil.IsGormDB(t) {
 		v.holdsCache[t] = true
 		return true

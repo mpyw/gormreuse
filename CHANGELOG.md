@@ -4,6 +4,12 @@ These notes say what changes for users in each release, and what to do about it.
 
 ## Unreleased
 
+### New diagnostics
+
+| Now reported | Example | What to do |
+| --- | --- | --- |
+| A call of a `pure` method that changes a `*gorm.DB` its receiver holds (#404). `pure` covers the arguments only, so the call branches what the receiver holds, as for a method without the directive. `-fix` offers no `Session` for that root | `//gormreuse:pure func (r repo) list(dst *gorm.DB) { r.db.Where("x").Find(&us) }`, then `repo{db: q}.list(nil); q.Find(&a)` | Make `q` immutable with `Session`, or stop changing the receiver in the method |
+
 ### Changed
 
 | Change | Effect |

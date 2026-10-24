@@ -7,6 +7,16 @@ import (
 	"github.com/mpyw/gormreuse/internal/ssa/callsite"
 )
 
+// TestChangesReceiverOfWithoutVerdicts: with no verdicts, as in a tracer built
+// without validating the pure functions, no method changes its receiver.
+func TestChangesReceiverOfWithoutVerdicts(t *testing.T) {
+	t.Parallel()
+	var p *PureVerdicts
+	if p.ChangesReceiverOf(nil) {
+		t.Error("ChangesReceiverOf on nil verdicts = true, want false")
+	}
+}
+
 func TestIsPureFunction(t *testing.T) {
 	t.Parallel()
 	// Syntax-backed pure set resolves //gormreuse:pure via each function's AST.

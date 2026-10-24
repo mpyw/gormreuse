@@ -544,9 +544,14 @@ func (u siteUse) handleArgs() {
 	// Check if this is a pure function - pure functions don't pollute args.
 	// Neither does a wrapper such as sql.Named("s", sub) whose result is only
 	// a read-only argument: the method that takes it reads sub (#253).
+	// A pure method may still change what its receiver holds (#404), which
+	// handleHolders decides.
 	call := u.call()
-	if site.Declared != nil && ctx.RootTracer.IsPureFunction(site.Declared) ||
-		call != nil && pollutionsource.IsReadOnlyWrapperCall(call, site) {
+	if site.Declared != nil && ctx.RootTracer.IsPureFunction(site.Declared) {
+		u.handleHolders()
+		return
+	}
+	if call != nil && pollutionsource.IsReadOnlyWrapperCall(call, site) {
 		return
 	}
 
@@ -621,7 +626,9 @@ func (u siteUse) handleArgs() {
 // struct, its address, or a copy of it passed to a call, also boxed in an
 // interface or as the receiver of a method value. A gorm method only reads a
 // struct it is passed, and so does a pure function, or a static call to a
-// package that does not reach gorm and gets no function. So does a method of
+// package that does not reach gorm and gets no function. The pure contract
+// covers the arguments only, so a pure method that may change what its
+// receiver holds still hands its receiver on (#404). So does a method of
 // gorm.Statement, as in `stmt := &gorm.Statement{DB: db}; stmt.Parse(&User{})`:
 // it reads only the configuration of stmt.DB, such as its Dialector and
 // NamingStrategy, and calls AddError, which changes no clause. So does a getter
@@ -636,10 +643,14 @@ func (u siteUse) handleHolders() {
 	if site.IsGormMethod() || isGormStatementMethod(site) {
 		return
 	}
-	if site.Declared != nil && (ctx.RootTracer.IsPureFunction(site.Declared) || ctx.RootTracer.HasParamReads(site.Declared)) {
+	pure := site.Declared != nil && ctx.RootTracer.IsPureFunction(site.Declared)
+	if pure && !ctx.RootTracer.PureChangesReceiver(site.Declared) || site.Declared != nil && ctx.RootTracer.HasParamReads(site.Declared) {
 		return
 	}
 	operands := site.Args
+	if pure {
+		operands = nil
+	}
 	if site.Recv != nil {
 		operands = append([]ssa.Value{site.Recv}, operands...)
 	}

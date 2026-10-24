@@ -2491,6 +2491,19 @@ func withTenant(db *gorm.DB, tenantID int) *gorm.DB {
 }
 ```
 
+> [!NOTE]
+> **The receiver is not covered (#404).** `pure` covers the arguments only. A pure method that changes a `*gorm.DB` its receiver holds hands the receiver on, as a method without the directive does. So `repo{db: q}.list(nil); q.Find(nil)` is reported, and `-fix` offers no `Session` there.
+>
+> The method changes that `*gorm.DB` when it does any of these:
+>
+> - calls a chain method on it;
+> - passes it to a function that is not pure;
+> - returns it, directly or through a getter (`return r.Get()`);
+> - writes its query: a field of its `Statement`, or a map or a slice the `Statement` holds;
+> - calls such a method on its receiver.
+>
+> These do not count: writing `Error`, `RowsAffected` or `Config`, reading it through `Session` or a getter, and writing or returning a copy. Inside another pure function, passing an argument to such a method as its receiver is the warning that a method without the directive gives.
+
 <details>
 <summary>Placement, calls without the directive, and the full contract</summary>
 
@@ -5740,9 +5753,9 @@ load("b") // not reported
 ```
 
 </td><td>A call through the returned func value has no known callee</td></tr>
-<tr><td><!-- fixtures: pswNotDirect, pswHolderParams, pswReassignedParam, pswInferNotDirect -->
+<tr><td><!-- fixtures: pswNotDirect, pswHolderParams, pswReassignedParam, pswInferNotDirect, prDerefCopyWrite -->
 
-A pure function, or a helper inferred `immutable-param`, that writes the argument's query through anything but a direct path: a `*gorm.Statement` parameter, a local variable that is assigned again, captured or has its address taken, a copy, a `Session` or `Debug` result, a holder parameter, an `append` result, or a call:
+A pure function, or a helper inferred `immutable-param`, that writes the argument's query through anything but a direct path: a `*gorm.Statement` parameter, a local variable that is assigned again, captured or has its address taken, a copy, a `Session` or `Debug` result, a holder parameter, an `append` result, or a call. The same rule decides whether a pure method changes what its receiver holds (#404), so a write through a copy of the receiver, as `c := *r`, is not followed either:
 
 ```go
 //gormreuse:pure
